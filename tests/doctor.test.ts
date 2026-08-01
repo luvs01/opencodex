@@ -326,6 +326,8 @@ describe("service memory section (#314 WP4)", () => {
   const baseData: ServiceMemoryData = {
     pid: 4242,
     bunVersion: "1.3.14",
+    bunRevision: "1.3.14+0d9b296a",
+    bunRuntimeSource: "bundled",
     platform: "win32",
     rss: 5 * 1024 ** 3,
     heapUsed: 200 * 1024 ** 2,
@@ -401,11 +403,28 @@ describe("service memory section (#314 WP4)", () => {
     expect(lines.some(l => l.includes("looks normal"))).toBe(false);
   });
 
-  test("guidance gating: win32 + auto-known-bad prints version-claiming guidance", () => {
+  test("guidance gating: bundled win32 + auto-known-bad offers an override", () => {
     const lines = formatServiceMemoryLines({ status: "ok", data: baseData });
+    expect(lines.some(l => l.includes("source=bundled"))).toBe(true);
     expect(lines.some(l => l.includes("OPENCODEX_BUN_PATH"))).toBe(true);
-    // Version-claiming, never binary-claiming.
-    expect(lines.join("\n")).not.toContain("bundled binary");
+  });
+
+  test("guidance gating: active override reports revision without repeating setup advice", () => {
+    const lines = formatServiceMemoryLines({
+      status: "ok",
+      data: {
+        ...baseData,
+        bunVersion: "1.4.0",
+        bunRevision: "1.4.0-canary.1+5f65d3785",
+        bunRuntimeSource: "override",
+      },
+    });
+    const text = lines.join("\n");
+    expect(text).toContain("revision=1.4.0-canary.1+5f65d3785");
+    expect(text).toContain("source=OPENCODEX_BUN_PATH override");
+    expect(text).toContain("OPENCODEX_BUN_PATH is already active");
+    expect(text).not.toContain("set OPENCODEX_BUN_PATH");
+    expect(text).not.toContain("a version affected by the upstream Bun memory issue");
   });
 
   test("guidance gating: darwin auto-off or fixed Windows runtime prints no override guidance", () => {

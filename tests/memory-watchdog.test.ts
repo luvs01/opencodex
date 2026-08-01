@@ -175,7 +175,7 @@ describe("GET /api/system/memory", () => {
     expect(res).not.toBeNull();
     expect(res!.status).toBe(200);
 	    const body = await res!.json() as {
-	      pid: number; bunVersion: string; platform: string; rss: number;
+	      pid: number; bunVersion: string; bunRevision: string; bunRuntimeSource: string; platform: string; rss: number;
 	      heapUsed: number; external: number; arrayBuffers: number; observedBytes: number; observedMetric: string;
 	      jscHeap: { heapSize: number } | null;
 	      responseState: { count: number; totalBytes: number; largestBytes: number; oldestAgeMs: number };
@@ -189,6 +189,8 @@ describe("GET /api/system/memory", () => {
 	    };
     expect(body.pid).toBe(process.pid);
     expect(body.bunVersion).toBe(Bun.version);
+	    expect(body.bunRevision).toBe(Bun.revision);
+	    expect(["override", "bundled", "process"]).toContain(body.bunRuntimeSource);
 	    expect(body.rss).toBeGreaterThan(0);
 	    expect(body.heapUsed).toBeGreaterThan(0);
 	    expect(body.external).toBeGreaterThanOrEqual(0);

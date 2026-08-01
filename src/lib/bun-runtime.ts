@@ -19,10 +19,12 @@ export { isRealBunBinary };
 const require = createRequire(import.meta.url);
 
 const BUN_OVERRIDE_ENV = "OPENCODEX_BUN_PATH";
+export const BUN_RUNTIME_SOURCE_ENV = "OCX_BUN_RUNTIME_SOURCE";
+export type BunRuntimeSource = "override" | "bundled" | "process";
 
 export type DurableBunRuntime = {
   path: string;
-  source: "override" | "bundled" | "process";
+  source: BunRuntimeSource;
   overrideEnv: typeof BUN_OVERRIDE_ENV;
 };
 
@@ -58,6 +60,18 @@ export function durableBunRuntime(): DurableBunRuntime {
   const bundled = bundledBunPath();
   if (bundled) return { path: bundled, source: "bundled", overrideEnv: BUN_OVERRIDE_ENV };
   return { path: process.execPath, source: "process", overrideEnv: BUN_OVERRIDE_ENV };
+}
+
+/**
+ * Runtime origin reported by the running proxy. Durable launchers bake the
+ * source selected at install time so a later shell environment cannot
+ * misidentify an already-installed service. Direct starts fall back to the
+ * same resolver that selected their Bun executable.
+ */
+export function effectiveBunRuntimeSource(): BunRuntimeSource {
+  const baked = process.env[BUN_RUNTIME_SOURCE_ENV]?.trim();
+  if (baked === "override" || baked === "bundled" || baked === "process") return baked;
+  return durableBunRuntime().source;
 }
 
 /**

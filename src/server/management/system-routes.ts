@@ -20,6 +20,7 @@
  * dashboard drain-and-restart confirm UX — never request bodies or IDs.
  */
 import { selectEagerPath } from "../../lib/bun-stream-caps";
+import { effectiveBunRuntimeSource } from "../../lib/bun-runtime";
 import { getActiveTurnCount, isDraining } from "../lifecycle";
 import { getActiveMemoryWatchdog, observedMemoryCounter } from "../memory-watchdog";
 import { responseStateMetrics } from "../../responses/state";
@@ -75,6 +76,7 @@ export async function handleSystemRoutes(ctx: ManagementContext): Promise<Respon
       pid: process.pid,
       bunVersion: Bun.version,
       bunRevision: Bun.revision,
+      bunRuntimeSource: effectiveBunRuntimeSource(),
       platform: process.platform,
       uptimeSeconds: process.uptime(),
       rss: usage.rss,

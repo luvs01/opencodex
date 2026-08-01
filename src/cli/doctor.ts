@@ -523,6 +523,8 @@ export async function probeWham(fetchImpl: typeof fetch = fetch): Promise<WhamPr
 export type ServiceMemoryData = {
   pid: number;
   bunVersion: string;
+  bunRevision?: string;
+  bunRuntimeSource?: "override" | "bundled" | "process" | null;
   platform: string;
   rss: number;
   heapUsed: number;
@@ -579,6 +581,10 @@ export async function fetchServiceMemory(
       data: {
         pid: body.pid,
         bunVersion: body.bunVersion,
+        bunRevision: typeof body.bunRevision === "string" ? body.bunRevision : undefined,
+        bunRuntimeSource: body.bunRuntimeSource === "override" || body.bunRuntimeSource === "bundled" || body.bunRuntimeSource === "process"
+          ? body.bunRuntimeSource
+          : null,
         platform: typeof body.platform === "string" ? body.platform : "unknown",
         rss: body.rss,
         heapUsed: typeof body.heapUsed === "number" ? body.heapUsed : 0,
@@ -625,7 +631,14 @@ export function formatServiceMemoryLines(report: ServiceMemoryReport): string[] 
     return lines;
   }
   const d = report.data;
-  lines.push(`  ok     service pid ${d.pid}: Bun ${d.bunVersion} on ${d.platform}`);
+  const sourceLabel = d.bunRuntimeSource === "override"
+    ? "OPENCODEX_BUN_PATH override"
+    : d.bunRuntimeSource;
+  const identityDetails = [
+    d.bunRevision ? `revision=${d.bunRevision}` : null,
+    sourceLabel ? `source=${sourceLabel}` : null,
+  ].filter((value): value is string => Boolean(value)).join(", ");
+  lines.push(`  ok     service pid ${d.pid}: Bun ${d.bunVersion} on ${d.platform}${identityDetails ? ` (${identityDetails})` : ""}`);
   const observed = observedMemory(d);
   const observedBytes = d.observedBytes ?? d.watchdog?.observedBytes ?? observed.bytes;
   const observedMetric = d.observedMetric ?? d.watchdog?.observedMetric ?? observed.metric;
@@ -652,12 +665,15 @@ export function formatServiceMemoryLines(report: ServiceMemoryReport): string[] 
   } else {
     lines.push("  !!     high RSS, indeterminate split — capture two doctor runs over time to see the trend");
   }
-  // Version-claiming (never binary-claiming): the endpoint cannot distinguish
-  // the bundled binary from an OPENCODEX_BUN_PATH override of the same version.
   if (d.platform === "win32" && d.eagerRelay?.reason === "auto-known-bad") {
-    lines.push(`         service is running Bun ${d.bunVersion} on Windows — a version affected by the upstream Bun memory issue.`);
-    lines.push("         Options: wait for a bundled runtime update, or set OPENCODEX_BUN_PATH to a runtime you trust (unvalidated — own risk),");
-    lines.push("         or opt into streamMode \"eager-relay\" via PUT /api/settings (crash risk on this runtime; see docs).");
+    if (d.bunRuntimeSource === "override") {
+      lines.push(`         OPENCODEX_BUN_PATH is already active for Bun ${d.bunVersion}; automatic eager relay has not validated this runtime revision.`);
+      lines.push("         Keep streamMode \"auto\" for the conservative path, or explicitly opt into \"eager-relay\" at your own risk; see docs.");
+    } else {
+      lines.push(`         service is running Bun ${d.bunVersion} on Windows — a version affected by the upstream Bun memory issue.`);
+      lines.push("         Options: wait for a bundled runtime update, or set OPENCODEX_BUN_PATH to a runtime you trust (unvalidated — own risk),");
+      lines.push("         or opt into streamMode \"eager-relay\" via PUT /api/settings (crash risk on this runtime; see docs).");
+    }
   }
   return lines;
 }
