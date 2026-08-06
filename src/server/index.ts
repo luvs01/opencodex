@@ -674,12 +674,17 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname.startsWith("/api/")) {
-        const apiAuthError = requireManagementAuth(req, managementAuth, config);
+        const localManagementAuth = {
+          attestationSecret: localAttestationSecret,
+          pid: process.pid,
+          port: boundPort ?? requestServer.port ?? listenPort,
+        };
+        const apiAuthError = requireManagementAuth(req, managementAuth, config, localManagementAuth);
         if (apiAuthError) return withManagementCors(apiAuthError, req, config);
         // Which credential passed the gate, resolved from the same session table the
         // gate used. Consent-bearing routes need this: request headers are forgeable
         // by anything holding the admin token, the credential is not.
-        const principal = managementPrincipal(req, managementAuth, config) ?? undefined;
+        const principal = managementPrincipal(req, managementAuth, config, localManagementAuth) ?? undefined;
         const mgmtResponse = await handleManagementAPI(req, url, config, deps.managementApi, principal);
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);

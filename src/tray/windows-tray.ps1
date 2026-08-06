@@ -255,7 +255,11 @@ $stopItem.add_Click({
 })
 $restartItem.add_Click({
   $statusItem.Text = "Proxy: Restarting..."
-  Set-PendingAction "Restart Proxy" 20
+  # /api/system/restart may drain active work for 60s and then spend up to 70s
+  # handing off to an identity-verified replacement. The tray observes health/PID
+  # rather than the detached CLI exit, so keep a watchdog margin around that shared
+  # lifecycle budget. The CLI remains the lifecycle owner; the tray never kills.
+  Set-PendingAction "Restart Proxy" 160
   if (-not (Start-OcxCommand @("__tray-restart"))) { $script:pendingAction = $null }
 })
 $logsItem.add_Click({
