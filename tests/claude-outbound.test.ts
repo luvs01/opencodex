@@ -259,6 +259,32 @@ describe("claude outbound SSE", () => {
     expect(msg2.content.find((b: Record<string, unknown>) => b.type === "thinking").thinking).toBe("AB");
   });
 
+  test("reasoning part identity does not retain untrusted string metadata", async () => {
+    const untrusted = "x".repeat(1024 * 1024);
+    const upstream = [
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      sse("response.reasoning_summary_text.delta", {
+        item_id: untrusted,
+        output_index: untrusted,
+        summary_index: untrusted,
+        delta: "A",
+      }),
+      sse("response.reasoning_summary_text.delta", {
+        item_id: `${untrusted}2`,
+        output_index: `${untrusted}2`,
+        summary_index: `${untrusted}2`,
+        delta: "B",
+      }),
+      sse("response.completed", { response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } } }),
+    ].join("");
+
+    const msg = await collectAnthropicMessage(
+      responsesSseToAnthropicSse(streamFromChunks([upstream]), "m"),
+      "m",
+    ) as Record<string, any>;
+    expect(msg.content.find((b: Record<string, unknown>) => b.type === "thinking").thinking).toBe("AB");
+  });
+
   test("data-only Responses frames infer event names from payload types", async () => {
     const upstream = [
       dataOnlySse({ type: "response.created", response: { id: "resp_data_only", status: "in_progress" } }),

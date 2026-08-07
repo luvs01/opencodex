@@ -23,6 +23,10 @@ function isRec(v: unknown): v is Rec {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
+function boundedReasoningIndex(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : -1;
+}
+
 function uuid(): string {
   return crypto.randomUUID().replace(/-/g, "");
 }
@@ -187,7 +191,7 @@ interface OpenBlock {
   argsBufBytes?: number;
   webSearchArgsEmitted?: boolean;
   callId?: string;
-  /** Last reasoning part identity (item + summary/content index) seen by this thinking block. */
+  /** Last bounded reasoning part identity seen by this thinking block. */
   reasoningPartKey?: string;
 }
 
@@ -360,9 +364,11 @@ export function responsesSseToAnthropicSse(
             // so multi-part summaries do not glue into one run-on paragraph. Frames
             // without part indices produce a constant key and never get a separator.
             const slot = eventName === "response.reasoning_summary_text.delta"
-              ? `s${String(data.summary_index)}`
-              : `c${String(data.content_index)}`;
-            const partKey = `${String(data.item_id)}:${slot}`;
+              ? `s${boundedReasoningIndex(data.summary_index)}`
+              : `c${boundedReasoningIndex(data.content_index)}`;
+            // Use only validated numeric indexes so retained state has a fixed upper bound;
+            // item_id and malformed indexes are untrusted upstream strings and may be huge.
+            const partKey = `${boundedReasoningIndex(data.output_index)}:${slot}`;
             if (open!.reasoningPartKey !== undefined && open!.reasoningPartKey !== partKey) {
               emit("content_block_delta", {
                 type: "content_block_delta", index: open!.index,
