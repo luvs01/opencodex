@@ -205,6 +205,20 @@ test("toggling to the current state changes nothing", async () => {
   expect(readConfig()).toBe(bytes);
 });
 
+test("a toggle without config.json reports that its intent is not durable", async () => {
+  writeConfig(fencedConfig());
+
+  const disable = await put(baseConfig(), false);
+  expect(disable.status).toBe(200);
+  expect(disable.body.state).toBe("absent");
+  expect(disable.body.reason).toBe("not_durable");
+
+  const enable = await put(baseConfig(), true);
+  expect(enable.status).toBe(200);
+  expect(enable.body.state).toBe("current");
+  expect(enable.body.reason).toBe("not_durable");
+});
+
 test("an orphaned marker refuses BOTH directions and no writer runs", async () => {
   const orphaned = `# user\n${BEGIN}\n[model.ocx-a]\n`;
   writeConfig(orphaned);

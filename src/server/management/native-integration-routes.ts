@@ -390,6 +390,7 @@ async function handleGrokToggle(ctx: ManagementContext): Promise<Response> {
         message: result.changed
           ? "Grok integration disabled — the opencodex block was removed. Re-enabling regenerates it from the current model list."
           : "Grok integration is already off",
+        ...(durable ? {} : { reason: "not_durable" }),
       } satisfies NativeToggleEnvelope);
     }
 
@@ -496,6 +497,7 @@ async function handleGrokToggle(ctx: ManagementContext): Promise<Response> {
       ok: true, clientId: "grok", changed: result.changed,
       state: "current",
       message: result.changed ? "Grok integration enabled — the opencodex block was regenerated from the current model list." : "Grok integration is already on",
+      ...(durable ? {} : { reason: "not_durable" }),
     } satisfies NativeToggleEnvelope);
   })();
   try {
