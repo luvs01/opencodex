@@ -396,6 +396,11 @@ describe("validateIssue - feature", () => {
       false,
     );
     assert.equal(isMediaOnly('<picture><source srcset="x.webp"><img src="x.png"></picture>'), true);
+    assert.equal(
+      isMediaOnly('<picture>\n    <source srcset="x.webp">\n    <img src="x.png">\n</picture>'),
+      true,
+    );
+    assert.equal(isMediaOnly('<video controls>\n    <source src="clip.mp4">\n</video>'), true);
     assert.equal(isMediaOnly('<video src="clip.mp4"></video>'), true);
     assert.equal(isMediaOnly('<img src="x.png" />\nCaption text'), false);
     assert.equal(isMediaOnly("Some real description."), false);

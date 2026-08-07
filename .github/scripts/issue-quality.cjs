@@ -76,16 +76,28 @@ function stripMediaTokens(text) {
 }
 
 /**
- * Replace every indented code line (4+ leading spaces or a tab) with a
- * placeholder of equal length so media stripping cannot touch it. Returns the
- * masked text plus the original lines for restoration.
+ * Replace indented code lines (4+ leading spaces or a tab) with placeholders
+ * so media stripping cannot touch them. Indented children of an unindented
+ * HTML media block remain visible because their indentation is just HTML
+ * formatting. Returns the masked text plus the original lines for restoration.
  */
 function protectIndentedCodeLines(text) {
   const lines = [];
+  let mediaBlockDepth = 0;
   const masked = text.split("\n").map((line) => {
-    if (/^(?: {4,}|\t)/.test(line)) {
+    const isIndented = /^(?: {4,}|\t)/.test(line);
+    if (isIndented && mediaBlockDepth === 0) {
       lines.push(line);
       return "\u0000" + line.replace(/[^\n]/g, " ").slice(1);
+    }
+
+    // Indentation inside a real HTML media block is formatting, not a
+    // Markdown indented-code block. Leave child tags visible to the HTML
+    // stripper. An indented opening tag at depth zero remains protected as
+    // literal Markdown code and therefore must not start a block here.
+    for (const tag of line.matchAll(/<(\/)?(picture|video|audio)\b[^>]*>/gi)) {
+      if (tag[1]) mediaBlockDepth = Math.max(0, mediaBlockDepth - 1);
+      else if (!/\/\s*>$/.test(tag[0])) mediaBlockDepth += 1;
     }
     lines.push(null);
     return line;
