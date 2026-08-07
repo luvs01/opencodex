@@ -343,7 +343,7 @@ describe("native main profile scoped server admission", () => {
     }
   });
 
-  test("uncooperative Live sideband keeps main ownership through close fallback and switch timeout", async () => {
+  test("uncooperative Live sideband releases main ownership after close fallback", async () => {
     class UncooperativeUpstream extends EventTarget {
       readyState = WebSocket.CONNECTING;
       closeCalls = 0;
@@ -428,9 +428,9 @@ describe("native main profile scoped server admission", () => {
       await Bun.sleep(1_100);
       expect(upstream?.closeCalls).toBe(2);
       expect(upstream?.readyState).toBe(WebSocket.CLOSING);
-      expect(getNativeMainProfileRequestCount()).toBe(1);
+      expect(getNativeMainProfileRequestCount()).toBe(0);
 
-      const blocked = await handleNativeProfileAPI(
+      const switched = await handleNativeProfileAPI(
         new Request("http://localhost/api/native-main-profiles/switch", {
           method: "POST",
           body: JSON.stringify({ target: "target", confirmedStopped: true }),
@@ -439,9 +439,9 @@ describe("native main profile scoped server admission", () => {
         {} as OcxConfig,
         { manager, drainTimeoutMs: 75 },
       );
-      expect(blocked?.status).toBe(409);
-      expect(switches).toBe(0);
-      expect(getNativeMainProfileRequestCount()).toBe(1);
+      expect(switched?.status).toBe(200);
+      expect(switches).toBe(1);
+      expect(getNativeMainProfileRequestCount()).toBe(0);
 
       upstream?.finishClose();
       await Bun.sleep(0);

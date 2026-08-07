@@ -213,22 +213,14 @@ function armLiveSidebandCloseFallback(ws: ServerWebSocket<WsData>, upstream: Web
   ws.data.liveCloseFallback = setTimeout(() => {
     ws.data.liveCloseFallback = undefined;
     if (ws.data.liveUpstream !== upstream) return;
-    if (upstream.readyState === WebSocket.CLOSED) {
-      finalizeLiveSideband(ws, upstream);
-      return;
-    }
-    // A close frame was already sent below. Retry once, but never surrender
-    // native-main ownership while the authenticated transport remains live.
+    // A close frame was already sent below. Retry once before releasing the
+    // drain, then force local cleanup if the peer never completes the handshake.
     try {
       upstream.close(1000, "upstream close timeout");
     } catch {
       /* upstream is already unusable */
     }
-    // Some implementations transition synchronously without delivering the
-    // close event. That is still an observed CLOSED transport and is safe to
-    // finalize. CONNECTING/CLOSING peers keep the lease so profile switching
-    // fails at its own bounded drain deadline instead of racing live traffic.
-    if (upstream.readyState === WebSocket.CLOSED) finalizeLiveSideband(ws, upstream);
+    finalizeLiveSideband(ws, upstream);
   }, LIVE_SIDEBAND_CLOSE_FALLBACK_MS);
 }
 
@@ -243,13 +235,12 @@ function closeLiveSideband(ws: ServerWebSocket<WsData>, code = 1000, reason = ""
   } else {
     // The sideband holds a native-main admission lease. Do not release it just
     // because the downstream left: its authenticated upstream remains live
-    // until the close event arrives or the transport is observed CLOSED. The
-    // bounded fallback only retries close; it does not release ownership.
+    // until this close handshake completes (or the bounded fallback runs).
     armLiveSidebandCloseFallback(ws, upstream);
     try {
       upstream.close(code, reason);
     } catch {
-      /* the fallback retries close without releasing ownership */
+      /* the fallback releases ownership if this socket never reports close */
     }
   }
   try {
