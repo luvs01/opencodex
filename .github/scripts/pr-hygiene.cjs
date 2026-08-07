@@ -143,8 +143,10 @@ function assessHygiene({ files = [], labels = [] }) {
   const behaviorChanged = allPaths.some(
     (path) => isBehaviorPath(path) && !commentOnlyPaths.has(path),
   );
-  // Deleted tests add no coverage and must not satisfy the regression gate.
-  const testsChanged = allPaths.some(
+  // Deleted or renamed-away tests add no coverage and must not satisfy the
+  // regression gate. Previous paths still classify behavior and generated
+  // files above, but only a current test path counts as regression coverage.
+  const testsChanged = filenames.some(
     (path) => isTestPath(path) && !removedFilenames.has(path),
   );
 

@@ -186,6 +186,19 @@ describe("assessHygiene", () => {
     assert.equal(failures[0].code, "missing_regression_test");
   });
 
+  it("does not count renamed-away tests as regression coverage", () => {
+    const failures = assessHygiene({ files: [
+      { filename: "src/router.ts", patch: "+change" },
+      {
+        filename: "docs/router.md",
+        previous_filename: "tests/router.test.ts",
+        status: "renamed",
+        patch: "",
+      },
+    ] });
+    assert.equal(failures[0].code, "missing_regression_test");
+  });
+
   it("allows maintainer-approved narrow exceptions", () => {
     const failures = assessHygiene({
       files: [
