@@ -70,6 +70,15 @@ describe("truncateForDebug", () => {
     expect(clamped).not.toContain("access-token-value");
     expect(clamped).toContain("Bearer [REDACTED]");
   });
+
+  test("does not retain multiline XML credential attribute suffixes", () => {
+    const clamped = truncateForDebug(
+      '<request authorization="decoy\nBasic dXNlcjpwYXNz">public</request>',
+    );
+
+    expect(clamped).toBe("<request authorization=[REDACTED]");
+    expect(clamped).not.toContain("dXNlcjpwYXNz");
+  });
 });
 
 describe("appendUsageDebug", () => {

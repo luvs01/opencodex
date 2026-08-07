@@ -134,6 +134,17 @@ const COLON_LABELLED_CREDENTIAL = new RegExp(
  * terminator its own grammar defines, so the surrounding structure survives.
  */
 const OTHER_FRAMED_CREDENTIALS: Array<[RegExp, string]> = [
+  // XML/HTML credential attributes may contain newlines, so they cannot use
+  // the line-oriented form rule below. Keep the tag through the attribute's
+  // `=` and mask to end of input: a quote is attacker-controlled and therefore
+  // is not a trustworthy place to resume emitting diagnostics.
+  [
+    new RegExp(
+      `(<[A-Za-z_:][\\w:.-]*(?:[^>"']|"[^"]*"|'[^']*')*?[^\\S\\r\\n]+(?:${CREDENTIAL_HEADER_LABEL})[^\\S]*=[^\\S]*)[\\s\\S]*`,
+      "gi",
+    ),
+    "attribute",
+  ],
   // URL query / form-encoded: `authorization=<value>` up to `&` or `;`.
   // Unconditionally to the separator — a quoted value is NOT allowed to end it
   // early, or `authorization="decoy"<secret>&model=…` leaks the suffix.

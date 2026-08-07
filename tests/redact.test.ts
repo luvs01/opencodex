@@ -309,6 +309,15 @@ describe("redactSecretString", () => {
     }
   });
 
+  test("masks multiline credential attributes on otherwise ordinary XML tags", () => {
+    const redacted = redactSecretString(
+      '<request method="GET" authorization="decoy\nBasic dXNlcjpwYXNz">public</request>',
+    );
+
+    expect(redacted).toBe(`<request method="GET" authorization=${REDACTED_SECRET}`);
+    expect(redacted).not.toContain("dXNlcjpwYXNz");
+  });
+
   test("a tag that merely starts with a credential word keeps its value", () => {
     // Without an exact tag-name boundary these lost their values.
     expect(redactSecretString("<authorizationStatus>denied</authorizationStatus>"))
