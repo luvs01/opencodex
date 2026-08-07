@@ -25,6 +25,7 @@ import {
   setAccountAlias,
   setActiveAccount,
 } from "../src/oauth/store";
+import { CONFIG_UNINSTALL_MANIFEST, recordOwnedConfigPath } from "../src/lib/config-ownership";
 import type { OAuthCredentials } from "../src/oauth/types";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-oauth-store-multi-test");
@@ -63,6 +64,7 @@ describe("multi-account auth store", () => {
   test("legacy single-credential auth.json normalizes and round-trips without losing login", async () => {
     const authPath = join(TEST_DIR, "auth.json");
     mkdirSync(TEST_DIR, { recursive: true, mode: 0o700 });
+    expect(recordOwnedConfigPath(TEST_DIR, authPath)).toBe(true);
     writeFileSync(authPath, JSON.stringify({
       xai: { access: "legacy-access", refresh: "legacy-refresh", expires: Date.now() + 1000, email: "old@example.com" },
     }));
@@ -73,6 +75,10 @@ describe("multi-account auth store", () => {
     const raw = JSON.parse(readFileSync(authPath, "utf-8"));
     expect(Array.isArray(raw.xai.accounts)).toBe(true);
     expect(existsSync(`${authPath}.pre-multiauth`)).toBe(true);
+    const manifest = JSON.parse(
+      readFileSync(join(TEST_DIR, CONFIG_UNINSTALL_MANIFEST), "utf8"),
+    ) as { paths: string[] };
+    expect(manifest.paths).toContain("auth.json.pre-multiauth");
   });
 
   test("legacy credential WITHOUT identity gets a deterministic account id across loads", async () => {

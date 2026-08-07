@@ -8,7 +8,7 @@ import {
   recordOwnedConfigPath,
   removeOwnedConfigState,
 } from "../src/lib/config-ownership";
-import { getDefaultConfig, saveConfig } from "../src/config";
+import { backupInvalidConfig, getDefaultConfig, saveConfig } from "../src/config";
 
 describe("owned config uninstall", () => {
   test("first owned write creates a missing config root and its metadata", () => {
@@ -54,6 +54,32 @@ describe("owned config uninstall", () => {
       expect(existsSync(dir)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("removes generated invalid-config backups", () => {
+    const parent = mkdtempSync(join(tmpdir(), "ocx-uninstall-invalid-backup-"));
+    const dir = join(parent, "config");
+    const configPath = join(dir, "config.json");
+    const previous = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = dir;
+
+    try {
+      expect(recordOwnedConfigPath(dir, configPath)).toBe(true);
+      writeFileSync(configPath, '{"apiKey":"secret"}\n');
+      const backupPath = backupInvalidConfig(configPath);
+      expect(backupPath).not.toBeNull();
+
+      const manifest = JSON.parse(
+        readFileSync(join(dir, CONFIG_UNINSTALL_MANIFEST), "utf8"),
+      ) as { paths: string[] };
+      expect(manifest.paths).toContain(backupPath!.slice(dir.length + 1));
+      expect(removeOwnedConfigState(dir).status).toBe("removed");
+      expect(existsSync(backupPath!)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 
