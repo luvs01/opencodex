@@ -29,6 +29,7 @@ import {
   writeLegacyOpenaiHistoryRecovery,
   type HistoryWriteTarget,
 } from "./internal/history-writer";
+import { readCodexTransitionStateAtHome } from "./transition-state";
 
 /**
  * The durable operation, mirrored into the request for diagnostics only.
@@ -106,13 +107,13 @@ export function isHistoryWorkerRunMessage(data: unknown): data is HistoryWorkerR
 export function runHistoryUnitUnderLock(
   message: HistoryWorkerRunMessage,
 ): HistoryWorkerResult {
-  const { requestId, jobId, operation } = message;
+  const { requestId, jobId } = message;
   const target: HistoryWriteTarget = {
     canonicalStateDbPath: message.canonicalStateDbPath,
     canonicalBackupPath: message.canonicalBackupPath,
   };
 
-  if (operation === "skip") {
+  if (message.operation === "skip") {
     return { type: "done", requestId, jobId, outcome: "skipped", rows: 0, files: 0 };
   }
 
@@ -120,8 +121,23 @@ export function runHistoryUnitUnderLock(
     message.canonicalCodexHome,
     message.canonicalStateDbPath,
     permit => {
-      if (operation === "recover-legacy-openai") {
+      // Legacy recovery is an explicit maintenance command, not a scheduled
+      // convergence transition. It remains distinct from generic restore.
+      if (message.operation === "recover-legacy-openai") {
         return writeLegacyOpenaiHistoryRecovery(permit, target);
+      }
+      const durable = readCodexTransitionStateAtHome(message.canonicalCodexHome);
+      if (durable.kind !== "ready") return { refused: "history_schedule_unavailable" } as const;
+      const { state } = durable;
+      if (state.currentTxId !== jobId || state.history.txId !== jobId || !state.historySchedule) {
+        return { refused: "history_job_overtaken" } as const;
+      }
+      const operation = message.operation;
+      const expectedDirection = operation === "apply-opencodex" || operation === "migrate-openai"
+        ? "apply"
+        : operation === "restore-openai" ? "remove" : null;
+      if (expectedDirection === null || state.historySchedule.direction !== expectedDirection) {
+        return { refused: "history_operation_mismatch" } as const;
       }
       // apply-opencodex routes history to opencodex; migrate/restore return it to
       // native. The provider is derived from the operation, never from a caller.
@@ -134,6 +150,9 @@ export function runHistoryUnitUnderLock(
     return { type: "blocked", requestId, jobId, reason: acquired.reason };
   }
   const result = acquired.value;
+  if ("refused" in result) {
+    return { type: "error", requestId, jobId, message: result.refused };
+  }
   if (result.failed === true) {
     return { type: "error", requestId, jobId, message: "history_transition_failed" };
   }

@@ -25,6 +25,7 @@ import type {
 } from "./history-worker";
 import { historyBackupPathFor } from "./history-provider";
 import { getCodexHome } from "./paths";
+import { readCodexTransitionStateAtHome } from "./transition-state";
 
 /** Where Codex keeps its resume history, and the manifest that shadows it. */
 const STATE_DB_FILE = "state_5.sqlite";
@@ -154,7 +155,10 @@ export async function runCodexHistoryJob(
   options: { readonly timeoutMs?: number } = {},
 ): Promise<CodexHistoryJobOutcome> {
   const requestId = randomUUID();
-  const jobId = randomUUID();
+  const durable = readCodexTransitionStateAtHome(request.canonicalCodexHome);
+  const jobId = durable.kind === "ready" && durable.state.currentTxId
+    ? durable.state.currentTxId
+    : randomUUID();
   const timeoutMs = options.timeoutMs ?? WORKER_TIMEOUT_MS;
 
   // `skip` writes nothing, so spawning a thread to decide that would be pure

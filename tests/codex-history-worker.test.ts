@@ -10,6 +10,11 @@ import {
   runHistoryUnitUnderLock,
   type HistoryWorkerRunMessage,
 } from "../src/codex/history-worker";
+import { openCodexCoordinatorTransaction } from "../src/codex/transition-state";
+import {
+  resolveCodexCoordinatorDatabasePath,
+  resolveEffectiveUserIdentity,
+} from "../src/codex/user-identity";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const sandboxes: string[] = [];
@@ -140,6 +145,40 @@ test("the unit runs the real transition under H", () => {
   ).get();
   db.close();
   expect(row?.model_provider).toBe("openai");
+});
+
+test("a stale message cannot choose history direction", () => {
+  const fixture = makeFixture("ocx-history-worker-stale-");
+  const coordinatorPath = resolveCodexCoordinatorDatabasePath(
+    resolveEffectiveUserIdentity(),
+    fixture.codexHome,
+  );
+  const coordinator = openCodexCoordinatorTransaction(coordinatorPath);
+  const begun = coordinator.capability.beginTransition(
+    { nativeGeneration: 0, currentTxId: null },
+    {
+      txId: "current-restore-job",
+      direction: "remove",
+      authoritySnapshotId: "snapshot-1",
+      nextRetryAt: null,
+    },
+  );
+  expect(begun.kind).toBe("updated");
+  coordinator.commit();
+  coordinator.close();
+
+  const result = runHistoryUnitUnderLock(runMessage(fixture, {
+    jobId: "stale-apply-job",
+    operation: "apply-opencodex",
+  }));
+
+  expect(result).toMatchObject({ type: "error", message: "history_job_overtaken" });
+  const db = new Database(fixture.stateDb, { readonly: true });
+  const row = db.query<{ model_provider: string }, []>(
+    "SELECT model_provider FROM threads WHERE id = 'thread-1'",
+  ).get();
+  db.close();
+  expect(row?.model_provider).toBe("opencodex");
 });
 
 /**

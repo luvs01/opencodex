@@ -526,8 +526,7 @@ export const readCodexTransitionState: ReadCodexTransitionState = () => {
   }
 };
 
-function readCommittedState(): TransitionStateRead {
-  const path = currentCoordinatorDatabasePath();
+function readCommittedState(path = currentCoordinatorDatabasePath()): TransitionStateRead {
   let database: Database | undefined;
   try {
     database = new Database(path, { readonly: true });
@@ -537,6 +536,19 @@ function readCommittedState(): TransitionStateRead {
     return mapUnavailable(error);
   } finally {
     try { database?.close(); } catch { /* read already completed */ }
+  }
+}
+
+/** Read the durable coordinator for an already-canonical Codex home. */
+export function readCodexTransitionStateAtHome(canonicalCodexHome: string): TransitionStateRead {
+  try {
+    const path = resolveCodexCoordinatorDatabasePath(
+      resolveEffectiveUserIdentity(),
+      realpathSync.native(canonicalCodexHome),
+    );
+    return readCommittedState(path);
+  } catch (error) {
+    return mapReadError(error);
   }
 }
 
