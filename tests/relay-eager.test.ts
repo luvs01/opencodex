@@ -284,6 +284,22 @@ describe("relaySseEagerBounded — inline payload rewrite (#864)", () => {
     expect(budget.snapshot().currentBytes).toBe(0);
   });
 
+  test("bounds delimiter-free frames before they can bypass the client queue cap", async () => {
+    const up = controlledUpstream();
+    const upstream = new AbortController();
+    const { hooks } = makeHooks();
+    const relayed = relaySseEagerBounded(up.stream, upstream, hooks, { maxQueueBytes: 1 });
+    const reading = readAll(relayed);
+
+    up.push(new Uint8Array(4 * 1024 * 1024 + 1).fill(120));
+    up.close();
+
+    const text = await reading;
+    expect(text).not.toContain("x".repeat(64));
+    expect(text).toContain("upstream SSE frame exceeded the safe limit");
+    expect(upstream.signal.aborted).toBe(true);
+  });
+
   test("blocks without a data field pass through untouched before the terminal", async () => {
     const up = controlledUpstream();
     const { hooks } = makeHooks();

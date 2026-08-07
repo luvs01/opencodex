@@ -17,6 +17,7 @@ const nativePassthroughSseResponses = new WeakSet<Response>();
 const eagerRelaySseResponses = new WeakSet<Response>();
 
 export const MAX_INSPECTION_SSE_FRAME_BYTES = 4 * 1024 * 1024;
+export const MAX_CLIENT_SSE_FRAME_BYTES = 4 * 1024 * 1024;
 export const MAX_COMPLETED_OUTPUT_ITEMS = 256;
 export const MAX_COMPLETED_OUTPUT_ITEM_SOURCE_BYTES = 8 * 1024 * 1024;
 export const MAX_TAIL_ERROR_MESSAGE_CHARS = 512;
@@ -150,7 +151,14 @@ export function createSseTerminalOutputBoundary(): SseTerminalOutputBoundary {
     feed(chunk) {
       if (disposed || terminal) return new Uint8Array(0);
       buffer += decoder!.decode(chunk, { stream: true });
-      return process(false);
+      const output = process(false);
+      if (encoder.encode(buffer).byteLength > MAX_CLIENT_SSE_FRAME_BYTES) {
+        // Drop the oversized partial before the relay catch path calls finish();
+        // reflecting it into a synthetic failure would defeat the memory cap.
+        buffer = "";
+        throw new Error("upstream SSE frame exceeded the safe limit");
+      }
+      return output;
     },
     finish() {
       if (disposed || terminal) return new Uint8Array(0);

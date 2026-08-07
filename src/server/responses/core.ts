@@ -2221,7 +2221,12 @@ async function handleResponsesInner(
       const rewrittenBody = clientBlockRewrite !== undefined || payloadRewrites.length > 0
         ? relaySseWithBlockRewrite(nativeBody, clientBlockRewrite ?? payloadRewriteAsBlockRewrite(composeSsePayloadRewrites(...payloadRewrites)), translatorBudget)
         : nativeBody;
-      const clientBody = relaySseWithFailedTail(rewrittenBody, upstream, reason => clientGone.abort(reason));
+      // Known-bad Windows Bun runtimes must keep the no-rewrite client branch
+      // as a native tee relay. A JS pull wrapper reintroduces Bun#32111 when the
+      // client disconnects; fixed runtimes already took the eager path above.
+      const clientBody = process.platform === "win32" && !needsClientRewrite
+        ? nativeBody
+        : relaySseWithFailedTail(rewrittenBody, upstream, reason => clientGone.abort(reason));
       return markNativePassthroughSseResponse(new Response(clientBody, {
         status: upstreamResponse.status,
         headers,

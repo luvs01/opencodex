@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { relaySseWithFailedTail, relayWithAbort } from "../src/server";
 import { relaySseEagerBounded, type EagerRelayHooks } from "../src/server/relay-eager";
-import { MAX_TAIL_ERROR_MESSAGE_CHARS } from "../src/server/relay";
+import { MAX_CLIENT_SSE_FRAME_BYTES, MAX_TAIL_ERROR_MESSAGE_CHARS } from "../src/server/relay";
 import { TranslatorBudgetExceededError } from "../src/lib/translator-budget";
 
 const encoder = new TextEncoder();
@@ -138,6 +138,17 @@ describe("relaySseWithFailedTail", () => {
     const out = await drain(relaySseWithFailedTail(src, upstream));
     expect(out).toContain("event: response.failed\ndata: ");
     expect(out.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
+  test("fails closed when an unterminated SSE frame exceeds the client buffer cap", async () => {
+    const upstream = new AbortController();
+    const chunk = "x".repeat(MAX_CLIENT_SSE_FRAME_BYTES / 2);
+    const out = await drain(relaySseWithFailedTail(sourceStream([chunk, chunk, "x"]), upstream));
+
+    expect(out).not.toContain(chunk);
+    expect(out).toContain("upstream SSE frame exceeded the safe limit");
+    expect(out.endsWith("data: [DONE]\n\n")).toBe(true);
+    expect(upstream.signal.aborted).toBe(true);
   });
 
   test("translator overflow failed tail preserves translation_buffer_limit", async () => {
