@@ -654,6 +654,12 @@ describe("validateIssue - feature", () => {
     assert.equal(hasActionableReproductionDetail("```\nSIGSEGV at 0x0000\n```"), true);
   });
 
+  it("checks long non-matching reproduction tokens in linear time", () => {
+    const startedAt = performance.now();
+    assert.equal(hasActionableReproductionDetail("a".repeat(60_000)), false);
+    assert.ok(performance.now() - startedAt < 500, "actionable reproduction check took too long");
+  });
+
   it("rejects fenced placeholder-only examples", () => {
     const fencedPlaceholders = [
       "```\nN/A\n```",

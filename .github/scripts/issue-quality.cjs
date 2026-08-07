@@ -1087,13 +1087,8 @@ const REPRO_PATH_RE = new RegExp([
     "~?/[\\w.@-]+(?:/[\\w.@-]+)+",
     "[A-Za-z]:\\\\(?:[\\w.@-]+\\\\)+[\\w.@-]+",
     "~?/[\\w.@-]+/[\\w.@-]+\\.(?:json|yaml|yml|toml|conf|log|env|txt|ts|js|tsx|jsx|sh|ps1|py)",
-    "[\\w.@-]+\\.(?:json|yaml|yml|toml|conf|log|env)\\b",
+    "(?:^|[^\\w.@-])[\\w.@-]+\\.(?:json|yaml|yml|toml|conf|log|env)\\b",
 ].join("|"));
-const ACTIONABLE_REPRO_RE = new RegExp(
-  [REPRO_COMMAND_RE.source, REPRO_FAILURE_RE.source, REPRO_PATH_RE.source].join("|"),
-  "i",
-);
-
 // Sigil-only fences with no body content are never actionable.
 const EMPTY_FENCE_RE = /^[ \t]{0,3}(?:```+|~~~+)\s*\n\s*\n[ \t]{0,3}(?:```+|~~~+)\s*$/;
 
@@ -1104,9 +1099,17 @@ const EMPTY_FENCE_RE = /^[ \t]{0,3}(?:```+|~~~+)\s*\n\s*\n[ \t]{0,3}(?:```+|~~~+
  * count as actionable when their body contains non-whitespace content.
  */
 function hasActionableReproductionDetail(text) {
+  if (typeof text !== "string") return false;
+  // Reject text with no actionable syntax before clean() performs Markdown
+  // media handling, which is unnecessary for a plain non-matching token.
+  if (!/[./\\`~]/.test(text) && !REPRO_COMMAND_RE.test(text) && !REPRO_FAILURE_RE.test(text)) {
+    return false;
+  }
   const c = clean(text);
   if (!c) return false;
-  if (ACTIONABLE_REPRO_RE.test(c)) return true;
+  if (REPRO_COMMAND_RE.test(c) || REPRO_FAILURE_RE.test(c)) return true;
+  // Avoid running path patterns over long tokens that cannot contain a path.
+  if (/[./\\]/.test(c) && REPRO_PATH_RE.test(c)) return true;
   // Fenced blocks: only count when the body has non-whitespace content.
   if (/```|~~~/.test(c)) {
     const parts = stripFencedActionableContent(c);
