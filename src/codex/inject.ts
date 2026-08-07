@@ -1194,7 +1194,10 @@ export async function restoreNativeCodexAsync(): Promise<{
   success: boolean;
   message: string;
 }> {
-  const inline = restoreNativeCodex({ skipHistory: true });
+  const inline = restoreNativeCodexCore({ skipHistory: true });
+  if (!inline.restoreHistory) {
+    return { success: inline.success, message: inline.message };
+  }
   const outcome = await runCodexHistoryJob({
     ...resolveCodexHistoryJobTarget(),
     operation: deriveCodexHistoryOperation({
@@ -1217,9 +1220,10 @@ export async function restoreNativeCodexAsync(): Promise<{
   return { success: inline.success, message: `${inline.message}${historyMsg}` };
 }
 
-export function restoreNativeCodex(options: { skipHistory?: boolean } = {}): {
+function restoreNativeCodexCore(options: { skipHistory?: boolean } = {}): {
   success: boolean;
   message: string;
+  restoreHistory: boolean;
 } {
   const activeProvider = currentExternalCodexModelProvider();
   if (activeProvider) {
@@ -1227,6 +1231,7 @@ export function restoreNativeCodex(options: { skipHistory?: boolean } = {}): {
     return {
       success: true,
       message: `External Codex provider ${tomlString(activeProvider)} preserved; no native restore was needed.`,
+      restoreHistory: false,
     };
   }
   const journal = restoreJournalState();
@@ -1272,7 +1277,15 @@ export function restoreNativeCodex(options: { skipHistory?: boolean } = {}): {
       : history.ejectedRows
         ? ` ${history.ejectedRows} opencodex history thread(s) were ejected to openai so native Codex can resume them.`
         : "";
-  return { success: cfg.success, message: `${msg}${historyMsg}` };
+  return { success: cfg.success, message: `${msg}${historyMsg}`, restoreHistory: true };
+}
+
+export function restoreNativeCodex(options: { skipHistory?: boolean } = {}): {
+  success: boolean;
+  message: string;
+} {
+  const result = restoreNativeCodexCore(options);
+  return { success: result.success, message: result.message };
 }
 
 export function getCodexConfigPath(): string {

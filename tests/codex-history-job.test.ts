@@ -147,7 +147,7 @@ test("an overrun Worker returns a typed timeout rather than hanging", async () =
  */
 test("the synchronous restore body is gated on skipHistory", () => {
   const source = readFileSync(join(import.meta.dir, "..", "src", "codex", "inject.ts"), "utf8");
-  const body = source.slice(source.indexOf("export function restoreNativeCodex("));
+  const body = source.slice(source.indexOf("function restoreNativeCodexCore("));
   const historyCall = body.indexOf("syncCodexHistoryProvider(\"openai\"");
   expect(historyCall).toBeGreaterThan(-1);
 
@@ -157,5 +157,5 @@ test("the synchronous restore body is gated on skipHistory", () => {
   expect(gate).toBeLessThan(historyCall);
 
   // And the async wrapper is the thing that sets it.
-  expect(source).toContain("restoreNativeCodex({ skipHistory: true })");
+  expect(source).toContain("restoreNativeCodexCore({ skipHistory: true })");
 });

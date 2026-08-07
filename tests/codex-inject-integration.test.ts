@@ -42,6 +42,19 @@ function runRestore(codexHome: string, ocxHome: string): { stdout: string; statu
   return { stdout: result.stdout?.trim() ?? "", status: result.status ?? 1 };
 }
 
+function runRestoreAsync(codexHome: string, ocxHome: string): { stdout: string; status: number } {
+  const script = `
+    const { restoreNativeCodexAsync } = require("./src/codex/inject");
+    restoreNativeCodexAsync().then(result => console.log(JSON.stringify(result)));
+  `;
+  const result = spawnSync(process.execPath, ["--eval", script], {
+    cwd: repoRoot,
+    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: ocxHome },
+    encoding: "utf8",
+  });
+  return { stdout: result.stdout?.trim() ?? "", status: result.status ?? 1 };
+}
+
 describe("injectCodexConfig integration (Design B)", () => {
   let codexHome: string;
   let ocxHome: string;
@@ -503,6 +516,35 @@ describe("injectCodexConfig integration (Design B)", () => {
     expect(readFileSync(dbPath).equals(dbBefore)).toBe(true);
     expect(readFileSync(rolloutPath, "utf8")).toBe(rollout);
     expect(existsSync(journalPath)).toBe(false);
+  });
+
+  test("async restore preserves external provider history", () => {
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model_provider = "custom"\n', "utf8");
+    const rolloutPath = join(codexHome, "rollout-custom.jsonl");
+    const rollout = `${JSON.stringify({
+      type: "session_meta",
+      payload: { id: "thread-custom", model_provider: "opencodex", source: "cli" },
+    })}\n`;
+    writeFileSync(rolloutPath, rollout, "utf8");
+    const dbPath = join(codexHome, "state_5.sqlite");
+    const db = new Database(dbPath);
+    db.run(`CREATE TABLE threads (
+      id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, model_provider TEXT NOT NULL,
+      source TEXT NOT NULL, first_user_message TEXT NOT NULL, has_user_event INTEGER NOT NULL
+    )`);
+    db.run(`INSERT INTO threads VALUES ('thread-custom', ?, 'opencodex', 'cli', 'hello', 1)`, rolloutPath);
+    db.close();
+
+    const result = runRestoreAsync(codexHome, ocxHome);
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).message).toContain('External Codex provider "custom" preserved');
+    const restored = new Database(dbPath, { readonly: true });
+    expect(restored.query("SELECT model_provider FROM threads WHERE id = 'thread-custom'").get())
+      .toEqual({ model_provider: "opencodex" });
+    restored.close();
+    expect(readFileSync(rolloutPath, "utf8")).toBe(rollout);
   });
 
   test("provider selected through a legacy root profile is also preserved", () => {
