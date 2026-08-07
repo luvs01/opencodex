@@ -1225,6 +1225,22 @@ describe("validateIssue - documentation", () => {
     assert.equal(result.valid, false);
   });
 
+  it("rejects placeholder-only documentation wrapped in media tags", () => {
+    const body = [
+      "### Documentation problem type",
+      "Missing documentation",
+      "### Documentation location",
+      "<video>No response</video>",
+      "### What is wrong or missing?",
+      "<picture>Not applicable</picture>",
+      "### What should the documentation explain instead?",
+      "<audio>None</audio>",
+    ].join("\n");
+    const result = validateIssue({ title: "Docs", body, labels: ["documentation"] });
+    assert.equal(result.kind, "documentation");
+    assert.equal(result.valid, false);
+  });
+
   it("accepts a complete documentation correction", () => {
     const body = [
       "### Documentation problem type",
@@ -1250,6 +1266,7 @@ describe("normalisation", () => {
   it("treats 'No response' as empty", () => {
     assert.equal(clean("No response"), "");
     assert.equal(clean("_No response_"), "");
+    assert.equal(clean("<video>No response</video>"), "");
   });
 
   it("treats NA and not applicable as placeholders", () => {

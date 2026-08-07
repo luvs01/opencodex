@@ -131,7 +131,9 @@ function stripHtmlMedia(text) {
         .replace(/<[^>]+>/g, " ")
         .replace(/[\s_*~`]+/g, " ")
         .trim();
-      return innerStripped.length === 0 ? " " : match;
+      // Keep fallback/caption prose, but discard its media wrapper so the
+      // normal placeholder check still sees values such as "No response".
+      return innerStripped.length === 0 ? " " : innerStripped;
     },
   );
   return s;
@@ -386,6 +388,9 @@ function clean(raw) {
   if (isMediaOnly(s)) {
     s = stripMediaTokens(s).replace(/\s+/g, " ").trim();
   }
+  // Check the textual fallback of a media block as well as the original
+  // value, so wrapping a placeholder in media HTML cannot make it content.
+  if (isPlaceholderOnlyValue(stripMediaTokens(s))) return "";
   // Whole-value placeholders first (including a single enclosing fence), so
   // line-by-line stripping cannot leave bare fence markers behind.
   if (isPlaceholderOnlyValue(s)) return "";
