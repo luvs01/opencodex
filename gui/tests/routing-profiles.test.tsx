@@ -250,6 +250,56 @@ test("routing clears stale dry-run results when switching profiles", async () =>
   }
 });
 
+test("routing re-enables dry-run after inputs invalidate a pending request", async () => {
+  let releaseDryRun!: () => void;
+  const dryRunGate = new Promise<void>(resolve => {
+    releaseDryRun = resolve;
+  });
+
+  installFetch(async (url, init) => {
+    if (url.endsWith("/api/routing-profiles") && (init?.method ?? "GET") === "GET") {
+      return Response.json({ profiles: [PROFILE] });
+    }
+    if (url.endsWith("/api/routing-analytics")) {
+      return Response.json(ANALYTICS);
+    }
+    if (url.endsWith("/api/routing-profiles/dry-run") && init?.method === "POST") {
+      await dryRunGate;
+      return Response.json(DRY_RUN_OK);
+    }
+    return new Response("missing", { status: 404 });
+  });
+
+  const { container, root } = await mountPage();
+  try {
+    const evaluate = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => button.textContent?.includes("Evaluate candidates"));
+    const tools = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(evaluate).toBeTruthy();
+    expect(tools).toBeTruthy();
+
+    await act(async () => { evaluate!.click(); });
+    expect(evaluate!.disabled).toBe(true);
+
+    await act(async () => { tools!.click(); });
+    expect(evaluate!.disabled).toBe(false);
+
+    await act(async () => {
+      releaseDryRun();
+      await Promise.resolve();
+    });
+    await tick(3);
+
+    expect(evaluate!.disabled).toBe(false);
+    expect(container.textContent).not.toContain("0.910");
+  } finally {
+    await act(async () => {
+      releaseDryRun();
+      root.unmount();
+    });
+  }
+});
+
 test("routing refreshes the selected profile after reload", async () => {
   let profilesPayload: unknown[] = [PROFILE];
   installFetch((url, init) => {
@@ -344,4 +394,3 @@ test("routing ignores a stale load body that finishes after a newer retry", asyn
     });
   }
 });
-
