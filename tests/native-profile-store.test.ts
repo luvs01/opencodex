@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -380,6 +381,13 @@ describe("native-profile recovery journal storage", () => {
 
     expect(caught).toBeInstanceOf(NativeProfileError);
     expect((caught as NativeProfileError).code).toBe("VAULT_INVALID");
+  });
+
+  test.skipIf(process.platform === "win32")("rejects a vault FIFO without waiting for a writer", () => {
+    const store = context();
+    execFileSync("mkfifo", [store.vaultPath]);
+
+    expect(() => readNativeProfileVault(store)).toThrow(NativeProfileError);
   });
 
   test("reads at most journal cap plus one when the opened journal grows after fstat", () => {
