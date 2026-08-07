@@ -679,6 +679,10 @@ export interface RestartIo {
   verifyOcxFn?: (pid: number) => number | null;
   /** Liveness check when deciding whether a reclaim timeout still has live holders. */
   isAliveFn?: (pid: number) => boolean;
+  /** Test seam for production pinned-start retries. */
+  spawnDetachedStartFn?: typeof spawnDetachedStart;
+  /** Test seam for terminating a still-running pinned-start attempt. */
+  killProxyFn?: typeof killProxy;
 }
 
 /**
@@ -937,6 +941,16 @@ async function restartAfterUpdate(
     !!(await proxyIdentityAt(p, { hostname: host }))
   ));
   const probeIdentity = io.probeProxyIdentity ?? defaultProbeProxyIdentity;
+  const now = io.now ?? (() => Date.now());
+  const spawnPinnedStart = io.spawnDetachedStartFn ?? spawnDetachedStart;
+  const killSpawnAttempt = (child: ChildProcess | null): void => {
+    // Once Node has observed this ChildProcess exit, its numeric PID is no longer
+    // owned by the start attempt and may already identify an unrelated process.
+    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+    if (aliveFn(child.pid)) {
+      try { (io.killProxyFn ?? killProxy)(child.pid); } catch { /* best-effort */ }
+    }
+  };
   const expectedVersion = typeof job.latestVersion === "string" && job.latestVersion.length > 0
     ? job.latestVersion
     : null;
@@ -965,9 +979,7 @@ async function restartAfterUpdate(
         `Pinned start attempt ${attempt - 1} did not become healthy on port ${port}; `
           + `retrying (${attempt}/${attempts}).`,
       );
-      if (lastChild?.pid && aliveFn(lastChild.pid)) {
-        try { killProxy(lastChild.pid); } catch { /* best-effort */ }
-      }
+      killSpawnAttempt(lastChild);
       lastChild = null;
     }
     preparePortForPinnedStart(job, port, listPids, aliveFn, verifyOcx);
@@ -987,17 +999,19 @@ async function restartAfterUpdate(
       );
       continue;
     }
-    lastChild = spawnDetachedStart(job, job.installer, port);
-    const healthDeadline = Date.now() + perAttemptHealthMs;
-    while (Date.now() < healthDeadline) {
+    const child = spawnPinnedStart(job, job.installer, port);
+    lastChild = child;
+    child.once("exit", () => {
+      if (lastChild === child) lastChild = null;
+    });
+    const healthDeadline = now() + perAttemptHealthMs;
+    while (now() < healthDeadline) {
       if (await probe(port, hostname)) return;
       await sleep(500);
     }
   }
   // Exhausted retries: do not leave a hung pinned-start child owning the port.
-  if (lastChild?.pid && aliveFn(lastChild.pid)) {
-    try { killProxy(lastChild.pid); } catch { /* best-effort */ }
-  }
+  killSpawnAttempt(lastChild);
 }
 
 /** Compact listen-holder summary for update-job logs when reclaim fails. */
