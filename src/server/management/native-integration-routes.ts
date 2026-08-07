@@ -234,6 +234,13 @@ async function handleCodexToggle(ctx: ManagementContext): Promise<Response> {
     }
     const enabled = body.enabled;
 
+    if (!enabled) {
+      // Restoring Codex mutates shared native artifacts. Refuse before even
+      // persisting intent when the installed service belongs to another home.
+      const owned = assertNativeTeardownOwned();
+      if (!owned.ok) return refusal(409, "codex", "home_mismatch", owned.message);
+    }
+
     const { setCodexIntegrationEnabled } = await import("../../codex/desired-state");
     const persisted = setCodexIntegrationEnabled(enabled);
     /*

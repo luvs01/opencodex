@@ -104,6 +104,25 @@ describe("request validation", () => {
 });
 
 describe("turning Codex off", () => {
+  test("refuses teardown owned by a service installed from another home", async () => {
+    writeFileSync(join(fixtureRoot, "service-state.json"), JSON.stringify({
+      version: 2,
+      codexHome: process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"),
+      opencodexHome: join(fixtureRoot, "foreign-opencodex-home"),
+      backend: "scheduler",
+    }));
+
+    const result = await put(baseConfig(), { enabled: false });
+
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({
+      code: "native_integration_refused",
+      clientId: "codex",
+      reason: "home_mismatch",
+    });
+    expect(persistedCodexIntent()).toBeUndefined();
+  });
+
   test("persists the decision so it survives the next start", async () => {
     const result = await put(baseConfig(), { enabled: false });
     expect(result.status).toBe(200);
