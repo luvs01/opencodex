@@ -22,6 +22,7 @@ import {
 } from "../src/config";
 import { hashAuthority } from "../src/codex/admission";
 import { captureCatalogAdmissionSnapshot } from "../src/codex/catalog-admission";
+import { recomputeInjectWitness } from "../src/codex/inject-coordination";
 import { JOURNAL_PATH } from "../src/codex/journal";
 import type { AdmissionSnapshot } from "../src/codex/convergence-types";
 import type { OcxConfig } from "../src/types";
@@ -225,6 +226,27 @@ describe("the generation read that belongs to the open transaction", () => {
   test("it throws again once the transaction has closed", () => {
     withConfigMutationLockSync(() => readConfigGenerationInCurrentMutationTransaction());
     expect(() => readConfigGenerationInCurrentMutationTransaction()).toThrow();
+  });
+
+  test("the under-lock injection witness reads current config evidence", () => {
+    saveConfig(config(10100));
+    const before = readConfigAdmissionSnapshot();
+    saveConfig(config(20200));
+
+    const nativeConfig = join(root, "native.toml");
+    const journal = join(root, "journal.json");
+    writeFileSync(nativeConfig, 'model = "gpt-5"\n');
+
+    const current = withConfigMutationLockSync(() => recomputeInjectWitness({
+      candidate: { configBytes: "candidate", profileBytes: "profile", catalogPath: null },
+      canonicalTargets: { config: nativeConfig, profile: join(root, "profile"), journal },
+      observedOwnership: "unknown",
+    }));
+
+    const after = readConfigAdmissionSnapshot();
+    expect(before.contentSha256).not.toBe(after.contentSha256);
+    expect(current.evidence.persistedIdentity).toBe(after.contentSha256);
+    expect(current.evidence.generation).toEqual({ present: true, value: 2 });
   });
 });
 

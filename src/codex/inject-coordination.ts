@@ -7,7 +7,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
-import { atomicWriteFile } from "../config";
+import {
+  atomicWriteFile,
+  readConfigAdmissionSnapshot,
+  readConfigGenerationInCurrentMutationTransaction,
+} from "../config";
 import type { CodexWriteLockResult } from "./codex-write-lock";
 import { JOURNAL_PATH } from "./journal";
 import { CODEX_CONFIG_PATH, CODEX_PROFILE_PATH } from "./paths";
@@ -208,17 +212,17 @@ export function buildInjectWitness(
 export function recomputeInjectWitness(options: {
   candidate: CodexWriteCandidate;
   canonicalTargets: CodexWriteEvidence["canonicalTargets"];
-  persistedIdentity: string;
-  generation: CodexWriteEvidence["generation"];
   observedOwnership: CodexWriteCoordination["observedOwnership"];
 }): CodexWriteCoordination {
   const nativeInput = readOrNull(options.canonicalTargets.config) ?? "";
+  const persisted = readConfigAdmissionSnapshot();
+  const generation = readConfigGenerationInCurrentMutationTransaction();
   return codexWriteCoordination(
     options.candidate,
     {
       nativeInputIdentity: createHash("sha256").update(nativeInput).digest("hex"),
-      persistedIdentity: options.persistedIdentity,
-      generation: options.generation,
+      persistedIdentity: persisted.kind === "read" ? persisted.contentSha256 : "unreadable",
+      generation: { present: true, value: generation.value },
       journalIdentity: contentIdentity(options.canonicalTargets.journal),
       canonicalTargets: options.canonicalTargets,
     },

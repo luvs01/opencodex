@@ -876,8 +876,6 @@ export async function injectCodexConfig(
           authoritySnapshotId: recomputeInjectWitness({
             candidate: witness.candidate,
             canonicalTargets: witness.evidence.canonicalTargets,
-            persistedIdentity,
-            generation,
             observedOwnership: witness.observedOwnership,
           }).comparisonId,
         }),
