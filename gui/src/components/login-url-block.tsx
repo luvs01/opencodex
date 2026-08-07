@@ -22,6 +22,14 @@ export function LoginUrlBlock({ url }: { url: string }) {
     : outcome === "unavailable"
       ? t("prov.linkCopyUnavailable")
       : t("prov.copyLink");
+  const canOpen = (() => {
+    try {
+      const protocol = new URL(url).protocol;
+      return protocol === "https:" || protocol === "http:";
+    } catch {
+      return false;
+    }
+  })();
 
   return (
     <div className="login-url-block">
@@ -31,9 +39,11 @@ export function LoginUrlBlock({ url }: { url: string }) {
           <IconLink style={{ width: 13, height: 13 }} aria-hidden="true" />
           <span aria-live="polite">{label}</span>
         </button>
-        <a href={url} target="_blank" rel="noreferrer" className="login-url-block-open">
-          <IconExternal style={{ width: 13, height: 13 }} aria-hidden="true" /> {t("prov.didntOpen")}
-        </a>
+        {canOpen && (
+          <a href={url} target="_blank" rel="noreferrer" className="login-url-block-open">
+            <IconExternal style={{ width: 13, height: 13 }} aria-hidden="true" /> {t("prov.didntOpen")}
+          </a>
+        )}
       </div>
     </div>
   );
