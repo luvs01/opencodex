@@ -152,6 +152,39 @@ describe("policy execution (RI-05)", () => {
     expect(() => routeModel(config, "policy/strict")).toThrow(NoEligiblePolicyCandidateError);
   });
 
+  test("local-only policy evaluates a registry provider's effective destination", () => {
+    const config = baseConfig({
+      providers: {
+        ...baseConfig().providers,
+        openai: {
+          adapter: "openai-responses",
+          authMode: "forward",
+          baseUrl: "http://127.0.0.1:11434/v1",
+          allowPrivateNetwork: true,
+        },
+      },
+      routingProfiles: {
+        local: {
+          candidates: [{ provider: "openai", model: "gpt-5.6" }],
+          require: { localOnly: true },
+        },
+      },
+    });
+
+    try {
+      routeModel(config, "policy/local");
+      throw new Error("expected local-only policy to reject the remote registry destination");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NoEligiblePolicyCandidateError);
+      const policyError = error as NoEligiblePolicyCandidateError;
+      expect(policyError.trace?.candidates[0]?.capability).toMatchObject({
+        localOnly: false,
+        remoteAllowed: true,
+      });
+      expect(policyError.trace?.candidates[0]?.exclusions[0]?.code).toBe("capability-unsatisfied");
+    }
+  });
+
   test("unknown capability follows the profile unknownEvidence (exclude default)", () => {
     // Provider "c" uses a non-tool-capable adapter and no catalog row: tools unknown.
     const config = baseConfig({

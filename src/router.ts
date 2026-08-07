@@ -11,7 +11,12 @@ import type { NormalizedComboConfig } from "./combos/types";
 import { hasOwnProvider, resolveEnvValue } from "./config";
 import { assertProviderDestinationAllowed } from "./lib/destination-policy";
 import { redactSecretString, redactUrlForLog } from "./lib/redact";
-import { PROVIDER_REGISTRY, providerCodexAccountMode, providerMatchesRegistryTransport } from "./providers/registry";
+import {
+  effectiveProviderBaseUrl,
+  PROVIDER_REGISTRY,
+  providerCodexAccountMode,
+  providerMatchesRegistryTransport,
+} from "./providers/registry";
 import {
   isCanonicalOpenAiForwardProvider,
   LEGACY_CHATGPT_PROVIDER_ID,
@@ -289,16 +294,13 @@ function routedProviderConfig(providerName: string, provider: OcxProviderConfig)
   const reasoningSplitModels = mergeStringArray(registryEntry.reasoningSplitModels, provider.reasoningSplitModels);
   const thinkingToggleModels = mergeStringArray(registryEntry.thinkingToggleModels, provider.thinkingToggleModels);
   const thinkingBudgetModels = mergeStringArray(registryEntry.thinkingBudgetModels, provider.thinkingBudgetModels);
-  const registryBaseUrlIsTemplate = /\{[^}]*\}/.test(registryEntry.baseUrl);
   const userBaseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : "";
   const userBaseUrlIsResolved = userBaseUrl.length > 0 && !/\{[^}]*\}/.test(userBaseUrl);
   if (registryEntry.allowBaseUrlOverride && !userBaseUrlIsResolved) {
     throw new Error(`Invalid baseUrl for provider "${providerName}": expected a nonblank URL without unresolved placeholders`);
   }
   // Registry template URLs are presets; local/self-hosted entries opt in explicitly.
-  const baseUrl = (registryBaseUrlIsTemplate || registryEntry.allowBaseUrlOverride) && userBaseUrlIsResolved
-    ? userBaseUrl
-    : registryEntry.baseUrl;
+  const baseUrl = effectiveProviderBaseUrl(providerName, provider);
   if (userBaseUrlIsResolved) warnIfBaseUrlDiscarded(providerName, userBaseUrl, baseUrl);
   assertProviderDestinationAllowed(providerName, { baseUrl, allowPrivateNetwork: provider.allowPrivateNetwork });
 

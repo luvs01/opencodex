@@ -12,7 +12,8 @@
 
 import type { OcxConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
-import { PROVIDER_REGISTRY } from "../providers/registry";
+import { effectiveProviderBaseUrl, PROVIDER_REGISTRY } from "../providers/registry";
+import { assessUrlDestination } from "../lib/destination-policy";
 import {
   nativeInputModalities,
   nativeOpenAiContextWindow,
@@ -75,28 +76,6 @@ function cachedCatalogModels(): CatalogModelRow[] {
 }
 
 /**
- * Classify a hostname for locality evidence. `URL.hostname` keeps IPv6
- * literals bracketed (`[::1]`), so strip the brackets before matching.
- * Anything not positively local or private stays unknown: "unknown is not
- * zero", so an unrecognized host must never assert `remoteAllowed`.
- */
-function classifyHostname(hostname: string): "local" | "private" | null {
-  const host = hostname.trim().toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost") || host === "0.0.0.0") return "local";
-  if (host === "::1" || /^127\./.test(host)) return "local";
-  if (/^10\./.test(host)
-    || /^192\.168\./.test(host)
-    || /^169\.254\./.test(host)
-    || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
-    || /^f[cd][0-9a-f]{2}:/.test(host)
-    || /^fe80:/.test(host)
-    || /^::ffff:(?:10\.|127\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)) {
-    return "private";
-  }
-  return null;
-}
-
-/**
  * Adapters whose upstream protocol supports function/tool calling. Mirrors
  * the adapter ids the resolver accepts (including the `azure` alias for
  * `azure-openai`); `kiro` and `mimo-free` send/delegate tool calls.
@@ -116,20 +95,15 @@ const TOOL_CAPABLE_ADAPTERS = new Set([
 
 function localRemoteEvidence(baseUrl: string | undefined): Pick<RouteCapabilityEvidence, "localOnly" | "remoteAllowed"> {
   if (typeof baseUrl !== "string" || baseUrl.length === 0) return {};
-  try {
-    const hostname = new URL(baseUrl).hostname;
-    if (!hostname) return {};
-    const kind = classifyHostname(hostname);
-    if (kind === null) return {};
-    // Both booleans are emitted once classified: definitive negative evidence,
-    // so a local host cannot satisfy `require.remoteAllowed` (or vice versa)
-    // under `unknownEvidence.capability: "allow"`/`"penalize"`.
-    return kind === "local" || kind === "private"
-      ? { localOnly: true, remoteAllowed: false }
-      : { remoteAllowed: true, localOnly: false };
-  } catch {
-    return {};
+  const assessment = assessUrlDestination(baseUrl);
+  if (!assessment) return {};
+  if (assessment.kind === "localhost" || assessment.kind === "loopback" || assessment.kind === "private") {
+    return { localOnly: true, remoteAllowed: false };
   }
+  if (assessment.kind === "public" || assessment.kind === "hostname") {
+    return { remoteAllowed: true, localOnly: false };
+  }
+  return {};
 }
 
 /**
@@ -185,7 +159,11 @@ export function candidateCapabilityEvidence(
     ? "supported"
     : tierSupport === false ? "unsupported" : "unknown";
 
-  const localRemote = localRemoteEvidence(provider?.baseUrl);
+  // Evaluate policy locality against the same effective destination dispatch
+  // uses, not a stale configured URL that a fixed registry transport ignores.
+  const localRemote = localRemoteEvidence(
+    provider === undefined ? undefined : effectiveProviderBaseUrl(providerName, provider),
+  );
   // Only emit a definitive encryptedCodexTasks value when the provider is
   // present. An absent/unconfigured provider must stay unknown so
   // require.encryptedCodexTasks does not fail closed on missing config.

@@ -1893,6 +1893,22 @@ export function providerMatchesRegistryTransport(
 }
 
 /**
+ * Return the destination that routing will use for a configured provider row.
+ * Fixed registry transports deliberately ignore stale configured URLs, while
+ * templates and explicitly overridable entries use a resolved operator URL.
+ */
+export function effectiveProviderBaseUrl(id: string, provider: OcxProviderConfig): string {
+  const entry = getProviderRegistryEntry(id);
+  if (!entry || !providerMatchesRegistryTransport(id, provider)) return provider.baseUrl;
+  const configured = typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : "";
+  const configuredIsResolved = configured.length > 0 && !/\{[^}]*\}/.test(configured);
+  const registryIsTemplate = /\{[^}]*\}/.test(entry.baseUrl);
+  return (registryIsTemplate || entry.allowBaseUrlOverride) && configuredIsResolved
+    ? configured
+    : entry.baseUrl;
+}
+
+/**
  * Resolve the registry entry a configured provider actually points at, by TRANSPORT
  * rather than by name.
  *
