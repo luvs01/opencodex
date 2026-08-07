@@ -740,8 +740,15 @@ function proxyAdmissionHeaders(config: OcxConfig | undefined, envRef: string): R
   return shouldInjectApiAuthHeader(config) ? { "x-opencodex-api-key": envRef } : undefined;
 }
 
+/** Do not let provider-controlled catalog text become an environment lookup. */
+function containsEnvInterpolation(value: string): boolean {
+  return value.includes("${");
+}
+
 function buildHermesClientConfig(ctx: ExportContext): HermesGeneratedConfig {
-  const models = normalizeExportModels(ctx.models).map(model => model.namespaced);
+  const models = normalizeExportModels(ctx.models)
+    .filter(model => !containsEnvInterpolation(model.namespaced))
+    .map(model => model.namespaced);
   const headers = proxyAdmissionHeaders(ctx.config, HERMES_API_KEY_ENV_REF);
   return {
     providers: {
@@ -758,13 +765,15 @@ function buildHermesClientConfig(ctx: ExportContext): HermesGeneratedConfig {
 }
 
 function buildOpenclawClientConfig(ctx: ExportContext): OpenclawGeneratedConfig {
-  const models: OpenclawModelEntry[] = normalizeExportModels(ctx.models).map(model => {
+  const models: OpenclawModelEntry[] = normalizeExportModels(ctx.models).flatMap(model => {
+    const name = exportModelLabel(model);
+    if (containsEnvInterpolation(model.namespaced) || containsEnvInterpolation(name)) return [];
     const context = authoritativeContextWindow(model.contextWindow);
-    return {
+    return [{
       id: model.namespaced,
-      name: exportModelLabel(model),
+      name,
       ...(context !== undefined ? { contextWindow: context } : {}),
-    };
+    }];
   });
   const headers = proxyAdmissionHeaders(ctx.config, OPENCLAW_API_KEY_ENV_REF);
   return {
