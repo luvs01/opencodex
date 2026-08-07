@@ -1103,10 +1103,11 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
           yield { type: "error", message: "upstream stream ended mid tool call without a terminal signal — possible truncation" };
           return;
         }
-        // Finish-less EOF is only safe when answer text was emitted. Reasoning-only / usage-only
-        // truncations must stay on the error path (hideThinkingSummary can suppress reasoning).
-        // Trailing usage alone is not a terminal signal for this adapter (#735 / restore #773).
-        if (!sawFinish && !sawUserFacingOutput) {
+        // Answer text does not prove that generation finished: an upstream can close between
+        // content deltas. Require an independent terminal signal so partial output is never
+        // promoted to a completed response. Reasoning-only / usage-only truncations also stay on
+        // the error path (hideThinkingSummary can suppress reasoning).
+        if (!sawFinish && (pendingUsage === undefined || !sawUserFacingOutput)) {
           debugProviderDiagnostic("openai-chat", "stream-truncated", {
             finishReason: finishReason ?? null,
             hadUsage: pendingUsage !== undefined,
@@ -1115,7 +1116,8 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
           return;
         }
         yield* flushToolCalls();
-        // Graceful close that omitted [DONE] but delivered finish_reason and/or answer text.
+        // Graceful close that omitted [DONE] but delivered finish_reason, or answer text plus the
+        // provider's trailing usage frame.
         const stopReason = stopReasonFor(finishReason);
         yield { type: "done", usage: pendingUsage, ...(stopReason ? { stopReason } : {}) };
       } catch (error) {
