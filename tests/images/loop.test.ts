@@ -7,6 +7,7 @@ import type { AdapterEvent, OcxParsedRequest } from "../../src/types";
 import type { ImageBridgePlan, ImageCallResult } from "../../src/images/types";
 import type { ImageBridgeDeps } from "../../src/images/loop";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
+import { TRANSLATOR_MAX_CALL_ARGUMENT_BYTES, TRANSLATOR_MAX_TURN_BYTES } from "../../src/lib/translator-budget";
 
 const PREV_HOME = process.env.OPENCODEX_HOME;
 let runWithImageBridgeProduction: typeof import("../../src/images/loop")["runWithImageBridge"];
@@ -114,6 +115,31 @@ describe("runWithImageBridge", () => {
         message: "upstream translation buffer exceeded the safe limit",
       },
     ]]);
+    expect(sse).toContain("event: response.failed");
+    expect(sse).toContain('"code":"translation_buffer_limit"');
+    expect(sse).not.toContain("event: response.completed");
+  });
+
+  test("bounds buffered semantic output even while the provider keeps making progress", async () => {
+    const sse = await runAndGetSSE([[
+      { type: "text_delta", text: "x".repeat(TRANSLATOR_MAX_TURN_BYTES) },
+      { type: "done" },
+    ]]);
+
+    expect(sse).toContain("event: response.failed");
+    expect(sse).toContain('"code":"translation_buffer_limit"');
+    expect(sse).not.toContain("event: response.completed");
+  });
+
+  test("bounds synthetic media tool arguments before concatenating further deltas", async () => {
+    const sse = await runAndGetSSE([[
+      { type: "tool_call_start", id: "oversized", name: "image_gen" },
+      { type: "tool_call_delta", arguments: "x".repeat(TRANSLATOR_MAX_CALL_ARGUMENT_BYTES) },
+      { type: "tool_call_delta", arguments: "x" },
+      { type: "tool_call_end" },
+      { type: "done" },
+    ]]);
+
     expect(sse).toContain("event: response.failed");
     expect(sse).toContain('"code":"translation_buffer_limit"');
     expect(sse).not.toContain("event: response.completed");

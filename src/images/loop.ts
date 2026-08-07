@@ -24,6 +24,7 @@ import { fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-r
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import {
   isTranslatorBudgetExceededError,
+  TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
   TRANSLATOR_MAX_TURN_BYTES,
   TranslatorBudgetExceededError,
 } from "../lib/translator-budget";
@@ -110,6 +111,7 @@ function scanEventsForImageCall(events: AdapterEvent[], toolNames: Set<string>):
   const passthrough: AdapterEvent[] = [];
   let hasRealToolCall = false;
   let pending: { name: string; id: string; argsBuf: string; events: AdapterEvent[] } | null = null;
+  let pendingArgsBytes = 0;
   const flushPending = (): void => {
     if (!pending) return;
     if (toolNames.has(pending.name)) {
@@ -121,12 +123,17 @@ function scanEventsForImageCall(events: AdapterEvent[], toolNames: Set<string>):
       hasRealToolCall = true;
     }
     pending = null;
+    pendingArgsBytes = 0;
   };
   for (const e of events) {
     if (e.type === "tool_call_start") {
       flushPending();
       pending = { name: e.name, id: e.id, argsBuf: "", events: [e] };
     } else if (e.type === "tool_call_delta" && pending) {
+      pendingArgsBytes += Buffer.byteLength(e.arguments);
+      if (pendingArgsBytes > TRANSLATOR_MAX_CALL_ARGUMENT_BYTES) {
+        throw new TranslatorBudgetExceededError("tool_args", TRANSLATOR_MAX_CALL_ARGUMENT_BYTES);
+      }
       pending.argsBuf += e.arguments;
       pending.events.push(e);
     } else if (e.type === "tool_call_end" && pending) {
@@ -138,6 +145,7 @@ function scanEventsForImageCall(events: AdapterEvent[], toolNames: Set<string>):
         hasRealToolCall = true;
       }
       pending = null;
+      pendingArgsBytes = 0;
     } else {
       flushPending();
       passthrough.push(e);
@@ -285,6 +293,18 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
   let paidVideoCalls = 0;
   let hiddenUsage: OcxUsage | undefined;
 
+  const appendBoundedIterationEvent = (events: AdapterEvent[], event: AdapterEvent, currentBytes: number): number => {
+    // The bridge must retain a complete semantic iteration before deciding whether synthetic
+    // media calls are safe to hide. Bound that unavoidable copy independently of upstream byte
+    // progress so a provider cannot keep the inactivity watchdog alive while exhausting memory.
+    const nextBytes = currentBytes + Buffer.byteLength(JSON.stringify(event)) + 1;
+    if (nextBytes > TRANSLATOR_MAX_TURN_BYTES) {
+      throw new TranslatorBudgetExceededError("retained_collectors", TRANSLATOR_MAX_TURN_BYTES);
+    }
+    events.push(event);
+    return nextBytes;
+  };
+
   const addUsage = (a: OcxUsage | undefined, b: OcxUsage | undefined): OcxUsage | undefined => {
     if (!a) return b;
     if (!b) return a;
@@ -418,12 +438,13 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
         queue.close();
       });
       const events: AdapterEvent[] = [];
+      let eventBytes = 0;
       try {
         idle.reset();
         for await (const event of queue.stream()) {
           if (timedOut) break;
           idle.reset();
-          events.push(event);
+          eventBytes = appendBoundedIterationEvent(events, event, eventBytes);
         }
       } finally {
         idle.cancel();
@@ -611,6 +632,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
   // semantic output remains buffered for safe scanning.
   const consumeIterationEvents = async function* (prepared: IterationResponse): AsyncGenerator<AdapterEvent, IterationSplit> {
     const events: AdapterEvent[] = [];
+    let eventBytes = 0;
     try {
       const parse = prepared.responseAdapter.parseStream.bind(prepared.responseAdapter);
       for await (const event of parseStreamWithProgress(prepared.response, parse, {
@@ -619,7 +641,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
         translatorBudget,
       })) {
         if (event.type === "heartbeat") yield event;
-        else events.push(event);
+        else eventBytes = appendBoundedIterationEvent(events, event, eventBytes);
       }
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) throw error;
