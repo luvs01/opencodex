@@ -51,13 +51,15 @@ type HardenedIdentity = string;
 /**
  * What a stat can tell us about WHICH OBJECT is at a path.
  *
- * Two fields, deliberately separated, because conflating them shipped a bug:
+ * Three fields, deliberately separated, because conflating them shipped a bug:
  *
  * - `object` — `dev:ino`. Answers "is this the same file". Survives an ACL or
  *   permission change, which is exactly what we need across an icacls call.
  * - `freshness` — `ctimeNs`. Answers "has this file's metadata moved since". It
  *   distinguishes an unlink/recreate that ext4 gave the same inode back for, and
  *   it MOVES when permissions change.
+ * - `generation` — `birthtimeNs`. Distinguishes same-`dev:ino` replacement
+ *   across icacls while remaining stable when only the ACL changes.
  *
  * The first version used `dev:ino:ctimeNs` for both jobs. Since chmod bumps ctime
  * — probed, `{ctimeChangedByChmod: true}` — and icacls is a permission change, the
@@ -69,6 +71,8 @@ type HardenedIdentity = string;
 interface PathObservation {
   readonly object: string;
   readonly freshness: string;
+  /** Creation time is stable across ACL edits but changes on unlink/recreate. */
+  readonly generation: string | null;
 }
 
 /**
@@ -92,25 +96,40 @@ interface PathObservation {
  * Darwin nor Linux CI can confirm it and no pinned-Bun Windows probe has run.
  * It is defensive code, not a demonstrated platform fact.
  */
-type StatReader = (path: string) => { dev: bigint; ino: bigint; ctimeNs: bigint };
+type StatReader = (path: string) => {
+  dev: bigint;
+  ino: bigint;
+  ctimeNs: bigint;
+  birthtimeNs?: bigint;
+};
 
 const defaultStatReader: StatReader = path => {
   const s = statSync(path, { bigint: true });
-  return { dev: s.dev, ino: s.ino, ctimeNs: s.ctimeNs };
+  return { dev: s.dev, ino: s.ino, ctimeNs: s.ctimeNs, birthtimeNs: s.birthtimeNs };
 };
 
 let statReader: StatReader = defaultStatReader;
 
 /** Test seam: drive dev / ino / ctime independently. */
 export function setStatForTests(reader: StatReader | null): void {
-  statReader = reader ?? defaultStatReader;
+  // Older tests predate the creation-generation check. Give observations that
+  // omit it one stable, nonzero generation; race tests can vary it explicitly.
+  statReader = reader === null
+    ? defaultStatReader
+    : path => ({ birthtimeNs: 1n, ...reader(path) });
 }
 
 function observe(targetPath: string): PathObservation | null {
   try {
     const s = statReader(targetPath);
     if (s.ino === 0n) return null;
-    return { object: `${s.dev}:${s.ino}`, freshness: `${s.ctimeNs}` };
+    return {
+      object: `${s.dev}:${s.ino}`,
+      freshness: `${s.ctimeNs}`,
+      generation: s.birthtimeNs === undefined || s.birthtimeNs === 0n
+        ? null
+        : `${s.birthtimeNs}`,
+    };
   } catch {
     return null;
   }
@@ -162,12 +181,10 @@ function memoSatisfied(cache: Map<string, HardenedIdentity>, targetPath: string)
  *   {identityChangedDuringHarden: true, callsForOriginal: 3, totalCalls: 3,
  *    replacementWasHardened: false}
  *
- * So the OBJECT is captured before the sequence and compared after it. Only the
- * object — `dev:ino` — because icacls changes permissions, and `ctimeNs` moves
- * when permissions change (probed: `{ctimeChangedByChmod: true}`). Comparing the
- * full identity across the call would have rejected every successful harden and
- * failed closed on the first harden on Windows: the check would have been
- * demanding that an operation not do the thing it exists to do.
+ * So the object and its creation generation are captured before the sequence
+ * and compared after it. `ctimeNs` cannot be used for that comparison because
+ * icacls itself changes it. Creation time, unlike ctime, survives an ACL edit;
+ * it closes the same-dev:ino reuse gap without rejecting successful hardening.
  *
  * The memo then stores the object plus the freshness read AFTER hardening, which
  * is the state a later lookup should match.
@@ -185,7 +202,12 @@ function recordHarden(
   before: PathObservation | null,
 ): boolean {
   const after = observe(targetPath);
-  if (before === null || after === null || before.object !== after.object) {
+  if (
+    before === null
+    || after === null
+    || before.object !== after.object
+    || before.generation !== after.generation
+  ) {
     // Never leave a memo behind for a file we cannot vouch for, including one
     // written by an earlier successful harden of a now-replaced file.
     cache.delete(targetPath);

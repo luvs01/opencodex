@@ -813,7 +813,7 @@ for (const { label, harden, create } of ENTRY_POINTS) {
         // an unlinked inode immediately (100/100 cycles) while APFS recycled none
         // in 200, so a real-file version of this test asserts different things on
         // different platforms — it passed on macOS with a fix broken on Linux.
-        let current = { dev: 1n, ino: 10n, ctimeNs: 100n };
+        let current = { dev: 1n, ino: 10n, ctimeNs: 100n, birthtimeNs: 50n };
         setStatForTests(() => current);
 
         expect(await harden(stable, { required: true })).toEqual({ ok: true });
@@ -843,7 +843,9 @@ for (const { label, harden, create } of ENTRY_POINTS) {
         runner(args => {
           if (args.includes("/grant:r")) grants += 1;
           // Another process replaces the file before the sequence returns.
-          if (args.includes("/remove:g")) current = { dev: 1n, ino: 99n, ctimeNs: 500n };
+          if (args.includes("/remove:g")) {
+            current = { dev: 1n, ino: 10n, ctimeNs: 500n, birthtimeNs: 400n };
+          }
         });
 
         await expect(harden(stable, { required: true })).rejects.toThrow(
@@ -856,7 +858,7 @@ for (const { label, harden, create } of ENTRY_POINTS) {
         // An optional caller hitting the same race soft-fails with the same
         // honest diagnostic. The runner keeps swapping the file, so this second
         // attempt races too rather than settling on the replacement.
-        current = { dev: 1n, ino: 10n, ctimeNs: 100n };
+        current = { dev: 1n, ino: 10n, ctimeNs: 100n, birthtimeNs: 50n };
         const optional = await harden(stable, { required: false });
         expect(optional.ok).toBe(false);
         expect(optional.diagnostics).toMatch(/changed during hardening/);
@@ -879,7 +881,7 @@ for (const { label, harden, create } of ENTRY_POINTS) {
       await withWin32(async () => {
         let grants = 0;
         let ctime = 100n;
-        setStatForTests(() => ({ dev: 1n, ino: 10n, ctimeNs: ctime }));
+        setStatForTests(() => ({ dev: 1n, ino: 10n, ctimeNs: ctime, birthtimeNs: 50n }));
         runner(args => {
           if (args.includes("/grant:r")) grants += 1;
           ctime += 1n; // editing the DACL moves ctime; same file throughout
