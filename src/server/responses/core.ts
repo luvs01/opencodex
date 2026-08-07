@@ -2014,16 +2014,13 @@ async function handleResponsesInner(
     // Codex renders that as the opaque "Unknown error" (#452). Combo attempts
     // keep their typed failure envelope. Non-empty bodies are relayed verbatim
     // (headers included) so pool-retry Activation B/D and client diagnostics stay intact.
-    // Manual-redirect policy (#914): a 3xx is relayed as-is (Location preserved
-    // through sanitizePassthroughHeaders) so a redirect to a dead host can never
-    // masquerade as a pre-connection failure after the credential was seen.
-    // The numeric outcome above already classified it neutral — no streak.
+    // Manual-redirect policy (#914): reject a 3xx locally. Relaying Location would
+    // let redirect-following clients resend their request body and proxy admission
+    // headers to an upstream-selected origin. The numeric outcome above already
+    // classified the real upstream response as neutral — no streak.
     if (upstreamResponse.status >= 300 && upstreamResponse.status < 400) {
-      return new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers: sanitizePassthroughHeaders(upstreamResponse.headers),
-      });
+      await upstreamResponse.body?.cancel("upstream_redirect_rejected").catch(() => undefined);
+      return formatErrorResponse(502, "upstream_error", "Upstream redirects are not supported");
     }
     if (!upstreamResponse.ok) {
       if (options.comboAttempt) {

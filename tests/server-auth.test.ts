@@ -2691,7 +2691,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("passthrough pool send relays a 307 with Location and records no health evidence (#914)", async () => {
+  test("passthrough pool send rejects a 307 without Location and records no health evidence (#914)", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -2700,8 +2700,8 @@ describe("server local API auth", () => {
     clearAccountNeedsReauth("pool-a");
     clearUpstreamHostHealth();
 
-    // The upstream answers 307 -> dead.invalid. Manual redirects must relay it
-    // (with Location) instead of following into a dead-host rejection.
+    // The upstream answers 307 -> dead.invalid. Manual redirects must reject it
+    // locally instead of exposing a client-followable redirect or following it.
     const redirectTarget = "https://dead.invalid/x";
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -2753,8 +2753,11 @@ describe("server local API auth", () => {
         redirect: "manual",
       });
 
-      expect(response.status).toBe(307);
-      expect(response.headers.get("location")).toBe(redirectTarget);
+      expect(response.status).toBe(502);
+      expect(response.headers.get("location")).toBeNull();
+      expect(await response.json()).toMatchObject({
+        error: { type: "server_error", code: "upstream_server_error", message: "Upstream redirects are not supported" },
+      });
       // Neutral class: no account streak, no soft-avoid, no rotation, and the
       // real response cleared the seeded host streak.
       expect(getCodexUpstreamHealth("pool-a")).toBeNull();

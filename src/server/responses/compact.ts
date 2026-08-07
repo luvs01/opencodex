@@ -194,8 +194,6 @@ const COMPACT_PASSTHROUGH_HEADERS = [
   "x-codex-primary-reset-at",
   "x-codex-secondary-reset-at",
   "x-codex-tertiary-reset-at",
-  // A relayed 3xx keeps its Location so the client can follow it (#914).
-  "location",
 ];
 
 function compactResponseHeaders(upstream: Response): Headers {
@@ -208,6 +206,10 @@ function compactResponseHeaders(upstream: Response): Headers {
 }
 
 export async function bufferCompactResponse(upstream: Response, signal: AbortSignal): Promise<Response> {
+  if (upstream.status >= 300 && upstream.status < 400) {
+    await upstream.body?.cancel("upstream_redirect_rejected").catch(() => undefined);
+    return formatErrorResponse(502, "upstream_error", "Upstream redirects are not supported");
+  }
   const reader = upstream.body?.getReader();
   const headers = compactResponseHeaders(upstream);
   if (!reader) return new Response(null, { status: upstream.status, statusText: upstream.statusText, headers });

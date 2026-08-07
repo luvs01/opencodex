@@ -119,4 +119,19 @@ describe("adapterFailureFromMessage", () => {
     const body = await response.json() as { error?: { type?: string; code?: string } };
     expect(body.error).toMatchObject({ type: "client_cancelled", code: "client_cancelled" });
   });
+
+  test("a compact upstream redirect becomes a non-redirect error", async () => {
+    const upstream = new Response(null, {
+      status: 308,
+      headers: { location: "https://attacker.invalid/compact-leak" },
+    });
+
+    const response = await bufferCompactResponse(upstream, new AbortController().signal);
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("location")).toBeNull();
+    expect(await response.json()).toMatchObject({
+      error: { type: "server_error", code: "upstream_server_error", message: "Upstream redirects are not supported" },
+    });
+  });
 });

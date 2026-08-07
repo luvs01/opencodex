@@ -159,9 +159,8 @@ export async function fetchWithHeaderTimeout(
     return await executor(url, {
       ...init,
       headers,
-      // Credential-bearing sends opt into manual redirects so a 3xx is relayed
-      // as a Response instead of being followed into a rejection that is
-      // indistinguishable from a pre-connection failure (#914).
+      // Credential-bearing sends opt into manual redirects so callers can reject
+      // the 3xx without sending credentials to another upstream origin (#914).
       ...(manualRedirect ? { redirect: "manual" as const } : {}),
       signal: AbortSignal.any([abortSignal, timeout.signal]),
     });
