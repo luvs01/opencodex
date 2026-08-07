@@ -460,15 +460,17 @@ describe("coderabbitOutsideDiffFindings", () => {
 describe("unresolvedFindingsClaim with outside-diff supplement", () => {
   const HEAD = "3f1c0de0a6a4d0a3f9a1b2c3d4e5f60718293a4b";
 
-  it("does not count outside-diff when no unresolved bot thread exists", () => {
-    // The review body is immutable; once the author resolves every thread the
-    // supplement must not keep the box unticked forever (no empty commit).
+  it("counts outside-diff findings when no unresolved bot thread exists", () => {
     const claim = unresolvedFindingsClaim({
       threads: [],
       reviews: [{ body: "**Actionable comments posted: 2**", commit_id: HEAD, submitted_at: "2026-08-04T06:24:02Z", user: { login: "coderabbitai[bot]" } }],
       liveHeadSha: HEAD,
     });
-    assert.deepEqual(claim, { code: null, unresolved: 0, byBot: {} });
+    assert.deepEqual(claim, {
+      code: "review_findings",
+      unresolved: 2,
+      byBot: { "coderabbitai[bot]": 2 },
+    });
   });
 
   it("adds the outside-diff count to an unresolved thread count", () => {

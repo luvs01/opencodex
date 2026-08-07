@@ -296,11 +296,9 @@ function coderabbitOutsideDiffFindings({ reviews = [], liveHeadSha }) {
  * only in its review body (outside the diff range); those are added by the
  * `coderabbitOutsideDiffFindings` supplement so they cannot slip through.
  * The supplement is subordinate: it never subtracts, only adds unresolved
- * counts for the live head while a bot thread is still open. A review body is
- * immutable, so the count can never fall to zero on its own once posted; the
- * supplement therefore only counts while an unresolved bot thread exists — the
- * author resolves that thread to clear the box, matching the checklist wording
- * ("I resolved all correct ... findings") without requiring an empty commit.
+ * counts for the live head. Review-body-only findings must be checked even when
+ * CodeRabbit did not create a review thread; otherwise those findings would
+ * have no signal capable of keeping the checklist claim unticked.
  */
 function unresolvedFindingsClaim({ threads = [], reviews = [], liveHeadSha }) {
   const byBot = {};
@@ -313,13 +311,11 @@ function unresolvedFindingsClaim({ threads = [], reviews = [], liveHeadSha }) {
       unresolved += 1;
     }
   }
-  if (unresolved > 0) {
-    const outside = coderabbitOutsideDiffFindings({ reviews, liveHeadSha });
-    if (outside.code) {
-      for (const [login, count] of Object.entries(outside.byBot)) {
-        byBot[login] = (byBot[login] ?? 0) + count;
-        unresolved += count;
-      }
+  const outside = coderabbitOutsideDiffFindings({ reviews, liveHeadSha });
+  if (outside.code) {
+    for (const [login, count] of Object.entries(outside.byBot)) {
+      byBot[login] = (byBot[login] ?? 0) + count;
+      unresolved += count;
     }
   }
   return unresolved > 0
