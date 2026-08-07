@@ -48,16 +48,15 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /synchronize/);
   });
 
-  it("does not add review events that would break the trusted-base model", () => {
-    // `pull_request_review` / `pull_request_review_comment` load the workflow
-    // from the PR head branch (like `pull_request`), while this workflow's
-    // checkout pins the base SHA — head YAML + base scripts mismatch, so the
-    // gate crashes (`parseGateState is not a function`) and the head controls
-    // the workflow definition under a write token. The findings claim runs on
-    // every `pull_request_target` event instead (opened/edited/synchronize/
-    // ready_for_review).
-    assert.doesNotMatch(workflow, /^  pull_request_review:/m);
-    assert.doesNotMatch(workflow, /^  pull_request_review_comment:/m);
+  it("reruns when review findings are posted, changed, or removed", () => {
+    assert.match(
+      workflow,
+      /^  pull_request_review:\n    types:\n      - submitted\n      - edited\n      - dismissed$/m,
+    );
+    assert.match(
+      workflow,
+      /^  pull_request_review_comment:\n    types:\n      - created\n      - edited\n      - deleted$/m,
+    );
   });
 
   it("queries review threads and feeds them to the findings claim check", () => {

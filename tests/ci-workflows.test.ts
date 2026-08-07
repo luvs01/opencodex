@@ -675,7 +675,11 @@ describe("GitHub Actions hardening", () => {
   };
   type WorkflowJob = Record<string, unknown> & { "runs-on"?: unknown; steps?: WorkflowStep[] };
   type WorkflowShape = Record<string, unknown> & {
-    on?: { pull_request_target?: { types?: string[] } };
+    on?: {
+      pull_request_target?: { types?: string[] };
+      pull_request_review?: { types?: string[] };
+      pull_request_review_comment?: { types?: string[] };
+    };
     permissions?: Record<string, string> | string;
     concurrency?: Record<string, unknown> & { group?: string };
     jobs?: Record<string, WorkflowJob>;
@@ -828,13 +832,13 @@ describe("GitHub Actions hardening", () => {
       "permissions",
     ]);
 
-    // pull_request_target runs with the base repo's token. Checking out or
-    // executing the PR's code under it is the classic escalation. Review
-    // events are deliberately NOT added: they load the workflow from the PR
-    // head branch (like `pull_request`), which would run head-controlled
-    // workflow YAML under a write token against base-pinned scripts — a
-    // mismatch that crashes the gate and breaks the trusted-base model.
-    expect(Object.keys(workflow.on ?? {})).toEqual(["pull_request_target"]);
+    // The review triggers ensure findings posted after the initial target
+    // event immediately invalidate the gate's previous verdict.
+    expect(Object.keys(workflow.on ?? {})).toEqual([
+      "pull_request_target",
+      "pull_request_review",
+      "pull_request_review_comment",
+    ]);
 
     // And the trigger is exactly a `types:` list — nothing else.
     //
@@ -946,11 +950,16 @@ describe("GitHub Actions hardening", () => {
       "reopened",
       "synchronize",
     ]);
-    // Review events must NOT be added: they load the workflow from the PR
-    // head branch, breaking the base-pinned checkout (`pull_request_review`
-    // runs head YAML + base scripts → `parseGateState is not a function`).
-    expect(workflow.on?.pull_request_review).toBeUndefined();
-    expect(workflow.on?.pull_request_review_comment).toBeUndefined();
+    expect(workflow.on?.pull_request_review?.types).toEqual([
+      "submitted",
+      "edited",
+      "dismissed",
+    ]);
+    expect(workflow.on?.pull_request_review_comment?.types).toEqual([
+      "created",
+      "edited",
+      "deleted",
+    ]);
 
     // The verdict is a live PR read plus ancestry/description checks.
     expect(script).toContain("github.rest.pulls.get");
