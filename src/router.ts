@@ -605,6 +605,15 @@ function routeModelInternal(
       throw new Error(`No provider configured for model: ${modelId}`);
     }
     if (hasOwnProvider(config.providers, provName)) {
+      const conflictingDefault = activeProviderEntries(config)
+        .find(([candidateName, candidate]) => candidateName !== provName && candidate.defaultModel === modelId);
+      if (conflictingDefault) {
+        throw new Error(
+          `Ambiguous model selector ${modelId}: it is both the default model for provider `
+          + `${conflictingDefault[0]} and a ${provName} provider namespace. Use an encoded `
+          + `${conflictingDefault[0]}/<model> selector to choose the default-model provider explicitly.`,
+        );
+      }
       const prov = config.providers[provName];
       if (prov.disabled === true) throw new Error(`Provider is disabled: ${provName}`);
       const known = knownModelIdsForProvider(provName, prov);

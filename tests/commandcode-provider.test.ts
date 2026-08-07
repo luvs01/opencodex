@@ -170,6 +170,28 @@ describe("Command Code provider", () => {
     expect(body.parallel_tool_calls).toBe(true);
   });
 
+  test("rejects an ambiguous native default instead of routing it through DeepSeek", () => {
+    const config = commandcodeConfig({
+      defaultModel: "deepseek/deepseek-v4-flash",
+      models: ["deepseek/deepseek-v4-flash"],
+    });
+    config.providers.deepseek = {
+      adapter: "openai-chat",
+      baseUrl: "https://api.deepseek.com",
+      authMode: "key",
+      apiKey: "deepseek-test-key",
+      defaultModel: "deepseek-v4-flash",
+      models: ["deepseek-v4-flash"],
+    };
+
+    expect(() => routeModel(config, "deepseek/deepseek-v4-flash"))
+      .toThrow("Ambiguous model selector deepseek/deepseek-v4-flash");
+    expect(routeModel(config, "commandcode/deepseek-deepseek-v4-flash")).toMatchObject({
+      providerName: "commandcode",
+      modelId: "deepseek/deepseek-v4-flash",
+    });
+  });
+
   test("discovers the live catalog with context windows and preserves slash ids", async () => {
     globalThis.fetch = (async (input, init) => {
       expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/models");
