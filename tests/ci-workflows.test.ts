@@ -1787,9 +1787,9 @@ describe("GitHub Actions hardening", () => {
       expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
     });
 
-    test("a head with no ci check at all keeps the CI box (docs-only style PRs)", async () => {
-      // No CI run exists for this head: there is nothing to contradict the
-      // author's claim, so the CI box survives.
+    test("a head with no ci check fails closed for the CI claim", async () => {
+      // No CI run means the claim has no positive evidence, so the box is
+      // unticked and the PR stays in draft.
       const result = await run({
         pr: {
           base: { ref: "dev" },
@@ -1804,15 +1804,18 @@ describe("GitHub Actions hardening", () => {
         "checks.listForRef",
         "graphql",
         "pulls.listReviews",
-        "issues.addLabels",
-        "graphql",
+        "pulls.get",
+        "pulls.update",
         "issues.createComment",
       ]));
-      expect(callsTo(result, "pulls.update")).toEqual([]);
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
       const drafts = callsTo(result, "graphql") as [{ query: string }];
-      expect(drafts).toHaveLength(2);
+      expect(drafts).toHaveLength(1);
       expect(drafts[0]!.query).toContain("reviewThreads");
-      expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
+      expect(lastReadinessCommentBody(result)).toContain(
+        "GitHub CI is not green on the current head",
+      );
     });
 
     test("a pending ci check cannot attest green", async () => {

@@ -564,14 +564,11 @@ jobs:
                 const ciCheck = (checksData.check_runs ?? []).find(
                   check => check.name === "ci"
                 );
-                // No `ci` check means no CI run exists for this head (for
-                // example a docs-only change): there is nothing to contradict
-                // the author's claim. A real `ci` check must be completed
-                // successfully.
+                // The readiness claim requires positive CI evidence. A missing,
+                // pending, or unsuccessful aggregate check must fail closed.
                 ciGreen =
-                  ciCheck === undefined ||
-                  (ciCheck.status === "completed" &&
-                    ciCheck.conclusion === "success");
+                  ciCheck?.status === "completed" &&
+                  ciCheck.conclusion === "success";
               } catch (error) {
                 core.warning(
                   `Could not list checks for the readiness claim check: ${error.message}`
