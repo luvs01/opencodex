@@ -83,6 +83,7 @@ export default function RoutingProfiles({ apiBase }: { apiBase: string }) {
 
   const clearDryRun = useCallback(() => {
     dryRunGenerationRef.current += 1;
+    setRunning(false);
     setDryRunResult(null);
     setDryRunError("");
   }, []);
