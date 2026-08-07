@@ -195,7 +195,7 @@ describe("quota-aware scoring (RI-07)", () => {
     expect(penalized.candidates[0]!.score!.components.quota).toBe(QUOTA_UNKNOWN_PENALTY_SCORE);
   });
 
-  test("execution path passes the active codex account into quota evidence", async () => {
+  test("execution path does not invent Codex quota evidence from the active pool account", async () => {
     updateAccountQuota("pool-a", 30, 1_800_000_000_000, 20, 1_900_000_000_000);
     const cfg = config({
       codexAccounts: [{ id: "pool-a", email: "pool-a@example.test", isMain: false }],
@@ -205,8 +205,8 @@ describe("quota-aware scoring (RI-07)", () => {
       },
     });
     const route = routeModel(cfg, "policy/quotaRoute");
-    expect(route.routeDecision!.candidates[0]!.quota?.known).toBe(true);
-    expect(route.routeDecision!.candidates[0]!.quota?.headroom).toBeCloseTo(0.7, 2);
+    expect(route.routeDecision!.candidates[0]!.quota?.known).toBe(false);
+    expect(route.routeDecision!.candidates[0]!.quota?.headroom).toBeUndefined();
   });
 
   test("exact account selectors and pool strategies remain authoritative", () => {

@@ -12,10 +12,7 @@ import { candidateCapabilityEvidence } from "../../routing/capability";
 import { policyCandidateHealthEvidence } from "../../routing/health";
 import { quotaEvidenceForCandidate } from "../../routing/quota";
 import { costEvidenceForCandidate } from "../../routing/cost";
-import { providerCodexAccountMode } from "../../providers/registry";
-import { getEffectiveActiveCodexAccountId } from "../../codex/routing";
 import { getAccountSet } from "../../oauth/store";
-import { OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { isPlainRecord } from "./shared";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { jsonResponse } from "../auth-cors";
@@ -104,21 +101,6 @@ function assembleCandidateEvidence(
     quota: quotaEvidenceForCandidate({
       provider: candidate.provider,
       model: candidate.model,
-      ...(candidate.provider === OPENAI_CODEX_PROVIDER_ID
-        && providerCodexAccountMode(
-          OPENAI_CODEX_PROVIDER_ID,
-          config.providers[OPENAI_CODEX_PROVIDER_ID],
-        ) === "pool"
-        ? (() => {
-            const codexAccountId = getEffectiveActiveCodexAccountId(config);
-            return {
-              codexAccountId,
-              codexAccountPlan: codexAccountId
-                ? config.codexAccounts?.find(account => account.id === codexAccountId)?.plan
-                : undefined,
-            };
-          })()
-        : {}),
       accountRef: candidate.provider === "anthropic"
         ? getAccountSet("anthropic")?.activeAccountId
         : undefined,
