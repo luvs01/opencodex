@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
@@ -14,6 +14,7 @@ import {
   queryRequestHistory,
   rebuildRequestHistoryIndex,
   requestHistoryRowById,
+  REQUEST_HISTORY_MAX_RECORD_BYTES,
   REQUEST_HISTORY_MAX_PAGE_SIZE,
 } from "../src/routing/history/indexer";
 import { InvalidCursorError } from "../src/routing/history/cursor";
@@ -206,6 +207,17 @@ describe("request-history index (RI-02)", () => {
     const after = await queryRequestHistory({}, undefined, 10);
     expect(after.rows.length).toBe(4);
     expect(after.rows.some(row => row.requestId === "req-partial")).toBe(true);
+  });
+
+  test("streaming refresh skips an oversized record and continues indexing", async () => {
+    const { usageLogPath } = await import("../src/usage/log");
+    appendFileSync(usageLogPath(), `${"x".repeat(REQUEST_HISTORY_MAX_RECORD_BYTES + 1)}\n`, "utf-8");
+    appendUsageEntry(entry("after-oversized", 9999));
+
+    const page = await queryRequestHistory({}, undefined, 10);
+    expect(page.rows.map(row => row.requestId)).toEqual(["after-oversized"]);
+    expect(page.meta.indexedRows).toBe(1);
+    expect(page.meta.indexedOffset).toBe(statSync(usageLogPath()).size);
   });
 
   test("duplicate replay is ignored", async () => {
