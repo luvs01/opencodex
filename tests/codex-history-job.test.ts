@@ -8,6 +8,7 @@ import { Database } from "bun:sqlite";
 import {
   deriveCodexHistoryOperation,
   runCodexHistoryJob,
+  terminateAndJoinHistoryWorkerForTests,
 } from "../src/codex/history-job";
 
 const sandboxes: string[] = [];
@@ -132,6 +133,33 @@ test("an overrun Worker returns a typed timeout rather than hanging", async () =
   if (outcome.kind === "failed") expect(outcome.reason).toBe("timeout");
   expect(Date.now() - started).toBeLessThan(20_000);
 }, 30_000);
+
+test("non-thenable Worker termination waits for the close event", async () => {
+  let closeListener: (() => void) | undefined;
+  let exited = false;
+  const worker = {
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      if (type !== "close") return;
+      closeListener = typeof listener === "function"
+        ? () => listener(new Event("close"))
+        : () => listener.handleEvent(new Event("close"));
+    },
+    terminate() {
+      setTimeout(() => {
+        exited = true;
+        closeListener?.();
+      }, 25);
+      return undefined;
+    },
+  } as unknown as Worker;
+
+  const joined = terminateAndJoinHistoryWorkerForTests(worker);
+  await Bun.sleep(5);
+  expect(exited).toBe(false);
+
+  await joined;
+  expect(exited).toBe(true);
+});
 
 /**
  * The async restore wrapper owns history; the synchronous body must not also do

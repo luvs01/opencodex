@@ -142,6 +142,44 @@ function classifyWorkerResult(result: HistoryWorkerResult): CodexHistoryJobOutco
 }
 
 /**
+ * Ask a Worker to stop and wait until it has actually exited.
+ *
+ * Bun's `Worker.terminate()` returns `void`, unlike implementations that return
+ * a join promise. In that case the `close` event is the only completion signal;
+ * treating the return from `terminate()` as completion lets the Worker keep
+ * mutating history after its caller has moved on.
+ */
+async function terminateAndJoinWorker(worker: Worker, alreadyClosed: boolean): Promise<void> {
+  if (alreadyClosed) return;
+
+  await new Promise<void>(resolve => {
+    let joined = false;
+    const done = () => {
+      if (joined) return;
+      joined = true;
+      resolve();
+    };
+
+    worker.addEventListener("close", done, { once: true });
+    try {
+      const terminated = worker.terminate() as unknown;
+      if (terminated && typeof (terminated as Promise<unknown>).then === "function") {
+        void (terminated as Promise<unknown>).then(done, done);
+      }
+      // A non-thenable return is Bun's normal case. The close listener joins it.
+    } catch {
+      // A Worker that is already gone needs no further join.
+      done();
+    }
+  });
+}
+
+/** Test seam for the non-thenable Bun termination contract. */
+export async function terminateAndJoinHistoryWorkerForTests(worker: Worker): Promise<void> {
+  await terminateAndJoinWorker(worker, false);
+}
+
+/**
  * Run one history unit in a Worker and join it before returning.
  *
  * The join is not optional politeness: returning while the thread may still be
@@ -174,20 +212,13 @@ export async function runCodexHistoryJob(
 
   return new Promise<CodexHistoryJobOutcome>(resolve => {
     let settled = false;
+    let workerClosed = false;
     const finish = (outcome: CodexHistoryJobOutcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       // Terminate and join before settling: see the note above.
-      const done = () => resolve(outcome);
-      try {
-        const terminated = worker.terminate() as unknown;
-        if (terminated && typeof (terminated as Promise<unknown>).then === "function") {
-          void (terminated as Promise<unknown>).then(done, done);
-          return;
-        }
-      } catch { /* already gone */ }
-      done();
+      void terminateAndJoinWorker(worker, workerClosed).then(() => resolve(outcome));
     };
 
     const timer = setTimeout(() => {
@@ -230,7 +261,10 @@ export async function runCodexHistoryJob(
      * and the Worker always closes after posting its result.
      */
     worker.addEventListener("messageerror", () => died("history_worker_unserializable_message"));
-    worker.addEventListener("close", () => died("history_worker_closed_early"));
+    worker.addEventListener("close", () => {
+      workerClosed = true;
+      died("history_worker_closed_early");
+    });
 
     worker.onerror = (event: ErrorEvent) => {
       finish({
