@@ -189,7 +189,7 @@ import {
   payloadRewriteAsBlockRewrite,
   relaySseWithBlockRewrite,
 } from "../sse-payload-rewrite";
-import { responsesJsonToSseBody } from "../responses-json-events";
+import { responsesJsonToSseStream } from "../responses-json-events";
 import { guardTerminalEventStream } from "./terminal-guard";
 
 /**
@@ -2280,7 +2280,7 @@ async function handleResponsesInner(
           const sseHeaders = sanitizePassthroughHeaders(headers);
           sseHeaders.set("content-type", "text/event-stream");
           sseHeaders.set("cache-control", "no-store");
-          return new Response(responsesJsonToSseBody(completed), {
+          return new Response(responsesJsonToSseStream(completed), {
             status: upstreamResponse.status,
             statusText: upstreamResponse.statusText,
             headers: sseHeaders,
