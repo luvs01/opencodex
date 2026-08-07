@@ -55,6 +55,8 @@ export interface PolicyRunResult {
   removed?: number;
   trashDir?: string;
   policy: StorageCleanupPolicy;
+  /** Run-owned metadata for callers that must persist it outside this isolate. */
+  metadataPatch?: PolicyRunMetadataPatch;
 }
 
 export interface PolicyRunDeps {
@@ -451,15 +453,17 @@ export function runStorageCleanupPolicy(deps: PolicyRunDeps): PolicyRunResult {
 
   const selection = selectPolicyPreview(policy, deps.codexHome);
   if (selection.archivedBytes <= policy.trigger.archivedBytesOver) {
-    const saved = commitPolicyRunMetadata(load, save, { now, nextRun: "advance" });
+    const metadataPatch: PolicyRunMetadataPatch = { now, nextRun: "advance" };
+    const saved = commitPolicyRunMetadata(load, save, metadataPatch);
     logPolicyEvent("skip under_threshold");
-    return { ok: true, skipped: "under_threshold", policy: saved };
+    return { ok: true, skipped: "under_threshold", policy: saved, metadataPatch };
   }
 
   if (selection.count === 0) {
-    const saved = commitPolicyRunMetadata(load, save, { now, nextRun: "advance" });
+    const metadataPatch: PolicyRunMetadataPatch = { now, nextRun: "advance" };
+    const saved = commitPolicyRunMetadata(load, save, metadataPatch);
     logPolicyEvent("skip nothing_selected");
-    return { ok: true, skipped: "nothing_selected", policy: saved };
+    return { ok: true, skipped: "nothing_selected", policy: saved, metadataPatch };
   }
 
   const result = execute({
@@ -473,14 +477,16 @@ export function runStorageCleanupPolicy(deps: PolicyRunDeps): PolicyRunResult {
   });
 
   if (!result.ok && result.error === "codex_busy") {
-    const saved = commitPolicyRunMetadata(load, save, { now, nextRun: "defer_busy" });
+    const metadataPatch: PolicyRunMetadataPatch = { now, nextRun: "defer_busy" };
+    const saved = commitPolicyRunMetadata(load, save, metadataPatch);
     logPolicyEvent("defer codex_busy");
-    return { ok: false, deferred: "codex_busy", error: "codex_busy", policy: saved };
+    return { ok: false, deferred: "codex_busy", error: "codex_busy", policy: saved, metadataPatch };
   }
 
   if (!result.ok) {
     // Non-busy failure: still advance schedule so we do not tight-loop.
-    const saved = commitPolicyRunMetadata(load, save, { now, nextRun: "advance" });
+    const metadataPatch: PolicyRunMetadataPatch = { now, nextRun: "advance" };
+    const saved = commitPolicyRunMetadata(load, save, metadataPatch);
     logPolicyEvent(`fail ${result.error ?? "cleanup_failed"}`);
     return {
       ok: false,
@@ -488,10 +494,11 @@ export function runStorageCleanupPolicy(deps: PolicyRunDeps): PolicyRunResult {
       mode: result.mode,
       ...(result.trashDir ? { trashDir: result.trashDir } : {}),
       policy: saved,
+      metadataPatch,
     };
   }
 
-  const saved = commitPolicyRunMetadata(load, save, {
+  const metadataPatch: PolicyRunMetadataPatch = {
     now,
     nextRun: "advance",
     lastRun: {
@@ -499,7 +506,8 @@ export function runStorageCleanupPolicy(deps: PolicyRunDeps): PolicyRunResult {
       freedBytes: result.bytes,
       removed: result.count,
     },
-  });
+  };
+  const saved = commitPolicyRunMetadata(load, save, metadataPatch);
   logPolicyEvent(
     `ok mode=${result.mode} removed=${result.count} freedBytes=${result.bytes}`,
   );
@@ -510,6 +518,7 @@ export function runStorageCleanupPolicy(deps: PolicyRunDeps): PolicyRunResult {
     removed: result.count,
     ...(result.trashDir ? { trashDir: result.trashDir } : {}),
     policy: saved,
+    metadataPatch,
   };
 }
 

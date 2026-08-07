@@ -41,6 +41,9 @@ self.onmessage = (event: MessageEvent<unknown>) => {
       ...(typeof blockMs === "number" && Number.isFinite(blockMs) && blockMs > 0
         ? { holdAfterLoadMs: Math.floor(blockMs) }
         : {}),
+      // Config is owned by the parent isolate. Return the metadata patch for
+      // the parent to merge after the worker exits instead of writing here.
+      savePolicy: () => {},
     });
     self.postMessage({ type: "done", requestId, result });
   } catch (err) {

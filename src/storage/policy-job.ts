@@ -12,8 +12,10 @@ import {
 } from "./storage-mutation-coordinator";
 import type { AdmissionLease } from "../lib/admission";
 import {
+  commitPolicyRunMetadata,
   isPolicyDue,
   readStorageCleanupPolicyFromConfig,
+  writeStorageCleanupPolicyToConfig,
   type PolicyRunReason,
   type PolicyRunResult,
   type PolicySkipReason,
@@ -399,6 +401,14 @@ async function executeJob(opts: RequestPolicyRunOptions): Promise<void> {
         codexHome,
         ...(typeof blockMs === "number" && blockMs > 0 ? { blockMs } : {}),
       });
+      if (result.metadataPatch) {
+        const policy = commitPolicyRunMetadata(
+          readStorageCleanupPolicyFromConfig,
+          writeStorageCleanupPolicyToConfig,
+          result.metadataPatch,
+        );
+        result = { ...result, policy };
+      }
     }
 
     if (generation !== runGeneration) return;
