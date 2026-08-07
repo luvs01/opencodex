@@ -304,14 +304,22 @@ export function evaluatePolicyProfile(
     const excludedByUnknown = unknown && profile.unknownEvidence.capability === "exclude";
     const costLimit = profile.limits.maxEstimatedCostUsd;
     const estimatedCost = evidence.cost?.estimatedUsd;
+    // A hard ceiling requires evidence that the request fits below it. Routing
+    // with an unknown estimate would otherwise turn the ceiling into the
+    // profile's (permissive by default) unknown-cost scoring preference.
+    const unknownCostAtLimit = costLimit !== undefined
+      && (typeof estimatedCost !== "number" || !Number.isFinite(estimatedCost));
     const overCostLimit = costLimit !== undefined
       && typeof estimatedCost === "number"
       && Number.isFinite(estimatedCost)
       && estimatedCost > costLimit;
+    if (unknownCostAtLimit) {
+      exclusions.push({ code: "unknown-price", detail: "maxEstimatedCostUsd" });
+    }
     if (overCostLimit) {
       exclusions.push({ code: "cost-limit", detail: "maxEstimatedCostUsd" });
     }
-    let eligible = !unsatisfied && !excludedByUnknown && !overCostLimit;
+    let eligible = !unsatisfied && !excludedByUnknown && !unknownCostAtLimit && !overCostLimit;
 
     // Health scoring (RI-06): live hard cooldown is authoritative and
     // excludes; unknown health follows the profile's unknownEvidence policy;
@@ -349,7 +357,7 @@ export function evaluatePolicyProfile(
     // above; unknown cost follows the profile's unknownEvidence policy.
     const cost = evidence.cost;
     let costValue = cost ? costScore(cost) : null;
-    if (costValue === null && profile.unknownEvidence.cost === "exclude") {
+    if (costValue === null && profile.unknownEvidence.cost === "exclude" && !unknownCostAtLimit) {
       exclusions.push({ code: "unknown-price" });
       eligible = false;
     } else if (costValue === null && profile.unknownEvidence.cost === "penalize") {
