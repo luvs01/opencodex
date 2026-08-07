@@ -217,7 +217,11 @@ export type RecoveryOutcome =
  * The single exception is not a roll-forward: when BOTH targets already hold the
  * post-image the writes had finished and only the journal deletion was missing.
  */
-export function recoverIfNeeded(journalPath: string): RecoveryOutcome {
+export function recoverIfNeeded(
+  journalPath: string,
+  expectedConfigPath: string,
+  expectedStorePath: string,
+): RecoveryOutcome {
   const raw = readOrNull(journalPath);
   if (raw === null) return { ok: true, action: "none" };
 
@@ -227,6 +231,17 @@ export function recoverIfNeeded(journalPath: string): RecoveryOutcome {
       ok: false,
       error: "recovery_required",
       detail: `journal at ${journalPath} failed its checksum or is truncated; nothing was read from it`,
+    };
+  }
+
+  // The checksum detects corruption, not forgery. Bind the record to the
+  // paths selected by the active prompt-layer configuration before reading or
+  // writing either target.
+  if (record.configPath !== expectedConfigPath || record.storePath !== expectedStorePath) {
+    return {
+      ok: false,
+      error: "recovery_required",
+      detail: `journal at ${journalPath} does not match the active prompt-layer paths; nothing was read from it`,
     };
   }
 
