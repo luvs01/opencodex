@@ -90,6 +90,7 @@ export async function readBoundedJsonRequestBody(
   req: Request,
   maxBytes: number,
   budget?: TranslatorBudget,
+  options?: { emptyBodyFallback?: unknown },
 ): Promise<unknown> {
   const encoding = req.headers.get("content-encoding");
   const declaredLength = declaredBodyLength(req);
@@ -116,6 +117,9 @@ export async function readBoundedJsonRequestBody(
     releaseDecoded = decoded === raw ? undefined : budget?.observeAcceptedRequestCopy(decoded.byteLength);
     const text = new TextDecoder().decode(decoded);
     releaseText = budget?.observeAcceptedRequestCopy(new TextEncoder().encode(text).byteLength);
+    if (text.trim() === "" && options && "emptyBodyFallback" in options) {
+      return options.emptyBodyFallback;
+    }
     const parsed = JSON.parse(text);
     budget?.observeAcceptedRequestCopy(new TextEncoder().encode(JSON.stringify(parsed)).byteLength);
     return parsed;
