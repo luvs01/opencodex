@@ -623,6 +623,7 @@ test("sideband URL policy: override precedence, normalization, and fail-closed b
   // Scheme rewrite: https -> wss; loopback http -> ws (the dev case the knob exists for).
   expect(buildLiveSidebandUpstreamWsUrl(frameless, "http://localhost:8080/v1")).toBe("ws://localhost:8080/v1/live/rtc_1");
   expect(buildLiveSidebandUpstreamWsUrl(frameless, "http://127.0.0.1:8080")).toBe("ws://127.0.0.1:8080/v1/live/rtc_1");
+  expect(buildLiveSidebandUpstreamWsUrl(frameless, "http://127.0.0.2:8080")).toBe("ws://127.0.0.2:8080/v1/live/rtc_1");
 
   // Fail-closed bounds: malformed, remote plaintext, userinfo, and non-http(s)
   // schemes all return the canonical root — a compromised or accidental override
@@ -631,6 +632,8 @@ test("sideband URL policy: override precedence, normalization, and fail-closed b
     "not a url",
     "http://realtime.example.test/v1",
     "ws://realtime.example.test/v1",
+    "http://127.evil.example/v1",
+    "http://127.0.0.1.evil.example/v1",
     "https://user:pass@realtime.example.test/v1",
     "ftp://realtime.example.test/v1",
     "   ",
