@@ -11,8 +11,13 @@ import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getConfigDir, getConfigPath, readConfigDiagnostics, readPid, readRuntimePort, resolveEnvValue } from "../config";
-import { findLiveProxy } from "../server/proxy-liveness";
-import { gracefulStopHost } from "../lib/process-control";
+import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
+import {
+  LOCAL_ATTESTATION_CHALLENGE_HEADER,
+  LOCAL_ATTESTATION_PROOF_HEADER,
+  createLocalAttestationChallenge,
+  verifyLocalAttestationProof,
+} from "../lib/local-management-attestation";
 import { BUN_RUNTIME_SOURCES } from "../lib/bun-runtime";
 import type { BunRuntimeSource } from "../lib/bun-runtime";
 import { maskAccountId } from "../lib/privacy";
@@ -659,6 +664,54 @@ export async function fetchServiceMemory(
   }
 }
 
+export async function fetchServiceMemoryFromLiveProxy(
+  live: LiveProxy,
+  token: string | null,
+  deps: {
+    fetchImpl?: typeof fetch;
+    readRuntimePortImpl?: typeof readRuntimePort;
+  } = {},
+): Promise<ServiceMemoryReport> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+
+  // /healthz is public and therefore only a liveness signal. Before disclosing a
+  // management credential, require the listener to prove possession of the secret
+  // from the protected per-process runtime record.
+  if (token) {
+    if (live.source !== "runtime" || live.pid === null) {
+      return { status: "unreachable", error: "listener attestation unavailable" };
+    }
+    const runtime = (deps.readRuntimePortImpl ?? readRuntimePort)(live.pid);
+    if (!runtime?.attestationSecret || runtime.port !== live.port) {
+      return { status: "unreachable", error: "listener attestation unavailable" };
+    }
+    try {
+      const challenge = createLocalAttestationChallenge();
+      const proofResponse = await fetchImpl(
+        `http://${probeHostname(live.hostname)}:${live.port}/healthz`,
+        {
+          headers: { [LOCAL_ATTESTATION_CHALLENGE_HEADER]: challenge },
+          signal: AbortSignal.timeout(SERVICE_MEMORY_TIMEOUT_MS),
+        },
+      );
+      const proof = proofResponse.headers.get(LOCAL_ATTESTATION_PROOF_HEADER);
+      if (!proofResponse.ok || !verifyLocalAttestationProof(
+        runtime.attestationSecret,
+        challenge,
+        live.pid,
+        live.port,
+        proof,
+      )) {
+        return { status: "unreachable", error: "listener attestation failed" };
+      }
+    } catch (err) {
+      return { status: "unreachable", error: err instanceof Error ? err.name : "listener attestation failed" };
+    }
+  }
+
+  return fetchServiceMemory(probeHostname(live.hostname), live.port, token, fetchImpl);
+}
+
 const mb = (bytes: number): string => `${Math.round(bytes / (1024 * 1024))}MB`;
 
 /** Render the doctor "Memory / runtime" section lines (testable without console capture). */
@@ -887,7 +940,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
       console.log("  --     no running ocx proxy found (no live pid/runtime record)");
     } else {
       const token = configuredAdminToken();
-      const report = await fetchServiceMemory(gracefulStopHost(runtime.hostname), runtime.port, token);
+      const report = await fetchServiceMemoryFromLiveProxy(live, token);
       for (const line of formatServiceMemoryLines(report)) console.log(line);
     }
   }

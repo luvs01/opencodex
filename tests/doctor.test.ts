@@ -10,6 +10,7 @@ import {
   collectRunningProxyEnv,
   collectWslDualInstall,
   fetchServiceMemory,
+  fetchServiceMemoryFromLiveProxy,
   formatServiceMemoryLines,
   parseProcessEnvBlock,
   probeWham,
@@ -19,6 +20,11 @@ import {
 } from "../src/cli/doctor";
 import { collectOrcaCodexHomeDiagnostic } from "../src/codex/home";
 import { NativeProfileError } from "../src/codex/native-profile-types";
+import {
+  LOCAL_ATTESTATION_CHALLENGE_HEADER,
+  LOCAL_ATTESTATION_PROOF_HEADER,
+  createLocalAttestationProof,
+} from "../src/lib/local-management-attestation";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-doctor-test");
 const TEST_CODEX_HOME = join(TEST_DIR, "codex");
@@ -400,6 +406,68 @@ describe("service memory section (#314 WP4)", () => {
       (async () => Response.json({ hello: "world" })) as typeof fetch);
     expect(malformed.status).toBe("unreachable");
     if (malformed.status === "unreachable") expect(malformed.error).toBe("malformed response");
+  });
+
+  test("does not send a management token to a live listener without runtime attestation", async () => {
+    let fetchCalls = 0;
+    const report = await fetchServiceMemoryFromLiveProxy(
+      { hostname: "127.0.0.1", port: 19191, pid: null, source: "config" },
+      "ocx-admin-memory-test",
+      {
+        readRuntimePortImpl: () => null,
+        fetchImpl: (async () => {
+          fetchCalls += 1;
+          return Response.json(baseData);
+        }) as typeof fetch,
+      },
+    );
+
+    expect(fetchCalls).toBe(0);
+    expect(report).toEqual({ status: "unreachable", error: "listener attestation unavailable" });
+  });
+
+  test("sends the management token only after the runtime listener proves its identity", async () => {
+    const attestationSecret = "A".repeat(43);
+    const seenTokens: Array<string | null> = [];
+    const report = await fetchServiceMemoryFromLiveProxy(
+      { hostname: "127.0.0.1", port: 19191, pid: 4242, source: "runtime" },
+      "ocx-admin-memory-test",
+      {
+        readRuntimePortImpl: () => ({ pid: 4242, port: 19191, attestationSecret }),
+        fetchImpl: (async (input, init) => {
+          seenTokens.push(new Headers(init?.headers).get("x-opencodex-api-key"));
+          if (String(input).endsWith("/healthz")) {
+            const challenge = new Headers(init?.headers).get(LOCAL_ATTESTATION_CHALLENGE_HEADER)!;
+            const proof = createLocalAttestationProof(attestationSecret, challenge, 4242, 19191)!;
+            return new Response("ok", { headers: { [LOCAL_ATTESTATION_PROOF_HEADER]: proof } });
+          }
+          return Response.json(baseData);
+        }) as typeof fetch,
+      },
+    );
+
+    expect(seenTokens).toEqual([null, "ocx-admin-memory-test"]);
+    expect(report.status).toBe("ok");
+  });
+
+  test("does not send the management token when listener attestation is invalid", async () => {
+    const attestationSecret = "A".repeat(43);
+    let memoryCalls = 0;
+    const report = await fetchServiceMemoryFromLiveProxy(
+      { hostname: "127.0.0.1", port: 19191, pid: 4242, source: "runtime" },
+      "ocx-admin-memory-test",
+      {
+        readRuntimePortImpl: () => ({ pid: 4242, port: 19191, attestationSecret }),
+        fetchImpl: (async (input, init) => {
+          expect(new Headers(init?.headers).get("x-opencodex-api-key")).toBeNull();
+          if (!String(input).endsWith("/healthz")) memoryCalls += 1;
+          return new Response("fake", { headers: { [LOCAL_ATTESTATION_PROOF_HEADER]: "B".repeat(43) } });
+        }) as typeof fetch,
+      },
+    );
+
+    expect(memoryCalls).toBe(0);
+    expect(report).toEqual({ status: "unreachable", error: "listener attestation failed" });
   });
 
   test("identity labels: doctor process is never presented as the service", () => {
