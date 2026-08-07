@@ -1223,6 +1223,34 @@ describe("OpenAI Responses hosted-tool name conflicts", () => {
     expect(containers[0].tools).toContainEqual({ type: "image_generation" });
   });
 
+  test("additional_tools restoration does not spread stripped indices into Math.min", () => {
+    const adapter = createResponsesPassthroughAdapter({
+      ...keyedProvider,
+      modelPreferHostedTools: { "provider-image-model": ["image_generation"] },
+    });
+    const input = Array.from({ length: 3 }, () => ({
+      type: "additional_tools",
+      tools: [{ type: "namespace", name: "image_gen", tools: [] }],
+    }));
+    const originalMin = Math.min;
+    Math.min = (...values: number[]) => {
+      if (values.length > 2) throw new RangeError("too many arguments");
+      return originalMin(...values);
+    };
+
+    try {
+      expect(() => adapter.buildRequest({
+        modelId: "provider-image-model",
+        context: { messages: [] },
+        stream: true,
+        options: {},
+        _rawBody: { model: "provider-image-model", input },
+      }, meta)).not.toThrow();
+    } finally {
+      Math.min = originalMin;
+    }
+  });
+
   test("configured model rewrites a custom image-gen selector", () => {
     const adapter = createResponsesPassthroughAdapter({
       ...keyedProvider,
