@@ -194,8 +194,6 @@ const COMPACT_PASSTHROUGH_HEADERS = [
   "x-codex-primary-reset-at",
   "x-codex-secondary-reset-at",
   "x-codex-tertiary-reset-at",
-  // A relayed 3xx keeps its Location so the client can follow it (#914).
-  "location",
 ];
 
 function compactResponseHeaders(upstream: Response): Headers {

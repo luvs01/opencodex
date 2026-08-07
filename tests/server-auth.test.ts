@@ -2691,7 +2691,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("passthrough pool send relays a 307 with Location and records no health evidence (#914)", async () => {
+  test("passthrough pool send strips a 307 Location and records no health evidence (#914)", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -2700,8 +2700,8 @@ describe("server local API auth", () => {
     clearAccountNeedsReauth("pool-a");
     clearUpstreamHostHealth();
 
-    // The upstream answers 307 -> dead.invalid. Manual redirects must relay it
-    // (with Location) instead of following into a dead-host rejection.
+    // The upstream answers 307 -> dead.invalid. Manual redirects must avoid
+    // following it, while the response sanitizer must not expose its target.
     const redirectTarget = "https://dead.invalid/x";
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -2754,7 +2754,7 @@ describe("server local API auth", () => {
       });
 
       expect(response.status).toBe(307);
-      expect(response.headers.get("location")).toBe(redirectTarget);
+      expect(response.headers.get("location")).toBeNull();
       // Neutral class: no account streak, no soft-avoid, no rotation, and the
       // real response cleared the seeded host streak.
       expect(getCodexUpstreamHealth("pool-a")).toBeNull();

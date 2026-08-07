@@ -1147,6 +1147,7 @@ export function sanitizePassthroughHeaders(upstream: Headers): Headers {
     "transfer-encoding",
     "connection",
     "keep-alive",
+    "location",
     "proxy-authenticate",
     "proxy-authorization",
     "set-cookie",

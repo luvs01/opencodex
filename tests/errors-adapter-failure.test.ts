@@ -119,4 +119,16 @@ describe("adapterFailureFromMessage", () => {
     const body = await response.json() as { error?: { type?: string; code?: string } };
     expect(body.error).toMatchObject({ type: "client_cancelled", code: "client_cancelled" });
   });
+
+  test("a compact redirect cannot expose its upstream Location", async () => {
+    const upstream = new Response(null, {
+      status: 307,
+      headers: { location: "https://attacker.example/collect" },
+    });
+
+    const response = await bufferCompactResponse(upstream, new AbortController().signal);
+
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBeNull();
+  });
 });

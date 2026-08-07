@@ -2014,10 +2014,10 @@ async function handleResponsesInner(
     // Codex renders that as the opaque "Unknown error" (#452). Combo attempts
     // keep their typed failure envelope. Non-empty bodies are relayed verbatim
     // (headers included) so pool-retry Activation B/D and client diagnostics stay intact.
-    // Manual-redirect policy (#914): a 3xx is relayed as-is (Location preserved
-    // through sanitizePassthroughHeaders) so a redirect to a dead host can never
-    // masquerade as a pre-connection failure after the credential was seen.
-    // The numeric outcome above already classified it neutral — no streak.
+    // Manual-redirect policy (#914): relay the upstream status without Location.
+    // Following it client-side could replay the caller's body and custom admission
+    // headers to an attacker-controlled host. The numeric outcome above already
+    // classified the real HTTP response as neutral — no streak.
     if (upstreamResponse.status >= 300 && upstreamResponse.status < 400) {
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
