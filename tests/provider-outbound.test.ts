@@ -68,6 +68,44 @@ describe("provider outbound GET transport", () => {
     });
   });
 
+  test("protocol-mismatched proxy variables keep public requests on the DNS-pinned transport", async () => {
+    const cases = [
+      { url: "http://provider.example/v1/models", proxyKey: "HTTPS_PROXY" },
+      { url: "https://provider.example/v1/models", proxyKey: "HTTP_PROXY" },
+    ] as const;
+
+    for (const { url, proxyKey } of cases) {
+      for (const key of proxyKeys) delete process.env[key];
+      process.env[proxyKey] = "http://127.0.0.1:9";
+      const { providerOutboundGet } = await import("../src/lib/provider-outbound");
+      const { dependencies, captured } = directDependencies(new Response(null, { status: 204 }));
+
+      const response = await providerOutboundGet("custom", { baseUrl: url }, url, {}, dependencies);
+
+      expect(response.status).toBe(204);
+      expect(captured.address).toBe("93.184.216.34");
+    }
+  });
+
+  test("NO_PROXY matches keep public requests on the DNS-pinned transport", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    process.env.HTTPS_PROXY = "http://127.0.0.1:9";
+    process.env.NO_PROXY = "provider.example";
+    const { providerOutboundGet } = await import("../src/lib/provider-outbound");
+    const { dependencies, captured } = directDependencies(new Response(null, { status: 204 }));
+
+    const response = await providerOutboundGet(
+      "custom",
+      { baseUrl: "https://provider.example/v1" },
+      "https://provider.example/v1/models",
+      {},
+      dependencies,
+    );
+
+    expect(response.status).toBe(204);
+    expect(captured.address).toBe("93.184.216.34");
+  });
+
   test("private providers behind a configured proxy require an explicit NO_PROXY match", async () => {
     const proxyUrl = "http://127.0.0.1:9";
     process.env.HTTPS_PROXY = proxyUrl;
