@@ -30,6 +30,16 @@ describe("request evidence extraction (RI-05)", () => {
     expect(evidence.imageInputRequired).toBeUndefined();
   });
 
+  test("deeply nested and cyclic content is scanned without recursion", () => {
+    let content: unknown = [{ type: "input_image", image_url: "https://example.test/i.png" }];
+    for (let depth = 0; depth < 20_000; depth += 1) content = [{ content }];
+    expect(evidenceFromBody({ input: content }).imageInputRequired).toBe(true);
+
+    const cyclic: { content?: unknown } = {};
+    cyclic.content = cyclic;
+    expect(evidenceFromBody({ messages: [cyclic] }).imageInputRequired).toBeUndefined();
+  });
+
   test("tools array produces toolsRequired", () => {
     const evidence = evidenceFromBody({
       tools: [{ type: "function", function: { name: "x" } }],

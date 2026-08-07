@@ -13,17 +13,26 @@ import type { PolicyRequestEvidence } from "./evaluator";
  * Walk a body fragment for image parts. Real request shapes nest image blocks:
  * Responses puts them under `input[].content[]` (type `input_image`), Chat
  * Completions under `messages[].content[]` (type `image_url`), and Claude
- * Messages under `messages[].content[]` (type `image`), so the scan recurses
- * into arrays and `content` fields instead of only checking the top level.
+ * Messages under `messages[].content[]` (type `image`), so the scan walks
+ * arrays and `content` fields instead of only checking the top level. Keep the
+ * walk iterative because these fragments come directly from request bodies.
  */
 function containsImagePart(value: unknown): boolean {
-  if (typeof value === "string") return false;
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(containsImagePart);
-  const record = value as Record<string, unknown>;
-  if (record.type === "image" || record.type === "input_image") return true;
-  if (record.image_url !== undefined || record.image !== undefined) return true;
-  if (record.content !== undefined && containsImagePart(record.content)) return true;
+  const pending: unknown[] = [value];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      for (const item of current) pending.push(item);
+      continue;
+    }
+    const record = current as Record<string, unknown>;
+    if (record.type === "image" || record.type === "input_image") return true;
+    if (record.image_url !== undefined || record.image !== undefined) return true;
+    if (record.content !== undefined) pending.push(record.content);
+  }
   return false;
 }
 
