@@ -400,6 +400,17 @@ test("the overview does not claim nothing is installed while it is still loading
   expect(container.textContent ?? "").toContain("No installed clients were detected");
 });
 
+test("the overview does not claim nothing is installed when the client list fails to load", async () => {
+  stateResponse = () => json({ error: "nope" }, 500);
+
+  await mountOverview();
+
+  const text = container.textContent ?? "";
+  expect(text).toContain("Could not load integration state");
+  expect(text).not.toContain("No installed clients were detected");
+  expect(container.querySelector('[data-client="hermes"]')).not.toBeNull();
+});
+
 test("bulk disable confirms the result with the server before claiming success", async () => {
   /*
    * The resource layer's `refresh()` is fire-and-forget, so awaiting it proves
