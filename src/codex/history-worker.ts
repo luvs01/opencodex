@@ -24,6 +24,7 @@
  * Design record: devlog/_fin/260804_codex_write_substrate/020_history_isolation.md.
  */
 import { withHistoryWriteSerialization } from "./history-lock";
+import { openaiHistoryMigrationIsNoop } from "./history-provider";
 import {
   writeHistoryProviderTransition,
   writeLegacyOpenaiHistoryRecovery,
@@ -114,6 +115,14 @@ export function runHistoryUnitUnderLock(
 
   if (operation === "skip") {
     return { type: "done", requestId, jobId, outcome: "skipped", rows: 0, files: 0 };
+  }
+
+  // Design-B migration runs on every steady-state apply. Preserve its readonly
+  // fast path before taking H so an already-native database cannot report busy
+  // merely because another process owns the history write lock.
+  if (operation === "migrate-openai"
+    && openaiHistoryMigrationIsNoop(target.canonicalStateDbPath, target.canonicalBackupPath)) {
+    return { type: "done", requestId, jobId, outcome: "converged", rows: 0, files: 0 };
   }
 
   const acquired = withHistoryWriteSerialization(

@@ -564,7 +564,8 @@ export function withHistoryRetry<T>(fn: () => T, io: { sleepFn?: (ms: number) =>
  * probe (locked even for readers / schema drift) returns false so callers fall through
  * to the write attempt and keep today's behavior for genuinely unknown state.
  */
-function openaiRestoreIsNoop(stateDbPath: string, backupPath: string): boolean {
+export function openaiHistoryMigrationIsNoop(stateDbPath: string, backupPath: string): boolean {
+  if (!existsSync(stateDbPath)) return true;
   const pending = countPendingOpencodexHistory(stateDbPath, backupPath);
   return !pending.failed && pending.pendingRows === 0 && pending.backupEntries === 0;
 }
@@ -577,8 +578,8 @@ export function syncCodexHistoryProvider(
 ): CodexHistorySyncResult {
   // Opt-in steady-state gate (Design B loopback callers only): default semantics of
   // this exported API are unchanged — legacy stop/restore paths never pass the flag.
-  if (opts.skipWhenProvablyNoop && provider === "openai" && existsSync(stateDbPath)
-    && openaiRestoreIsNoop(stateDbPath, backupPath)) {
+  if (opts.skipWhenProvablyNoop && provider === "openai"
+    && openaiHistoryMigrationIsNoop(stateDbPath, backupPath)) {
     return { rows: 0, files: 0 };
   }
   return withHistoryRetry(() => syncCodexHistoryProviderUnsafe(provider, stateDbPath, backupPath))
@@ -733,7 +734,7 @@ export function migrateHistoryToOpenai(
   // and after the one-time migration every start would otherwise write-open the DB for
   // nothing. A missing DB with a leftover backup manifest does NOT satisfy the gate
   // (backupEntries > 0), so the guardian's fresh-reinstall re-count protection holds.
-  if (openaiRestoreIsNoop(stateDbPath, backupPath)) return { rows: 0, files: 0 };
+  if (openaiHistoryMigrationIsNoop(stateDbPath, backupPath)) return { rows: 0, files: 0 };
   return withHistoryRetry(() => syncCodexHistoryProviderUnsafe("openai", stateDbPath, backupPath), opts)
     ?? { rows: 0, files: 0, failed: true };
 }

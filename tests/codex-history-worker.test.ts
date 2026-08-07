@@ -142,6 +142,47 @@ test("the unit runs the real transition under H", () => {
   expect(row?.model_provider).toBe("openai");
 });
 
+test("steady-state migration skips H when readonly state proves there is no work", async () => {
+  const fixture = makeFixture("ocx-history-worker-migrate-noop-");
+  const migrated = runHistoryUnitUnderLock(runMessage(fixture, { operation: "migrate-openai" }));
+  expect(migrated).toMatchObject({ type: "done", outcome: "converged" });
+
+  const ready = join(fixture.codexHome, "..", "held");
+  const release = join(fixture.codexHome, "..", "release");
+  const holder = Bun.spawn([process.execPath, "--eval", `
+    import { existsSync, writeFileSync } from "node:fs";
+    const { withHistoryWriteSerialization } = await import("./src/codex/history-lock.ts");
+    withHistoryWriteSerialization(
+      ${JSON.stringify(fixture.codexHome)},
+      ${JSON.stringify(fixture.stateDb)},
+      () => {
+        writeFileSync(${JSON.stringify(ready)}, "held");
+        const waiter = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(${JSON.stringify(release)})) Atomics.wait(waiter, 0, 0, 10);
+      },
+    );
+  `], { cwd: repoRoot, env: fixture.env, stdout: "pipe", stderr: "pipe" });
+
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(ready)) {
+      if (Date.now() > deadline) throw new Error("holder never acquired H");
+      await Bun.sleep(5);
+    }
+
+    const result = runHistoryUnitUnderLock(runMessage(fixture, { operation: "migrate-openai" }));
+    expect(result).toMatchObject({
+      type: "done",
+      outcome: "converged",
+      rows: 0,
+      files: 0,
+    });
+  } finally {
+    writeFileSync(release, "release");
+    expect(await holder.exited).toBe(0);
+  }
+}, 30_000);
+
 /**
  * The reason the unit lives in a Worker at all: while another process holds H,
  * this one reports a typed block instead of stalling its own thread.
