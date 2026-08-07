@@ -2,7 +2,17 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { assessSponsoredSurface, isRestrictedPath } = require("./pr-sponsored-surface.cjs");
+const {
+  HEAD_SPECIFIC_APPROVAL_LABELS,
+  assessSponsoredSurface,
+  isRestrictedPath,
+} = require("./pr-sponsored-surface.cjs");
+
+describe("HEAD_SPECIFIC_APPROVAL_LABELS", () => {
+  it("invalidates maintainer sponsorship when the reviewed revision changes", () => {
+    assert.ok(HEAD_SPECIFIC_APPROVAL_LABELS.includes("maintainer-sponsored"));
+  });
+});
 
 describe("isRestrictedPath", () => {
   it("covers auth, workflow, release, and dependency surfaces", () => {

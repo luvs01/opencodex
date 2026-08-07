@@ -26,6 +26,14 @@ const RESTRICTED_PREFIXES = [
   "src/oauth/",
 ];
 
+const HEAD_SPECIFIC_APPROVAL_LABELS = [
+  "test-exception-approved",
+  "suppression-approved",
+  "generated-change-approved",
+  "dependency-change-approved",
+  "maintainer-sponsored",
+];
+
 const RESTRICTED_FILES = new Set([
   // Release and packaging automation executed by the release workflow.
   "scripts/release.ts",
@@ -80,6 +88,7 @@ function assessSponsoredSurface({
 }
 
 module.exports = {
+  HEAD_SPECIFIC_APPROVAL_LABELS,
   RESTRICTED_FILES,
   RESTRICTED_PREFIXES,
   assessSponsoredSurface,
