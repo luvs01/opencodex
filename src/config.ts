@@ -1949,7 +1949,6 @@ export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
 
 const CONFIG_MUTATION_DB_FILENAME = "config-mutation.sqlite";
 const CONFIG_MUTATION_DB_SIDECARS = ["-journal", "-wal", "-shm"] as const;
-let warnedConfigMutationDirectoryAcl = false;
 
 export class ConfigMutationLockError extends Error {
   readonly code = "CONFIG_MUTATION_LOCK_UNAVAILABLE";
@@ -1971,20 +1970,11 @@ function configMutationDatabasePath(): string {
     try { chmodSync(dir, 0o700); } catch { /* best-effort on existing dir */ }
   }
   if (windowsSecretAclApplies()) {
-    try {
-      // Distinct timeout memo from management-token directory harden: a required
-      // management-dir timeout must not poison config mutation on the same home
-      // (windows-latest server-management-auth cases).
-      hardenSecretDir(dir, { required: true, timeoutMemoKey: `${dir}::config-mutation` });
-    } catch (error) {
-      if (!warnedConfigMutationDirectoryAcl) {
-        warnedConfigMutationDirectoryAcl = true;
-        const diagnostics = error instanceof Error ? error.message : "ACL hardening failed";
-        console.warn(
-          `[opencodex] Config mutation coordination directory ACL hardening did not complete; continuing without it. ${diagnostics}`,
-        );
-      }
-    }
+    // Distinct timeout memo from management-token directory harden: a required
+    // management-dir timeout must not poison config mutation on the same home
+    // (windows-latest server-management-auth cases). This must fail closed because
+    // the directory also contains secret-bearing configuration and credential files.
+    hardenSecretDir(dir, { required: true, timeoutMemoKey: `${dir}::config-mutation` });
   }
   const path = join(dir, CONFIG_MUTATION_DB_FILENAME);
   recordOwnedConfigPath(dir, path);
