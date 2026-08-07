@@ -36,7 +36,7 @@ const SENSITIVE_KEY_PATTERN = /^(?:authorization|proxy-authorization|cookie|set-
 const CREDENTIAL_HEADER_LABEL_RAW = "x-api-key|x-goog-api-key|x-amz-security-token|api[_-]?key|apiKey|access[_-]?token|accessToken|refresh[_-]?token|refreshToken|id[_-]?token|client[_-]?secret|clientSecret|authorization|proxy-authorization|cookie|set-cookie|password|secret|token";
 
 const CREDENTIAL_HEADER_LABEL = CREDENTIAL_HEADER_LABEL_RAW
-  .replace(/(?<![\[\\])([A-Za-z])(?![\]\-])/g, "[$1\u0001]");
+  .replace(/[A-Za-z]/g, "[$&\u0001]");
 
 /**
  * Characters that render as a colon separator. Folded to `:` in the matching

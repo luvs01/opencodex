@@ -406,6 +406,9 @@ describe("redactSecretString", () => {
       '<header name="author&ii;zation">opaquecredential123456</header>',
       '<header name="s&ee;cret">opaquecredential123456</header>',
       '<header name="passwor&DifferentialD;">opaquecredential123456</header>',
+      "&chi;-api-key: opaquecredential123456",
+      "x-ap&iota;-key: opaquecredential123456",
+      '<header name="&chi;-api-key">opaquecredential123456</header>',
     ]) {
       const redacted = redactSecretString(input);
       expect(redacted).toContain(REDACTED_SECRET);
