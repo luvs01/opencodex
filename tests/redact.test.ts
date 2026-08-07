@@ -276,6 +276,13 @@ describe("redactSecretString", () => {
     expect(multipart).not.toContain("dXNlcjpwYXNz");
   });
 
+  test("non-colon framing does not expose structured credential suffixes", () => {
+    expect(redactSecretString("authorization=Bearer abcdefgh12345678&model=gpt"))
+      .toBe(`authorization=${REDACTED_SECRET}&model=gpt`);
+    expect(redactSecretString("token=tid=abc123;exp=1699999999;sku=copilot_pro;foo=bar:ABCDEF&model=gpt"))
+      .toBe(`token=${REDACTED_SECRET}&model=gpt`);
+  });
+
   test("XML credentials are covered by tag name, identifying attribute, and attribute value", () => {
     // A qualifying tag keeps only its NAME and masks to end of line. Using the
     // closing tag as the stopping point was the same early-termination mistake

@@ -415,7 +415,7 @@ const SECRET_VALUE_PATTERNS: Array<[RegExp, string]> = [
   // GitHub Copilot API tokens: semicolon-joined k=v grammar starting with tid=…
   // (e.g. "tid=abc123;exp=1699999999;sku=copilot_pro;…:sig"). Redact the whole token —
   // a Bearer-prefix rule alone leaves the suffix intact.
-  [/\btid=[A-Za-z0-9-]+(?:;[A-Za-z0-9_.-]+=[^;\s"']*)+(?::[A-Za-z0-9+/=_-]+)?/g, REDACTED_SECRET],
+  [/\btid=[A-Za-z0-9-]+(?:;[A-Za-z0-9_.-]+=[^;&\s"']*)+(?::[A-Za-z0-9+/=_-]+)?/g, REDACTED_SECRET],
   [/\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|refreshToken|accessToken|clientSecret|apiKey)=)([^&\s"',;]+)/gi, `$1${REDACTED_SECRET}`],
   [/((?:"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|refreshToken|accessToken|clientSecret|apiKey)"\s*:\s*"))([^"]+)(")/gi, `$1${REDACTED_SECRET}$3`],
   // Raw JSON "token" field values (Copilot token exchange bodies echo the credential here).
@@ -436,11 +436,11 @@ function isSensitiveKey(key: string): boolean {
 }
 
 export function redactSecretString(value: string): string {
-  let redacted = maskOtherFramings(maskCredentialHeaders(value));
+  let redacted = maskCredentialHeaders(value);
   for (const [pattern, replacement] of SECRET_VALUE_PATTERNS) {
     redacted = redacted.replace(pattern, replacement);
   }
-  return redacted;
+  return maskOtherFramings(redacted);
 }
 
 export function redactSecrets(value: unknown): unknown {
