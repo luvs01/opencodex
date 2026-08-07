@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { costEvidenceForCandidate, costScore } from "../src/routing/cost";
 import { evaluatePolicyProfile, COST_UNKNOWN_PENALTY_SCORE } from "../src/routing/evaluator";
+import { NoEligiblePolicyCandidateError, routeModel } from "../src/router";
 import type { OcxConfig } from "../src/types";
 
 let testDir = "";
@@ -98,6 +99,29 @@ describe("cost-aware scoring (RI-08)", () => {
     expect(result.candidates[0]!.eligible).toBe(false);
     expect(result.candidates[0]!.exclusions.some(exclusion => exclusion.code === "cost-limit")).toBe(true);
     expect(result.selectedIndex).toBeNull();
+  });
+
+  test("runtime routing fails closed when a hard cost ceiling cannot be estimated", () => {
+    const limited = config({
+      routingProfiles: {
+        cost: {
+          candidates: [{ provider: "anthropic", model: "claude-opus-5" }],
+          limits: { maxEstimatedCostUsd: 0.000001 },
+        },
+      },
+    });
+
+    expect(() => routeModel(limited, "policy/cost")).toThrow(NoEligiblePolicyCandidateError);
+    try {
+      routeModel(limited, "policy/cost");
+    } catch (error) {
+      const trace = (error as NoEligiblePolicyCandidateError).trace;
+      expect(trace.candidates[0]).toMatchObject({
+        eligible: false,
+        cost: { incomplete: true, limitUsd: 0.000001 },
+        exclusions: [{ code: "unknown-price", detail: "maxEstimatedCostUsd" }],
+      });
+    }
   });
 
   test("unknown cost follows the profile policy (exclude / penalize / allow)", async () => {
