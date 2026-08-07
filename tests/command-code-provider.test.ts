@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createCommandCodeAdapter } from "../src/adapters/command-code";
 import { loginCommandCode, parseCommandCodeCallback, shouldImportLocalCommandCodeAuth } from "../src/oauth/command-code";
 import { buildModelsRequest, OAUTH_PROVIDERS } from "../src/oauth";
@@ -197,6 +201,27 @@ describe("Command Code provider", () => {
     // must populate the repo/branch instead of returning the empty fallback.
     expect(body.config.isGitRepo).toBe(true);
     expect(body.config.currentBranch).not.toBe("");
+  });
+
+  test.skipIf(process.platform === "win32")("does not execute a repository-configured fsmonitor while collecting metadata", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "ocx-command-code-"));
+    const marker = join(workspace, "fsmonitor-ran");
+    const monitor = join(workspace, "fsmonitor.sh");
+    const previousCwd = process.cwd();
+    try {
+      await writeFile(monitor, `#!/bin/sh\nprintf invoked > ${JSON.stringify(marker)}\n`);
+      await chmod(monitor, 0o755);
+      execFileSync("git", ["init", "-q"], { cwd: workspace });
+      execFileSync("git", ["config", "core.fsmonitor", monitor], { cwd: workspace });
+
+      process.chdir(workspace);
+      const built = await builtRequest(parsed());
+      expect(JSON.parse(built.body).config.isGitRepo).toBe(true);
+      await expect(readFile(marker, "utf8")).rejects.toThrow();
+    } finally {
+      process.chdir(previousCwd);
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 
   test("does not advertise an unverified effort for models absent from the official table", async () => {

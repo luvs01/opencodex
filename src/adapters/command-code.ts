@@ -160,7 +160,9 @@ async function gitWorkspaceInfo(cwd: string | undefined): Promise<GitWorkspaceIn
   if (cached && Date.now() - cached.collectedAt < WORKSPACE_METADATA_TTL_MS) return cached.value;
   const run = async (args: string[]): Promise<string> => {
     try {
-      const { stdout } = await execFile("git", args, { cwd, encoding: "utf8", timeout: 2000, windowsHide: true });
+      // `git status` may invoke a repository-configured fsmonitor. Disable it for every
+      // metadata read so inspecting an untrusted workspace cannot launch local commands.
+      const { stdout } = await execFile("git", ["-c", "core.fsmonitor=false", ...args], { cwd, encoding: "utf8", timeout: 2000, windowsHide: true });
       return stdout.trim();
     } catch {
       return "";
