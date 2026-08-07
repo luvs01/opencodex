@@ -113,8 +113,12 @@ describe("selectEagerPath (platform policy matrix)", () => {
       .toEqual({ useEagerRelay: true, reason: "auto-fixed-runtime" });
   });
 
-  test("darwin + no rewrite + config-eager → eager", () => {
-    expect(selectEagerPath("darwin", false, "eager-relay", "1.3.14", null))
+  test("darwin + no rewrite + config-eager + known-bad runtime → tee", () => {
+    expect(selectEagerPath("darwin", false, "eager-relay", "1.3.14", null)).toBeNull();
+  });
+
+  test("darwin + no rewrite + config-eager + fixed runtime → eager", () => {
+    expect(selectEagerPath("darwin", false, "eager-relay", "1.4.0", "1.4.0"))
       .toEqual({ useEagerRelay: true, reason: "config-eager" });
   });
 

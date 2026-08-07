@@ -632,8 +632,8 @@ export interface OcxConfig {
    * Windows/macOS SSE passthrough stream shape (#314 mitigation).
    * On Windows, "auto" (default) selects eager relay only on a runtime proven
    * to carry the Bun#32111 fix. On macOS, "auto" always stays on legacy tee and
-   * eager relay is explicit-only. "eager-relay" opts into the new relay (and
-   * accepts #32111 crash risk on Bun 1.3.14); "legacy-tee" pins the tee path.
+   * eager relay requires both explicit opt-in and a runtime verified to carry
+   * the Bun#32111 fix. "legacy-tee" pins the tee path.
    * Persisted in config.json so service users can select the stream shape.
    * See src/lib/bun-stream-caps.ts.
    */

@@ -49,8 +49,9 @@ Native passthrough SSE has TWO shapes, selected per request in
   `legacy-tee` and known-bad-runtime `auto` on tee as documented. When selected,
   `response.completed` closes the client stream even if upstream keeps HTTP/SSE
   alive. Darwin uses it for no-client-rewrite traffic only (neither image-gen
-  aliases nor item-id repair) and is explicit-only: `auto` stays tee even after
-  a future threshold bump. One eager reader + byte-bounded
+  aliases nor item-id repair), but requires both explicit config and a
+  proven-fixed runtime: `auto` stays tee even after a future threshold bump.
+  One eager reader + byte-bounded
   client queue + post-cancel bounded discard-drain replaces the tee and goes
   directly to the response without a JS rewrite wrapper, preserving the full
   inspection side-effect set (shared `createSseInspector` factory in `relay.ts`)

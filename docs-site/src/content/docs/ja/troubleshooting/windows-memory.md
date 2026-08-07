@@ -42,7 +42,6 @@ Windows では、#32111 クラッシュを回避するために、opencodex は�
 2. **`OPENCODEX_BUN_PATH` を使用して信頼できる Bun ランタイムを実行します。** これは
 未検証の領域 — 私たちがテストしていないランタイムで opencodex を実行しています。自己責任で。サービスのインストールにとって重要: オーバーライドは、サービスの開始時ではなく、**サービス アーティファクトの生成時に**読み込まれます。環境変数を設定し、同じシェルから `ocx service repair` を再実行すると、パスが永続サービス定義に組み込まれます。 env を設定するだけでは、すでにインストールされているサービスには何も影響しません。
 
-3. **`streamMode: "eager-relay"` を使用して有界リレーにオプトインします。** 2 つの方法:
-`config.json` を編集する (`"streamMode": "eager-relay"` を追加する) か、管理 API を呼び出します。`PUT /api/settings` と `{"streamMode":"eager-relay"}` は、再起動せずに新しいターンに適用されます。 **クラッシュのリスク警告:** Bun 1.3.14 では、#32111 の影響を受けるストリーム形状が使用されており、ストリームの途中でプロセスがクラッシュする可能性があります (Windows に限らず、どの OS でも)。サービス マネージャーはサービスを再起動しますが、実行中のリクエストは失敗します。 `"legacy-tee"` は現在のデフォルトを固定します。 Windows では、`"auto"` (デフォルト) によりランタイム ゲートが決定します。 macOS では、`"auto"` は常に T 上にあります。明示的な `"eager-relay"` はオプトインです。
+3. **`streamMode: "eager-relay"` で bounded relay を明示的に選択します。** 設定方法は変わりませんが、macOS では bundled runtime に #32111 の修正が含まれると検証された場合にのみ有効になり、それまでは tee を使用します。Windows では既存の明示設定の動作を維持します。`"legacy-tee"` は tee を固定し、`"auto"` は Windows では runtime gate に従い、macOS では常に tee を使用します。
 
 これらのいずれかを実際の Windows ワークロードで試した場合は、[#314](https://github.com/lidge-jun/opencodex/issues/314) の `ocx doctor` メモリ セクションの前後を報告してください。これがまさにこの軽減策が待っている検証です。
