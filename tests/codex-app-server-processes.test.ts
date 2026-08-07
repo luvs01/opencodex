@@ -12,6 +12,7 @@ import {
   listCodexAppServerProcesses,
   listWindowsSnapshots,
   resetCodexAppServerCatalogStateCache,
+  resolveWindowsPowerShellPath,
   restartCodexAppServers,
   STALE_CODEX_APP_SERVER_HINT,
   warnIfStaleCodexAppServersAfterStartupWrite,
@@ -446,6 +447,24 @@ describe("Windows Win32_Process owner enumeration (#476)", () => {
     expect(processSource).toContain("WINDOWS_CODEX_BASENAME_CANDIDATE_RE.source");
     expect(processSource).toContain("powerShellSingleQuotedIgnoreCaseMatch");
     expect(WINDOWS_CODEX_BASENAME_CANDIDATE_RE.source).toContain("['\"]?");
+    expect(processSource).toContain('execFileSync("/bin/ps"');
+    expect(processSource).toContain("execFileSync(resolveWindowsPowerShellPath()");
+    expect(processSource).not.toContain('execFileSync("powershell.exe"');
+  });
+
+  test("PowerShell path is absolute and selects Sysnative for 32-bit Windows", () => {
+    expect(resolveWindowsPowerShellPath({ SystemRoot: "D:\\Windows" }, "x64")).toBe(
+      "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    );
+    expect(resolveWindowsPowerShellPath({
+      SystemRoot: "C:\\Windows",
+      PROCESSOR_ARCHITEW6432: "AMD64",
+    }, "ia32")).toBe(
+      "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe",
+    );
+    expect(resolveWindowsPowerShellPath({ SystemRoot: ".\\planted" }, "x64")).toBe(
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    );
   });
 
   test.skipIf(process.platform !== "win32")(
