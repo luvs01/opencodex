@@ -38,7 +38,6 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const CLINE_BASE_URL = "https://api.cline.bot";
 const ZAI_BASE_URL = "https://api.z.ai";
-const MINIMAX_REMAINS_URL = "https://www.minimax.io/v1/token_plan/remains";
 const MOONSHOT_BASE_URL = "https://api.moonshot.ai/v1";
 const VENICE_BASE_URL = "https://api.venice.ai/api/v1";
 const SYNTHETIC_BASE_URL = "https://api.synthetic.new/v2";
@@ -609,15 +608,14 @@ async function fetchZaiQuota(provider: string, config: OcxProviderConfig): Promi
  * the plan's total duration, so no percentage is fabricated from a presumed
  * window: the remaining time is reported as a duration-only window. When the
  * API supplies a total (`total_time` / `plan_duration_ms`), a consumed share
- * is derived from it. Region selects the host: `minimax` → www.minimax.io,
- * `minimax-cn` → api.minimaxi.com.
+ * is derived from it. The endpoint is resolved against the validated provider
+ * API base URL so credentials never cross origins.
  */
 async function fetchMinimaxQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalMinimaxBaseUrl(config.baseUrl)) return null;
   const apiKey = resolveEnvValue(config.apiKey)?.trim();
   if (!apiKey) return null;
-  const cnHost = normalizedBaseUrl(config.baseUrl)?.startsWith("https://api.minimaxi.com");
-  const remainsUrl = cnHost ? "https://api.minimaxi.com/v1/token_plan/remains" : MINIMAX_REMAINS_URL;
+  const remainsUrl = `${normalizedBaseUrl(config.baseUrl)}/token_plan/remains`;
   const response = await fetch(remainsUrl, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
     redirect: "error",
