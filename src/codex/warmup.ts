@@ -33,9 +33,21 @@ const MAX_ERROR_BODY_BYTES = 2048;
 
 /** Read the first MAX_ERROR_BODY_BYTES of a response body and extract an error message. */
 async function readErrorDetail(res: Response): Promise<string | undefined> {
+  if (!res.body) return undefined;
+
+  const reader = res.body.getReader();
   try {
-    const text = await res.text();
-    const trimmed = text.slice(0, MAX_ERROR_BODY_BYTES);
+    const bytes = new Uint8Array(MAX_ERROR_BODY_BYTES);
+    let byteLength = 0;
+    while (byteLength < MAX_ERROR_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = MAX_ERROR_BODY_BYTES - byteLength;
+      const chunk = value.subarray(0, remaining);
+      bytes.set(chunk, byteLength);
+      byteLength += chunk.byteLength;
+    }
+    const trimmed = new TextDecoder().decode(bytes.subarray(0, byteLength));
     try {
       const json = JSON.parse(trimmed) as Record<string, unknown>;
       // ChatGPT backend error shape: { error: { message: "..." } } or { detail: "..." }
@@ -53,6 +65,9 @@ async function readErrorDetail(res: Response): Promise<string | undefined> {
     return undefined;
   } catch {
     return undefined;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 

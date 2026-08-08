@@ -64,6 +64,33 @@ describe("codex warmup improvements", () => {
     }
   });
 
+  test("warmCodexAccount stops reading error bodies at the byte limit", async () => {
+    const encoder = new TextEncoder();
+    let pulls = 0;
+    let cancelled = false;
+    const fetchMock = mock(async () =>
+      new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(encoder.encode(
+            pulls === 1
+              ? `${JSON.stringify({ detail: "account unavailable" })}${" ".repeat(990)}`
+              : " ".repeat(1024),
+          ));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }), { status: 401 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmCodexAccount({ accessToken: "access-test", chatgptAccountId: "acct-test" }))
+      .rejects.toMatchObject({ upstreamDetail: "account unavailable" });
+
+    expect(pulls).toBeLessThan(10);
+    expect(cancelled).toBe(true);
+  });
+
   test("warmCodexAccount retries FALLBACK_MODELS when the default model returns 400", async () => {
     const parsedBodies: Record<string, unknown>[] = [];
     const fetchMock = mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
