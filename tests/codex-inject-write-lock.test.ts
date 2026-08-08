@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MANAGED_SUBAGENT_DEFAULT_MARKER } from "../src/codex/subagent-defaults";
 
 const repoRoot = join(import.meta.dir, "..");
 const CHILD = join(repoRoot, "tests", "helpers", "codex-inject-race-child.ts");
@@ -234,5 +235,41 @@ describe("the transition is resolved, not left pending", () => {
     // Opt-out is a completed decision, not a failure: converged, never blocked,
     // and never left pending for a job that chose to do nothing.
     expect(row.state?.history?.status).toBe("converged");
+  });
+
+  test("a failed coordinated restore rolls back its remove transition", () => {
+    const config = `${MANAGED_SUBAGENT_DEFAULT_MARKER}\n[notice]\n`;
+    writeFileSync(join(codexHome, "config.toml"), config);
+
+    const restored = spawnSync(process.execPath, ["--eval", `
+      const { writeFileSync } = require("node:fs");
+      const { join } = require("node:path");
+      const { restoreNativeCodexAsync } = require("./src/codex/inject");
+      const { readCodexTransitionState } = require("./src/codex/transition-state");
+      const configPath = join(process.env.CODEX_HOME, "config.toml");
+      const failedConfig = ${JSON.stringify(config)};
+      writeFileSync(configPath, "");
+      const before = readCodexTransitionState();
+      writeFileSync(configPath, failedConfig);
+      const result = await restoreNativeCodexAsync();
+      const after = readCodexTransitionState();
+      console.log(JSON.stringify({ before, result, after }));
+    `], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: opencodexHome },
+    });
+
+    expect(restored.status).toBe(0);
+    const payload = JSON.parse((restored.stdout ?? "{}").trim().split("\n").pop() ?? "{}") as {
+      before: { state: { nativeGeneration: number; currentTxId: string | null } };
+      result: { success: boolean; artifacts: { config: { state: string } } };
+      after: { state: { nativeGeneration: number; currentTxId: string | null } };
+    };
+    expect(payload.result.success).toBeFalse();
+    expect(payload.result.artifacts.config.state).toBe("failed");
+    expect(payload.before.state).toMatchObject({ nativeGeneration: 0, currentTxId: null });
+    expect(payload.after.state).toEqual(payload.before.state);
+    expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe(config);
   });
 });

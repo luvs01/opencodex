@@ -1333,6 +1333,13 @@ function restoreCodexConfigInline(): CodexRestoreConfigResult {
   }
 }
 
+class CodexRestoreConfigFailure extends Error {
+  constructor(readonly result: CodexRestoreConfigResult) {
+    super(result.message);
+    this.name = "CodexRestoreConfigFailure";
+  }
+}
+
 /** The catalog half, always inside its own K acquisition. */
 function restoreCodexCatalogArtifact(revalidateDesiredState: boolean): CodexRestoreCatalogResult {
   const owningCodexHome = getCodexHome();
@@ -1436,6 +1443,7 @@ export async function restoreNativeCodexAsync(
         let restored: CodexRestoreConfigResult;
         try {
           restored = restoreCodexConfigInline();
+          if (restored.state === "failed") throw new CodexRestoreConfigFailure(restored);
         } catch (error) {
           const compensated = restoreCodexPreImages(preImages);
           if (!compensated.complete) throw new CodexPartialWriteError(compensated.unrestored);
@@ -1449,9 +1457,14 @@ export async function restoreNativeCodexAsync(
           },
         };
       },
-    );
-    if (coordinated.status === "skipped") return desiredEnabledRestoreSkip();
-    if (coordinated.status !== "acquired") {
+    ).catch((error: unknown) => {
+      if (!(error instanceof CodexRestoreConfigFailure)) throw error;
+      return { status: "restore_failed" as const, config: error.result };
+    });
+    if (coordinated.status === "restore_failed") {
+      config = coordinated.config;
+    } else if (coordinated.status === "skipped") return desiredEnabledRestoreSkip();
+    else if (coordinated.status !== "acquired") {
       config = {
         state: "failed",
         changed: false,
