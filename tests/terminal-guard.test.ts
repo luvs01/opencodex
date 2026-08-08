@@ -212,6 +212,28 @@ describe("terminal guard", () => {
     expect(actual.filter(event => event.type === "done")).toHaveLength(1);
   });
 
+  test("stops retaining events once a streamed answer cannot be a short announcement", async () => {
+    let continuations = 0;
+    let forwarded = 0;
+    for await (const _event of guardTerminalEventStream({
+      parsed: parsed("请检查这个问题并修复代码"),
+      firstEvents: (async function* () {
+        yield { type: "text_delta", text: "我接下来会修改。" } as AdapterEvent;
+        yield { type: "thinking_delta", thinking: "x".repeat(64 * 1_024 + 1) } as AdapterEvent;
+        for (let i = 0; i < 2_000; i += 1) yield { type: "text_delta", text: "" } as AdapterEvent;
+        yield { type: "done" } as AdapterEvent;
+      })(),
+      continuation: () => {
+        continuations += 1;
+        return (async function* () {})();
+      },
+      adapterName: "anthropic",
+    })) forwarded += 1;
+
+    expect(continuations).toBe(0);
+    expect(forwarded).toBe(2_003);
+  });
+
   test("serializes the guarded boundary as separate assistant output items", () => {
     const response = buildResponseJSON([
       { type: "text_delta", text: "我接下来会修改。" },

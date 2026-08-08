@@ -13,6 +13,8 @@ const PLAN_OR_COMPLETION_RE = /(?:\b(?:i(?:'|’)m going to|i will|i(?:'|’)ll|
 const WAITING_FOR_USER_RE = /(?:[?？]\s*$|需要我|请(?:确认|选择|提供)|是否|要不要|可以吗|\b(?:do you want|should i|which file|please confirm|please provide)\b)/iu;
 const EXPLICIT_CONTINUE_RE = /^(?:继续|接着|往下|go on|continue|proceed|keep going)\s*[.!。！]?$/iu;
 const MAX_ANNOUNCEMENT_CHARS = 280;
+const MAX_RETAINED_EVENTS = 1_024;
+const MAX_RETAINED_CONTENT_CHARS = 64 * 1_024;
 
 export const TERMINAL_GUARD_NUDGE =
   "你刚才只描述了计划，没有执行任何工具。不要再次解释计划，现在立即调用必要工具执行用户任务。" +
@@ -191,11 +193,14 @@ export async function* guardTerminalEventStream(options: GuardedEventStreamOptio
 
   while (true) {
     const seen: AdapterEvent[] = [];
+    let retainedContentChars = 0;
+    let retainedTextChars = 0;
+    let analysisEnabled = true;
     let terminalSeen = false;
     for await (const event of source) {
       if (event.type === "done") {
         terminalSeen = true;
-        const analysis = options.adapterName === "anthropic"
+        const analysis = options.adapterName === "anthropic" && analysisEnabled
           ? analyzeTerminalTurn(parsed, seen)
           : { decision: "pass" as const };
         const normalStop = event.stopReason !== "max_tokens" && event.stopReason !== "content_filter";
@@ -222,7 +227,40 @@ export async function* guardTerminalEventStream(options: GuardedEventStreamOptio
         yield usage ? { ...event, usage } : event;
         return;
       }
-      seen.push(event);
+      if (analysisEnabled) {
+        if (event.type === "tool_call_start") {
+          // A real tool call makes this turn ineligible for a no-tool continuation.
+          analysisEnabled = false;
+          seen.length = 0;
+        } else if (
+          event.type === "text_delta"
+          || event.type === "thinking_delta"
+          || event.type === "thinking_signature"
+          || event.type === "redacted_thinking"
+        ) {
+          const content = event.type === "text_delta"
+            ? event.text
+            : event.type === "thinking_delta"
+              ? event.thinking
+              : event.type === "thinking_signature"
+                ? event.signature
+                : event.data;
+          retainedContentChars += content.length;
+          if (event.type === "text_delta") retainedTextChars += event.text.length;
+          if (
+            retainedTextChars > MAX_ANNOUNCEMENT_CHARS
+            || retainedContentChars > MAX_RETAINED_CONTENT_CHARS
+            || seen.length >= MAX_RETAINED_EVENTS
+          ) {
+            // The guard only acts on short, no-tool announcements. Once that is impossible,
+            // return to bounded pass-through instead of retaining the rest of the stream.
+            analysisEnabled = false;
+            seen.length = 0;
+          } else {
+            seen.push(event);
+          }
+        }
+      }
       yield event;
     }
     if (!terminalSeen) return;
