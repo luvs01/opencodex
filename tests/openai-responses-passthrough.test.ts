@@ -4,6 +4,7 @@ import { enrichProviderFromRegistry, providerConfigSeed } from "../src/providers
 import { getProviderRegistryEntry } from "../src/providers/registry";
 import { sanitizeEncryptedContentInPlace } from "../src/server/responses";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
+import { parseRequest } from "../src/responses/parser";
 import { withTestTranslatorBudget } from "./helpers/translator-budget";
 
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
@@ -105,6 +106,26 @@ describe("DeepSeek Responses endpoint contract", () => {
 });
 
 describe("OpenAI Responses passthrough sanitization", () => {
+  test("normalizes client-only ultra effort before forward and key provider serialization", () => {
+    const parsed = parseRequest({
+      model: "gpt-5.6-sol",
+      input: "hi",
+      reasoning: { effort: "ultra", summary: "auto" },
+    });
+
+    for (const config of [
+      provider,
+      { adapter: "openai-responses", baseUrl: "https://api.openai.example/v1", authMode: "key" as const },
+    ]) {
+      const request = createResponsesPassthroughAdapter(config).buildRequest(
+        parsed,
+        { headers: new Headers() },
+      );
+      const body = JSON.parse(request.body) as { reasoning: { effort: string; summary: string } };
+      expect(body.reasoning).toEqual({ effort: "max", summary: "auto" });
+    }
+  });
+
   test("normalizes top-level function schemas in the serialized raw body (#745)", () => {
     const validParameters = {
       type: "object",

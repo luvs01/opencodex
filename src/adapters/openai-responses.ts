@@ -180,6 +180,13 @@ function stripUnsupportedReasoningParams(body: unknown): unknown {
   return { ...body, reasoning: Object.keys(rest).length > 0 ? rest : undefined };
 }
 
+/** Keep the client-only ultra effort from reaching any Responses-compatible upstream. */
+function normalizeUltraReasoningEffort(body: unknown): unknown {
+  if (!isPlainObject(body) || !isPlainObject(body.reasoning)) return body;
+  if (body.reasoning.effort !== "ultra") return body;
+  return { ...body, reasoning: { ...body.reasoning, effort: "max" } };
+}
+
 /**
  * A false model capability prevents Codex from emitting summary fields after the catalog refresh.
  * Strip them here as well so an already-running client with a stale catalog cannot keep sending an
@@ -1183,6 +1190,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (parsed._compactionRequest === true && !isCanonicalOpenAiForwardProvider(provider)) {
         outBody = buildRoutedCompactionBody(outBody);
       }
+      outBody = normalizeUltraReasoningEffort(outBody);
       const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody), { preserveRawReasoningContent: provider.preserveResponsesReasoningContent === true })))))));
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
