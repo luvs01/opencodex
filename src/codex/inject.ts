@@ -477,7 +477,7 @@ function setRootModelCatalogPath(content: string, catalogPath: string): string {
   const rootEnd = firstTable === -1 ? lines.length : firstTable;
   for (let i = 0; i < rootEnd; i++) {
     const m = lines[i].match(
-      /^\s*model_catalog_json\s*=\s*("(?:\\.|[^"])*"|'[^']*')\s*$/,
+      /^\s*model_catalog_json\s*=\s*("(?:\\.|[^"])*"|'[^']*')\s*(?:#.*)?$/,
     );
     if (!m) continue;
     const existing = parseTomlString(m[1]);
@@ -572,7 +572,7 @@ function stripOpencodexCatalogPath(content: string): string {
     .split("\n")
     .filter((line) => {
       const m = line.match(
-        /^\s*model_catalog_json\s*=\s*("(?:\\.|[^"])*"|'[^']*')\s*$/,
+        /^\s*model_catalog_json\s*=\s*("(?:\\.|[^"])*"|'[^']*')\s*(?:#.*)?$/,
       );
       return !m || !isOpencodexCatalogPath(parseTomlString(m[1]));
     })

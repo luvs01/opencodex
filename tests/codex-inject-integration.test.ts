@@ -100,6 +100,41 @@ describe("injectCodexConfig integration (Design B)", () => {
     expect(second).toBe(first);
   });
 
+  test("preserves a user catalog key with a trailing comment without duplicating it", () => {
+    writeFileSync(join(codexHome, "config.toml"), [
+      'model_catalog_json = "custom-catalog.json" # user catalog',
+      "",
+      "[features]",
+      "fast_mode = true",
+      "",
+    ].join("\n"), "utf8");
+
+    const result = runInject(codexHome, ocxHome);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).success).toBe(true);
+
+    const config = readFileSync(join(codexHome, "config.toml"), "utf8");
+    expect(config.match(/^model_catalog_json\s*=/gm)?.length).toBe(1);
+    expect(config).toContain('model_catalog_json = "custom-catalog.json" # user catalog');
+    expect(() => Bun.TOML.parse(config)).not.toThrow();
+  });
+
+  test("removes a stale OpenCodex catalog key with a trailing comment", () => {
+    writeFileSync(
+      join(codexHome, "config.toml"),
+      'model_catalog_json = "opencodex-catalog.json" # stale catalog\n',
+      "utf8",
+    );
+
+    const result = runInject(codexHome, ocxHome);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).success).toBe(true);
+
+    const config = readFileSync(join(codexHome, "config.toml"), "utf8");
+    expect(config).not.toContain("model_catalog_json");
+    expect(() => Bun.TOML.parse(config)).not.toThrow();
+  });
+
   test("fastMode=false forces fast_mode=false in both config and profile", () => {
     writeFileSync(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
 
