@@ -164,6 +164,7 @@ import { buildDesktop3pRegistry } from "../claude/desktop-3p";
 import { runClaudeAuthModeMigration } from "../claude/auth-mode-migration";
 import {
   bindNativeMainStartupLifecycle,
+  blockNativeMainStartupForForeignOwnership,
   releaseNativeMainStartupLifecycle,
   startNativeMainStartupLifecycle,
   type NativeMainStartupGateDeps,
@@ -602,8 +603,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   // clients; no Codex request can use this lifecycle in that state.
   const nativeOwnership = inspectNativeCodexOwnership();
   const nativeMainLifecycle: NativeMainStartupLifecycle = shouldSyncCodexOnStart(config)
-    && nativeOwnership.ownership !== "foreign"
-    ? startNativeMainStartupLifecycle(deps.nativeMainStartup)
+    ? nativeOwnership.ownership === "foreign"
+      ? blockNativeMainStartupForForeignOwnership()
+      : startNativeMainStartupLifecycle(deps.nativeMainStartup)
     : {
       homeId: null,
       settled: Promise.resolve({ status: "ready", homeId: null }),

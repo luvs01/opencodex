@@ -20,8 +20,8 @@ export type NativeMainStartupGateSnapshot =
   | { status: "ready"; homeId: string | null }
   | {
       status: "blocked";
-      homeId: string;
-      reason: "recovery-pending" | "manual-recovery" | "owner-conflict" | "owner-unavailable" | "stage-cleanup-required";
+      homeId: string | null;
+      reason: "foreign-ownership" | "recovery-pending" | "manual-recovery" | "owner-conflict" | "owner-unavailable" | "stage-cleanup-required";
     };
 
 export interface NativeMainStartupGateDeps {
@@ -291,6 +291,23 @@ export function startNativeMainStartupLifecycle(
       await Promise.allSettled([entry!.settled]);
       if (entry!.sweepInFlight) await Promise.allSettled([entry!.sweepInFlight]);
       await entry!.owner.release();
+    },
+  };
+}
+
+/** Close native-main admission without resolving or creating any CODEX_HOME artifacts. */
+export function blockNativeMainStartupForForeignOwnership(): NativeMainStartupLifecycle {
+  const currentEpoch = ++epoch;
+  snapshot = { status: "blocked", homeId: null, reason: "foreign-ownership" };
+  settled = Promise.resolve(snapshot);
+  return {
+    homeId: null,
+    settled,
+    async release() {
+      if (epoch !== currentEpoch) return;
+      epoch += 1;
+      snapshot = ready(null);
+      settled = Promise.resolve(snapshot);
     },
   };
 }

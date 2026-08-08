@@ -30,6 +30,7 @@ import type {
 } from "../src/codex/native-profile-types";
 import type { OcxConfig } from "../src/types";
 import {
+  blockNativeMainStartupForForeignOwnership,
   initializeNativeMainStartupGate,
   isNativeMainTrafficBlocked,
   nativeMainStartupGateSnapshot,
@@ -286,6 +287,20 @@ const recoverable: Array<{ phase: Phase; observation: Observation; active: "sour
 ];
 
 describe("native-main startup journal gate", () => {
+  test("foreign service ownership closes native-main admission without starting ownership", async () => {
+    const lifecycle = blockNativeMainStartupForForeignOwnership();
+    expect(nativeMainStartupGateSnapshot()).toEqual({
+      status: "blocked",
+      homeId: null,
+      reason: "foreign-ownership",
+    });
+    expect(isNativeMainTrafficBlocked()).toBe(true);
+    expect(tryClaimNativeMainProfileForTurn()).toBe(false);
+
+    await lifecycle.release();
+    expect(isNativeMainTrafficBlocked()).toBe(false);
+  });
+
   test("combined turn and standalone claims reject retained recovery before native-main reads", async () => {
     const homeId = "home-combined-admission";
     resetLifecycleDrainStateForTests();
