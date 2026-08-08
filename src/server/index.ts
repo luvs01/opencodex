@@ -1,3 +1,4 @@
+export { guardResponseBodyInactivity } from "../lib/response-body-inactivity";
 import { markActivity } from "../lib/sidecar-tracker";
 import {
   buildWarmupCompletionFrames,
