@@ -143,7 +143,9 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /stackedBase/);
     assert.match(workflow, /github\.rest\.pulls\.list/);
     assert.match(workflow, /treating as stacked/);
-    assert.match(workflow, /other\.base\?\.repo\?\.owner/);
+    assert.match(workflow, /other\.head\?\.repo\?\.owner/);
+    assert.match(workflow, /other\.head\?\.repo\?\.name/);
+    assert.doesNotMatch(workflow, /other\.base\?\.repo\?\.(?:owner|name)/);
     const qualityCall = workflow.match(
       /collectPrQualityFailures\(\{([\s\S]*?)\}\);/,
     );
