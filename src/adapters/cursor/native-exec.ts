@@ -128,6 +128,8 @@ const blobs = new Map<string, CursorBlobEntry>();
 const blobRequestScopes = new Map<CursorBlobRequestScopeToken, CursorBlobRequestScopeState>();
 let blobLimits = { ...DEFAULT_BLOB_LIMITS };
 let blobBytes = 0;
+/** Retained key-string bytes (separate from the payload cap — see key()). */
+let blobKeyBytes = 0;
 let blobLocalBytes = 0;
 let blobPinnedBytes = 0;
 let blobEvictableBytes = 0;
@@ -152,13 +154,13 @@ function recomputeBlobClassAccounting(): void {
   let pinnedBytes = 0;
   let evictableBytes = 0;
   let oldestAt: number | null = null;
-  for (const entry of blobs.values()) {
+  for (const [k, entry] of blobs) {
     const requestPinned = entry.requestPins.size > 0;
     const provenancePinned = entry.provenance === "remote-setBlobArgs" && !isExpired(entry, now);
     if (entry.provenance === "local-regenerated") localBytes += entry.sizeBytes;
-    if (requestPinned || provenancePinned) pinnedBytes += entry.sizeBytes;
+    if (requestPinned || provenancePinned) pinnedBytes += entry.sizeBytes + k.length;
     if (!requestPinned && (entry.provenance === "local-regenerated" || isExpired(entry, now))) {
-      evictableBytes += entry.sizeBytes;
+      evictableBytes += entry.sizeBytes + k.length;
       oldestAt = oldestAt === null ? entry.storedAt : Math.min(oldestAt, entry.storedAt);
     }
   }
@@ -196,9 +198,10 @@ function deleteBlob(k: string, recompute = true): number {
   if (!entry) return 0;
   blobs.delete(k);
   blobBytes -= entry.sizeBytes;
+  blobKeyBytes -= k.length;
   for (const scope of entry.requestPins) blobRequestScopes.get(scope)?.keys.delete(k);
   if (recompute) recomputeBlobClassAccounting();
-  return entry.sizeBytes;
+  return entry.sizeBytes + k.length;
 }
 
 function releaseHydratedBlob(k: string, requestScope?: CursorBlobRequestScopeToken): void {
@@ -313,6 +316,7 @@ function setBlob(
   if (blobs.has(k)) deleteBlob(k, false);
   blobs.set(k, entry);
   blobBytes += entry.sizeBytes;
+  blobKeyBytes += k.length;
   for (const scope of entry.requestPins) blobRequestScopes.get(scope)?.keys.add(k);
   reconcileBlobClassAccountingAndEnforce();
   return { admitted: true, replaced: existing !== undefined };
@@ -328,8 +332,11 @@ function getBlob(k: string): Uint8Array | undefined {
   return entry.data;
 }
 
+const MAX_BLOB_ID_PASSTHROUGH_BYTES = 64;
+
 function key(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString("hex");
+  if (bytes.byteLength <= MAX_BLOB_ID_PASSTHROUGH_BYTES) return `h:${Buffer.from(bytes).toString("hex")}`;
+  return `d:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 /**
@@ -382,6 +389,7 @@ export function storeCursorBlob(data: Uint8Array, requestScope?: CursorBlobReque
 export interface CursorBlobMetrics {
   count: number;
   totalBytes: number;
+  keyBytes: number;
   localBytes: number;
   pinnedBytes: number;
   rejectedEntryTooLarge: number;
@@ -393,6 +401,7 @@ export function cursorBlobMetrics(): CursorBlobMetrics {
   return {
     count: blobs.size,
     totalBytes: blobBytes,
+    keyBytes: blobKeyBytes,
     localBytes: blobLocalBytes,
     pinnedBytes: blobPinnedBytes,
     rejectedEntryTooLarge,
@@ -410,7 +419,7 @@ export function cursorBlobRetainedStoreSnapshot(): {
 } {
   return {
     count: blobs.size,
-    bytes: blobBytes,
+    bytes: blobBytes + blobKeyBytes,
     evictableBytes: blobEvictableBytes,
     pinnedBytes: blobPinnedBytes,
     oldestAt: blobOldestEvictableAt,
@@ -440,6 +449,7 @@ export function resetCursorBlobStateForTests(): void {
   blobs.clear();
   blobRequestScopes.clear();
   blobBytes = 0;
+  blobKeyBytes = 0;
   rejectedEntryTooLarge = 0;
   rejectedPinnedSaturation = 0;
   recomputeBlobClassAccounting();
