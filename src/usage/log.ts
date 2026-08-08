@@ -615,8 +615,8 @@ export function readUsageEntries(): PersistedUsageEntry[] {
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const parsed = JSON.parse(line) as PersistedUsageEntry;
-      if (parsed && typeof parsed === "object" && typeof parsed.requestId === "string") {
+      const parsed: unknown = JSON.parse(line);
+      if (isPersistedUsageEntry(parsed)) {
         entries.push(normalizeUsageEntry(parsed));
       }
     } catch {
@@ -626,13 +626,19 @@ export function readUsageEntries(): PersistedUsageEntry[] {
   return entries;
 }
 
+function isPersistedUsageEntry(value: unknown): value is PersistedUsageEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<PersistedUsageEntry>;
+  return typeof entry.requestId === "string" && typeof entry.provider === "string";
+}
+
 function parseUsageLines(lines: string[]): PersistedUsageEntry[] {
   const entries: PersistedUsageEntry[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const parsed = JSON.parse(line) as PersistedUsageEntry;
-      if (parsed && typeof parsed === "object" && typeof parsed.requestId === "string") {
+      const parsed: unknown = JSON.parse(line);
+      if (isPersistedUsageEntry(parsed)) {
         entries.push(normalizeUsageEntry(parsed));
       }
     } catch {

@@ -141,7 +141,7 @@ describe("usage log", () => {
   test("usage byte-prefix truncation and entry-count truncation report independent metadata", async () => {
     writeFileSync(
       usageLogPath(),
-      `${Array.from({ length: 500_001 }, (_, index) => JSON.stringify({ requestId: String(index) })).join("\n")}\n`,
+      `${Array.from({ length: 500_001 }, (_, index) => JSON.stringify({ requestId: String(index), provider: "p" })).join("\n")}\n`,
     );
     const snapshot = await readUsageSnapshotForManagement();
     expect(snapshot.entries).toHaveLength(500_000);
@@ -654,14 +654,17 @@ describe("usage log", () => {
     }]);
   });
 
-  test("skips malformed JSONL lines while keeping valid entries", () => {
+  test("skips malformed JSONL and provider-less entries while keeping valid entries", async () => {
     writeFileSync(usageLogPath(), [
       "{\"requestId\":\"a\",\"timestamp\":1,\"provider\":\"p\",\"model\":\"m\",\"status\":200,\"durationMs\":1,\"usageStatus\":\"unreported\"}",
       "{not-json",
+      "{\"requestId\":\"missing-provider\",\"timestamp\":2}",
+      "{\"requestId\":\"invalid-provider\",\"timestamp\":2,\"provider\":42}",
       "{\"requestId\":\"b\",\"timestamp\":2,\"provider\":\"p\",\"model\":\"m\",\"status\":200,\"durationMs\":1,\"usageStatus\":\"reported\",\"usage\":{\"inputTokens\":1,\"outputTokens\":2},\"totalTokens\":3}",
     ].join("\n"));
 
     expect(readUsageEntries().map(entry => entry.requestId)).toEqual(["a", "b"]);
+    expect((await readUsageEntriesForManagement()).map(entry => entry.requestId)).toEqual(["a", "b"]);
   });
 
   test("keeps missing usage distinct from zero usage", () => {
