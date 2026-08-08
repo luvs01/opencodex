@@ -3,7 +3,7 @@ import type { OcxConfig } from "../types";
 export const DEFAULT_PROVIDER_CONTEXT_CAP = 350_000;
 
 function isValidContextCap(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 export function providerContextCap(config: Pick<OcxConfig, "providerContextCaps">, provider: string): number | undefined {

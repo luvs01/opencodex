@@ -2423,6 +2423,19 @@ describe("provider management validation", () => {
         body: JSON.stringify({ value: 0 }),
       });
       expect(bad.status).toBe(400);
+
+      // Fractional values must not be floored into schema-invalid persisted caps.
+      const fractional = await fetch(new URL("/api/provider-context-caps", server.url), {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: 0.5 }),
+      });
+      expect(fractional.status).toBe(400);
+      expect(await fractional.json()).toEqual({ error: "value must be a positive integer" });
+      expect(loadConfig()).toMatchObject({
+        contextCapValue: 500_000,
+        providerContextCaps: { "test-openai": 500_000, other: 500_000 },
+      });
     } finally {
       await server.stop(true);
     }

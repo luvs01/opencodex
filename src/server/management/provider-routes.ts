@@ -643,8 +643,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
 
     // Branch 1: set the global cap value and re-point every enabled provider to it.
     if (body.value !== undefined) {
-      if (typeof body.value !== "number" || !Number.isFinite(body.value) || body.value <= 0) {
-        return jsonResponse({ error: "value must be a positive number" }, 400);
+      if (typeof body.value !== "number" || !Number.isInteger(body.value) || body.value <= 0) {
+        return jsonResponse({ error: "value must be a positive integer" }, 400);
       }
       const affected = Object.keys(providerContextCaps(config));
       setGlobalContextCapValue(config, body.value);
