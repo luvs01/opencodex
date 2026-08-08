@@ -204,6 +204,22 @@ describe("vision description cache and per-turn cap", () => {
     expect(visionDescriptionRetainedStoreSnapshot()).toEqual(before);
   });
 
+  test("does not consume or expose an oversized sidecar error body", async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(65_537).fill(120)); },
+      cancel() { cancelled = true; },
+    }), { status: 503 })) as typeof fetch;
+    const request = parsed([{ type: "input_image", image_url: DATA_A }]);
+
+    await describeImagesInPlace(request, plan(), new Headers({ authorization: "Bearer test" }));
+
+    expect(cancelled).toBe(true);
+    expect(textParts(request)).toEqual([
+      "[An image was attached but could not be processed: vision sidecar HTTP 503]",
+    ]);
+  });
+
   test("interleaves hits, misses, and over-cap markers without changing message or part order", async () => {
     globalThis.fetch = (async (_url, init) => openaiSse(imageCaption(JSON.parse(String(init?.body))))) as typeof fetch;
     const headers = new Headers({ authorization: "Bearer test" });
