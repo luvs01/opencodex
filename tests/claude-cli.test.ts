@@ -52,6 +52,26 @@ describe("ocx claude env assembly", () => {
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe("sk-ocx-123");
   });
 
+  test("does not send the proxy admission key to a user-selected gateway", () => {
+    const env = buildClaudeEnv(cfg({
+      apiKeys: [{ id: "1", name: "main", key: "sk-ocx-123", createdAt: "2026-01-01" }],
+    }), 10100, {
+      ANTHROPIC_BASE_URL: "https://gateway.example.test",
+    }, {}, { preBunAnthropicSlots: ["ANTHROPIC_BASE_URL"] });
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://gateway.example.test");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  test("does not add an auth token when the user exported an Anthropic API key", () => {
+    const env = buildClaudeEnv(cfg({
+      apiKeys: [{ id: "1", name: "main", key: "sk-ocx-123", createdAt: "2026-01-01" }],
+    }), 10100, {
+      ANTHROPIC_API_KEY: "sk-ant-user",
+    }, {}, { preBunAnthropicSlots: ["ANTHROPIC_API_KEY"] });
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-user");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
   // Host-managed routing guard (devlog 260720_claude_authmode_persist/020):
   // defends the spawn env against leftover cc-switch/CCR settings.json env hijack.
   test("subscription mode leaves the host-managed auth assertion unset", () => {

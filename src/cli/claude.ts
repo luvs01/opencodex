@@ -92,6 +92,7 @@ export function buildClaudeEnv(
   };
   setDefault("ANTHROPIC_BASE_URL", `http://127.0.0.1:${port}`);
   const existingBaseUrl = env.ANTHROPIC_BASE_URL;
+  let targetsLocalProxy = false;
   if (existingBaseUrl) {
     try {
       const parsed = new URL(existingBaseUrl);
@@ -101,6 +102,10 @@ export function buildClaudeEnv(
         console.error(`⚠ Replacing stale opencodex ANTHROPIC_BASE_URL ${existingBaseUrl} with ${replacement}.`);
         env.ANTHROPIC_BASE_URL = replacement;
       }
+      const effective = new URL(env.ANTHROPIC_BASE_URL!);
+      targetsLocalProxy = effective.protocol === "http:"
+        && (effective.hostname === "localhost" || effective.hostname === "127.0.0.1")
+        && Number(effective.port) === port;
     } catch {
       // Preserve user-provided values that are not parseable URLs.
     }
@@ -110,7 +115,10 @@ export function buildClaudeEnv(
   // the user's Claude login. Only inject a token when the proxy actually requires an
   // admission key; otherwise Claude Code keeps its own OAuth and sends it to us —
   // native claude models then pass through verbatim (see server/claude-messages.ts).
-  if ((config.apiKeys?.length ?? 0) > 0) {
+  // Never pair a proxy admission secret with a user-selected destination. Also let an
+  // explicitly exported Anthropic API key remain the sole credential so Claude Code
+  // does not report conflicting authentication variables.
+  if (targetsLocalProxy && !env.ANTHROPIC_API_KEY && (config.apiKeys?.length ?? 0) > 0) {
     setDefault("ANTHROPIC_AUTH_TOKEN", config.apiKeys![0].key);
   }
   // Detection reads the SANITIZED launch env — the exact object spawned below — so the
@@ -128,7 +136,7 @@ export function buildClaudeEnv(
     env: () => env as NodeJS.ProcessEnv,
     ownTokens: ownAdmissionTokens(config),
   }));
-  if (!env.ANTHROPIC_AUTH_TOKEN && resolved.markerMode === "proxy") {
+  if (targetsLocalProxy && !env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY && resolved.markerMode === "proxy") {
     env.ANTHROPIC_AUTH_TOKEN = PROXY_MARKER;
   }
   if (resolved.origin === "auto-unknown") {
