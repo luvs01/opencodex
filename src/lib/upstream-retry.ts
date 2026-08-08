@@ -2,10 +2,9 @@
  * Retry guard for upstream fetches that die on stale pooled keep-alive sockets.
  *
  * chatgpt.com (Cloudflare) closes idle keep-alive connections server-side; Bun's fetch pool
- * reuses the half-closed socket and the request write fails with ECONNRESET before any
- * response bytes arrive. Retrying on a fresh connection is safe for our replayable
- * (string-body) upstream requests, because fetch() rejects only before response headers —
- * a caught error here means no response was ever received.
+ * reuses the half-closed socket and the request write can fail with ECONNRESET before any
+ * response bytes arrive. A rejection before response headers does not prove that the origin
+ * did not process the request, so reset retries require an explicit replay-safety opt-in.
  *
  * Deliberately narrow: timeouts, aborts, ECONNREFUSED/DNS/TLS failures, and HTTP error
  * statuses (returned as Response, never thrown) are NOT retried. Mid-stream SSE resets are
@@ -238,6 +237,8 @@ export interface ResetRetryOptions {
   abortSignal?: AbortSignal;
   /** Short host/path label for the retry warn log (no secrets/query strings). */
   label?: string;
+  /** Opt in only when replaying the operation cannot duplicate upstream side effects. */
+  replaySafe?: boolean;
   attempts?: number;
 }
 
@@ -304,16 +305,20 @@ export function applyUpstreamRecoveryInit<T extends RequestInit>(
 }
 
 /**
- * Run `doFetch`, retrying only connection-reset-shaped rejections (see
- * isConnectionResetError) with jittered backoff. The caller's thunk must be replay-safe
- * (string body); every retry is logged so persistent resets stay visible.
+ * Run `doFetch`, retrying connection-reset-shaped rejections (see
+ * isConnectionResetError) with jittered backoff only when the caller explicitly proves the
+ * operation replay-safe. String bodies are mechanically reusable, but that alone does not
+ * make a model request idempotent: the origin may process it before closing the connection.
+ * Every retry is logged so persistent resets stay visible.
  */
 export async function fetchWithResetRetry(
   doFetch: ReplayableFetch,
   opts: ResetRetryOptions = {},
   firstRecovery?: UpstreamSendRecovery,
 ): Promise<Response> {
-  const attempts = Math.max(1, opts.attempts ?? RESET_RETRY_MAX_ATTEMPTS);
+  const attempts = opts.replaySafe
+    ? Math.max(1, opts.attempts ?? RESET_RETRY_MAX_ATTEMPTS)
+    : 1;
   let lastError: unknown;
   let sawReset = false;
   for (let attempt = 0; attempt < attempts; attempt++) {
