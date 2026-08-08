@@ -676,6 +676,50 @@ describe("request log metadata", () => {
     });
   });
 
+  test("non-JSON error logging streams without waiting for the upstream body to end", async () => {
+    const entries: RequestLogEntry[] = [];
+    const encoder = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("upstream failed: first chunk"));
+      },
+    });
+    const response = responseWithDeferredRequestLog(
+      new Response(upstream, { status: 502, headers: { "content-type": "text/plain" } }),
+      "ocx-test-streaming-error",
+      Date.now(),
+      { model: "gpt-5.5", provider: "custom" },
+      entry => entries.push(entry),
+    );
+
+    const reader = response.body!.getReader();
+    const first = await Promise.race([
+      reader.read(),
+      Bun.sleep(250).then(() => { throw new Error("error response was buffered"); }),
+    ]);
+    expect(new TextDecoder().decode(first.value)).toBe("upstream failed: first chunk");
+    expect(entries).toHaveLength(0);
+    await reader.cancel();
+    expect(entries[0]?.upstreamError).toBe("upstream failed: first chunk");
+  });
+
+  test("non-JSON error logging inspects only a bounded prefix while preserving the body", async () => {
+    const entries: RequestLogEntry[] = [];
+    const body = `provider error: ${"x".repeat(20_000)}`;
+    const response = responseWithDeferredRequestLog(
+      new Response(body, { status: 500, headers: { "content-type": "text/plain" } }),
+      "ocx-test-bounded-error",
+      Date.now(),
+      { model: "gpt-5.5", provider: "custom" },
+      entry => entries.push(entry),
+    );
+
+    expect(await response.text()).toBe(body);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.upstreamError).toHaveLength(500);
+    expect(entries[0]?.upstreamError).toStartWith("provider error: ");
+  });
+
   test("deferred SSE logging captures terminal reported usage", async () => {
     const entries: RequestLogEntry[] = [];
     const body = new ReadableStream<Uint8Array>({
