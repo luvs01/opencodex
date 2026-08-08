@@ -60,6 +60,20 @@ describe("codex warmup", () => {
       .rejects.toMatchObject({ name: "CodexWarmupError", code: "invalid_sse" });
   });
 
+  test("rejects an oversized unterminated SSE stream", async () => {
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const chunk = new Uint8Array(256 * 1024).fill(65);
+        for (let index = 0; index < 5; index += 1) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    globalThis.fetch = (async () => new Response(oversizedBody, { status: 200 })) as typeof fetch;
+
+    await expect(warmCodexAccount({ accessToken: "a", chatgptAccountId: "c" }))
+      .rejects.toMatchObject({ name: "CodexWarmupError", code: "stream_too_large" });
+  });
+
   test("rejects EOF before success terminal", async () => {
     globalThis.fetch = (async () => sseResponse('event: response.created\ndata: {"type":"response.created"}\n\n')) as typeof fetch;
     await expect(warmCodexAccount({ accessToken: "a", chatgptAccountId: "c" }))

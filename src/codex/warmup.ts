@@ -1,5 +1,5 @@
 export class CodexWarmupError extends Error {
-  code: "http_status" | "missing_body" | "stream_failed" | "stream_incomplete" | "stream_error" | "invalid_sse" | "no_terminal" | "transport";
+  code: "http_status" | "missing_body" | "stream_failed" | "stream_incomplete" | "stream_error" | "stream_too_large" | "invalid_sse" | "no_terminal" | "transport";
   status?: number;
   /** Upstream error detail extracted from the response body (truncated to 512 chars). */
   upstreamDetail?: string;
@@ -30,6 +30,7 @@ const DEFAULT_MODEL = "gpt-5.4-mini";
 const FALLBACK_MODELS = ["gpt-5.5"];
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_ERROR_BODY_BYTES = 2048;
+const MAX_WARMUP_STREAM_BYTES = 1024 * 1024;
 
 /** Read the first MAX_ERROR_BODY_BYTES of a response body and extract an error message. */
 async function readErrorDetail(res: Response): Promise<string | undefined> {
@@ -93,11 +94,16 @@ async function drainWarmupSse(body: ReadableStream<Uint8Array>): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let bytesRead = 0;
 
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      bytesRead += value.byteLength;
+      if (bytesRead > MAX_WARMUP_STREAM_BYTES) {
+        throw new CodexWarmupError("stream_too_large", "Codex warmup stream exceeded the size limit");
+      }
       buffer += decoder.decode(value, { stream: true });
 
       for (;;) {
