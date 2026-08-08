@@ -3,7 +3,6 @@ import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type Resp
 import { formatPassthroughUpstreamError } from "./passthrough-error";
 import { describeUpstreamConnectFailure } from "./upstream-error";
 import {
-  getConfigPath,
   multiAgentGuidanceEnabled,
   resolveEnvValue,
 } from "../../config";
@@ -1688,7 +1687,7 @@ async function handleResponsesInner(
         return formatErrorResponse(
           400,
           "invalid_request_error",
-          `${err.message}. Remove or reconfigure provider '${route.providerName}' in ${getConfigPath()}.`,
+          `${err.message}. Remove or reconfigure provider '${route.providerName}' in the OpenCodex configuration.`,
         );
       }
       return formatErrorResponse(401, "authentication_error", err instanceof Error ? err.message : String(err));
