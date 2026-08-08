@@ -4161,6 +4161,23 @@ describe("GitHub Actions hardening", () => {
       expect(probe.bun).toBe("undefined");
     });
 
+    test("the harness drains nested deferred work and preserves timer arguments", async () => {
+      for (const body of [
+        `setTimeout(() => queueMicrotask(() => github.request("POST /repos/attacker/other/issues", {})), 0);`,
+        `setTimeout((enabled) => {
+          if (enabled) github.request("POST /repos/attacker/other/issues", {});
+        }, 0, true);`,
+        `setImmediate((enabled) => {
+          if (enabled) github.request("POST /repos/attacker/other/issues", {});
+        }, true);`,
+      ]) {
+        const result = await runEnforcePrTarget(body, {
+          pr: { base: { ref: "dev" } },
+        });
+        expect(methodsOf(result)).toEqual(["request"]);
+      }
+    });
+
     test("a draft GraphQL failure is soft-failed with accurate state and a hard check failure", async () => {
       // Observed on PR #626: convertPullRequestToDraft failed with
       // "Resource not accessible by integration", the job crashed before

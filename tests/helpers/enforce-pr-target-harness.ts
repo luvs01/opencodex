@@ -421,13 +421,18 @@ function nodeLikeRuntime(deferred: (() => unknown)[]): Record<string, unknown> {
   const deny = (name: string) => () => {
     throw new Error(`the script must not use ${name}`);
   };
-  /** Record the callback so the run can drain it, and hand back a timer id. */
-  const capture = (callback: unknown) => {
+  /** Record a callback and its arguments so the run can drain it. */
+  const capture = (callback: unknown, args: unknown[] = []) => {
     if (typeof callback === "function") {
-      deferred.push(callback as () => unknown);
+      deferred.push(() => callback(...args));
     }
     return { unref: () => {}, ref: () => {} };
   };
+  const captureTimer = (callback: unknown, _delay?: unknown, ...args: unknown[]) =>
+    capture(callback, args);
+  const captureImmediate = (callback: unknown, ...args: unknown[]) =>
+    capture(callback, args);
+  const captureMicrotask = (callback: unknown) => capture(callback);
 
   const fakeGlobal: Record<string, unknown> = {
     process: nodeProcess,
@@ -452,10 +457,10 @@ function nodeLikeRuntime(deferred: (() => unknown)[]): Record<string, unknown> {
   fakeGlobal.globalThis = fakeGlobal;
   fakeGlobal.global = fakeGlobal;
 
-  fakeGlobal.setTimeout = capture;
-  fakeGlobal.setInterval = capture;
-  fakeGlobal.setImmediate = capture;
-  fakeGlobal.queueMicrotask = capture;
+  fakeGlobal.setTimeout = captureTimer;
+  fakeGlobal.setInterval = captureTimer;
+  fakeGlobal.setImmediate = captureImmediate;
+  fakeGlobal.queueMicrotask = captureMicrotask;
 
   return {
     process: nodeProcess,
@@ -467,10 +472,10 @@ function nodeLikeRuntime(deferred: (() => unknown)[]): Record<string, unknown> {
     eval: deny("eval"),
     module: undefined,
     import_meta: undefined,
-    setTimeout: capture,
-    setInterval: capture,
-    setImmediate: capture,
-    queueMicrotask: capture,
+    setTimeout: captureTimer,
+    setInterval: captureTimer,
+    setImmediate: captureImmediate,
+    queueMicrotask: captureMicrotask,
   };
 }
 
@@ -1039,8 +1044,8 @@ export async function runEnforcePrTarget(
   // Run whatever the script deferred. Node would run these too, with the write
   // token still live, so their calls belong in the recording — a scenario that
   // asserts on the exact call list then sees them.
-  for (const callback of deferred.splice(0)) {
-    await callback();
+  while (deferred.length > 0) {
+    await deferred.shift()!();
   }
 
   return {
