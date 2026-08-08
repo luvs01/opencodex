@@ -1251,6 +1251,24 @@ test("chatCompletionsToResponsesBody recovers tool_calls function.name from earl
   expect(calls.some(c => c.call_id === "call_b" && c.name === "exec_command")).toBe(true);
 });
 
+test("chatCompletionsToResponsesBody processes long tool-call histories without rescanning prior calls", () => {
+  const messages: Array<Record<string, unknown>> = [{ role: "user", content: "start" }];
+  for (let i = 0; i < 5_000; i++) {
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: `call_${i}`, type: "function", function: { name: "exec_command", arguments: "{}" } }],
+    });
+  }
+
+  const startedAt = performance.now();
+  const body = chatCompletionsToResponsesBody({ model: "gpt-test", messages });
+  const elapsedMs = performance.now() - startedAt;
+
+  expect((body.input as unknown[]).length).toBe(5_001);
+  expect(elapsedMs).toBeLessThan(1_000);
+});
+
 // Local-stack fixup regressions (Sol audit of #279, devlog 100_merge_records.md WP5):
 // CRLF framing and a terminal event without a trailing blank line must not be reported
 // as truncation now that the shared SSE decoder drives the converter.
