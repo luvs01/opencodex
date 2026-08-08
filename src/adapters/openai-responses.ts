@@ -1113,6 +1113,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         // OAuth passthrough: ChatGPT backend path is `${baseUrl}/responses` (no /v1).
         url = `${provider.baseUrl}/responses`;
         if (provider.headers) Object.assign(headers, provider.headers); // static headers first…
+        const mayForwardCallerCredentials = isCanonicalOpenAiForwardProvider(provider);
         const runtimeProvider = provider as {
           _codexAccountOverride?: { accessToken: string; chatgptAccountId: string };
           _codexAccountRequired?: boolean;
@@ -1120,12 +1121,14 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         if (runtimeProvider._codexAccountRequired && !runtimeProvider._codexAccountOverride) {
           throw new Error("Codex pool account auth is required but unavailable");
         }
-        for (const h of FORWARD_HEADERS) {
-          const v = incoming?.headers.get(h);
-          if (v) headers[h] = v;                                        // …so forwarded auth always wins.
+        if (mayForwardCallerCredentials) {
+          for (const h of FORWARD_HEADERS) {
+            const v = incoming?.headers.get(h);
+            if (v) headers[h] = v;                                      // …so forwarded auth always wins.
+          }
         }
         const override = runtimeProvider._codexAccountOverride;
-        if (override) {
+        if (override && mayForwardCallerCredentials) {
           headers["authorization"] = `Bearer ${override.accessToken}`;
           headers["chatgpt-account-id"] = override.chatgptAccountId;
         }

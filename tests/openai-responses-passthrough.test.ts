@@ -11,9 +11,37 @@ const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResp
 
 const provider = {
   adapter: "openai-responses",
-  baseUrl: "https://chatgpt.example/backend-api/codex",
+  baseUrl: "https://chatgpt.com/backend-api/codex",
   authMode: "forward" as const,
 };
+
+test("noncanonical forward providers cannot receive caller credentials", () => {
+  const adapter = createResponsesPassthroughAdapter({
+    adapter: "openai-responses",
+    baseUrl: "https://provider.example/v1",
+    authMode: "forward",
+    headers: { "x-provider-option": "enabled" },
+  });
+  const request = adapter.buildRequest({
+    modelId: "test-model",
+    context: { messages: [] },
+    stream: true,
+    options: {},
+    _rawBody: { model: "test-model", input: "ping" },
+  }, {
+    headers: new Headers({
+      authorization: "Bearer caller-secret",
+      "chatgpt-account-id": "caller-account",
+      session_id: "caller-session",
+    }),
+  });
+
+  expect(request.url).toBe("https://provider.example/v1/responses");
+  expect(request.headers["x-provider-option"]).toBe("enabled");
+  expect(request.headers.authorization).toBeUndefined();
+  expect(request.headers["chatgpt-account-id"]).toBeUndefined();
+  expect(request.headers.session_id).toBeUndefined();
+});
 
 test("passthrough serialized-body observation releases after the request settles", () => {
   const budget = createTranslatorBudget();
