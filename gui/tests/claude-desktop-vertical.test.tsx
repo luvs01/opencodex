@@ -19,6 +19,7 @@ let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 let container: HTMLElement;
 let root: Root | null = null;
+let statusBody: unknown;
 
 function model(route: string, label: string, family: string, available = true) {
   return { route, label, available, contextWindow: 200_000, effortSupported: true, assignment: { family, alias: `alias-${label}` } };
@@ -56,12 +57,19 @@ beforeEach(() => {
     localStorage: { configurable: true, value: testWindow.localStorage },
   });
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  statusBody = {
+    desiredEnabled: true,
+    applied: true,
+    appliedAt: null,
+    stale: false,
+    health: { lastRequestAt: null, requestCount: 0, errorCount: 0 },
+  };
 
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string) => {
       const body = String(url).includes("/status")
-        ? { applied: true, appliedAt: null, stale: false, health: { lastRequestAt: null, requestCount: 0, errorCount: 0 } }
+        ? statusBody
         : payload();
       return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as unknown as Response;
     },
@@ -109,6 +117,14 @@ test("families render as a vertical stack, Opus first", async () => {
   expect(container.querySelector(".claude-lanes")).toBeNull();
   const names = Array.from(container.querySelectorAll(".ocx-group-name")).map(n => n.textContent);
   expect(names).toEqual(["Opus", "Fable", "Sonnet", "Haiku"]);
+});
+
+test("a malformed status response does not crash the Desktop page", async () => {
+  statusBody = { error: "status unavailable" };
+  await mount();
+
+  expect(container.querySelector(".ocx-group-stack")).not.toBeNull();
+  expect(container.querySelector(".claude-status-bar")?.textContent).toContain("Failed to load Claude Desktop profile");
 });
 
 test("all families fold on first load", async () => {

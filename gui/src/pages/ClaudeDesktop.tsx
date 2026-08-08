@@ -63,6 +63,23 @@ interface DesktopResponse {
   port: number;
 }
 
+function isDesktopStatus(value: unknown): value is DesktopStatus {
+  if (!value || typeof value !== "object") return false;
+  const status = value as Record<string, unknown>;
+  const health = status.health;
+  return typeof status.desiredEnabled === "boolean"
+    && typeof status.applied === "boolean"
+    && (status.appliedAt === null || typeof status.appliedAt === "string")
+    && typeof status.stale === "boolean"
+    && !!health
+    && typeof health === "object"
+    && (health as Record<string, unknown>).lastRequestAt !== undefined
+    && ((health as Record<string, unknown>).lastRequestAt === null
+      || typeof (health as Record<string, unknown>).lastRequestAt === "string")
+    && typeof (health as Record<string, unknown>).requestCount === "number"
+    && typeof (health as Record<string, unknown>).errorCount === "number";
+}
+
 type PendingAction = "save" | "apply" | null;
 
 const FAMILY_KEYS: Record<Family, TKey> = {
@@ -260,14 +277,15 @@ export default function ClaudeDesktop({
   // profile editor, which keeps its drafts intact across Code/Desktop tab switches.
   const statusCacheKey = `ocx.claude-desktop.status.v1:${apiBase}`;
   const statusResourceKey = `claude-desktop-status:${apiBase}`;
-  const cachedStatus = readSessionListCache<DesktopStatus>(statusCacheKey);
+  const cachedStatusValue = readSessionListCache<unknown>(statusCacheKey);
+  const cachedStatus = isDesktopStatus(cachedStatusValue) ? cachedStatusValue : null;
   const statusResource = useDataSurface<DesktopStatus>(
     statusResourceKey,
     [apiBase],
     async (signal) => {
       const response = await fetch(`${apiBase}/api/claude-desktop/status`, { signal });
-      const next = await readJsonIfOk<DesktopStatus>(response);
-      if (!next) throw new Error("Claude Desktop status unavailable");
+      const next = await readJsonIfOk<unknown>(response);
+      if (!isDesktopStatus(next)) throw new Error("Claude Desktop status unavailable");
       writeSessionListCache(statusCacheKey, next);
       return next;
     },
