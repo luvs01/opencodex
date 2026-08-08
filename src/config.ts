@@ -2832,10 +2832,17 @@ export function verifyPidIdentity(candidatePid: number): number | null {
 
 function readProcessCommandLine(pid: number): string | undefined {
   try {
+    if (process.platform === "linux") {
+      const output = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+      return output.replace(/\0/g, " ").trim() || undefined;
+    }
     if (process.platform === "win32") {
+      const systemRoot = /^[a-z]:\\windows$/i.test(process.env.SystemRoot ?? "")
+        ? process.env.SystemRoot!
+        : "C:\\Windows";
       // Prefer WMIC over PowerShell: much faster cold start, and windowsHide avoids console flash.
       // Fall back to PowerShell when WMIC is absent (newer Windows images).
-      const wmic = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\wbem\\WMIC.exe`;
+      const wmic = `${systemRoot}\\System32\\wbem\\WMIC.exe`;
       try {
         const output = execFileSync(wmic, [
           "process", "where", `ProcessId=${pid}`, "get", "CommandLine", "/VALUE",
@@ -2846,7 +2853,8 @@ function readProcessCommandLine(pid: number): string | undefined {
       } catch {
         /* WMIC missing or failed — fall through */
       }
-      const output = execFileSync("powershell.exe", [
+      const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+      const output = execFileSync(powershell, [
         "-NoProfile",
         "-NoLogo",
         "-NonInteractive",
@@ -2857,7 +2865,7 @@ function readProcessCommandLine(pid: number): string | undefined {
       ], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000, windowsHide: true });
       return output.trim() || undefined;
     }
-    const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+    const output = execFileSync("/bin/ps", ["-p", String(pid), "-o", "command="], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 1000,

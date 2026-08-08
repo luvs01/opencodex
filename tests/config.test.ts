@@ -18,6 +18,7 @@ import {
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
   readConfigDiagnostics,
+  readPid,
   readRuntimePort,
   removePid,
   removeRuntimePort,
@@ -1701,6 +1702,25 @@ describe("opencodex config defaults", () => {
     writePid(process.pid);
 
     expect(readFileSync(getPidPath(), "utf-8")).toBe(String(process.pid));
+  });
+
+  test.if(process.platform === "linux")("pid validation does not execute ps from PATH", () => {
+    const attackerDir = join(testDir, "attacker-bin");
+    const markerPath = join(testDir, "executed");
+    mkdirSync(attackerDir);
+    const fakePs = join(attackerDir, "ps");
+    writeFileSync(fakePs, `#!/bin/sh\ntouch '${markerPath}'\necho 'ocx start'\n`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${attackerDir}:${previousPath ?? ""}`;
+    writePid(process.pid);
+
+    try {
+      expect(readPid()).toBeNull();
+      expect(existsSync(markerPath)).toBe(false);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   });
 
   test("removes pid file only when the expected pid still matches", () => {
