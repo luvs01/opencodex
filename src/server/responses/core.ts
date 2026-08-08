@@ -295,7 +295,6 @@ interface CodexPoolAccountRetryArgs {
   options: {
     abortSignal?: AbortSignal;
     onCodexAuthContextResolved?: (ctx: CodexAuthContext) => void;
-    deferCodexResetDerivedCooldown?: boolean;
     // Narrowed subset of HandleResponsesOptions: the retry rebuilds the adapter, so it
     // needs the inbound scope or the retry could land on a different wire than the
     // first attempt.
@@ -400,18 +399,19 @@ async function retryCodexPoolOnAlternateAccount(
       firstAuthCtx.writerGeneration,
     );
   }
-  if (!shouldDeferCodexResetDerivedCooldown(firstResponse, options.deferCodexResetDerivedCooldown)) {
-    recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
-      ...quotaMeta,
-      threadId: req.headers.get("x-codex-parent-thread-id"),
-      modelId: route.modelId,
-      probeLeaseId: codexProbeLeaseId(firstAuthCtx),
-      probeQuotaScope: codexProbeQuotaScope(firstAuthCtx),
-      writerGeneration: firstAuthCtx.writerGeneration,
-      // Retry already advanced the RR ring via excludeAccountId — reuse for promotion.
-      ...(retryAuthCtx.accountId ? { promoteAccountId: retryAuthCtx.accountId } : {}),
-    });
-  }
+  // Deferral only keeps the current account eligible for a later model target. Once an
+  // alternate account has been selected, retain the first account's quota outcome so a
+  // successful retry cannot leave the exhausted account active or thread-affined.
+  recordCodexUpstreamOutcome(config, firstAuthCtx.accountId, outcomeStatus, {
+    ...quotaMeta,
+    threadId: req.headers.get("x-codex-parent-thread-id"),
+    modelId: route.modelId,
+    probeLeaseId: codexProbeLeaseId(firstAuthCtx),
+    probeQuotaScope: codexProbeQuotaScope(firstAuthCtx),
+    writerGeneration: firstAuthCtx.writerGeneration,
+    // Retry already advanced the RR ring via excludeAccountId — reuse for promotion.
+    ...(retryAuthCtx.accountId ? { promoteAccountId: retryAuthCtx.accountId } : {}),
+  });
 
   const retryHeaders = headersForCodexAuthContext(req.headers, retryAuthCtx);
   const retryProvider = applyCodexAuthContextToProvider(
