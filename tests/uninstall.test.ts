@@ -41,6 +41,22 @@ describe("full uninstall command", () => {
     expect(service).toContain("uninstallSystemd");
   });
 
+  test("native service removal failures propagate to the full uninstall", async () => {
+    const service = await readText("src/service.ts");
+    const helper = service.slice(
+      service.indexOf("export function uninstallServiceIfInstalled()"),
+      service.indexOf("export function isServiceInstalled()"),
+    );
+    const nativeRemoval = helper.slice(
+      helper.indexOf('if (statusWinswRaw() !== "nonexistent")'),
+      helper.indexOf("if (removed)"),
+    );
+
+    expect(nativeRemoval).toContain("uninstallWinswService();");
+    expect(nativeRemoval).not.toContain("try {");
+    expect(nativeRemoval).not.toContain("catch");
+  });
+
   test("full uninstall kills the tracked proxy before deleting service assets", async () => {
     const cli = await readText("src/cli/index.ts");
     const uninstallBody = cli.slice(cli.indexOf("async function handleUninstall()"), cli.indexOf("type HealthCheck"));

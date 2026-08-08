@@ -2470,12 +2470,8 @@ export function uninstallServiceIfInstalled(): boolean {
       if (q.includes(TASK)) { uninstallWindows(); removed = true; }
     } catch { /* task not found */ }
     if (statusWinswRaw() !== "nonexistent") {
-      try {
-        uninstallWinswService();
-        removed = true;
-      } catch (err) {
-        console.warn(`⚠️  Failed to remove native service: ${err instanceof Error ? err.message : String(err)}. Check 'sc.exe query ${WINSW_SERVICE_ID}'.`);
-      }
+      uninstallWinswService();
+      removed = true;
     }
     if (removed) { removeServiceInstallState(); return true; }
   } else if (process.platform === "linux" && existsSync(unitPath())) {
