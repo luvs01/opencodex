@@ -245,6 +245,62 @@ describe("server 429 key failover (end-to-end)", () => {
     }
   });
 
+  test("short cooldown expiry cannot retry the same pool keys indefinitely", async () => {
+    const originalFetch = globalThis.fetch;
+    let upstreamAttempts = 0;
+    let cancelledBodies = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://delayed-rate-limit.example/v1/chat/completions") {
+        upstreamAttempts += 1;
+        await Bun.sleep(5);
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"error":{"message":"rate limited"}}'));
+            if (upstreamAttempts > 1) controller.close();
+          },
+          cancel() { cancelledBodies += 1; },
+        }), {
+          status: 429,
+          headers: { "retry-after": "0.001", "content-type": "application/json" },
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+
+    const config: OcxConfig = {
+      port: 0, hostname: "127.0.0.1", defaultProvider: "bounded-pool",
+      providers: {
+        "bounded-pool": {
+          adapter: "openai-chat",
+          baseUrl: "https://delayed-rate-limit.example/v1",
+          apiKey: "key-alpha-000111222333",
+          apiKeyPool: [
+            { id: "k1", key: "key-alpha-000111222333", addedAt: 1 },
+            { id: "k2", key: "key-beta-444555666777", addedAt: 2 },
+          ],
+        },
+      },
+    } as OcxConfig;
+    saveConfig(config);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "bounded-pool/some-model", input: "hello", stream: false }),
+      });
+      await res.text();
+
+      expect(res.status).toBe(429);
+      expect(upstreamAttempts).toBe(2);
+      expect(cancelledBodies).toBe(1);
+    } finally {
+      await server.stop(true);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("network failure after a 429 key rotation surfaces the retry error", async () => {
     const originalFetch = globalThis.fetch;
     let upstreamAttempts = 0;

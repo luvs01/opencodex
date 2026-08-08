@@ -2728,6 +2728,11 @@ async function handleResponsesInner(
   // `attempts` same-key replays in total (bounded per request).
   const rateLimitPolicy = rateLimitRetryPolicyFor(route.provider);
   let rateLimitRetries = 0;
+  // Cooldowns are global health state, not a request-local retry budget: a short Retry-After can
+  // expire while another key is in flight. Bound this request to each remaining pool key once so
+  // an upstream cannot keep the recovery loop alive by timing its 429 responses.
+  const maxKeyPoolFailovers = Math.max(0, (route.provider.apiKeyPool?.length ?? 0) - 1);
+  let keyPoolFailovers = 0;
   // Shared with the terminal-guard continuation below: an image-tier reduction that let the
   // main request clear a 413 must not be forgotten on the very next continuation build.
   let imageTierBias = 0;
@@ -2880,7 +2885,11 @@ async function handleResponsesInner(
       // Multi-key 429 failover: rotate to the next pool key (cooldown-aware) and retry the
       // SAME request once per remaining key. OAuth/forward providers and single-key pools
       // return null immediately, so this stays a no-op for them (src/providers/key-failover.ts).
-      while (upstreamResponse.status === 429 && hasKeyPoolFailover(route.provider)) {
+      while (
+        upstreamResponse.status === 429
+        && hasKeyPoolFailover(route.provider)
+        && keyPoolFailovers < maxKeyPoolFailovers
+      ) {
         const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
           retryAfter: upstreamResponse.headers.get("retry-after"),
           now: Date.now(),
@@ -2888,6 +2897,7 @@ async function handleResponsesInner(
           promptCacheKey: parsed.options.promptCacheKey,
         });
         if (!rotated) break;
+        keyPoolFailovers += 1;
         // Release the failed response's socket before retrying; unread bodies otherwise linger
         // until runtime cleanup (one per rotated key under a rate-limit storm).
         try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
@@ -3138,7 +3148,11 @@ async function handleResponsesInner(
         }
       }
 
-      if (response.status === 429 && hasKeyPoolFailover(route.provider)) {
+      if (
+        response.status === 429
+        && hasKeyPoolFailover(route.provider)
+        && keyPoolFailovers < maxKeyPoolFailovers
+      ) {
         const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
           retryAfter: response.headers.get("retry-after"),
           now: Date.now(),
@@ -3146,6 +3160,7 @@ async function handleResponsesInner(
           promptCacheKey: nextParsed.options.promptCacheKey,
         });
         if (rotated) {
+          keyPoolFailovers += 1;
           try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
           route.provider = rotated;
           invalidateSameTargetRequest();
