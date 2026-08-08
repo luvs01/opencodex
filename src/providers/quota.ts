@@ -25,12 +25,14 @@ import {
   type CodexCapacityAggregation,
   type CodexCapacityQuota,
 } from "./codex-capacity";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
+const QUOTA_RESPONSE_MAX_BYTES = 64 * 1024;
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_USAGE_URL = `${KIMI_CODE_BASE_URL}/usages`;
 const A6API_BASE_URL = "https://api.a6api.com";
@@ -254,6 +256,16 @@ function normalizePercent(value: unknown): number | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+async function readQuotaResponse(response: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const body = await readBoundedResponseBody(response, { maxBytes: QUOTA_RESPONSE_MAX_BYTES });
+    if (!body.displaySafe) return null;
+    return asRecord(JSON.parse(body.text));
+  } catch {
+    return null;
+  }
 }
 
 function isBuiltInChatGptForwardProvider(name: string, provider: OcxProviderConfig): boolean {
@@ -671,7 +683,7 @@ async function fetchMoonshotQuota(provider: string, config: OcxProviderConfig): 
       ? TERMINAL_QUOTA_FAILURE
       : null;
   }
-  const body = asRecord(await response.json().catch(() => null));
+  const body = await readQuotaResponse(response);
   const data = asRecord(body?.data) ?? body;
   if (!data) return null;
   const available = toFiniteNumber(data.available_balance);
@@ -707,7 +719,7 @@ async function fetchVeniceQuota(provider: string, config: OcxProviderConfig): Pr
       ? TERMINAL_QUOTA_FAILURE
       : null;
   }
-  const body = asRecord(await response.json().catch(() => null));
+  const body = await readQuotaResponse(response);
   const data = asRecord(body?.data) ?? body;
   if (!data) return null;
   const diemBalance = toFiniteNumber(data.balance);
@@ -750,7 +762,7 @@ async function fetchSyntheticQuota(provider: string, config: OcxProviderConfig):
       ? TERMINAL_QUOTA_FAILURE
       : null;
   }
-  const body = asRecord(await response.json().catch(() => null));
+  const body = await readQuotaResponse(response);
   const data = asRecord(body?.data) ?? body;
   const quota: ProviderQuota = { updatedAt: Date.now() };
   let windows = 0;
@@ -798,7 +810,7 @@ async function fetchDeepInfraQuota(provider: string, config: OcxProviderConfig):
       ? TERMINAL_QUOTA_FAILURE
       : null;
   }
-  const body = asRecord(await response.json().catch(() => null));
+  const body = await readQuotaResponse(response);
   const data = asRecord(body?.data) ?? body;
   if (!data) return null;
   const stripeBalance = toFiniteNumber(data.stripe_balance);
@@ -840,7 +852,7 @@ async function fetchNeuralwattQuota(provider: string, config: OcxProviderConfig)
       ? TERMINAL_QUOTA_FAILURE
       : null;
   }
-  const body = asRecord(await response.json().catch(() => null));
+  const body = await readQuotaResponse(response);
   const data = asRecord(body?.data) ?? body;
   const quota: ProviderQuota = { updatedAt: Date.now() };
   let windows = 0;

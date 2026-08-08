@@ -1168,6 +1168,31 @@ describe("fetchProviderQuotaReports", () => {
     expect(seen).toEqual([]);
   });
 
+  test("API-key quota probes reject and cancel oversized success bodies", async () => {
+    const providers = [
+      ["moonshot", "https://api.moonshot.ai/v1"],
+      ["venice", "https://api.venice.ai/api/v1"],
+      ["synthetic", "https://api.synthetic.new/v2"],
+      ["deepinfra", "https://api.deepinfra.com/v1/openai"],
+      ["neuralwatt", "https://api.neuralwatt.com/v1"],
+    ] as const;
+    let cancellations = 0;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(64 * 1024 + 1));
+      },
+      cancel() {
+        cancellations += 1;
+      },
+    }), { status: 200 })) as typeof fetch;
+
+    for (const [provider, baseUrl] of providers) {
+      const result = await fetchProviderQuotaReports(keyQuotaConfig(provider, baseUrl), true);
+      expect(result.reports).toEqual([]);
+    }
+    expect(cancellations).toBe(providers.length);
+  });
+
   test("Kimi quota never sends OAuth credentials to a non-canonical base URL", async () => {
     await saveCredential("kimi", { access: "kimi-access-secret", refresh: "kimi-refresh-secret", expires: Date.now() + 3600_000 });
     const seen: string[] = [];
