@@ -242,45 +242,6 @@ export function usesCodexForwardPoolAuth(
     && provider.authMode === "forward" && provider.adapter === "openai-responses";
 }
 
-function normalizeCodexUnsupportedModelDetail(value: string): string {
-  return value.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
-}
-
-function isAllowListedCodexAccountModel400(
-  status: number,
-  bodyText: string,
-  modelId: string,
-): boolean {
-  if (status !== 400) return false;
-  try {
-    const payload = JSON.parse(bodyText) as unknown;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-    const detail = (payload as { detail?: unknown }).detail;
-    if (typeof detail !== "string") return false;
-    const expected = `The '${modelId}' model is not supported when using Codex with a ChatGPT account.`;
-    return normalizeCodexUnsupportedModelDetail(detail)
-      === normalizeCodexUnsupportedModelDetail(expected);
-  } catch {
-    return false;
-  }
-}
-
-async function shouldRetryCodexPoolAccountModel400(
-  response: Response,
-  modelId: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  if (response.status !== 400) return false;
-  try {
-    const body = await readBoundedResponseBody(response.clone(), { signal });
-    return body.displaySafe
-      && !body.truncated
-      && isAllowListedCodexAccountModel400(response.status, body.text, modelId);
-  } catch {
-    return false;
-  }
-}
-
 /** Pre-stream quota/billing rejections that warrant one alternate-account attempt (#584). */
 export function shouldRetryCodexPoolAccountQuota(response: Response): boolean {
   return response.status === 402 || response.status === 429;
@@ -353,8 +314,8 @@ function shouldDeferCodexResetDerivedCooldown(response: Response, enabled?: bool
 }
 
 /**
- * One bounded alternate-account retry for Codex pool auth. Used for allow-listed
- * model-400 and for pre-stream 429/402 quota failures (#584).
+ * One bounded alternate-account retry for Codex pool auth on pre-stream 429/402
+ * quota failures (#584).
  */
 async function retryCodexPoolOnAlternateAccount(
   args: CodexPoolAccountRetryArgs,
@@ -1900,13 +1861,7 @@ async function handleResponsesInner(
 
     if (usesCodexForwardPoolAuth(authCtx, route.provider) && !authCtx.fixedAccount) {
       let poolRetryOutcome: number | undefined;
-      if (await shouldRetryCodexPoolAccountModel400(
-        upstreamResponse,
-        route.modelId,
-        options.abortSignal,
-      )) {
-        poolRetryOutcome = 400;
-      } else if (shouldRetryCodexPoolAccountQuota(upstreamResponse)) {
+      if (shouldRetryCodexPoolAccountQuota(upstreamResponse)) {
         // Pre-stream only: once SSE has begun, mid-stream quota stays terminal.
         poolRetryOutcome = upstreamResponse.status;
       }

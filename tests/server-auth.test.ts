@@ -1849,15 +1849,15 @@ describe("server local API auth", () => {
     }
   });
 
-  test("Activation A: allow-listed 400 retries once on another eligible pool account", async () => {
+  test("upstream model 400 cannot select and expose another pool account", async () => {
+    const body = unsupportedModelBody();
     const harness = await startPoolRetryHarness(accountId => accountId === "acct-pool-a"
-      ? rejectionResponse(unsupportedModelBody())
-      : Response.json({ id: "retry-success", status: "completed", output: [] }));
+      ? rejectionResponse(body)
+      : Response.json({ id: "unexpected-retry", status: "completed", output: [] }));
     try {
       const response = await harness.request();
-      expect(response.status).toBe(200);
-      expect((await response.json() as { id: string }).id).toBe("retry-success");
-      expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-b"]);
+      await expectOriginal400(response, body);
+      expect(harness.dispatches).toEqual(["acct-pool-a"]);
       expect(getCodexUpstreamHealth("pool-a")).toBeNull();
       expect(getCodexUpstreamHealth("pool-b")).toBeNull();
       expect(harness.config.activeCodexAccountId).toBe("pool-a");
@@ -2336,21 +2336,20 @@ describe("server local API auth", () => {
     }
   });
 
-  test("Activation D: second allow-listed 400 is returned without a third dispatch", async () => {
-    const bodyA = unsupportedModelBody();
-    const bodyB = `${unsupportedModelBody()}\n`;
-    const harness = await startPoolRetryHarness(accountId => rejectionResponse(
-      accountId === "acct-pool-a" ? bodyA : bodyB,
-      { "x-pool-retry-test": accountId },
-    ));
+  test("second quota rejection is returned without a third dispatch", async () => {
+    const body = JSON.stringify({ error: { message: "rate limited" } });
+    const harness = await startPoolRetryHarness(accountId => new Response(body, {
+      status: 429,
+      headers: { "content-type": "application/json", "x-pool-retry-test": accountId },
+    }));
     try {
       const response = await harness.request();
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(429);
       expect(response.headers.get("x-pool-retry-test")).toBe("acct-pool-b");
-      expect(await response.text()).toBe(bodyB);
+      expect(await response.text()).toBe(body);
       expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-b"]);
-      expect(getCodexUpstreamHealth("pool-a")).toBeNull();
-      expect(getCodexUpstreamHealth("pool-b")).toBeNull();
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({ lastFailureStatus: 429 });
+      expect(getCodexUpstreamHealth("pool-b")).toMatchObject({ lastFailureStatus: 429 });
     } finally {
       await stopPoolRetryHarness(harness);
     }
@@ -2362,7 +2361,7 @@ describe("server local API auth", () => {
     try {
       for (const streamMode of ["legacy-tee", "eager-relay"] as const) {
         const positive = await startPoolRetryHarness(accountId => accountId === "acct-pool-a"
-          ? rejectionResponse(unsupportedModelBody())
+          ? new Response("rate limited", { status: 429 })
           : new Response(
               'event: response.completed\ndata: {"type":"response.completed","response":{"id":"from-b","status":"completed","output":[]}}\n\n',
               { headers: { "content-type": "text/event-stream" } },
@@ -2496,9 +2495,10 @@ describe("server local API auth", () => {
     }
   });
 
-  test("normalization near-misses never authorize a pool retry", async () => {
+  test("unsupported-model sentence variants never authorize a pool retry", async () => {
     const exact = `The '${POOL_RETRY_MODEL}' model is not supported when using Codex with a ChatGPT account.`;
     const cases = [
+      exact,
       exact.slice(0, -1),
       exact.replaceAll("'", "\u2019"),
       `prefix ${exact}`,
@@ -2517,15 +2517,6 @@ describe("server local API auth", () => {
       expect(nextNegative).toBe(negativeBodies.length);
     } finally {
       await stopPoolRetryHarness(negative);
-    }
-    const positive = await startPoolRetryHarness(accountId => accountId === "acct-pool-a"
-      ? rejectionResponse(JSON.stringify({ detail: `  THE   '${POOL_RETRY_MODEL}' MODEL IS NOT SUPPORTED\nWHEN USING CODEX WITH A CHATGPT ACCOUNT.  ` }))
-      : Response.json({ id: "normalized", status: "completed", output: [] }));
-    try {
-      expect((await (await positive.request()).json() as { id: string }).id).toBe("normalized");
-      expect(positive.dispatches).toEqual(["acct-pool-a", "acct-pool-b"]);
-    } finally {
-      await stopPoolRetryHarness(positive);
     }
   }, 12_000);
 
@@ -2563,8 +2554,8 @@ describe("server local API auth", () => {
     }
   });
 
-  test("retry-dispatch transport failure records only B and never triple-dispatches", async () => {
-    const harness = await startPoolRetryHarness(() => rejectionResponse(unsupportedModelBody()));
+  test("quota retry transport failure records only B and never triple-dispatches", async () => {
+    const harness = await startPoolRetryHarness(() => new Response("rate limited", { status: 429 }));
     const redirectedFetch = globalThis.fetch;
     globalThis.fetch = (async (input, init) => {
       const accountId = new Headers(init?.headers).get("chatgpt-account-id");
@@ -2578,7 +2569,7 @@ describe("server local API auth", () => {
       const response = await harness.request();
       expect(response.status).toBe(502);
       expect(harness.dispatches).toEqual(["acct-pool-a", "acct-pool-b"]);
-      expect(getCodexUpstreamHealth("pool-a")).toBeNull();
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({ lastFailureStatus: 429 });
       expect(getCodexUpstreamHealth("pool-b")).toMatchObject({
         consecutiveFailures: 1,
         lastFailureStatus: 0,
@@ -2596,7 +2587,7 @@ describe("server local API auth", () => {
         getTrackedCodexWebSocketCountForAccount("pool-b"),
       ]);
       return accountId === "acct-pool-a"
-        ? rejectionResponse(unsupportedModelBody())
+        ? new Response("rate limited", { status: 429 })
         : new Response(
             'event: response.completed\ndata: {"type":"response.completed","response":{"id":"ws-b","status":"completed","output":[]}}\n\n',
             { headers: { "content-type": "text/event-stream" } },
