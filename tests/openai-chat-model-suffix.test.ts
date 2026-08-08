@@ -67,6 +67,11 @@ describe("stripBracketedModelSuffix", () => {
   test("empty bracket group is still stripped", async () => {
     expect(stripBracketedModelSuffix("model[]")).toBe("model");
   });
+
+  test("handles a long malformed suffix without regex backtracking", () => {
+    const modelId = `model${"[".repeat(100_000)}x`;
+    expect(stripBracketedModelSuffix(modelId)).toBe(modelId);
+  });
 });
 
 describe("openai-chat adapter wire model normalization", () => {
