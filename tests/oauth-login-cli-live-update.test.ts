@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../src/config";
 import { upsertOAuthProvider } from "../src/oauth";
-import { notifyRunningProxyAfterOAuthLogin } from "../src/oauth/login-cli";
+import { notifyRunningProxy, notifyRunningProxyAfterOAuthLogin } from "../src/oauth/login-cli";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
@@ -53,6 +53,29 @@ afterEach(() => {
 });
 
 describe("CLI OAuth live-update credential preservation", () => {
+  test("does not send provider credentials to a spoofed configured-port listener", async () => {
+    const requests: Array<{ path: string; body: string }> = [];
+    const fake = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/healthz") {
+          return Response.json({ status: "ok", service: "opencodex", version: "test", uptime: 1, pid: 999_999 });
+        }
+        requests.push({ path: url.pathname, body: await request.text() });
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      saveConfig(keyModeXaiConfig(fake.port));
+      await notifyRunningProxy("xai", { apiKey: "live-update-sentinel-key" });
+      expect(requests).toEqual([]);
+    } finally {
+      await fake.stop(true);
+    }
+  });
+
   test("notify after OAuth login keeps key billing on live and disk configs", async () => {
     const server = startServer(0);
     try {
