@@ -140,7 +140,9 @@ describe("devlog is tracked, with no submodule left behind", () => {
 
   test("security triage excised before publication stays untracked", () => {
     const excised = trackedFiles().filter((path) =>
-      /^devlog\/_plan\/260730_(?:open_pr_backlog|new_issue_pr)_triage\//.test(path),
+      /^devlog\/(?:_plan\/260730_(?:open_pr_backlog|new_issue_pr)_triage|_fin\/260731_pr_issue_triage_round)\//.test(
+        path,
+      ),
     );
 
     expect(excised).toEqual([]);
