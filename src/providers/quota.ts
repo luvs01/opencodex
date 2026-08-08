@@ -7,6 +7,7 @@ import {
 import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { resolveEnvValue } from "../config";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
@@ -31,6 +32,7 @@ const ACCOUNT_TOKEN_SKEW_MS = 60_000;
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
+const CURSOR_QUOTA_MAX_RESPONSE_BYTES = 64 * 1024;
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_USAGE_URL = `${KIMI_CODE_BASE_URL}/usages`;
 const A6API_BASE_URL = "https://api.a6api.com";
@@ -232,6 +234,21 @@ function normalizePercent(value: unknown): number | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+async function parseCursorQuotaResponse(response: Response): Promise<Record<string, unknown> | null> {
+  const body = await readBoundedResponseBody(response, {
+    maxBytes: CURSOR_QUOTA_MAX_RESPONSE_BYTES,
+    totalTimeoutMs: REQUEST_TIMEOUT_MS,
+    inactivityTimeoutMs: REQUEST_TIMEOUT_MS,
+    fatalUtf8: true,
+  }).catch(() => null);
+  if (!body?.displaySafe) return null;
+  try {
+    return asRecord(JSON.parse(body.text));
+  } catch {
+    return null;
+  }
 }
 
 function isBuiltInChatGptForwardProvider(name: string, provider: OcxProviderConfig): boolean {
@@ -917,7 +934,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (periodRes.ok) {
-      const body = asRecord(await periodRes.json().catch(() => null));
+      const body = await parseCursorQuotaResponse(periodRes);
       const planUsage = asRecord(body?.planUsage);
       if (planUsage) {
         const resetAt = normalizeResetAt(body?.billingCycleEnd ?? planUsage.billingCycleEnd ?? body?.periodEnd);
@@ -979,7 +996,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (summaryRes.ok) {
-      const body = asRecord(await summaryRes.json().catch(() => null));
+      const body = await parseCursorQuotaResponse(summaryRes);
       const individual = asRecord(body?.individualUsage);
       const plan = asRecord(individual?.plan);
       if (plan) {
@@ -1008,7 +1025,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = await parseCursorQuotaResponse(response);
   if (!body) return null;
 
   // Prefer the gpt-4 bucket (historical "fast requests"); else first model with used+limit.

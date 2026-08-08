@@ -1139,6 +1139,27 @@ describe("fetchProviderQuotaReports", () => {
     expect(result.reports[0]?.quota.monthlyResetAt).toBe(Date.UTC(2027, 0, 31));
   });
 
+  test("cursor rejects oversized quota responses across every fallback", async () => {
+    await saveCredential("cursor", { access: "cursor-access-secret", refresh: "cursor-refresh-secret", expires: Date.now() + 3600_000 });
+    const seen: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response(`{"padding":"${"x".repeat(64 * 1024)}"}`, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports(cursorOnlyConfig(), true);
+
+    expect(result.reports).toEqual([]);
+    expect(seen).toEqual([
+      "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+      "https://api2.cursor.sh/api/usage/summary",
+      "https://api2.cursor.sh/auth/usage",
+    ]);
+  });
+
   test("main identity invalidation drops the stale report without negative-caching the new identity", async () => {
     const full = testConfig();
     const config = {
