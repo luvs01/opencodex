@@ -940,6 +940,20 @@ describe("sanitizeEncryptedContentInPlace", () => {
     expect(sanitizeEncryptedContentInPlace(undefined)).toBe(0);
   });
 
+  test("deep unknown input does not overflow the call stack", () => {
+    const root: Array<Record<string, unknown>> = [{ type: "unknown" }];
+    let cursor = root[0]!;
+    for (let depth = 0; depth < 30_000; depth += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    cursor.content = [{ type: "encrypted_content", encrypted_content: "deep plaintext" }];
+
+    expect(sanitizeEncryptedContentInPlace(root)).toBe(1);
+    expect(cursor.content).toEqual([{ type: "input_text", text: "deep plaintext" }]);
+  });
+
   test("mixed slot (hook preamble + embedded Fernet task) splits into text + encrypted parts", () => {
     const fernet = fernetFixture();
     const input = [

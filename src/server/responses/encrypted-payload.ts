@@ -261,8 +261,12 @@ export function hasEncryptedContentPart(content: unknown): boolean {
 export function sanitizeEncryptedContentInPlace(input: unknown): number {
   if (!Array.isArray(input)) return 0;
   let rewritten = 0;
-  const visit = (node: unknown): number => {
-    const before = rewritten;
+  type AgentContext = { message: Record<string, unknown>; parent?: AgentContext };
+  const stack: Array<{ node: unknown; agentContext?: AgentContext }> = [{ node: input }];
+  const rewrittenAgentMessages = new Set<Record<string, unknown>>();
+
+  while (stack.length > 0) {
+    const { node, agentContext } = stack.pop()!;
     if (Array.isArray(node)) {
       for (let i = 0; i < node.length; i += 1) {
         const child = node[i] as unknown;
@@ -277,32 +281,33 @@ export function sanitizeEncryptedContentInPlace(input: unknown): number {
             node.splice(i, 1, ...parts);
             i += parts.length - 1;
             rewritten += 1;
+            for (let context = agentContext; context; context = context.parent) {
+              rewrittenAgentMessages.add(context.message);
+            }
             continue;
           }
         }
-        const childRewrites = visit(child);
-        if (
-          childRewrites > 0
-          && child && typeof child === "object"
-          && (child as { type?: unknown }).type === "agent_message"
-          && !hasEncryptedContentPart((child as { content?: unknown }).content)
-        ) {
-          const message = child as { type: string; role?: string; id?: unknown; author?: unknown; recipient?: unknown };
-          message.type = "message";
-          message.role = "user";
-          delete message.id;
-          delete message.author;
-          delete message.recipient;
+        if (child && typeof child === "object") {
+          const childContext = (child as { type?: unknown }).type === "agent_message"
+            ? { message: child as Record<string, unknown>, parent: agentContext }
+            : agentContext;
+          stack.push({ node: child, agentContext: childContext });
         }
       }
-      return rewritten - before;
+      continue;
     }
     if (node && typeof node === "object") {
-      for (const value of Object.values(node)) visit(value);
+      for (const value of Object.values(node)) stack.push({ node: value, agentContext });
     }
-    return rewritten - before;
-  };
-  visit(input);
+  }
+
+  for (const message of rewrittenAgentMessages) {
+    if (message.type !== "agent_message" || hasEncryptedContentPart(message.content)) continue;
+    message.type = "message";
+    message.role = "user";
+    delete message.id;
+    delete message.author;
+    delete message.recipient;
+  }
   return rewritten;
 }
-
