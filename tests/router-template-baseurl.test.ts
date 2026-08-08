@@ -6,6 +6,7 @@ const OVERRIDE_PROVIDERS = [
   { id: "ollama", registryBaseUrl: "http://localhost:11434/v1" },
   { id: "vllm", registryBaseUrl: "http://localhost:8000/v1" },
   { id: "lm-studio", registryBaseUrl: "http://localhost:1234/v1" },
+  { id: "alibaba-token-plan", registryBaseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" },
   { id: "litellm", registryBaseUrl: "http://localhost:4000/v1" },
 ] as const;
 
