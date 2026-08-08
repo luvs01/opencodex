@@ -1,4 +1,5 @@
 import { decodeEventStream } from "../lib/eventstream-decoder";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 import { estimateTokens } from "../lib/token-estimate";
 import { debugProviderDiagnostic } from "../lib/debug";
 import { resolveKiroApiRegion, resolveKiroProfileArn } from "../oauth/kiro";
@@ -1619,7 +1620,8 @@ export async function* parseKiroStream(
     firstResult.releaseRetained();
     fallback.releaseRequestBody?.();
     if (!fallback.response.ok) {
-      const payload = await fallback.response.text().catch(() => "");
+      const body = await readBoundedResponseBody(fallback.response).catch(() => undefined);
+      const payload = body?.displaySafe ? body.text : "";
       const failure = classifyKiroHttpError(fallback.response.status, fallback.response.headers, payload);
       yield {
         type: "error",

@@ -15,6 +15,7 @@ import {
 import { parseKiroEvent } from "../src/adapters/kiro-events";
 import { resetKiroThrottleStateForTests } from "../src/adapters/kiro-retry";
 import { encodeMessage } from "../src/lib/eventstream-decoder";
+import { BOUNDED_BODY_MAX_BYTES } from "../src/lib/bounded-body";
 import { estimateTokens } from "../src/lib/token-estimate";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
 import type { OcxParsedRequest, OcxProviderConfig, OcxUsage } from "../src/types";
@@ -1294,6 +1295,34 @@ describe("kiro adapter — parseStream", () => {
       code: "server_is_overloaded",
       retryable: false,
       usage: expect.objectContaining({}),
+    });
+  });
+
+  test("oversized fallback HTTP errors are cancelled and classified without their body", async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(BOUNDED_BODY_MAX_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+    const adapter = createKiroAdapter(provider);
+    await adapter.buildRequest(parsedWith([{ role: "user", content: "do it" }], [bashTool]));
+
+    const events = await collectAdapterEvents(adapter.parseStream(new Response(streamOf(
+      eventFrame({ content: "I am checking." }),
+    ))));
+
+    expect(cancelled).toBe(true);
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      status: 500,
+      retryable: false,
     });
   });
 
