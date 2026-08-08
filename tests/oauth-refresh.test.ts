@@ -475,7 +475,7 @@ describe("oauth refresh hardening", () => {
     expect(getCredential("xai")?.source).toBe("oauth");
   });
 
-  test("Anthropic transient failures do not mark needsReauth", async () => {
+  test("Anthropic transient failures remain retryable without marking needsReauth", async () => {
     for (const [index, error] of [
       new AnthropicTokenError("server", 503, undefined),
       new AnthropicTokenError("timeout", undefined, undefined),
@@ -483,6 +483,12 @@ describe("oauth refresh hardening", () => {
       await saveCredential("anthropic", { access: `old-${index}`, refresh: `rt-old-${index}`, expires: 1, accountId: `acct-${index}` });
       const id = getAccountSet("anthropic")!.activeAccountId;
       await expect(refreshAnthropicAccountWithLock("anthropic", id, { ...OAUTH_PROVIDERS.anthropic!, refresh: async () => { throw error; } }, getAccountCredential("anthropic", id)!)).rejects.toBe(error);
+      expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)!.needsReauth).toBeUndefined();
+      expect(readOAuthRefreshIntent("anthropic", id)).toBeUndefined();
+      await expect(refreshAnthropicAccountWithLock("anthropic", id, {
+        ...OAUTH_PROVIDERS.anthropic!,
+        refresh: async () => ({ access: `fresh-${index}`, refresh: `rt-fresh-${index}`, expires: Date.now() + 3600_000 }),
+      }, getAccountCredential("anthropic", id)!)).resolves.toBe(`fresh-${index}`);
       expect(getAccountSet("anthropic")!.accounts.find(account => account.id === id)!.needsReauth).toBeUndefined();
     }
   });
