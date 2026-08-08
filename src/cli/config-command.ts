@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { getConfigPath, readConfigDiagnostics, saveConfig, validateConfigCandidate } from "../config";
+import { readFileSync } from "node:fs";
+import { atomicWriteFile, getConfigPath, readConfigDiagnostics, saveConfig, validateConfigCandidate } from "../config";
 import type { OcxConfig } from "../types";
 import { CliUsageError, printData, rejectArgs, runCliAction, takeFlag } from "./runtime-api";
 
@@ -125,7 +125,7 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
       rejectArgs(args, USAGE);
       const content = `${JSON.stringify(readConfigDiagnostics().config, null, 2)}\n`;
       if (path === "-") process.stdout.write(content);
-      else { writeFileSync(path, content, { encoding: "utf8", mode: 0o600 }); console.log(`Exported config to ${path}.`); }
+      else { atomicWriteFile(path, content); console.log(`Exported config to ${path}.`); }
       return;
     }
     if (action === "import") {

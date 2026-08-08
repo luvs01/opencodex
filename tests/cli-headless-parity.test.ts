@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleAccessCommand } from "../src/cli/access";
@@ -310,6 +310,41 @@ describe("headless GUI parity CLI", () => {
       if (previous === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previous;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("config export hardens existing files and symlink targets", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-cli-export-home-"));
+    const outputDir = mkdtempSync(join(tmpdir(), "ocx-cli-export-output-"));
+    const previous = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = home;
+    try {
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        providers: { example: { apiKey: "provider-secret" } },
+        apiKeys: [{ key: "client-secret" }],
+      }));
+
+      const existingPath = join(outputDir, "existing.json");
+      writeFileSync(existingPath, "old\n");
+      chmodSync(existingPath, 0o644);
+      expect(await handleConfigCommand(["export", existingPath])).toBe(0);
+      expect(statSync(existingPath).mode & 0o777).toBe(0o600);
+      expect(readFileSync(existingPath, "utf8")).toContain('"providers"');
+
+      const targetPath = join(outputDir, "target.json");
+      const linkPath = join(outputDir, "export.json");
+      writeFileSync(targetPath, "old\n");
+      chmodSync(targetPath, 0o644);
+      symlinkSync(targetPath, linkPath);
+      expect(await handleConfigCommand(["export", linkPath])).toBe(0);
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(statSync(targetPath).mode & 0o777).toBe(0o600);
+      expect(readFileSync(targetPath, "utf8")).toContain('"providers"');
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(outputDir, { recursive: true, force: true });
     }
   });
 
