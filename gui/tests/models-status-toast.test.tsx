@@ -135,6 +135,50 @@ test("apply feedback renders as a fixed toast, not an inline notice before the w
   expect(workspace?.previousElementSibling?.classList.contains("action-toast")).toBe(true);
 });
 
+test("re-selecting the default v2 thread count does not publish an invalid-count error", async () => {
+  const baseFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/v2")) {
+      if (init?.method === "PUT") putCalls += 1;
+      return Response.json({
+        enabled: true,
+        agentsMaxThreadsConflict: false,
+        maxConcurrentThreadsPerSession: null,
+        multiAgentMode: "default",
+      });
+    }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+
+  const { createRoot } = await import("react-dom/client");
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <LanguageProvider>
+        <Models apiBase="http://localhost" />
+      </LanguageProvider>,
+    );
+  });
+  await act(async () => {
+    await new Promise(resolve => testWindow.setTimeout(resolve, 0));
+    await Promise.resolve();
+  });
+
+  const defaultTrigger = [...container.querySelectorAll<HTMLButtonElement>(".select-trigger")]
+    .find(button => button.textContent?.includes("default (4)"));
+  expect(defaultTrigger).toBeDefined();
+  await act(async () => { defaultTrigger!.click(); });
+  const defaultOption = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find(option => option.textContent?.includes("default (4)"));
+  expect(defaultOption).toBeDefined();
+  await act(async () => { defaultOption!.click(); });
+
+  expect(container.textContent).not.toContain("Enter a positive whole number");
+  expect(putCalls).toBe(0);
+});
+
 test("success toast expires after 6s and a repeated action re-arms it", async () => {
   installFakeTimers();
   const { createRoot } = await import("react-dom/client");

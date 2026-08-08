@@ -757,6 +757,10 @@ export default function Models({ apiBase }: { apiBase: string }) {
 
   const onSelectThreads = (raw: string) => {
     if (raw === CUSTOM_OPTION) { setShowThreadsCustom(true); setThreadsCustom(String(v2?.maxConcurrentThreadsPerSession ?? "")); return; }
+    // The empty value represents the server-managed default, not a numeric override.
+    // Re-selecting it in the custom Select must remain a no-op, as it was for the
+    // native select, rather than coercing "" to 0 and publishing a validation error.
+    if (raw === "") return;
     setShowThreadsCustom(false);
     void putV2Threads(Number(raw));
   };
