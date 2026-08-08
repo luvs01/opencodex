@@ -95,7 +95,7 @@ export default function ProviderOverview({
   }, [connectionProbeKey]);
 
   const testConnection = useCallback(async () => {
-    if (!apiBase) return;
+    if (apiBase === undefined) return;
     connectionAbortRef.current?.controller.abort();
     const controller = new AbortController();
     connectionAbortRef.current = { key: connectionProbeKey, controller };
@@ -173,7 +173,7 @@ export default function ProviderOverview({
             </div>
           )}
         </dl>
-        {apiBase && (
+        {apiBase !== undefined && (
           <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
             <button
               type="button"

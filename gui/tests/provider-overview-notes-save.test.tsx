@@ -186,6 +186,27 @@ test("static catalog connection test renders as not applicable instead of failed
   await act(async () => { root.unmount(); });
 });
 
+test("connection test supports the default same-origin API base", async () => {
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    expect(String(input)).toBe("/api/providers/test?name=openai");
+    return Response.json({ ok: true, latencyMs: 4, message: "Connected" });
+  }) as typeof fetch;
+
+  const { root, container } = await mountOverview(async () => ({ ok: true }), item, "");
+  const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find(candidate => candidate.textContent?.includes("Test connection"));
+  expect(button).toBeTruthy();
+
+  await act(async () => {
+    button!.click();
+    await flush();
+  });
+
+  expect(container.querySelector('[data-connection-test-state="ok"]')?.textContent).toContain("Connected");
+
+  await act(async () => { root.unmount(); });
+});
+
 test("same-provider config changes clear a rendered connection result", async () => {
   globalThis.fetch = (async () => Response.json({
     ok: true,
