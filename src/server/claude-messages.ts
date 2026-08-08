@@ -27,6 +27,7 @@ import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
 import { NoEligiblePolicyCandidateError, routeModel } from "../router";
 import { evidenceFromBody } from "../routing/request-evidence";
+import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
@@ -628,11 +629,17 @@ async function handleClaudeMessagesWithBudget(
   // bodies: it 400s on sampling params ("Unsupported parameter: max_output_tokens",
   // verified live 2026-07-11). Strip them for that route; routed providers keep them.
   let nativeRoute = false;
+  let allowMainAccountEnrichment = false;
   try {
     const route = routeModel(config, internalBody.model as string, evidenceFromBody(internalBody));
     // Settle the wire once so the sampling decision below reads the effective
     // adapter rather than the provider-wide default (#404).
     route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "anthropic");
+    // Main-account headers may reach an openai-responses forward destination verbatim.
+    // Only the canonical ChatGPT destination is allowed to receive that credential;
+    // other adapters replace it with their own auth before the upstream request.
+    allowMainAccountEnrichment = route.provider.adapter !== "openai-responses"
+      || isCanonicalOpenAiForwardProvider(route.provider);
     logCtx.routeDecision = route.routeDecision;
     if (route.provider.adapter === "openai-responses") {
       nativeRoute = true;
@@ -685,7 +692,7 @@ async function handleClaudeMessagesWithBudget(
   // native replays have no caller ChatGPT credential. This enrichment is optional:
   // auth-context later rejects a real physical-main selection, while routed/pool
   // traffic continues without reading native credentials during a fence/recovery.
-  if (tryClaimNativeMainProfileForTurn(logIds?.turnAdmissionLease)) {
+  if (allowMainAccountEnrichment && tryClaimNativeMainProfileForTurn(logIds?.turnAdmissionLease)) {
     const { getMainAccountToken } = await import("../codex/main-account");
     const token = getMainAccountToken();
     if (token) {

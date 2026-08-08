@@ -620,6 +620,56 @@ test("native openai-responses route carries prompt_cache_key + synthesized sessi
   }
 });
 
+test("custom forward openai-responses route never receives the main ChatGPT credential", async () => {
+  writeFileSync(join(isolatedCodexHome!.path, "auth.json"), JSON.stringify({
+    tokens: { access_token: "main-secret-must-not-leave", account_id: "main-account-must-not-leave" },
+  }));
+  const captured: Array<{ authorization: string | null; accountId: string | null }> = [];
+  const upstream = Bun.serve({
+    port: 0,
+    fetch(req) {
+      captured.push({
+        authorization: req.headers.get("authorization"),
+        accountId: req.headers.get("chatgpt-account-id"),
+      });
+      return new Response([
+        'event: response.created\ndata: {"response":{"id":"resp_1","status":"in_progress"}}\n\n',
+        'event: response.completed\ndata: {"response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  saveConfig({
+    port: 0,
+    defaultProvider: "custom",
+    providers: {
+      custom: {
+        adapter: "openai-responses",
+        baseUrl: `${upstream.url.toString().replace(/\/$/, "")}/v1`,
+        authMode: "forward",
+        allowPrivateNetwork: true,
+      },
+    },
+  } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/messages", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer claude-placeholder" },
+      body: JSON.stringify({
+        model: "custom/gpt-test",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(captured).toEqual([{ authorization: null, accountId: null }]);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
 test("Claude replay owns optional main enrichment while routed work survives drain and recovery", async () => {
   resetLifecycleDrainStateForTests();
   writeFileSync(join(isolatedCodexHome!.path, "auth.json"), JSON.stringify({
