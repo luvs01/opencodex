@@ -125,6 +125,20 @@ afterEach(() => {
 });
 
 describe("provider management validation", () => {
+  test("provider management validates responsesPath before persistence", () => {
+    const provider = { adapter: "openai-responses", baseUrl: "https://allowed.example" };
+    expect(providerManagementConfigError("custom", { ...provider, responsesPath: "/responses" })).toBeNull();
+
+    for (const [responsesPath, expectedError] of [
+      ["@169.254.169.254/latest/meta-data", "responsesPath must start with /"],
+      ["https://other-origin.example/responses", "responsesPath must be a relative path without a URL scheme"],
+      ["/responses?target=other", "responsesPath must not include query strings or fragments"],
+      [42, "responsesPath must be a string"],
+    ] as const) {
+      expect(providerManagementConfigError("custom", { ...provider, responsesPath })).toContain(expectedError);
+    }
+  });
+
   test("provider management validates model hosted-tool preferences", () => {
     const provider = {
       adapter: "openai-responses",

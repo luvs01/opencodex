@@ -666,8 +666,9 @@ export function providerBaseUrlConfigError(baseUrl: string): string | null {
   return null;
 }
 
-function providerResponsesPathConfigError(responsesPath: string | undefined): string | null {
+export function providerResponsesPathConfigError(responsesPath: unknown): string | null {
   if (responsesPath === undefined) return null;
+  if (typeof responsesPath !== "string") return "responsesPath must be a string";
   if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(responsesPath) || responsesPath.includes("://")) {
     return "responsesPath must be a relative path without a URL scheme";
   }

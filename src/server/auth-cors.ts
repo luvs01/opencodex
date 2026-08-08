@@ -10,6 +10,7 @@ import {
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerResponsesPathConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   retryOn429PolicyConfigError,
 } from "../config";
@@ -432,6 +433,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const destinationError = providerDestinationConfigError(name, typed);
   if (destinationError) return `provider ${name} ${destinationError}`;
+  const responsesPathError = providerResponsesPathConfigError(raw.responsesPath);
+  if (responsesPathError) return `provider ${name} ${responsesPathError}`;
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
