@@ -67,6 +67,7 @@ describe("anthropic extended-thinking gate", () => {
   test("adaptive-thinking model maps unsupported 'minimal' effort to 'low'", async () => {
     const b = await bodyOf(parsed("minimal", {}, "claude-fable-5"));
     expect(b.output_config).toEqual({ effort: "low" });
+    expect(b.max_tokens).toBe(12_288);
   });
 
   test("adaptive-thinking model resizes max_tokens for high effort (issue #246)", async () => {
