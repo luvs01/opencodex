@@ -161,7 +161,7 @@ export async function handleClientIntegrationCommand(
 ): Promise<number> {
   return runCliAction(async () => {
     const args = [...argv];
-    const action = (args.shift() ?? "status").toLowerCase();
+    const action = (args[0]?.startsWith("--") ? "status" : args.shift() ?? "status").toLowerCase();
     const wantsJson = takeFlag(args, "--json");
 
     if (action === "status" || action === "show" || action === "list") {

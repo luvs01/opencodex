@@ -266,6 +266,16 @@ describe("headless GUI parity CLI", () => {
     ]);
   });
 
+  test("client integration status accepts flags without an explicit action", async () => {
+    const runtime = fakeRuntime();
+    expect(await handleClientIntegrationCommand(["--json"], runtime.deps)).toBe(0);
+    expect(await handleClientIntegrationCommand(["--client", "hermes", "--json"], runtime.deps)).toBe(0);
+    expect(runtime.requests.map(row => [row.path, row.method])).toEqual([
+      ["/api/client-integrations", "GET"],
+      ["/api/client-integrations/hermes", "GET"],
+    ]);
+  });
+
   test("restore refuses to guess about drift, and forwards the confirmation when given", async () => {
     /*
      * Replacing edits a user made after the snapshot is their decision, so the
