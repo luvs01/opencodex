@@ -655,6 +655,26 @@ describe("Responses bridge reasoning and usage parity", () => {
     expect(frames.some(f => f.event === "response.function_call_arguments.done")).toBe(false);
   });
 
+  test("streaming freeform preview handles large one-byte argument streams incrementally", async () => {
+    const input = "x".repeat(32_000);
+    const wrapped = JSON.stringify({ input });
+    const events: AdapterEvent[] = [
+      { type: "tool_call_start", id: "c1", name: "apply_patch" },
+      ...Array.from(wrapped, char => ({ type: "tool_call_delta" as const, arguments: char })),
+      { type: "tool_call_end" },
+      { type: "done" },
+    ];
+
+    const frames = await collectSse(bridgeToResponsesSSE(
+      replay(events), "model", undefined, new Set(["apply_patch"]),
+    ));
+    const preview = frames
+      .filter(frame => frame.event === "response.custom_tool_call_input.delta")
+      .map(frame => frame.data.delta)
+      .join("");
+    expect(preview).toBe(input);
+  }, 3_000);
+
   test("non-streaming error produces failed status", () => {
     const json = buildResponseJSON([
       {
