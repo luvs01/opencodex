@@ -519,6 +519,25 @@ function ejectRemainingOpencodexHistory(db: Database): { rows: number; files: nu
   return { rows: rows.length, files };
 }
 
+function hasCompatibleHistorySchema(stateDbPath: string): boolean {
+  try {
+    const db = new Database(stateDbPath, { readonly: true });
+    try {
+      db.query(`
+        SELECT id, rollout_path, model_provider, source, has_user_event, first_user_message
+        FROM threads
+        LIMIT 0
+      `).all();
+      return true;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    if (isRecoverableHistoryError(error)) throw error;
+    return false;
+  }
+}
+
 export function classifyRecoverableHistoryError(error: unknown): CodexHistoryFailureReason | null {
   const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
@@ -680,6 +699,10 @@ function syncCodexHistoryProviderUnsafe(provider: CodexHistoryProvider, stateDbP
 function restoreCodexHistoryProvider(stateDbPath: string, backupPath: string): CodexHistorySyncResult {
   const manifest = readBackup(backupPath, stateDbPath);
   const entries = Object.values(manifest.entries);
+
+  // With no manifest there is nothing to restore unless this is a legacy opencodex DB.
+  // Older, empty, or corrupt Codex databases may not have the history schema at all.
+  if (entries.length === 0 && !hasCompatibleHistorySchema(stateDbPath)) return { rows: 0, files: 0 };
 
   const db = openStateDb(stateDbPath);
   try {

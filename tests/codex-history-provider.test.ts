@@ -267,6 +267,29 @@ describe("Codex history provider sync", () => {
     expect(existsSync(backupPath)).toBe(false);
   });
 
+  test.each([
+    ["no threads table", "CREATE TABLE metadata (key TEXT PRIMARY KEY)"],
+    ["no first_user_message column", "CREATE TABLE threads (id TEXT, rollout_path TEXT, model_provider TEXT, source TEXT, has_user_event INTEGER)"],
+  ])("no-backup restore ignores an incompatible state DB with %s", (_case, schema) => {
+    const dir = join(tmpdir(), `ocx-incompatible-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "state_5.sqlite");
+    const db = new Database(dbPath);
+    db.run(schema);
+    db.close();
+
+    expect(syncCodexHistoryProvider("openai", dbPath, join(dir, "missing-backup.json"))).toEqual({ rows: 0, files: 0 });
+  });
+
+  test("no-backup restore ignores a corrupt state DB", () => {
+    const dir = join(tmpdir(), `ocx-corrupt-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "state_5.sqlite");
+    writeFileSync(dbPath, "not a sqlite database");
+
+    expect(syncCodexHistoryProvider("openai", dbPath, join(dir, "missing-backup.json"))).toEqual({ rows: 0, files: 0 });
+  });
+
   test("explicitly recovers legacy opencodex user rows to openai", () => {
     const { dbPath, execRollout, legacyRollout } = makeFixture({ includeExec: true, includeLegacy: true });
 
