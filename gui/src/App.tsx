@@ -20,10 +20,9 @@ import { type Page } from "./app-routing";
 import { readModelsTab, type ModelsTab } from "./pages/models-tab";
 import { useAppRouteState } from "./use-app-route-state";
 import { requestProxyStop } from "./stop-proxy";
+import { readStoredTheme, writeStoredTheme, type Theme } from "./theme-storage";
 
 installApiAuthFetch();
-
-type Theme = "light" | "dark" | "system";
 
 const PAGE_TKEY: Record<Page, TKey> = {
   dashboard: "nav.dashboard",
@@ -39,7 +38,6 @@ const PAGE_TKEY: Record<Page, TKey> = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
-const THEME_KEY = "ocx-theme";
 
 /**
  * Every sidebar row maps one-to-one onto a page again.
@@ -74,11 +72,6 @@ function readRuntimeVersion(data: unknown): string | null {
   if (!data || typeof data !== "object" || !("version" in data)) return null;
   const version = (data as { version?: unknown }).version;
   return typeof version === "string" && version.length > 0 ? version : null;
-}
-
-function readStoredTheme(): Theme {
-  const t = localStorage.getItem(THEME_KEY);
-  return t === "light" || t === "dark" ? t : "system";
 }
 
 export default function App() {
@@ -120,8 +113,9 @@ export default function App() {
 
   useEffect(() => {
     const el = document.documentElement;
-    if (theme === "system") { el.removeAttribute("data-theme"); localStorage.removeItem(THEME_KEY); }
-    else { el.setAttribute("data-theme", theme); localStorage.setItem(THEME_KEY, theme); }
+    if (theme === "system") el.removeAttribute("data-theme");
+    else el.setAttribute("data-theme", theme);
+    writeStoredTheme(theme);
   }, [theme]);
 
   const healthPoll = useKeyedClientResource(
