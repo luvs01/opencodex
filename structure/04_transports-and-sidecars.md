@@ -339,7 +339,8 @@ Cursor Router's parameterized `default` model is represented in Codex by four ca
 All four route to the `default` Cursor wire model. Explicit variants additionally populate
 `AgentRunRequest.requested_model.parameters` with the `optimization` parameter; this is the same
 parameterized-model channel used by current Cursor clients. Router rows are static capabilities and
-must survive a live `GetUsableModels` response that omits `default`.
+seed the fallback catalog. After successful live discovery, only `cursor/auto` is retained
+unconditionally; explicit optimization variants require account-specific availability evidence.
 
 `cursor/grok-4.5-fast` is also a stable Codex-facing row, but current Cursor clients do not request
 it as a flat model slug. OpenCodex sends `grok-4.5` through `requested_model` with separate `effort`

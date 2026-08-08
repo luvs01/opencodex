@@ -165,7 +165,7 @@ export function filterCursorConfiguredModelsByLiveDiscovery<T extends { id: stri
   liveIds: readonly string[],
 ): T[] {
   return configured.filter(model =>
-    isCursorRouterModelId(model.id) || isCursorModelAvailableForAccount(model.id, liveIds),
+    model.id === CURSOR_AUTO_MODEL_ID || isCursorModelAvailableForAccount(model.id, liveIds),
   );
 }
 

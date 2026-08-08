@@ -272,7 +272,8 @@ Bridge Cursor экспериментальный. После `ocx login cursor` 
 | `cursor/auto-intelligence` | Intelligence |
 
 Явные варианты отправляют модель Cursor `default` с её параметром `optimization`, сохраняя выбор
-на каждом запросе. Они остаются доступны даже если live-discovery не вернул `default`.
+на каждом запросе. После успешного live-discovery показываются только явные варианты, разрешённые
+ответом для данного аккаунта; `cursor/auto` остаётся безопасным fallback-вариантом.
 
 Server-driven local tool'ы Cursor по умолчанию выключены. Codex продолжает использовать собственные
 инструменты, такие как `apply_patch` и `exec_command`, со своей же approval/sandbox policy:
