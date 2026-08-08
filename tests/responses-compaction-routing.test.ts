@@ -482,6 +482,38 @@ describe("routed compaction for key-mode openai-responses (#422)", () => {
 });
 
 describe("compaction terminal handling (#422)", () => {
+  for (const stream of [false, true]) {
+    test(`rejects and cancels an oversized ${stream ? "streaming" : "JSON"} upstream response`, async () => {
+      let cancelled = false;
+      const chunk = new Uint8Array(1024 * 1024);
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(chunk);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      globalThis.fetch = (async () => new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": stream ? "text/event-stream" : "application/json",
+        },
+      })) as typeof fetch;
+
+      const res = await handleResponses(
+        compactionRequest(baseCompactionBody({ stream })),
+        keyProviderConfig(),
+        { model: "", provider: "" },
+      );
+      const responseText = await res.text();
+
+      expect(cancelled).toBe(true);
+      expect(responseText).toContain("upstream compaction response exceeded 32 MiB");
+      expect(responseText).not.toContain('"type":"compaction"');
+    });
+  }
+
   test("an upstream failure does not become an empty compaction", async () => {
     globalThis.fetch = (async () => jsonResponse({
       id: "resp_1",

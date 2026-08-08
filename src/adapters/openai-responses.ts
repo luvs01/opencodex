@@ -11,6 +11,83 @@ import { OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 import { modelRecordValue } from "../reasoning-effort";
 import type { TranslatorBudget } from "../lib/translator-budget";
 
+export const ROUTED_COMPACTION_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+const ROUTED_COMPACTION_RESPONSE_TOO_LARGE = "upstream compaction response exceeded 32 MiB";
+
+function declaredResponseBytes(response: Response): number | null {
+  const value = response.headers.get("content-length");
+  if (value === null || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+async function readRoutedCompactionBody(response: Response): Promise<string> {
+  if (!response.body) throw new Error("malformed upstream compaction response");
+  const reader = response.body.getReader();
+  if ((declaredResponseBytes(response) ?? 0) > ROUTED_COMPACTION_RESPONSE_MAX_BYTES) {
+    await reader.cancel(ROUTED_COMPACTION_RESPONSE_TOO_LARGE).catch(() => undefined);
+    throw new Error(ROUTED_COMPACTION_RESPONSE_TOO_LARGE);
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > ROUTED_COMPACTION_RESPONSE_MAX_BYTES) {
+        await reader.cancel(ROUTED_COMPACTION_RESPONSE_TOO_LARGE).catch(() => undefined);
+        throw new Error(ROUTED_COMPACTION_RESPONSE_TOO_LARGE);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
+}
+
+async function boundedRoutedCompactionStream(response: Response): Promise<ReadableStream<Uint8Array>> {
+  if (!response.body) throw new Error("passthrough adapter received no response body");
+  const reader = response.body.getReader();
+  if ((declaredResponseBytes(response) ?? 0) > ROUTED_COMPACTION_RESPONSE_MAX_BYTES) {
+    await reader.cancel(ROUTED_COMPACTION_RESPONSE_TOO_LARGE).catch(() => undefined);
+    throw new Error(ROUTED_COMPACTION_RESPONSE_TOO_LARGE);
+  }
+  let total = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        total += value.byteLength;
+        if (total > ROUTED_COMPACTION_RESPONSE_MAX_BYTES) {
+          await reader.cancel(ROUTED_COMPACTION_RESPONSE_TOO_LARGE).catch(() => undefined);
+          controller.error(new Error(ROUTED_COMPACTION_RESPONSE_TOO_LARGE));
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        await reader.cancel(error).catch(() => undefined);
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
+
 // Headers relayed verbatim from the caller in OAuth-passthrough ("forward") mode.
 // Exported so the web-search sidecar reuses the exact same forwarded-auth set for its ChatGPT call.
 export const FORWARD_HEADERS = [
@@ -1214,50 +1291,62 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let doneText = "";
       let snapshot = "";
       let usage: OcxUsage | undefined;
-      for await (const event of decodeServerSentEvents(response.body, { translatorBudget: budget })) {
-        let payload: unknown;
-        try { payload = JSON.parse(event.data); } catch { continue; }
-        if (!isPlainObject(payload)) continue;
-        switch (payload.type) {
-          case "response.output_text.delta":
-            if (typeof payload.delta === "string") {
-              const next = deltas + payload.delta;
-              const previousBytes = budgetEncoder.encode(deltas).byteLength;
-              const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
-              deltas = next;
-              reservation.commitRetained();
-              budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
-            }
-            break;
-          case "response.output_text.done":
-            if (typeof payload.text === "string") {
-              const next = doneText + payload.text;
-              const previousBytes = budgetEncoder.encode(doneText).byteLength;
-              const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
-              doneText = next;
-              reservation.commitRetained();
-              budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
-            }
-            break;
-          case "response.failed":
-          case "error":
-            yield { type: "error", message: responsesErrorMessage(payload.response ?? payload) };
-            return;
-          case "response.incomplete":
-            yield { type: "incomplete", reason: responsesErrorMessage(payload.response ?? payload) };
-            return;
-          case "response.completed":
-            {
-              const next = responsesPayloadText(payload.response);
-              const previousBytes = budgetEncoder.encode(snapshot).byteLength;
-              const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
-              snapshot = next;
-              reservation.commitRetained();
-              budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
-            }
-            usage = usageFromResponsesPayload(payload.response);
-            break;
+      let boundedBody: ReadableStream<Uint8Array>;
+      try {
+        boundedBody = await boundedRoutedCompactionStream(response);
+      } catch (error) {
+        yield { type: "error", message: error instanceof Error ? error.message : ROUTED_COMPACTION_RESPONSE_TOO_LARGE };
+        return;
+      }
+      try {
+        for await (const event of decodeServerSentEvents(boundedBody, { translatorBudget: budget })) {
+          let payload: unknown;
+          try { payload = JSON.parse(event.data); } catch { continue; }
+          if (!isPlainObject(payload)) continue;
+          switch (payload.type) {
+            case "response.output_text.delta":
+              if (typeof payload.delta === "string") {
+                const next = deltas + payload.delta;
+                const previousBytes = budgetEncoder.encode(deltas).byteLength;
+                const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
+                deltas = next;
+                reservation.commitRetained();
+                budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
+              }
+              break;
+            case "response.output_text.done":
+              if (typeof payload.text === "string") {
+                const next = doneText + payload.text;
+                const previousBytes = budgetEncoder.encode(doneText).byteLength;
+                const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
+                doneText = next;
+                reservation.commitRetained();
+                budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
+              }
+              break;
+            case "response.failed":
+            case "error":
+              yield { type: "error", message: responsesErrorMessage(payload.response ?? payload) };
+              return;
+            case "response.incomplete":
+              yield { type: "incomplete", reason: responsesErrorMessage(payload.response ?? payload) };
+              return;
+            case "response.completed":
+              {
+                const next = responsesPayloadText(payload.response);
+                const previousBytes = budgetEncoder.encode(snapshot).byteLength;
+                const reservation = budget.reserveTransient(budgetEncoder.encode(next).byteLength, { kind: "retained_collectors" });
+                snapshot = next;
+                reservation.commitRetained();
+                budget.releaseRetained(previousBytes, { kind: "retained_collectors" });
+              }
+              usage = usageFromResponsesPayload(payload.response);
+              break;
+          }
         }
+      } catch (error) {
+        yield { type: "error", message: error instanceof Error ? error.message : ROUTED_COMPACTION_RESPONSE_TOO_LARGE };
+        return;
       }
       // Gateways differ in which of these they emit; prefer the authoritative
       // completed snapshot so text is never double-counted.
@@ -1269,8 +1358,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
 
     async parseResponse(response: Response, budget: TranslatorBudget): Promise<AdapterEvent[]> {
       let payload: unknown;
-      try { payload = await response.json(); } catch {
-        return [{ type: "error", message: "malformed upstream compaction response" }];
+      try { payload = JSON.parse(await readRoutedCompactionBody(response)); } catch (error) {
+        return [{
+          type: "error",
+          message: error instanceof Error && error.message === ROUTED_COMPACTION_RESPONSE_TOO_LARGE
+            ? error.message
+            : "malformed upstream compaction response",
+        }];
       }
       budget.chargeRetained(new TextEncoder().encode(JSON.stringify(payload)).byteLength, { kind: "retained_collectors" });
       if (!isPlainObject(payload)) {
