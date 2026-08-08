@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, appendFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, appendFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
@@ -132,6 +132,13 @@ export function isKnownInboundProtocol(value: unknown): value is NonNullable<Per
 
 export function usageLogPath(): string {
   return join(getConfigDir(), "usage.jsonl");
+}
+
+const MAX_USAGE_LOG_BYTES = 64 * 1024 * 1024;
+const MAX_USAGE_ENTRY_BYTES = 64 * 1024;
+
+function usageLogArchivePath(): string {
+  return `${usageLogPath()}.1`;
 }
 
 export function usageTotalTokens(usage: OcxUsage | undefined): number | undefined {
@@ -397,6 +404,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
 function ensureUsageLogDir(): void {
   const dir = getConfigDir();
   recordOwnedConfigPath(dir, usageLogPath());
+  recordOwnedConfigPath(dir, usageLogArchivePath());
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   try { chmodSync(dir, 0o700); } catch { /* best-effort on platforms that ignore chmod */ }
 }
@@ -404,7 +412,25 @@ function ensureUsageLogDir(): void {
 export function appendUsageEntry(entry: PersistedUsageEntry): void {
   ensureUsageLogDir();
   const path = usageLogPath();
-  appendFileSync(path, `${JSON.stringify(normalizeUsageEntry(entry))}\n`, { encoding: "utf-8", mode: 0o600 });
+  const line = `${JSON.stringify(normalizeUsageEntry(entry))}\n`;
+  const lineBytes = Buffer.byteLength(line);
+  // Refuse anomalously large rows and rotate the active ledger before it can grow
+  // without bound. The single archive preserves recent history while bounding the
+  // total usage-log footprint to roughly twice MAX_USAGE_LOG_BYTES.
+  if (lineBytes > MAX_USAGE_ENTRY_BYTES) return;
+  if (existsSync(path) && statSync(path).size + lineBytes > MAX_USAGE_LOG_BYTES) {
+    const archive = usageLogArchivePath();
+    rmSync(archive, { force: true });
+    if (statSync(path).size <= MAX_USAGE_LOG_BYTES) {
+      renameSync(path, archive);
+      try { chmodSync(archive, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
+    } else {
+      // A legacy log may already exceed the new bound; do not preserve an
+      // arbitrarily large attacker-controlled file as the archive.
+      rmSync(path, { force: true });
+    }
+  }
+  appendFileSync(path, line, { encoding: "utf-8", mode: 0o600 });
   try { chmodSync(path, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
 }
 
