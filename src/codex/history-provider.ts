@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { zstdDecompressSync } from "node:zlib";
+import * as zlib from "node:zlib";
 import { Database } from "bun:sqlite";
 import { CODEX_HOME } from "./paths";
 import { atomicWriteFile, getConfigDir } from "../config";
@@ -374,9 +374,9 @@ function decompressRolloutZstUtf8(
   maxBytes: number = MAX_ROLLOUT_ZST_DECOMPRESSED_BYTES,
 ): string {
   const compressed = readFileSync(path);
-  const decoded = zstdDecompressSync(compressed as Uint8Array<ArrayBuffer>, {
-    maxOutputLength: maxBytes,
-  });
+  const decoded = typeof zlib.zstdDecompressSync === "function"
+    ? zlib.zstdDecompressSync(compressed as Uint8Array<ArrayBuffer>, { maxOutputLength: maxBytes })
+    : Bun.zstdDecompressSync(compressed);
   if (decoded.byteLength > maxBytes) {
     throw new Error("rollout_zst_too_large");
   }
