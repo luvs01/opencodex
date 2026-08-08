@@ -2031,7 +2031,10 @@ async function handleResponsesInner(
         options.onConsumedComboFailure?.(failure);
         return failure.response;
       }
-      const errorText = await upstreamResponse.text().catch(() => "");
+      const boundedError = await readBoundedResponseBody(upstreamResponse, {
+        signal: options.abortSignal,
+      }).catch(() => undefined);
+      const errorText = boundedError?.displaySafe ? boundedError.text : "";
       return formatPassthroughUpstreamError(upstreamResponse.status, errorText, {
         statusText: upstreamResponse.statusText,
         headers,

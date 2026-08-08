@@ -8,6 +8,7 @@ import { saveConfig } from "../src/config";
 import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
 import { getDebugLogEntries, resetDebugLogBufferForTests } from "../src/lib/debug-log-buffer";
 import { resetDebugSettingsForTests } from "../src/lib/debug-settings";
+import { BOUNDED_BODY_MAX_BYTES } from "../src/lib/bounded-body";
 import { setDraining } from "../src/server/lifecycle";
 import { startServer } from "../src/server";
 import { formatPassthroughUpstreamError } from "../src/server/responses/passthrough-error";
@@ -188,6 +189,24 @@ describe("passthrough empty 503 (#452)", () => {
         expect(typeof json.error?.message).toBe("string");
         expect(json.error!.message!.trim().length).toBeGreaterThan(0);
         expect(json.error!.message!.toLowerCase()).not.toBe("unknown error");
+      },
+    );
+  });
+
+  test("ChatGPT passthrough replaces an oversized error body with a bounded status-only error", async () => {
+    await withPoolPassthrough(
+      () => new Response("x".repeat(BOUNDED_BODY_MAX_BYTES + 1), { status: 503 }),
+      async (serverUrl) => {
+        const response = await originalGlobalFetch(new URL("/v1/responses", serverUrl), {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer inbound-token" },
+          body: JSON.stringify({ model: "gpt-5.6-sol", input: "hi", stream: false }),
+        });
+        expect(response.status).toBe(503);
+        const text = await response.text();
+        expect(text.length).toBeLessThan(BOUNDED_BODY_MAX_BYTES + 1);
+        const json = JSON.parse(text) as { error?: { message?: string } };
+        expect(json.error?.message).toBe("Provider error 503: (empty body)");
       },
     );
   });
