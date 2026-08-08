@@ -465,17 +465,10 @@ function updateSessionMeta(path: string, expectedId: string, patch: { provider?:
 }
 
 function toNativeRestoreTarget(entry: BackupEntry): NativeRestoreTarget {
-  if (entry.modelProvider !== "opencodex") {
-    return {
-      modelProvider: entry.modelProvider,
-      source: entry.source,
-      hasUserEvent: entry.hasUserEvent,
-    };
-  }
   return {
-    modelProvider: "openai",
-    source: entry.source === "exec" ? "cli" : entry.source,
-    hasUserEvent: 1,
+    modelProvider: entry.modelProvider,
+    source: entry.source,
+    hasUserEvent: entry.hasUserEvent,
   };
 }
 
@@ -667,8 +660,7 @@ function restoreCodexHistoryProvider(stateDbPath: string, backupPath: string): C
   const db = openStateDb(stateDbPath);
   try {
     if (entries.length === 0) {
-      const ejected = ejectRemainingOpencodexHistory(db);
-      return ejected.rows > 0 ? { rows: 0, files: ejected.files, ejectedRows: ejected.rows } : { rows: 0, files: 0 };
+      return { rows: 0, files: 0 };
     }
 
     let files = 0;
@@ -696,10 +688,7 @@ function restoreCodexHistoryProvider(stateDbPath: string, backupPath: string): C
     });
     restore();
     writeBackup(backupPath, { version: 1, stateDbPath, entries: {} }, stateDbPath);
-    const ejected = ejectRemainingOpencodexHistory(db);
-    return ejected.rows > 0
-      ? { rows: entries.length, files: files + ejected.files, ejectedRows: ejected.rows }
-      : { rows: entries.length, files };
+    return { rows: entries.length, files };
   } finally {
     db.close();
   }
@@ -718,8 +707,9 @@ export function restoreLegacyOpenaiHistory(stateDbPath = STATE_DB_PATH): { rows:
 }
 
 /**
- * One-time Design-B migration: restore backed-up originals, then eject any remaining
- * opencodex-tagged threads to openai. Thin wrapper over the restore path with a
+ * One-time Design-B migration: restore only backed-up originals. Untracked
+ * opencodex-tagged threads have unknown upstream provenance and must stay routed through
+ * OpenCodex rather than being exposed to OpenAI. Thin wrapper over the restore path with a
  * configurable retry budget — the daemon migration guardian uses `{ attempts: 1 }`
  * per tick so a locked DB never stalls the event loop beyond one sqlite busy wait.
  */
@@ -739,7 +729,7 @@ export function migrateHistoryToOpenai(
 }
 
 export interface PendingHistoryCount {
-  /** Threads still tagged opencodex that the eject path WOULD move (mirrors its WHERE). */
+  /** Kept for API compatibility; unknown-provenance opencodex rows are never auto-restored. */
   pendingRows: number;
   /** Entries still recorded in the backup manifest (restore targets). */
   backupEntries: number;
@@ -750,8 +740,9 @@ export interface PendingHistoryCount {
 /**
  * Read-only migration progress probe for the guardian and `ocx doctor`. Opens sqlite
  * readonly with a SHORT busy timeout so a locked DB cannot stall a daemon tick. The
- * pending predicate mirrors ejectRemainingOpencodexHistory exactly — rows eject ignores
- * (empty first_user_message) are not counted, so 0 really means "migration done".
+ * Only manifest entries are actionable migration work. A bare opencodex row may belong to
+ * any routed provider, so treating it as native OpenAI history would risk cross-provider
+ * disclosure. Such rows can only be changed by the explicit legacy recovery command.
  */
 export function countPendingOpencodexHistory(stateDbPath = STATE_DB_PATH, backupPath = HISTORY_BACKUP_PATH): PendingHistoryCount {
   let backupEntries = 0;
@@ -765,13 +756,8 @@ export function countPendingOpencodexHistory(stateDbPath = STATE_DB_PATH, backup
     const db = new Database(stateDbPath, { readonly: true });
     try {
       db.exec("PRAGMA busy_timeout = 100");
-      const row = db.query<{ n: number }, []>(`
-        SELECT count(*) AS n
-        FROM threads
-        WHERE model_provider = 'opencodex'
-          AND trim(coalesce(first_user_message, '')) != ''
-      `).get();
-      return { pendingRows: row?.n ?? 0, backupEntries };
+      db.query("SELECT 1 FROM threads LIMIT 1").get();
+      return { pendingRows: 0, backupEntries };
     } finally {
       db.close();
     }
