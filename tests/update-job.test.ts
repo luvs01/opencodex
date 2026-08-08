@@ -385,6 +385,40 @@ describe("GUI update execution decisions", () => {
     }
   });
 
+  test("service restart is not skipped when the listener scan fails", async () => {
+    let serviceRuns = 0;
+    const job: UpdateJobState = {
+      id: "svc-scan-failure",
+      status: "restarting",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentVersion: "2.10.2",
+      latestVersion: "2.10.3",
+      channel: "latest",
+      installer: "npm",
+      restart: true,
+      command: "",
+      log: [],
+    };
+    writeFileSync(updateJobPath(job.id), JSON.stringify(job));
+    await restartAfterUpdateForTests(job, { port: 19997, hostname: "127.0.0.1" }, {
+      serviceInstalledFn: () => true,
+      serviceViableFn: () => true,
+      waitForPort: async () => false,
+      listListenPidsFn: () => [],
+      scanListenPidsFn: () => ({ ok: false, error: "listener tools unavailable" }),
+      runService: () => {
+        serviceRuns += 1;
+        return { status: 0 };
+      },
+      probeProxy: async () => true,
+    });
+    expect(serviceRuns).toBe(1);
+    expect(readUpdateJob(job.id)?.log.some(line =>
+      line.includes("Skipping service reinstall after reclaim timeout"),
+    )).toBe(false);
+  });
+
   // 260804 #970: the Windows GUI update worker (OCX_SERVICE=1, never elevated) used to
   // skip the service refresh entirely, because it ran `service install` whose scheduler
   // path always reaches `schtasks /create`. `repair` never calls /create, so the skip's
