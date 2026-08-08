@@ -48,6 +48,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify dispatched SHA
         env:
@@ -454,10 +455,7 @@ jobs:
           fi
           "${render_args[@]}"
 
-          if [ -z "$existing_tag_sha" ]; then
-            git tag "$release_tag" "$GITHUB_SHA"
-            git push origin "refs/tags/${release_tag}"
-          fi
-
+          # Let the authenticated release API create the tag atomically with the
+          # release. Checkout deliberately does not persist this write token.
           gh release create "$release_tag" --target "$GITHUB_SHA" --title "$release_tag" \
             --notes-file "$notes_file" ${prerelease_flag:+$prerelease_flag}

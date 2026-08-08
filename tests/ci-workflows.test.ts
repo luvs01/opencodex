@@ -473,6 +473,15 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("timeout-minutes: 15");
 
+    // Build and dependency steps must not inherit the contents:write token via
+    // checkout's git credential helper. The final gh call creates both the tag
+    // and release through the API instead of relying on persisted credentials.
+    expect(workflow).toContain("persist-credentials: false");
+    expect(workflow).not.toContain('git push origin "refs/tags/${release_tag}"');
+    expect(workflow).toContain(
+      'gh release create "$release_tag" --target "$GITHUB_SHA"',
+    );
+
     // The exact-SHA CI gate already includes the three hosted keyring legs. The
     // release workflow must not duplicate the Linux bootstrap and drift from CI.
     expect(workflow).not.toContain("- name: OS keyring create/read/delete smoke");
@@ -612,8 +621,8 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toMatch(/gh release create[\s\S]*?--notes-file "\$notes_file"/);
     expect(workflow).not.toContain("gh release edit");
     expect(workflow).not.toContain("--generate-notes");
-    // Notes must be assembled before tagging so a notes API failure does not leave
-    // a remote tag that blocks release retries at preflight.
+    // Notes must be assembled before the release API creates its tag so a notes
+    // API failure does not leave a remote tag that blocks release retries.
     const createStep = workflow.split("- name: Create GitHub release")[1]!.split(/\n {6}- name:/)[0]!;
     // Preview carry lookup must use tag-specific API status, not `gh release view` stderr prose.
     expect(createStep).toContain("releases/tags/");
@@ -624,8 +633,8 @@ describe("GitHub Actions hardening", () => {
     }
     expect(createStep).not.toContain("set +e\n            pr_notes");
     expect(createStep.indexOf("gh api")).toBeGreaterThan(-1);
-    expect(createStep.indexOf('git tag "$release_tag"')).toBeGreaterThan(-1);
-    expect(createStep.indexOf("gh api")).toBeLessThan(createStep.indexOf('git tag "$release_tag"'));
+    expect(createStep).not.toContain('git tag "$release_tag"');
+    expect(createStep.indexOf("gh api")).toBeLessThan(createStep.indexOf("gh release create"));
     // The notes baseline must read the FULL tag set, not `--merged HEAD`: stable
     // tags live on main's lineage, which the preview branch does not carry, and a
     // trailing same-core preview must not hide the stable from the range
