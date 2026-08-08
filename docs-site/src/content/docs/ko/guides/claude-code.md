@@ -75,13 +75,16 @@ macOS의 자동 연결(`claudeCode.systemEnv`)도 같은 방식으로 판단하�
 네이티브 상태로 유지되고, 같은 세션에서 선택기 별칭을 써서 라우팅 모델도 계속 사용할 수 있어요.
 
 **헤더 처리:** hop-by-hop 헤더와 `host`, `content-length`, `accept-encoding`,
-`x-opencodex-api-key`, `origin`은 전달 전에 제거해요. 그 밖의 헤더(`anthropic-beta`,
+`x-opencodex-api-key`, `origin`은 전달 전에 제거해요. OpenCodex 입장 비밀과 일치하는
+`authorization` 또는 `x-api-key` 값도 제거하고, 그 밖의 종단 간 헤더(`anthropic-beta`,
 `anthropic-version` 포함)는 그대로 전달해요.
 
 다음 네 조건을 **모두** 충족하면 패스스루가 작동해요. `nativePassthrough`가 `false`가 아니고,
 모델 이름이 `claude` 또는 `anthropic`으로 시작하며, bearer 또는 `x-api-key`가 `sk-ant-`로
 시작하고, 별칭/모델 맵 해석 결과가 변경되지 않은 같은 모델이어야 해요. 그래서 `ocx claude`를
 사용할 때 "claude.ai connectors are disabled" 경고도 더 이상 나타나지 않아요.
+루프백이 아닌 리스너에서는 `x-opencodex-api-key`를 통한 프록시 인증도 필요하며,
+`authorization`과 `x-api-key`는 제공자 자격 증명 전용이에요.
 
 `claudeCode.nativePassthrough: false`로 끌 수 있고, `claudeCode.anthropicBaseUrl`로 다른 주소를
 지정할 수 있어요.

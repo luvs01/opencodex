@@ -205,6 +205,52 @@ test("count_tokens passes through with native credentials", async () => {
   }
 });
 
+test("native passthrough never forwards proxy admission credentials", async () => {
+  const previousToken = process.env.OPENCODEX_API_AUTH_TOKEN;
+  process.env.OPENCODEX_API_AUTH_TOKEN = "sk-ant-api03-key";
+  const captured: Captured[] = [];
+  const upstream = mockAnthropicUpstream(captured);
+  saveConfig({ ...cfg(upstream.url.toString().replace(/\/$/, "")), hostname: "0.0.0.0" });
+  const server = startServer(0);
+  const url = new URL("/v1/messages", server.url);
+  url.hostname = "127.0.0.1";
+  try {
+    const ambiguous = await globalThis.fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": "Bearer sk-ant-api03-key",
+        "x-api-key": "sk-ant-oat01-tst",
+      },
+      body: JSON.stringify(claudeBody()),
+    });
+    expect(ambiguous.status).not.toBe(200);
+    expect(captured).toHaveLength(0);
+
+    const dedicated = await globalThis.fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-opencodex-api-key": "sk-ant-api03-key",
+        "authorization": "Bearer sk-ant-oat01-tst",
+        "x-api-key": "sk-ant-api03-key",
+      },
+      body: JSON.stringify(claudeBody()),
+    });
+    expect(dedicated.status).toBe(200);
+    await dedicated.text();
+    expect(captured).toHaveLength(1);
+    expect(captured[0].headers.get("authorization")).toBe("Bearer sk-ant-oat01-tst");
+    expect(captured[0].headers.get("x-api-key")).toBeNull();
+    expect(captured[0].headers.get("x-opencodex-api-key")).toBeNull();
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+    if (previousToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
+    else process.env.OPENCODEX_API_AUTH_TOKEN = previousToken;
+  }
+});
+
 test("alias/mapped models and non-anthropic credentials do NOT pass through", async () => {
   const captured: Captured[] = [];
   const upstream = mockAnthropicUpstream(captured);

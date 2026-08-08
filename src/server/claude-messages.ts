@@ -28,6 +28,7 @@ import { estimateTokens } from "../lib/token-estimate";
 import { NoEligiblePolicyCandidateError, routeModel } from "../router";
 import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
+import { isApiAuthRequired, isDataPlaneAdmissionSecret, isProxyAdmissionSecret } from "./auth-cors";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForTerminalStatus, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
@@ -94,16 +95,23 @@ const PASSTHROUGH_STRIP_HEADERS = new Set([
   "accept-encoding", "x-opencodex-api-key", "origin",
 ]);
 
-function hasAnthropicNativeCredential(req: Request): boolean {
+function hasAnthropicNativeCredential(req: Request, config: OcxConfig): boolean {
   const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim() ?? "";
   const apiKey = req.headers.get("x-api-key")?.trim() ?? "";
-  return bearer.startsWith("sk-ant-") || apiKey.startsWith("sk-ant-");
+  return (bearer.startsWith("sk-ant-") && !isProxyAdmissionSecret(bearer, config))
+    || (apiKey.startsWith("sk-ant-") && !isProxyAdmissionSecret(apiKey, config));
 }
 
 function wantsNativePassthrough(req: Request, config: OcxConfig, model: unknown): model is string {
   if (config.claudeCode?.nativePassthrough === false) return false;
   if (typeof model !== "string" || !/^(claude|anthropic)/i.test(model)) return false;
-  if (!hasAnthropicNativeCredential(req)) return false;
+  // On exposed listeners, keep proxy admission on its dedicated header so the
+  // provider-owned Authorization/X-Api-Key credentials are never ambiguous.
+  if (isApiAuthRequired(config)) {
+    const admission = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
+    if (!isDataPlaneAdmissionSecret(admission, config)) return false;
+  }
+  if (!hasAnthropicNativeCredential(req, config)) return false;
   // An alias or modelMap hit means the user asked for a ROUTED model: translate instead.
   return resolveInboundModel(model, config.claudeCode) === model;
 }
@@ -324,7 +332,13 @@ async function anthropicNativePassthrough(
   }
   const headers = new Headers();
   req.headers.forEach((value, name) => {
-    if (!PASSTHROUGH_STRIP_HEADERS.has(name.toLowerCase())) headers.set(name, value);
+    const lowerName = name.toLowerCase();
+    if (PASSTHROUGH_STRIP_HEADERS.has(lowerName)) return;
+    const credential = lowerName === "authorization"
+      ? value.replace(/^Bearer\s+/i, "").trim()
+      : lowerName === "x-api-key" ? value.trim() : "";
+    if (credential && isProxyAdmissionSecret(credential, config)) return;
+    headers.set(name, value);
   });
   headers.set("content-type", "application/json");
 

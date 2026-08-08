@@ -50,13 +50,16 @@ macOS；在其他平台上，请使用 `ocx claude`。
 而已路由模型仍可在同一会话中通过选择器别名使用。
 
 **请求头处理：**转发前会移除逐跳请求头以及 `host`、`content-length`、`accept-encoding`、
-`x-opencodex-api-key` 和 `origin`。其他所有请求头（包括 `anthropic-beta` 和
+`x-opencodex-api-key` 和 `origin`。与 OpenCodex 准入密钥匹配的 `authorization` 或
+`x-api-key` 值也会被移除；其他端到端请求头（包括 `anthropic-beta` 和
 `anthropic-version`）都会透传。
 
 只有同时满足以下**四个**条件时才会触发透传：`nativePassthrough` 不为 `false`；模型以
 `claude` 或 `anthropic` 开头；bearer 或 `x-api-key` 以 `sk-ant-` 开头；并且别名/模型映射
 解析后返回的模型保持不变。这也意味着使用 `ocx claude` 时不再出现
 “claude.ai connectors are disabled”警告。
+在非回环监听器上，原生透传还要求通过 `x-opencodex-api-key` 完成代理准入；
+`authorization` 和 `x-api-key` 仅用于上游提供商凭据。
 
 可以设置 `claudeCode.nativePassthrough: false` 来禁用；也可以通过
 `claudeCode.anthropicBaseUrl` 指向其他位置。

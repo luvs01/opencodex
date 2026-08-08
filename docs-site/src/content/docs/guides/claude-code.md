@@ -156,13 +156,16 @@ caching and billing identity stay fully native, and routed models keep working i
 via the picker aliases.
 
 **Header handling:** hop-by-hop headers plus `host`, `content-length`, `accept-encoding`,
-`x-opencodex-api-key`, and `origin` are stripped before forwarding. All other headers (including
-`anthropic-beta` and `anthropic-version`) pass through.
+`x-opencodex-api-key`, and `origin` are stripped before forwarding. Any `authorization` or
+`x-api-key` value that matches an OpenCodex admission secret is also stripped; other end-to-end
+headers (including `anthropic-beta` and `anthropic-version`) pass through.
 
 The passthrough fires when **all four** conditions are met: `nativePassthrough` is not `false`;
 the model begins with `claude` or `anthropic`; the bearer or `x-api-key` starts with `sk-ant-`;
 and alias/model-map resolution returns the same model unchanged. This also means the
 "claude.ai connectors are disabled" warning no longer appears with `ocx claude`.
+On a non-loopback listener, native passthrough additionally requires proxy admission through
+`x-opencodex-api-key`; `authorization` and `x-api-key` remain exclusively provider-owned.
 
 Disable with `claudeCode.nativePassthrough: false`; point elsewhere with
 `claudeCode.anthropicBaseUrl`.
