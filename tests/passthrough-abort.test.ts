@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { linkAbortSignal, relaySseWithHeartbeat, relayWithAbort } from "../src/server";
+import {
+  getInspectionCounters,
+  MAX_INSPECTION_SSE_FRAME_BYTES,
+  resetInspectionCountersForTest,
+} from "../src/server/relay";
 
 const root = new URL("../", import.meta.url);
 
@@ -219,6 +224,28 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
 
     await readAll(relayed);
     expect(terminals).toEqual(["completed"]);
+  });
+
+  test("SSE passthrough bounds unterminated inspection and resynchronizes", async () => {
+    resetInspectionCountersForTest();
+    const enc = new TextEncoder();
+    const oversized = enc.encode(`data: ${"x".repeat(MAX_INSPECTION_SSE_FRAME_BYTES)}x\n\n`);
+    const terminal = enc.encode(
+      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"after-cap"}}\n\n',
+    );
+    const terminals: string[] = [];
+    const relayed = relaySseWithHeartbeat(
+      streamFromChunks([oversized, terminal]),
+      new AbortController(),
+      15_000,
+      status => terminals.push(status),
+    )!;
+
+    expect(await readAll(relayed)).toBe(new TextDecoder().decode(oversized) + new TextDecoder().decode(terminal));
+    expect(terminals).toEqual(["completed"]);
+    expect(getInspectionCounters().frameCapOverflows).toBe(1);
+    expect(getInspectionCounters().frameBufferHighWaterBytes)
+      .toBeLessThanOrEqual(MAX_INSPECTION_SSE_FRAME_BYTES);
   });
 
   test("SSE passthrough treats DONE without a terminal as incomplete", async () => {

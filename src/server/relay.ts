@@ -516,13 +516,11 @@ export function relaySseWithHeartbeat(
 ): ReadableStream<Uint8Array> | null {
   if (!body) return null;
   const reader = body.getReader();
-  const decoder = new TextDecoder();
   const heartbeat = new TextEncoder().encode(": opencodex keepalive\n\n");
   let timer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
   let clientCancelled = false;
   let terminalReported = false;
-  let buffer = "";
 
   const reportTerminal = (status: ResponsesTerminalStatus) => {
     if (terminalReported || clientCancelled || closed) return;
@@ -530,26 +528,14 @@ export function relaySseWithHeartbeat(
     onTerminal?.(status);
   };
 
-  const inspectPayload = (payload: string | null) => {
-    if (!payload) return;
-    const status = terminalStatusFromSsePayload(payload);
-    if (status) reportTerminal(status);
-  };
-
-  const inspectChunk = (value: Uint8Array) => {
-    buffer += decoder.decode(value, { stream: true });
-    let next: { block: string; rest: string } | null;
-    while ((next = nextSseBlock(buffer))) {
-      buffer = next.rest;
-      inspectPayload(sseDataPayload(next.block));
-    }
-  };
+  const inspector = createSseInspector({ onTerminal: reportTerminal });
 
   const cleanup = () => {
     if (closed) return;
     closed = true;
     if (timer) clearInterval(timer);
     timer = undefined;
+    inspector.dispose();
     options?.onDone?.();
   };
 
@@ -569,14 +555,13 @@ export function relaySseWithHeartbeat(
       try {
         const { done, value } = await reader.read();
         if (done) {
-          buffer += decoder.decode();
-          if (buffer.trim()) inspectPayload(sseDataPayload(buffer));
+          inspector.finish();
           if (!terminalReported && !clientCancelled) reportTerminal("incomplete");
           cleanup();
           controller.close();
           return;
         }
-        inspectChunk(value);
+        inspector.feed(value);
         controller.enqueue(value);
       } catch (err) {
         if (!clientCancelled) reportTerminal("incomplete");
