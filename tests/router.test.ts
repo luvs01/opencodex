@@ -510,6 +510,11 @@ describe("routeModel registry effort defaults", () => {
           models: ["disabled-only"],
           disabled: true,
         },
+        anthropic: {
+          adapter: "anthropic",
+          baseUrl: "https://api.anthropic.com",
+          disabled: true,
+        },
         active: {
           adapter: "openai-chat",
           baseUrl: "https://active.example.test/v1",
@@ -521,6 +526,7 @@ describe("routeModel registry effort defaults", () => {
 
     expect(routeModel(config, "shared-model").providerName).toBe("active");
     expect(routeModel(config, "active-only").providerName).toBe("active");
+    expect(routeModel(config, "claude-sonnet-test").providerName).toBe("active");
     expect(() => routeModel(config, "disabled/disabled-only")).toThrow("Provider is disabled");
   });
 });

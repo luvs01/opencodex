@@ -698,7 +698,7 @@ export function routeModel(
 function routeByKnownModelPattern(config: OcxConfig, modelId: string): RouteResult | undefined {
   for (const { providerNames, prefixes } of MODEL_PROVIDER_PATTERNS) {
     if (prefixes.some(prefix => modelId.startsWith(prefix))) {
-      const matchingProvider = Object.entries(config.providers).find(
+      const matchingProvider = activeProviderEntries(config).find(
         ([name]) => providerNames.some(providerName => name === providerName || name.startsWith(`${providerName}-`))
       );
       if (matchingProvider) {
