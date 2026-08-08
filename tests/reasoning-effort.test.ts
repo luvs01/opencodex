@@ -401,6 +401,23 @@ describe("provider-specific reasoning effort mapping", () => {
     expect(body.tool_choice).toBe("required");
   });
 
+  test("OpenAI-compatible chat does not advertise tools when tool_choice is none", () => {
+    const provider: OcxProviderConfig = { adapter: "openai-chat", baseUrl: "https://example.test/v1" };
+    const req = createOpenAIChatAdapter(provider).buildRequest({
+      modelId: "glm-5.2",
+      context: {
+        messages: [{ role: "user", content: "hello", timestamp: 0 }],
+        tools: [{ namespace: "mcp__secrets", name: "read_secret", description: "Read", parameters: { type: "object" } }],
+      },
+      stream: false,
+      options: { toolChoice: "none" },
+    });
+    const body = JSON.parse(req.body as string) as Record<string, unknown>;
+
+    expect(body.tools).toBeUndefined();
+    expect(body.tool_choice).toBe("none");
+  });
+
   test("named namespaced tool_choice resolves to the chat wire name", async () => {
     const provider: OcxProviderConfig = {
       adapter: "openai-chat",

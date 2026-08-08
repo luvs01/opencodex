@@ -26,7 +26,7 @@ import {
 } from "../../combos";
 import { isInjectionDebugEnabled } from "../../lib/debug-settings";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
-import { modelInList, namespacedToolName } from "../../types";
+import { modelInList, namespacedToolName, toolAllowedByToolChoice } from "../../types";
 import type { AdapterEvent, OcxConfig, OcxParsedRequest, OcxProviderConfig, OcxProviderContinuationState, OcxUsage } from "../../types";
 import {
   forceRefreshOAuthAccessSnapshot,
@@ -109,6 +109,8 @@ export function buildToolBridgeMaps(parsed: OcxParsedRequest, budget?: Translato
   const freeformToolNames = new Set<string>();
   const toolSearchToolNames = new Set<string>();
   for (const t of parsed.context.tools ?? []) {
+    // Upstream output is untrusted: only restore calls for tools the caller authorized.
+    if (!toolAllowedByToolChoice(t, parsed.options.toolChoice)) continue;
     if (t.namespace) {
       const wireName = namespacedToolName(t.namespace, t.name);
       budget?.chargeRetained(new TextEncoder().encode(JSON.stringify([wireName, t.namespace, t.name])).byteLength, { kind: "retained_collectors" });

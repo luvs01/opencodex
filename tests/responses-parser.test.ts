@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseRequest } from "../src/responses/parser";
+import { buildToolBridgeMaps } from "../src/server/responses";
 
 describe("Responses parser", () => {
   test("normalizes function tool schemas to an object root without corrupting valid schemas (#745)", () => {
@@ -91,6 +92,33 @@ describe("Responses parser", () => {
     });
 
     expect(parsed.options.toolChoice).toEqual({ allowedTools: ["web_search"], mode: "required" });
+  });
+
+  test("builds namespace restoration maps only for caller-authorized tools", () => {
+    const parsed = parseRequest({
+      model: "umans/umans-kimi-k2.7",
+      input: "use the safe tool",
+      tools: [{
+        type: "namespace",
+        name: "mcp__tools",
+        tools: [
+          { type: "function", name: "safe", parameters: { type: "object" } },
+          { type: "function", name: "secret", parameters: { type: "object" } },
+        ],
+      }],
+      tool_choice: {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [{ type: "function", name: "mcp__tools.safe" }],
+      },
+    });
+
+    expect([...buildToolBridgeMaps(parsed).toolNsMap]).toEqual([
+      ["mcp__tools__safe", { namespace: "mcp__tools", name: "safe" }],
+    ]);
+
+    parsed.options.toolChoice = "none";
+    expect(buildToolBridgeMaps(parsed).toolNsMap.size).toBe(0);
   });
 
   test("maps hosted allowed_tools entries to their synthetic routed tool names", () => {
