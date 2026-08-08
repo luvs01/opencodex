@@ -15,11 +15,11 @@ import { CODEX_HOME, getCodexHome } from "./paths";
 import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota } from "./quota";
 import {
   canAcquireCodexQuotaProbeLease,
+  canAcquireCodexQuotaScopeProbeLease,
   codexQuotaScopeForModel,
   computeCodexUsageScore,
   getCodexQuotaHealthSnapshot,
   getPoolAccountPlan,
-  isCodexAccountInCooldown,
 } from "./routing";
 import {
   isCodexAccountUsable,
@@ -233,11 +233,15 @@ export function isSubagentModelUnavailable(
     // advances instead of selecting a candidate that exact auth will reject.
     const quotaScope = codexQuotaScopeForModel(route.modelId);
     if (getCodexQuotaHealthSnapshot(resolvedAccountId, quotaScope, now) !== null) return true;
-  } else if (
-    isCodexAccountInCooldown(resolvedAccountId, now)
-    && !canAcquireCodexQuotaProbeLease(resolvedAccountId, now)
-  ) {
-    return true;
+  } else {
+    const quotaScope = codexQuotaScopeForModel(route.modelId);
+    const cooldown = getCodexQuotaHealthSnapshot(resolvedAccountId, quotaScope, now);
+    if (cooldown !== null) {
+      const probeAvailable = cooldown.quotaScope
+        ? canAcquireCodexQuotaScopeProbeLease(resolvedAccountId, cooldown.quotaScope, now)
+        : canAcquireCodexQuotaProbeLease(resolvedAccountId, now);
+      if (!probeAvailable) return true;
+    }
   }
   return isNativeModelQuotaExhausted(model, config, accountId, now);
 }

@@ -295,6 +295,23 @@ describe("subagent model fallback chain", () => {
     });
   });
 
+  test("pool fallback skips a reset-derived cooldown in the model's quota scope", () => {
+    const now = 1_800_000_000_000;
+    updateAccountQuota("pool-a", 10, undefined, 20);
+    const config = cfg({ subagentModelFallback: ["kimi/k3"] });
+    recordCodexUpstreamOutcome(config, "pool-a", 429, {
+      modelId: "gpt-5.6-sol",
+      now,
+      resetAt: Math.floor((now + 60 * 60_000) / 1_000),
+    });
+
+    expect(selectAvailableSubagentModel("gpt-5.6-sol", config, [], "pool-a", now + 1)).toEqual({
+      model: "kimi/k3",
+      rewritten: true,
+      skipped: ["gpt-5.6-sol"],
+    });
+  });
+
   test("account selector fallbacks still reject invalid or disabled native models", () => {
     resetSubagentModelFallbackStateForTests();
     updateAccountQuota("pool-a", 95, undefined, 20);
