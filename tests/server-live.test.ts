@@ -3,7 +3,7 @@
  * so the proxy must relay it to an OpenAI upstream instead of the /v1/* JSON-404 guard.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota } from "../src/codex/auth-api";
@@ -760,7 +760,7 @@ test("sideband relay preserves multibyte UTF-8 frames byte-identically in both d
 // The env-gated frame forensic log (OCX_LIVE_FRAME_LOG) records per-frame metadata and
 // U+FFFD presence without writing full payloads — the attribution tool for multibyte
 // transcript corruption reports.
-test("sideband frame log records direction, kind, and U+FFFD context without full payloads", async () => {
+test("sideband frame log records metadata without payload content", async () => {
   const frameLogPath = join(TEST_DIR, "frames.jsonl");
   process.env.OCX_LIVE_FRAME_LOG = frameLogPath;
   const FFFD_TEXT = "가볍게 ��기핼봐요";
@@ -839,13 +839,15 @@ test("sideband frame log records direction, kind, and U+FFFD context without ful
     expect(u2cFffd).toBeDefined();
     expect(u2cFffd.kind).toBe("text");
     expect(u2cFffd.bytes).toBeGreaterThan(0);
-    expect(u2cFffd.context).toContain("�");
+    expect(u2cFffd).not.toHaveProperty("context");
     expect(c2uClean).toBeDefined();
     expect(c2uClean.fffd).toBe(false);
-    // Full payloads must never be logged — only short FFFD context excerpts.
+    // No payload content is logged, including frames containing U+FFFD.
     for (const line of lines) {
       expect(JSON.stringify(line)).not.toContain("clean-frame");
+      expect(JSON.stringify(line)).not.toContain(FFFD_TEXT);
     }
+    if (process.platform !== "win32") expect(statSync(frameLogPath).mode & 0o777).toBe(0o600);
 
     client.close();
   } finally {
