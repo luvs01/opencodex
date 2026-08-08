@@ -114,8 +114,9 @@ export async function describeImage(
     if (!parsed.text.trim() && parsed.error) return { text: "", error: parsed.error };
     return { text: parsed.text };
   } catch (e) {
-    recordOutcome?.(e instanceof Error && e.name === "TimeoutError" ? "timeout" : "connect_error");
+    const callerAborted = abortSignal?.aborted && linkedSignal.signal.reason === abortSignal.reason;
     const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "connect_error";
+    if (!callerAborted) recordOutcome?.(kind);
     console.warn(`[vision] sidecar ${kind} (${Date.now() - t0}ms)`);
     return { text: "", error: e instanceof Error ? e.message : String(e) };
   } finally {

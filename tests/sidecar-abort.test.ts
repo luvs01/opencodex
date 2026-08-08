@@ -97,6 +97,7 @@ describe("sidecar abort propagation", () => {
   test("web-search sidecar fetch observes the WebSocket turn abort signal", async () => {
     const getSignal = installAbortAwareFetch();
     const turn = new AbortController();
+    const recorded: unknown[] = [];
     const outcome = runWebSearch(
       "current docs",
       { type: "web_search" },
@@ -104,6 +105,7 @@ describe("sidecar abort propagation", () => {
       new Headers({ authorization: "Bearer token" }),
       { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
       turn.signal,
+      value => recorded.push(value),
     );
 
     const signal = getSignal();
@@ -111,6 +113,7 @@ describe("sidecar abort propagation", () => {
     turn.abort("replacement turn");
     expect(signal.aborted).toBe(true);
     expect((await outcome).error).toBe("aborted by turn");
+    expect(recorded).toEqual([]);
   });
 
   test("web-search sidecar records HTTP and connect outcomes", async () => {
@@ -213,6 +216,7 @@ describe("sidecar abort propagation", () => {
   test("vision sidecar fetch observes the WebSocket turn abort signal", async () => {
     const getSignal = installAbortAwareFetch();
     const turn = new AbortController();
+    const recorded: unknown[] = [];
     const outcome = describeImage(
       "data:image/png;base64,iVBORw0KGgo=",
       "high",
@@ -221,6 +225,7 @@ describe("sidecar abort propagation", () => {
       new Headers({ authorization: "Bearer token" }),
       { model: "gpt-5.4-mini", timeoutMs: 30_000 },
       turn.signal,
+      value => recorded.push(value),
     );
 
     const signal = getSignal();
@@ -228,6 +233,7 @@ describe("sidecar abort propagation", () => {
     turn.abort("replacement turn");
     expect(signal.aborted).toBe(true);
     expect((await outcome).error).toBe("aborted by turn");
+    expect(recorded).toEqual([]);
   });
 
   test("vision sidecar records HTTP and connect outcomes", async () => {
