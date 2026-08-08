@@ -599,7 +599,11 @@ function ensureRootObjectType(parameters: unknown): Record<string, unknown> {
   return { ...obj, type: "object" };
 }
 
-function expandXaiRootObjectSchemas(schema: unknown): Record<string, unknown>[] | undefined {
+const XAI_TOOL_SCHEMA_MAX_UNION_DEPTH = 32;
+const XAI_TOOL_SCHEMA_MAX_VARIANTS = 128;
+
+function expandXaiRootObjectSchemas(schema: unknown, depth = 0): Record<string, unknown>[] | undefined {
+  if (depth > XAI_TOOL_SCHEMA_MAX_UNION_DEPTH) return undefined;
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
   const obj = schema as Record<string, unknown>;
   const compositionKey = ["oneOf", "anyOf"].find(key => Array.isArray(obj[key]));
@@ -608,14 +612,18 @@ function expandXaiRootObjectSchemas(schema: unknown): Record<string, unknown>[] 
     return [{ ...obj, type: "object" }];
   }
 
-  const siblings = Object.fromEntries(Object.entries(obj).filter(([key]) => key !== compositionKey));
+  // Root annotations are retained once by normalizeXaiToolParameters. A nested
+  // union with siblings cannot be flattened without copying those caller-owned
+  // values into every leaf, so fail closed instead of amplifying the request.
+  if (depth > 0 && Object.keys(obj).some(key => key !== compositionKey && key !== "type")) return undefined;
   const branches = obj[compositionKey];
   if (!Array.isArray(branches)) return undefined;
   const expanded: Record<string, unknown>[] = [];
   for (const branch of branches) {
-    const variants = expandXaiRootObjectSchemas(branch);
+    const variants = expandXaiRootObjectSchemas(branch, depth + 1);
     if (!variants) return undefined;
-    for (const variant of variants) expanded.push({ ...siblings, ...variant });
+    if (expanded.length + variants.length > XAI_TOOL_SCHEMA_MAX_VARIANTS) return undefined;
+    expanded.push(...variants);
   }
   return expanded.length > 0 ? expanded : undefined;
 }
@@ -623,11 +631,11 @@ function expandXaiRootObjectSchemas(schema: unknown): Record<string, unknown>[] 
 function normalizeXaiToolParameters(parameters: unknown): Record<string, unknown> | undefined {
   const variants = expandXaiRootObjectSchemas(parameters);
   if (!variants) return undefined;
-  if (variants.length === 1) return variants[0];
   const root = parameters && typeof parameters === "object" && !Array.isArray(parameters)
     ? parameters as Record<string, unknown>
     : {};
   const metadata = Object.fromEntries(Object.entries(root).filter(([key]) => key !== "oneOf" && key !== "anyOf" && key !== "type"));
+  if (variants.length === 1) return { ...metadata, ...variants[0] };
   return { ...metadata, oneOf: variants };
 }
 

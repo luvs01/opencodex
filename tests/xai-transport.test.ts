@@ -123,6 +123,38 @@ describe("xAI auth-mode transport selection", () => {
     expect((JSON.parse(otherRequest.body) as { tools: Array<{ function: { parameters: unknown } }> }).tools[0].function.parameters).toEqual({ ...schema, type: "object" });
   });
 
+  test("retains large root annotations once instead of copying them into union branches", () => {
+    const annotation = "x".repeat(32_768);
+    const schema = {
+      oneOf: Array.from({ length: 80 }, (_, index) => ({
+        type: "object",
+        properties: { [`field_${index}`]: { type: "string" } },
+      })),
+      description: annotation,
+    };
+    const request = createOpenAIChatAdapter(provider("key")).buildRequest({
+      ...parsed(),
+      context: { messages: [], tools: [{ name: "bounded", description: "Bounded", parameters: schema }] },
+    });
+    const parameters = (JSON.parse(request.body) as { tools: Array<{ function: { parameters: Record<string, unknown> } }> }).tools[0].function.parameters;
+
+    expect(parameters.description).toBe(annotation);
+    expect(parameters.oneOf).toHaveLength(80);
+    expect(request.body.length).toBeLessThan(100_000);
+  });
+
+  test("omits xAI tool unions beyond the normalization depth limit", () => {
+    let schema: Record<string, unknown> = { type: "object", properties: {} };
+    for (let depth = 0; depth < 1_000; depth += 1) schema = { oneOf: [schema] };
+
+    const request = createOpenAIChatAdapter(provider("key")).buildRequest({
+      ...parsed(),
+      context: { messages: [], tools: [{ name: "too_deep", description: "Too deep", parameters: schema }] },
+    });
+
+    expect(JSON.parse(request.body).tools).toBeUndefined();
+  });
+
   test("non-xAI providers preserve nested nullable and annotation schema content", () => {
     const schema = {
       type: "object",
