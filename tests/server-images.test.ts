@@ -290,6 +290,45 @@ test("falls back to a keyed openai-responses provider when no forward provider e
   }
 });
 
+test("rejects an oversized image relay response before buffering its body", async () => {
+  let bodyCanceled = false;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (requestUrl === "https://api.openai.com/v1/images/generations") {
+      return new Response(new ReadableStream<Uint8Array>({
+        cancel() { bodyCanceled = true; },
+      }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(100 * 1024 * 1024 + 1),
+        },
+      });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+
+  const config = {
+    port: 0,
+    defaultProvider: "openai-apikey",
+    openaiProviderTierVersion: 2,
+    providers: {
+      openai: disabledOpenAiProvider,
+      "openai-apikey": keyedProvider(),
+    },
+  } as OcxConfig;
+  const { handleImages } = await import("../src/server/images");
+  const response = await handleImages(new Request("http://localhost/v1/images/generations", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
+  }), config, "generations", { model: "", provider: "" } as never);
+
+  expect(response.status).toBe(502);
+  expect(await response.text()).toContain("response too large");
+  expect(bodyCanceled).toBe(true);
+});
+
 test("an explicit custom Images provider uses its configured endpoint, key, and headers", async () => {
   const captured: CapturedRequest[] = [];
   const upstream = Bun.serve({

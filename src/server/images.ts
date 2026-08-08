@@ -52,6 +52,45 @@ const IMAGES_UPSTREAM_TIMEOUT_MS = 300_000;
  */
 const IMAGES_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
 
+async function readImageResponseBody(response: Response): Promise<Uint8Array<ArrayBuffer> | undefined> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (Number.isFinite(declaredBytes) && declaredBytes > IMAGES_RESPONSE_MAX_BYTES) {
+      try { void response.body?.cancel().catch(() => undefined); } catch { /* best-effort upstream abort */ }
+      return undefined;
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  let payload = new Uint8Array(Math.min(IMAGES_RESPONSE_MAX_BYTES, 64 * 1024));
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return payload.subarray(0, length);
+      if (!value || value.byteLength === 0) continue;
+      if (value.byteLength > IMAGES_RESPONSE_MAX_BYTES - length) {
+        try { void reader.cancel().catch(() => undefined); } catch { /* best-effort upstream abort */ }
+        return undefined;
+      }
+      if (length + value.byteLength > payload.byteLength) {
+        const grown = new Uint8Array(Math.min(
+          IMAGES_RESPONSE_MAX_BYTES,
+          Math.max(payload.byteLength * 2, length + value.byteLength),
+        ));
+        grown.set(payload.subarray(0, length));
+        payload = grown;
+      }
+      payload.set(value, length);
+      length += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 const CCA_IMAGE_MODEL = "gemini-3.1-flash-image";
 
 /**
@@ -449,12 +488,11 @@ export async function handleImages(
       body: JSON.stringify(body),
       signal: linkedSignal.signal,
     });
-    // Buffer rather than stream: the payload is one JSON document (base64 image, typically a few
-    // MB), and buffering keeps the timeout window covering the whole exchange. Cap the size to
-    // prevent an oversized response from exhausting process memory.
-    const payload = await upstreamResponse.arrayBuffer();
-    if (payload.byteLength > IMAGES_RESPONSE_MAX_BYTES) {
-      return formatErrorResponse(502, "upstream_error", `image ${endpoint} response too large (${payload.byteLength} bytes)`);
+    // The payload is one JSON document, so buffer it under a strict byte ceiling. The reader
+    // cancels as soon as the response exceeds the ceiling rather than allocating the whole body.
+    const payload = await readImageResponseBody(upstreamResponse);
+    if (!payload) {
+      return formatErrorResponse(502, "upstream_error", `image ${endpoint} response too large (exceeded ${IMAGES_RESPONSE_MAX_BYTES} bytes)`);
     }
     forward?.recordOutcome?.(upstreamResponse.status);
     const relayHeaders: Record<string, string> = {};
