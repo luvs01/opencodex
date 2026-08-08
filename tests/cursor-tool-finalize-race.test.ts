@@ -10,6 +10,7 @@ import {
   McpArgsSchema,
   McpToolCallSchema,
   ToolCallSchema,
+  ToolCallCompletedUpdateSchema,
   ToolCallStartedUpdateSchema,
   InteractionUpdateSchema,
 } from "../src/adapters/cursor/gen/agent_pb";
@@ -57,8 +58,27 @@ function execFrame(id: number, callId: string, toolName: string, argText: string
   });
 }
 
+function completedFrame(callId: string, toolName: string) {
+  const toolCall = create(ToolCallSchema, {
+    tool: {
+      case: "mcpToolCall",
+      value: create(McpToolCallSchema, {
+        args: create(McpArgsSchema, { name: toolName, toolName, toolCallId: callId, providerIdentifier: PROVIDER }),
+      }),
+    },
+  });
+  return create(AgentServerMessageSchema, {
+    message: {
+      case: "interactionUpdate",
+      value: create(InteractionUpdateSchema, {
+        message: { case: "toolCallCompleted", value: create(ToolCallCompletedUpdateSchema, { callId, modelCallId: callId, toolCall }) },
+      }),
+    },
+  });
+}
+
 interface Harness {
-  feed(frame: ReturnType<typeof startedFrame>): Promise<void>;
+  feed(frame: ReturnType<typeof startedFrame> | ReturnType<typeof completedFrame>): Promise<void>;
   events: CursorServerMessage[];
   closeCodes: number[];
   cancelled(): boolean;
@@ -161,5 +181,19 @@ describe("transport finalize race (hidden parallel sibling)", () => {
     expect(h.closeCodes).toEqual([NGHTTP2_CANCEL]);
     const ends = h.events.filter(e => e.type === "tool_call_end").length;
     expect(ends).toBe(2);
+  });
+
+  test("late completion-only sibling re-arms finalize after draining the call set", async () => {
+    const h = makeHarness(40, ["echo_a", "echo_b"]);
+    await h.feed(startedFrame("call_a", "echo_a"));
+    await h.feed(execFrame(1, "call_a", "echo_a", "A"));
+
+    await sleep(15);
+    await h.feed(completedFrame("call_b", "echo_b"));
+    await sleep(60);
+
+    expect(h.events.map(e => e.type).filter(t => t === "done")).toHaveLength(1);
+    expect(h.events.filter(e => e.type === "tool_call_end")).toHaveLength(2);
+    expect(h.closeCodes).toEqual([NGHTTP2_CANCEL]);
   });
 });
