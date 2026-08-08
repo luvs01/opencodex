@@ -388,22 +388,18 @@ export function bridgeToResponsesSSE(
       let currentRawReasoning: { itemId: string; outputIndex: number; text: string; textBytes: number } | null = null;
       // Anthropic extended-thinking round-trip state: the signature signs the CURRENT thinking
       // block; redacted blocks are opaque payloads replayed verbatim. Attached to the reasoning
-      // item as an ocxr1 encrypted_content envelope on close. hiddenThinkingText collects the
-      // suppressed text under hideThinkingSummary so the signed text still round-trips.
+      // item as an ocxr1 encrypted_content envelope on close. Suppressed thinking text is never
+      // included because this envelope is only an encoding, not encryption.
       let pendingSignature: string | undefined;
       let pendingSignatureBytes = 0;
       let pendingRedacted: string[] = [];
-      let hiddenThinkingText = "";
-      let hiddenThinkingBytes = 0;
-      const takeReasoningEnvelope = (hiddenText?: string): string | undefined => {
+      const takeReasoningEnvelope = (): string | undefined => {
         if (!pendingSignature && pendingRedacted.length === 0) return undefined;
         const envelope: ReasoningEnvelope = {};
         if (pendingSignature) envelope.sig = pendingSignature;
         if (pendingRedacted.length > 0) envelope.red = pendingRedacted;
-        if (hiddenText) envelope.txt = hiddenText;
         const previousBytes = pendingSignatureBytes
-          + pendingRedacted.reduce((sum, value) => sum + bytesOf(value), 0)
-          + (hiddenText ? hiddenThinkingBytes : 0);
+          + pendingRedacted.reduce((sum, value) => sum + bytesOf(value), 0);
         const encoded = encodeReasoningEnvelope(envelope);
         const reservation = budget?.reserveTransient(bytesOf(encoded), { kind: "reasoning" });
         pendingSignature = undefined;
@@ -413,12 +409,9 @@ export function bridgeToResponsesSSE(
         budget?.releaseRetained(previousBytes, { kind: "reasoning" });
         return encoded;
       };
-      // hideThinkingSummary path: no visible reasoning item exists, but a signed thinking block
-      // must still round-trip — emit an envelope-only reasoning item (empty summary, no text leak).
+      // Preserve opaque provider state for hidden reasoning without exposing the suppressed text.
       const flushHiddenReasoningEnvelope = () => {
-        const encrypted = takeReasoningEnvelope(hiddenThinkingText || undefined);
-        hiddenThinkingText = "";
-        hiddenThinkingBytes = 0;
+        const encrypted = takeReasoningEnvelope();
         if (!encrypted) return;
         const itemId = `rs_${uuid()}`;
         const item = { type: "reasoning", id: itemId, summary: [] as never[], encrypted_content: encrypted };
@@ -427,35 +420,20 @@ export function bridgeToResponsesSSE(
         retainFinishedItem(item as OutputItem, bytesOf(encrypted), "reasoning");
         outputIndex++;
       };
-      // hideThinkingSummary for RAW reasoning (openai-chat reasoning_content, kiro tags): no
-      // visible reasoning item is emitted — the app renders nothing, so tool cells keep grouping
-      // like native models — but the text still round-trips in a txt-only ocxr1 envelope so
-      // preserveReasoningContentModels replay (GLM interleaved thinking) keeps working. Direct
-      // encodeReasoningEnvelope: takeReasoningEnvelope's sig/red guard would drop txt-only.
-      let hiddenRawReasoningText = "";
-      let hiddenRawReasoningBytes = 0;
       // Raw reasoning text flushed most recently, waiting for the tool call it
       // preceded. Recorded into the replay cache on tool_call_start so a later
       // continuation can re-attach it when history lost the reasoning item
       // (issue #950). Kept until new reasoning/text arrives: parallel tool
       // calls share the same preceding reasoning block.
+      let hiddenRawReasoningText = "";
+      let hiddenRawReasoningBytes = 0;
       let rawReasoningForNextToolCall = "";
       const flushHiddenRawReasoning = () => {
         if (!hiddenRawReasoningText) return;
         rawReasoningForNextToolCall = hiddenRawReasoningText;
-        const previousBytes = hiddenRawReasoningBytes;
-        const encrypted = encodeReasoningEnvelope({ txt: hiddenRawReasoningText });
-        const reservation = budget?.reserveTransient(bytesOf(encrypted), { kind: "reasoning" });
+        budget?.releaseRetained(hiddenRawReasoningBytes, { kind: "reasoning" });
         hiddenRawReasoningText = "";
         hiddenRawReasoningBytes = 0;
-        reservation?.commitRetained();
-        budget?.releaseRetained(previousBytes, { kind: "reasoning" });
-        const itemId = `rs_${uuid()}`;
-        const item = { type: "reasoning", id: itemId, summary: [] as never[], encrypted_content: encrypted };
-        emit("response.output_item.added", { output_index: outputIndex, item });
-        emit("response.output_item.done", { output_index: outputIndex, item });
-        retainFinishedItem(item as OutputItem, bytesOf(encrypted), "reasoning");
-        outputIndex++;
       };
       // Kiro reasoning round-trip. Kiro sends its encrypted blob at the END of a turn, while the
       // assistant message is still open, so this CANNOT emit on arrival: the open message still
@@ -869,12 +847,6 @@ export function bridgeToResponsesSSE(
                 // recorded for a LATER tool call (CodeRabbit on #971).
                 flushHiddenRawReasoning();
                 rawReasoningForNextToolCall = "";
-                ({ value: hiddenThinkingText, bytes: hiddenThinkingBytes } = appendString(
-                  hiddenThinkingText,
-                  hiddenThinkingBytes,
-                  event.thinking,
-                  "reasoning",
-                ));
                 break;
               }
               if (currentMsg) closeCurrentMessage("commentary");
@@ -1470,8 +1442,7 @@ function buildResponseJSONWithBudget(
     if (batchSignature) envelope.sig = batchSignature;
     if (batchRedacted.length > 0) envelope.red = batchRedacted;
     const hidden = options?.hideThinkingSummary === true;
-    if (hidden && currentSummaryReasoning && (envelope.sig || envelope.red)) envelope.txt = currentSummaryReasoning;
-    const encrypted = envelope.sig || envelope.red || envelope.txt ? encodeReasoningEnvelope(envelope) : undefined;
+    const encrypted = envelope.sig || envelope.red ? encodeReasoningEnvelope(envelope) : undefined;
     const sourceBytes = currentSummaryReasoningBytes + batchSignatureBytes + batchRedactedBytes;
     batchSignature = undefined;
     batchSignatureBytes = 0;
@@ -1496,11 +1467,7 @@ function buildResponseJSONWithBudget(
     if (!currentRawReasoning) return;
     rawReasoningForNextToolCall = currentRawReasoning;
     if (options?.hideThinkingSummary === true) {
-      // Same contract as the streaming path: no visible reasoning, txt-only envelope round-trip.
-      pushOutput({
-        type: "reasoning", id: `rs_${uuid()}`, summary: [],
-        encrypted_content: encodeReasoningEnvelope({ txt: currentRawReasoning }),
-      }, currentRawReasoningBytes, "reasoning");
+      budget?.releaseRetained(currentRawReasoningBytes, { kind: "reasoning" });
       currentRawReasoning = "";
       currentRawReasoningBytes = 0;
       return;

@@ -1,12 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { bridgeToResponsesSSE, buildResponseJSON } from "../src/bridge";
-import { decodeReasoningEnvelope } from "../src/responses/reasoning-envelope";
 import {
   clearReasoningReplayCacheForTests,
   peekReasoningForCall,
 } from "../src/responses/reasoning-replay-cache";
-import { parseRequest } from "../src/responses/parser";
-import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
 import type { AdapterEvent } from "../src/types";
 
 async function* replay(events: AdapterEvent[]): AsyncGenerator<AdapterEvent> {
@@ -43,7 +40,7 @@ describe("hidden raw reasoning (hideThinkingSummary parity for reasoning_raw_del
     clearReasoningReplayCacheForTests();
   });
 
-  test("streamed hidden: no reasoning_text deltas, envelope-only item, tool calls untouched", async () => {
+  test("streamed hidden: no reasoning output, tool calls untouched", async () => {
     const frames = await collectSse(bridgeToResponsesSSE(replay([
       { type: "reasoning_raw_delta", text: "chain " },
       { type: "reasoning_raw_delta", text: "of thought" },
@@ -57,11 +54,7 @@ describe("hidden raw reasoning (hideThinkingSummary parity for reasoning_raw_del
     const completed = frames.find(f => f.event === "response.completed")?.data.response as Record<string, unknown>;
     const output = completed.output as Record<string, unknown>[];
     const reasoning = output.filter(o => o.type === "reasoning");
-    expect(reasoning).toHaveLength(1);
-    expect(reasoning[0].content).toBeUndefined();
-    expect(reasoning[0].summary).toEqual([]);
-    const envelope = decodeReasoningEnvelope(reasoning[0].encrypted_content as string);
-    expect(envelope?.txt).toBe("chain of thought");
+    expect(reasoning).toHaveLength(0);
     const fc = output.find(o => o.type === "function_call") as Record<string, unknown>;
     expect(fc).toMatchObject({ call_id: "call_1", name: "read_file" });
   });
@@ -80,7 +73,7 @@ describe("hidden raw reasoning (hideThinkingSummary parity for reasoning_raw_del
     });
   });
 
-  test("streamed hidden: thrown upstream still flushes the envelope before response.failed", async () => {
+  test("streamed hidden: thrown upstream does not expose reasoning before response.failed", async () => {
     async function* throwing(): AsyncGenerator<AdapterEvent> {
       yield { type: "reasoning_raw_delta", text: "doomed thought" };
       throw new Error("upstream exploded");
@@ -91,19 +84,16 @@ describe("hidden raw reasoning (hideThinkingSummary parity for reasoning_raw_del
     const added = frames.filter(f => f.event === "response.output_item.added")
       .map(f => f.data.item as Record<string, unknown>)
       .filter(i => i.type === "reasoning");
-    expect(added).toHaveLength(1);
-    expect(decodeReasoningEnvelope(added[0].encrypted_content as string)?.txt).toBe("doomed thought");
+    expect(added).toHaveLength(0);
   });
 
-  test("non-streaming hidden: envelope-only item instead of raw content", () => {
+  test("non-streaming hidden: no raw reasoning item is emitted", () => {
     const json = buildResponseJSON([
       { type: "reasoning_raw_delta", text: "quiet" },
       { type: "done" },
     ], "routed/model", { hideThinkingSummary: true });
     const output = (json as { output: Record<string, unknown>[] }).output;
-    const reasoning = output.find(o => o.type === "reasoning") as Record<string, unknown>;
-    expect(reasoning.content).toBeUndefined();
-    expect(decodeReasoningEnvelope(reasoning.encrypted_content as string)?.txt).toBe("quiet");
+    expect(output.find(o => o.type === "reasoning")).toBeUndefined();
   });
 
   test("non-streaming visible: raw shape unchanged", () => {
@@ -115,31 +105,6 @@ describe("hidden raw reasoning (hideThinkingSummary parity for reasoning_raw_del
     expect(output.find(o => o.type === "reasoning")).toMatchObject({
       content: [{ type: "reasoning_text", text: "loud" }],
     });
-  });
-
-  test("replay: envelope-only item round-trips into reasoning_content for preserve-listed models", () => {
-    const json = buildResponseJSON([
-      { type: "reasoning_raw_delta", text: "replay me" },
-      { type: "done" },
-    ], "routed/model", { hideThinkingSummary: true });
-    const reasoningItem = (json as { output: Record<string, unknown>[] }).output.find(o => o.type === "reasoning");
-    const parsed = parseRequest({
-      model: "glm-5.2",
-      stream: false,
-      input: [
-        { type: "message", role: "user", content: [{ type: "input_text", text: "go" }] },
-        reasoningItem,
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
-        { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
-      ],
-    });
-    const adapter = createOpenAIChatAdapter({
-      adapter: "openai-chat", baseUrl: "https://api.z.ai/api/coding/paas/v4", apiKey: "k",
-      preserveReasoningContentModels: ["glm-5.2"],
-    });
-    const body = JSON.parse(adapter.buildRequest(parsed).body) as { messages: Record<string, unknown>[] };
-    const assistant = body.messages.find(m => m.role === "assistant" && m.reasoning_content !== undefined);
-    expect(assistant?.reasoning_content).toBe("replay me");
   });
 
   test("streamed hidden: raw reasoning is recorded in the replay cache for the following tool call", async () => {

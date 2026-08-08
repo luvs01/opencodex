@@ -108,7 +108,7 @@ describe("bridge ocxr1 envelope emission", () => {
     expect(env?.sig).toBe("RealSig1234567890==");
   });
 
-  test("SSE hideThinkingSummary: envelope-only reasoning item, no text leak", async () => {
+  test("SSE hideThinkingSummary: envelope preserves signature without hidden text", async () => {
     async function* gen() { yield* baseEvents; }
     const sse = await drainSse(bridgeToResponsesSSE(gen(), "claude-x", undefined, undefined, undefined, undefined, 2000, { hideThinkingSummary: true }));
     const reasoning = sseItems(sse).find(i => i.type === "reasoning");
@@ -118,7 +118,7 @@ describe("bridge ocxr1 envelope emission", () => {
     expect(sse.split("reasoning_summary_text.delta").length).toBe(1); // no summary deltas emitted
     const env = decodeReasoningEnvelope(reasoning!.encrypted_content as string);
     expect(env?.sig).toBe("RealSig1234567890==");
-    expect(env?.txt).toBe("hidden chain"); // signed text survives inside the envelope only
+    expect(Buffer.from((reasoning!.encrypted_content as string).slice(OCX_REASONING_PREFIX.length), "base64").toString()).not.toContain("hidden chain");
   });
 
   test("JSON: reasoning item carries envelope; redacted blocks included", async () => {
@@ -199,8 +199,11 @@ describe("parser ocxr1 decode + anthropic replay", () => {
     expect((assistant as { kiroRedactedReasoning?: string }).kiroRedactedReasoning).toBeUndefined();
   });
 
-  test("hidden signed text (txt) is restored as the thinking body", async () => {
-    const encrypted = encodeReasoningEnvelope({ sig: "RealSig1234567890==", txt: "the hidden signed text" });
+  test("legacy plaintext envelope text is not restored as thinking", async () => {
+    const encrypted = OCX_REASONING_PREFIX + Buffer.from(JSON.stringify({
+      sig: "RealSig1234567890==",
+      txt: "the hidden signed text",
+    })).toString("base64");
     const parsed = parseRequest({
       model: "anthropic/claude-x",
       input: [
@@ -211,7 +214,7 @@ describe("parser ocxr1 decode + anthropic replay", () => {
     });
     const assistant = parsed.context.messages.find(m => m.role === "assistant");
     const thinking = (assistant as unknown as { content: OcxThinkingContent[] }).content.find(p => p.type === "thinking");
-    expect(thinking?.thinking).toBe("the hidden signed text");
+    expect(thinking).toBeUndefined();
   });
 
   test("native (non-ocxr1) encrypted_content keeps the placeholder signature", async () => {
@@ -261,17 +264,15 @@ describe("parser ocxr1 decode + anthropic replay", () => {
     const adapter = createAnthropicAdapter(provider);
     const firstEnvelope = encodeReasoningEnvelope({
       sig: "FirstRealSignature123456==",
-      txt: "first signed chain",
     });
     const secondEnvelope = encodeReasoningEnvelope({
       sig: "SecondRealSignature123456==",
-      txt: "second signed chain",
     });
     const parsed = parseRequest({
       model: "anthropic/claude-x",
       input: [
-        { type: "reasoning", id: "rs_first", summary: [], encrypted_content: firstEnvelope },
-        { type: "reasoning", id: "rs_second", summary: [], encrypted_content: secondEnvelope },
+        { type: "reasoning", id: "rs_first", summary: [{ type: "summary_text", text: "first signed chain" }], encrypted_content: firstEnvelope },
+        { type: "reasoning", id: "rs_second", summary: [{ type: "summary_text", text: "second signed chain" }], encrypted_content: secondEnvelope },
         { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] },
         { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
       ],

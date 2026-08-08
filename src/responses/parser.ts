@@ -442,7 +442,7 @@ export function parseRequest(body: unknown): OcxParsedRequest {
         const envelope = typeof reasoning.encrypted_content === "string"
           ? decodeReasoningEnvelope(reasoning.encrypted_content)
           : null;
-        const thinkingText = envelope?.txt || text;
+        const thinkingText = text;
 
         // Kiro reasoning round-trip: a krc-only item carries nothing renderable — it is provider
         // state for the assistant turn that ALREADY closed, because Kiro emits its
