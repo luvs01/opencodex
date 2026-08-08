@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { evidenceDenyFindings, scanEvidence } from "../scripts/openai-provider-option-evidence-scan";
-import { runGateSequence, type GateResult, type GateSpec } from "../scripts/openai-provider-option-final-gates";
+import { finalGatePlan, runGateSequence, type GateResult, type GateSpec } from "../scripts/openai-provider-option-final-gates";
 import { evaluateLivePolicy, type LiveOutcome } from "../scripts/openai-hardening-live-policy";
 import { buildSanitizedRuntimeEnv } from "../scripts/openai-hardening-runtime-env";
 import { buildUnixCodexShim } from "../src/codex/shim";
@@ -159,6 +159,19 @@ describe("OpenAI provider-option evidence scanner", () => {
 });
 
 describe("OpenAI provider-option final gate runner", () => {
+  test("passes the stale-contract scan only when ripgrep finds no matches", async () => {
+    const gate = finalGatePlan("/repo", "/repo/evidence").find(candidate => candidate.name === "stale-contract-scan")!;
+    const deps = (exitCode: number) => ({
+      run: async () => ({ exitCode, output: "" }),
+      writeSummary: () => {},
+      scan: () => [],
+    });
+
+    await expect(runGateSequence([gate], deps(0))).rejects.toThrow("gate failed: stale-contract-scan (0)");
+    await expect(runGateSequence([gate], deps(1))).resolves.toContain("verdict=PASS");
+    await expect(runGateSequence([gate], deps(2))).rejects.toThrow("gate failed: stale-contract-scan (2)");
+  });
+
   test("runs once in order, writes one sanitized summary, then scans", async () => {
     const order: string[] = [];
     const writes: string[] = [];

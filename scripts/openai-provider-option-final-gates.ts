@@ -7,6 +7,7 @@ export interface GateSpec {
   command: string[];
   cwd?: string;
   env?: Record<string, string>;
+  successExitCodes?: number[];
 }
 
 export interface GateResult {
@@ -31,7 +32,9 @@ export async function runGateSequence(plan: GateSpec[], deps: GateDeps): Promise
   const lines = ["schemaVersion=1", "verdict=PASS"];
   for (const [index, gate] of plan.entries()) {
     const result = await deps.run(gate);
-    if (result.exitCode !== 0) throw new Error(`gate failed: ${gate.name} (${result.exitCode})`);
+    if (!(gate.successExitCodes ?? [0]).includes(result.exitCode)) {
+      throw new Error(`gate failed: ${gate.name} (${result.exitCode})`);
+    }
     lines.push(summaryLine(index, gate, result));
   }
   const summary = lines.join("\n") + "\n";
@@ -87,6 +90,7 @@ export function finalGatePlan(root: string, evidenceDir: string, unitRoot = dirn
         "src", "gui/src", "tests", "scripts", "README.md", "readme/README.ko.md", "readme/README.zh-CN.md",
         "structure", "docs-site/src/content/docs"],
       cwd: root,
+      successExitCodes: [1],
     },
     {
       name: "scoped-diff-check",
