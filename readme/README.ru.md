@@ -4,13 +4,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Подписывайтесь на @claudeebum в X"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/opencx"><img src="https://img.shields.io/npm/v/opencx?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/opencx?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/opencx?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start        # прокси + дашборд: localhost:10100
 ```
 
@@ -80,7 +80,7 @@ flowchart LR
 ### Для людей
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; the Bun runtime is bundled automatically
+npm install -g opencx   # Node 18+; the Bun runtime is bundled automatically
 ocx start                            # or `ocx service` to run it in the background
 ```
 
@@ -91,7 +91,7 @@ ocx start                            # or `ocx service` to run it in the backgro
 ### Для агентов
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start     # or `ocx service`
 ocx init      # interactive setup: writes ~/.opencodex/config.json and wires Codex
 ```
@@ -319,7 +319,7 @@ shim включён по умолчанию и отключается в GUI-п�
 
 ```bash
 ocx uninstall
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g opencx
 ```
 
 `ocx uninstall` останавливает прокси, удаляет установленную службу, удаляет shim для Codex,

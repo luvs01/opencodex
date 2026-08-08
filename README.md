@@ -4,13 +4,13 @@ Two commands, and every one of them runs any LLM you point it at.</p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Follow @claudeebum on X"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/opencx"><img src="https://img.shields.io/npm/v/opencx?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/opencx?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/opencx?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start        # proxy + dashboard on localhost:10100
 ```
 
@@ -53,7 +53,7 @@ account while existing threads stay pinned to the account that started them.
 ### For humans
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; the Bun runtime is bundled automatically
+npm install -g opencx   # Node 18+; the Bun runtime is bundled automatically
 ocx start                            # or `ocx service` to run it in the background
 ```
 
@@ -64,7 +64,7 @@ re-opens the dashboard at any time.
 ### For agents
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start     # or `ocx service`
 ocx init      # interactive setup: writes ~/.opencodex/config.json and wires Codex
 ```
@@ -161,7 +161,7 @@ daemon. Remove them with `ocx service uninstall` / `ocx codex-shim uninstall`.
 
 ```bash
 ocx uninstall                  # stop, remove service/shim, restore native Codex, clean up state
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g opencx
 ```
 
 ## Remote access

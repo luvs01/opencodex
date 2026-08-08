@@ -123,7 +123,7 @@ describe("previousReleaseNotesTag", () => {
 describe("stripCarriedReleaseNotes", () => {
   test("keeps PR categories and drops npm blurb, commits, and compare link", () => {
     const body = [
-      "Published to npm as `@bitkyc08/opencodex@2.7.39-preview.20260724` with dist-tag `preview`.",
+      "Published to npm as `opencx@2.7.39-preview.20260724` with dist-tag `preview`.",
       "",
       "<!-- Release notes generated using configuration in .github/release.yml at abc -->",
       "",
@@ -157,7 +157,7 @@ describe("stripCarriedReleaseNotes", () => {
 
   test("commits-only preview bodies strip to non-meaningful notes", () => {
     const body = [
-      "Published to npm as `@bitkyc08/opencodex@2.7.39-preview.20260724` with dist-tag `preview`.",
+      "Published to npm as `opencx@2.7.39-preview.20260724` with dist-tag `preview`.",
       "",
       "<!-- Release notes generated using configuration in .github/release.yml at abc -->",
       "",
@@ -366,7 +366,7 @@ describe("renderReleaseNotes", () => {
 
   test("renders OpenAI-style sections, scope bullets, and a full PR changelog", () => {
     const notes = renderReleaseNotes({
-      npmMetadata: "Published to npm as `@bitkyc08/opencodex@2.10.0` with dist-tag `latest`.",
+      npmMetadata: "Published to npm as `opencx@2.10.0` with dist-tag `latest`.",
       carriedPreviewNotes: carried,
       deltaPrNotes: delta,
       compareFrom: "v2.9.1",
@@ -375,7 +375,7 @@ describe("renderReleaseNotes", () => {
     });
 
     expect(notes).toBe([
-      "Published to npm as `@bitkyc08/opencodex@2.10.0` with dist-tag `latest`.",
+      "Published to npm as `opencx@2.10.0` with dist-tag `latest`.",
       "",
       "## New Features",
       "",
@@ -553,7 +553,7 @@ describe("renderReleaseNotes", () => {
 
   test("carries already-rendered preview bodies losslessly into stable notes", () => {
     const preview = renderReleaseNotes({
-      npmMetadata: "Published to npm as `@bitkyc08/opencodex@2.10.0-preview.1` with dist-tag `preview`.",
+      npmMetadata: "Published to npm as `opencx@2.10.0-preview.1` with dist-tag `preview`.",
       carriedPreviewNotes: carried,
       deltaPrNotes: delta,
       compareFrom: "v2.9.1",
@@ -561,7 +561,7 @@ describe("renderReleaseNotes", () => {
       repository: "lidge-jun/opencodex",
     });
     const stable = renderReleaseNotes({
-      npmMetadata: "Published to npm as `@bitkyc08/opencodex@2.10.0` with dist-tag `latest`.",
+      npmMetadata: "Published to npm as `opencx@2.10.0` with dist-tag `latest`.",
       carriedPreviewNotes: preview,
       compareFrom: "v2.9.1",
       compareTo: "v2.10.0",
@@ -589,7 +589,7 @@ describe("renderReleaseNotes", () => {
 
 describe("polish validation", () => {
   const head = [
-    "Published to npm as `@bitkyc08/opencodex@2.10.0` with dist-tag `latest`.",
+    "Published to npm as `opencx@2.10.0` with dist-tag `latest`.",
     "",
     "## New Features",
     "",

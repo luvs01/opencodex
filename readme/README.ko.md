@@ -4,13 +4,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="X에서 @claudeebum 팔로우"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/opencx"><img src="https://img.shields.io/npm/v/opencx?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/opencx?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/opencx?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start        # 프록시 + 대시보드: localhost:10100
 ```
 
@@ -78,7 +78,7 @@ flowchart LR
 ### 사람용
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start        # 또는 백그라운드에서 실행하려면 `ocx service`
 ```
 
@@ -87,7 +87,7 @@ http://localhost:10100에서 웹 대시보드를 열어 프로바이더, 모델,
 ### 에이전트용
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ocx start     # 또는 `ocx service`
 ocx init      # 대화형 설정: ~/.opencodex/config.json을 쓰고 Codex를 연결합니다
 ```
@@ -295,7 +295,7 @@ npm 패키지를 지우기 전에 로컬 상태를 먼저 정리하세요:
 
 ```bash
 ocx uninstall
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g opencx
 ```
 
 `ocx uninstall`은 프록시 중지, 설치된 service 제거, Codex shim 제거, Codex config/catalog/history

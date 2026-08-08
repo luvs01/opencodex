@@ -2736,7 +2736,7 @@ export function isOcxStartCommandLine(commandLine: string): boolean {
   // mid-update, and must still count as ocx for port reclaim.
   const hasOcxEntrypoint = normalized.includes("src/cli.ts")
     || normalized.includes("src/cli/index.ts")
-    || normalized.includes("@bitkyc08/opencodex")
+    || normalized.includes("opencx")
     || /@bitkyc08\/\.opencodex-/.test(normalized)
     || /(?:^|[\s/"'])(?:ocx|opencodex)(?:\.cmd)?(?:$|[\s"'])/.test(normalized);
   return hasOcxEntrypoint && /(?:^|[\s"'])start(?:$|[\s"'])/.test(normalized);

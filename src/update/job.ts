@@ -1071,7 +1071,7 @@ function restartFailureHint(port: number): string {
   return `Update installed, but the restarted proxy did not stay healthy on port ${port}. `
     + `Try 'ocx start --port ${port}'. `
     + "If the update log shows bun postinstall or EPERM warnings, "
-    + "reinstall with 'npm install -g --allow-scripts=bun @bitkyc08/opencodex'.";
+    + "reinstall with 'npm install -g --allow-scripts=bun opencx'.";
 }
 
 type AwaitHealthyResult =

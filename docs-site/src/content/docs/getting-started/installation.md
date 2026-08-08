@@ -18,7 +18,7 @@ vision and web-search sidecars can also use your ChatGPT login when a routed mod
 ## Install
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g opencx
 ```
 
 :::note[npm blocked the bun postinstall?]
@@ -29,10 +29,10 @@ script — and always include the package name (npm's abbreviated suggestion
 omits it, which would reinstall the current directory instead):
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun opencx
 
 # if the original install used sudo, keep using sudo:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun opencx
 ```
 :::
 
@@ -51,7 +51,7 @@ the catalog entries do not grant access by themselves. Use the preview channel o
 unreleased opencodex builds:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g opencx@preview
 ocx update --tag preview
 ```
 
