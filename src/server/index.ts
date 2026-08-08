@@ -184,7 +184,18 @@ import {
 const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
 const LIVE_SIDEBAND_PENDING_MAX = 32;
+const LIVE_SIDEBAND_PENDING_BYTES_MAX = 1024 * 1024;
 const LIVE_SIDEBAND_CLOSE_FALLBACK_MS = 1_000;
+
+export function exceedsLiveSidebandPendingByteLimit(pendingBytes: number, incomingBytes: number): boolean {
+  return incomingBytes > LIVE_SIDEBAND_PENDING_BYTES_MAX - pendingBytes;
+}
+
+function webSocketFrameBytes(frame: string | ArrayBuffer | ArrayBufferView | Blob | Buffer): number {
+  if (typeof frame === "string") return Buffer.byteLength(frame);
+  if (frame instanceof ArrayBuffer || ArrayBuffer.isView(frame)) return frame.byteLength;
+  return frame.size;
+}
 
 type LiveSidebandWebSocketFactory = (
   url: string,
@@ -204,6 +215,7 @@ function finalizeLiveSideband(ws: ServerWebSocket<WsData>, upstream?: WebSocket)
   }
   ws.data.liveUpstream = undefined;
   ws.data.livePending = undefined;
+  ws.data.livePendingBytes = undefined;
   ws.data.cancel = undefined;
   releaseLiveSidebandAdmission(ws);
 }
@@ -236,6 +248,7 @@ function closeLiveSideband(ws: ServerWebSocket<WsData>, code = 1000, reason = ""
   if (ws.data.liveClosing) return;
   ws.data.liveClosing = true;
   ws.data.livePending = undefined;
+  ws.data.livePendingBytes = undefined;
   ws.data.cancel = undefined;
   const upstream = ws.data.liveUpstream;
   if (!upstream || upstream.readyState === WebSocket.CLOSED) {
@@ -289,6 +302,7 @@ function attachLiveSidebandUpstream(
     ws.data.liveOpened = true;
     const pending = ws.data.livePending ?? [];
     ws.data.livePending = undefined;
+    ws.data.livePendingBytes = undefined;
     for (const frame of pending) {
       try {
         upstream.send(frame);
@@ -301,6 +315,10 @@ function attachLiveSidebandUpstream(
   upstream.addEventListener("message", (event) => {
     if (ws.data.liveUpstream !== upstream || ws.data.liveClosing) return;
     try {
+      if (webSocketFrameBytes(event.data) > MAX_WS_FRAME_BYTES) {
+        closeLiveSideband(ws, 1009, "message too large");
+        return;
+      }
       logLiveSidebandFrame("u2c", event.data);
       if (typeof event.data === "string") ws.send(event.data);
       else if (event.data instanceof ArrayBuffer) ws.send(event.data);
@@ -1068,6 +1086,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}) {
             liveUpstreamUrl: resolved.upstreamWsUrl,
             liveUpstreamHeaders: resolved.headers,
             livePending: [],
+            livePendingBytes: 0,
             liveOpened: false,
             liveTurnAdmissionLease: turnAdmissionLease,
           } satisfies WsData,
@@ -1125,6 +1144,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}) {
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
         if (ws.data.kind === "live-sideband") {
           if (ws.data.liveClosing) return;
+          const rawBytes = webSocketFrameBytes(raw);
+          if (rawBytes > MAX_WS_FRAME_BYTES) {
+            closeLiveSideband(ws, 1009, "message too large");
+            return;
+          }
           logLiveSidebandFrame("c2u", raw);
           const upstream = ws.data.liveUpstream;
           if (!upstream || upstream.readyState === WebSocket.CONNECTING || !ws.data.liveOpened) {
@@ -1133,7 +1157,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}) {
               closeLiveSideband(ws, 1009, "too many pending frames");
               return;
             }
+            const pendingBytes = ws.data.livePendingBytes ?? 0;
+            if (exceedsLiveSidebandPendingByteLimit(pendingBytes, rawBytes)) {
+              closeLiveSideband(ws, 1009, "too many pending bytes");
+              return;
+            }
             pending.push(raw);
+            ws.data.livePendingBytes = pendingBytes + rawBytes;
             return;
           }
           if (upstream.readyState !== WebSocket.OPEN) {

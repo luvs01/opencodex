@@ -9,7 +9,7 @@ import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota } from "../src/codex/auth-api";
 import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../src/codex/routing";
 import { saveConfig } from "../src/config";
-import { startServer } from "../src/server";
+import { exceedsLiveSidebandPendingByteLimit, startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
@@ -549,6 +549,11 @@ test("sideband GET /v1/live/{callId} upgrades and relays bidirectionally to Chat
     await server.stop(true);
     await upstream.stop(true);
   }
+});
+
+test("sideband caps total client bytes retained while the upstream connects", () => {
+  expect(exceedsLiveSidebandPendingByteLimit(256 * 1024, 768 * 1024)).toBe(false);
+  expect(exceedsLiveSidebandPendingByteLimit(256 * 1024, 768 * 1024 + 1)).toBe(true);
 });
 
 test("buildLiveSidebandUpstreamWsUrl maps Frameless and Realtime join shapes", async () => {
