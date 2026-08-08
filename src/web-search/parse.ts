@@ -27,6 +27,10 @@ interface OutputItem {
   content?: OutputTextBlock[];
 }
 
+// ChatGPT's Codex backend does not accept `max_output_tokens` on sidecar requests. Bound the
+// streamed response here instead, before it can accumulate unbounded text in this process.
+export const MAX_SIDECAR_RESPONSE_BYTES = 64 * 1024;
+
 /** Push a `url_citation` annotation as a source, de-duplicated by URL. */
 function collectAnnotation(ann: AnnotationLike | undefined, sources: WebSearchSource[], seen: Set<string>): void {
   if (!ann || ann.type !== "url_citation" || typeof ann.url !== "string" || seen.has(ann.url)) return;
@@ -141,6 +145,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let responseBytes = 0;
   const seen = new Set<string>();
   // Holder object — fields are mutated inside the closure, so they can't live as narrowed locals.
   const acc: {
@@ -183,11 +188,21 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      const remaining = MAX_SIDECAR_RESPONSE_BYTES - responseBytes;
+      const accepted = value.subarray(0, Math.max(0, remaining));
+      responseBytes += accepted.byteLength;
+      buffer += decoder.decode(accepted, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
         if (line.startsWith("data: ")) handle(line.slice(6).trim());
+      }
+      if (accepted.byteLength < value.byteLength || responseBytes >= MAX_SIDECAR_RESPONSE_BYTES) {
+        // Canceling closes the fetch body as soon as the local byte budget is exhausted, limiting
+        // both further upstream generation and memory use. A complete event already parsed above
+        // remains usable as a graceful partial sidecar result.
+        await reader.cancel("sidecar response byte limit reached");
+        break;
       }
     }
   } finally {
