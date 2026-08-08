@@ -21,6 +21,10 @@ const SNAPSHOT_DEBOUNCE_MS = 2_000;
  * continuation chains) stores the full expanded input each turn — ~quadratic bytes per chain —
  * so a count cap alone cannot bound memory. Oldest-first eviction applies past this mark. */
 export const MAX_STORED_RESPONSE_BYTES = 64 * 1024 * 1024;
+/** Aggregate ceiling for live continuation spill payloads. A per-file ceiling
+ * alone still permits an admitted client to fill the config filesystem with
+ * many independent oversized continuations before count/TTL eviction. */
+export const MAX_STORED_RESPONSE_SPILL_BYTES = 256 * 1024 * 1024;
 /** Legacy snapshot selection only. Spill demotion is governed solely by the RAM cap above. */
 const SNAPSHOT_ENTRY_MAX_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
@@ -70,6 +74,7 @@ let residentResponseBytes = 0;
 let oldestResidentId: string | undefined;
 let oldestResidentAt: number | null = null;
 let byteCapOverride: number | null = null;
+let spillByteCapOverride: number | null = null;
 let stateRevision = 0;
 const spillCounters = { writes: 0, writeFailures: 0, readFailures: 0 };
 /**
@@ -104,6 +109,23 @@ function byteCap(): number {
 /** Test-only: lower/restore the in-memory byte cap (null restores the default). */
 export function setResponseStateByteCapForTests(bytes: number | null): void {
   byteCapOverride = bytes;
+}
+
+/** Test-only: lower/restore the aggregate live-spill byte cap. */
+export function setResponseStateSpillByteCapForTests(bytes: number | null): void {
+  spillByteCapOverride = bytes;
+}
+
+function spillByteCap(): number {
+  return spillByteCapOverride ?? MAX_STORED_RESPONSE_SPILL_BYTES;
+}
+
+function storedSpillPayloadBytes(): number {
+  let total = 0;
+  for (const state of states.values()) {
+    if (state.kind === "spill") total += state.spill.payloadBytes;
+  }
+  return total;
 }
 
 /** Test-only: current in-memory byte accounting (proves evictions release their bytes). */
@@ -755,6 +777,16 @@ function pruneResponses(at = now()): void {
       spillCounters.writeFailures += 1;
       replaceWithSpillFailure(oldestId, entry);
     }
+  }
+  // Bound durable payloads independently from their small in-memory stubs.
+  // Evict oldest spill-backed continuations first, preserving newer chains.
+  let spillBytes = storedSpillPayloadBytes();
+  while (spillBytes > spillByteCap()) {
+    const oldestSpill = [...states].find(([, entry]) => entry.kind === "spill");
+    if (!oldestSpill) break;
+    const [oldestId, entry] = oldestSpill as [string, SpilledResponseState];
+    deleteEntry(oldestId);
+    spillBytes -= entry.spill.payloadBytes;
   }
 }
 
