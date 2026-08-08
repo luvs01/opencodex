@@ -46,6 +46,38 @@ import { codexAccountSelectionForTurn } from "./lifecycle";
 const SEARCH_UPSTREAM_TIMEOUT_MS = 200_000;
 const SEARCH_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
 
+async function readSearchResponse(response: Response): Promise<ArrayBuffer | null> {
+  if (!response.body) return new ArrayBuffer(0);
+
+  const reader = response.body.getReader();
+  let payload: Uint8Array<ArrayBuffer> = new Uint8Array(Math.min(64 * 1024, SEARCH_RESPONSE_MAX_BYTES));
+  let payloadBytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return payload.slice(0, payloadBytes).buffer;
+      if (!value || value.byteLength === 0) continue;
+      if (value.byteLength > SEARCH_RESPONSE_MAX_BYTES - payloadBytes) {
+        // Do not await cancellation: an untrusted stream may never settle it.
+        void reader.cancel("search response too large").catch(() => undefined);
+        return null;
+      }
+      if (payloadBytes + value.byteLength > payload.byteLength) {
+        const grown = new Uint8Array(Math.min(
+          SEARCH_RESPONSE_MAX_BYTES,
+          Math.max(payload.byteLength * 2, payloadBytes + value.byteLength),
+        ));
+        grown.set(payload.subarray(0, payloadBytes));
+        payload = grown;
+      }
+      payload.set(value, payloadBytes);
+      payloadBytes += value.byteLength;
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* Cancellation may still own the lock briefly. */ }
+  }
+}
+
 export async function handleSearch(
   req: Request,
   config: OcxConfig,
@@ -151,9 +183,9 @@ export async function handleSearch(
       body: JSON.stringify(relayBody),
       signal: linkedSignal.signal,
     });
-    const payload = await upstreamResponse.arrayBuffer();
-    if (payload.byteLength > SEARCH_RESPONSE_MAX_BYTES) {
-      return formatErrorResponse(502, "upstream_error", `search response too large (${payload.byteLength} bytes)`);
+    const payload = await readSearchResponse(upstreamResponse);
+    if (!payload) {
+      return formatErrorResponse(502, "upstream_error", `search response too large (limit ${SEARCH_RESPONSE_MAX_BYTES} bytes)`);
     }
     upstream.recordOutcome?.(upstreamResponse.status);
     const relayHeaders: Record<string, string> = {};

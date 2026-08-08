@@ -451,6 +451,48 @@ test("relays search upstream error status and body verbatim", async () => {
   }
 });
 
+test("cancels an oversized streaming search response as soon as it crosses the limit", async () => {
+  let upstreamCanceled = false;
+  let chunksRead = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(requestUrl);
+    if (url.hostname !== "chatgpt.com") return originalFetch(input, init);
+
+    return new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunksRead += 1;
+        controller.enqueue(new Uint8Array(chunksRead <= 16 ? 1024 * 1024 : 1));
+      },
+      cancel() {
+        upstreamCanceled = true;
+      },
+    }), { headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  saveConfig(forwardConfig());
+
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/alpha/search", server.url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`,
+        "chatgpt-account-id": "acct-123",
+      },
+      body: JSON.stringify({ id: "search-session", model: "gpt-test" }),
+    });
+    expect(response.status).toBe(502);
+    expect(((await response.json()) as { error: { message: string } }).error.message)
+      .toContain("search response too large");
+    // The stream may prefetch one queued chunk, but it must not keep pulling.
+    expect(chunksRead).toBeLessThanOrEqual(18);
+    expect(upstreamCanceled).toBe(true);
+  } finally {
+    await server.stop(true);
+  }
+});
+
 test("a hung search upstream times out with 504 after config.search.timeoutMs", async () => {
   const upstream = Bun.serve({
     port: 0,
