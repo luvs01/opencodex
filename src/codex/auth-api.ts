@@ -836,6 +836,7 @@ async function fetchPoolAccountQuota(accountId: string, forceRefresh = false, co
 }
 
 let primeInFlight: Promise<void> | null = null;
+const poolQuotaPrimeAttemptedAt = new Map<string, number>();
 let cooldownRecoveryInFlight: Promise<void> | null = null;
 
 export async function runCodexCooldownRecoveryProbes(config: OcxConfig, now = Date.now()): Promise<void> {
@@ -924,7 +925,10 @@ export async function primeCodexPoolQuotas(
     const pool = (runtimeConfig.codexAccounts ?? []).filter(isSelectableCodexPoolAccount);
     const stale = pool.filter(a => {
       const q = getAccountQuota(a.id);
-      return !q || Date.now() - q.updatedAt >= POOL_CACHE_TTL;
+      const lastAttemptAt = poolQuotaPrimeAttemptedAt.get(a.id);
+      return q
+        ? Date.now() - q.updatedAt >= POOL_CACHE_TTL
+        : lastAttemptAt === undefined || Date.now() - lastAttemptAt >= POOL_CACHE_TTL;
     });
     const primeMain = async () => {
       const mainLease = tryAcquireNativeMainPrimeLease();
@@ -952,6 +956,7 @@ export async function primeCodexPoolQuotas(
         primeMain(),
         mapWithConcurrency(stale, POOL_QUOTA_REFRESH_CONCURRENCY, async a => {
           if (!getCodexAccountCredential(a.id)) return;
+          poolQuotaPrimeAttemptedAt.set(a.id, Date.now());
           await fetchPoolAccountQuota(a.id, false, a.plan);
         }),
       ]);
@@ -969,6 +974,7 @@ export async function primeCodexPoolQuotas(
  * from another suite cannot coalesce into the next prime. */
 export function clearCodexQuotaPrimeState(): void {
   primeInFlight = null;
+  poolQuotaPrimeAttemptedAt.clear();
 }
 
 /** Test-only reset for the worker-level single-flight. */

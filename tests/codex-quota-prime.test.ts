@@ -422,6 +422,28 @@ describe("primeCodexPoolQuotas", () => {
     }
   });
 
+  test("failed pool quota attempts are not retried within the cache TTL", async () => {
+    const config = makeConfig();
+    seedPoolAccount(config, "blocked");
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    try {
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        if (String(input).includes("/backend-api/wham/usage")) {
+          calls += 1;
+          throw new Error("network blocked");
+        }
+        return originalFetch(input);
+      };
+      await primeCodexPoolQuotas(config, "first-failed-attempt");
+      await primeCodexPoolQuotas(config, "second-attempt-within-ttl");
+      expect(getAccountQuota("blocked")).toBeNull();
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("priming defuses the Phase 10 all-unknown deadlock", async () => {
     const config = makeConfig({ activeCodexAccountId: "p1", autoSwitchThreshold: 80 });
     seedPoolAccount(config, "p1");
