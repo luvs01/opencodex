@@ -1649,7 +1649,7 @@ export async function handleCodexAuthAPI(
     codexAuthLoginState.set(flowId, loginOwner);
     try {
       const { startLoginFlow, getLoginStatus } = await import("../oauth");
-      const result = await startLoginFlow("chatgpt", { forceLogin: true });
+      const result = await startLoginFlow("chatgpt", { forceLogin: true }, { flowId });
 
       // Open the browser server-side (same pattern as /api/oauth/login in management-api.ts).
       // The GUI's window.open is popup-blocked because it runs after an await, not a direct click.
@@ -1879,10 +1879,17 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/login/cancel" && req.method === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { flowId?: string };
+    const body = (await req.json().catch(() => ({}))) as { flowId?: unknown };
+    const flowId = typeof body.flowId === "string" ? body.flowId.trim() : "";
+    if (!flowId) return jsonResponse({ error: "flowId required" }, 400);
     const { cancelLoginFlow } = await import("../oauth");
-    const cancelled = cancelLoginFlow("chatgpt");
-    expireCodexAuthFlow(body.flowId ?? null);
+    // Import may yield; validate afterwards so a stale modal cannot cancel a replacement flow.
+    const flow = codexAuthLoginState.get(flowId);
+    if (!flow || flow.status !== "pending") {
+      return jsonResponse({ error: "login flow expired or unknown" }, 400);
+    }
+    const cancelled = cancelLoginFlow("chatgpt", flowId);
+    expireCodexAuthFlow(flowId);
     return jsonResponse({ ok: true, cancelled });
   }
 

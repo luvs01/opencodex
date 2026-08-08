@@ -126,6 +126,8 @@ export function sweepExpiredXaiPermanentFailureVerdicts(now=Date.now()):number{l
 export interface LoginOpts { forceLogin?: boolean; /** When set, persist into this account slot and require matching identity. */ reauthAccountId?: string }
 
 export interface LoginFlowLifecycle {
+  /** Optional request owner used to scope cancellation of this login attempt. */
+  flowId?: string;
   /** Runs after background credential/config persistence settles, before status becomes done. */
   onSettled?: () => void | Promise<void>;
 }
@@ -1043,7 +1045,7 @@ export async function runLogin(
  * submitManualLoginCode(), which feeds OAuthController.onManualCodeInput.
  */
 const loginState = new Map<string, { error?: string; done: boolean }>();
-const loginAbort = new Map<string, AbortController>();
+const loginAbort = new Map<string, { controller: AbortController; flowId?: string }>();
 
 /** Pending paste for a login in progress: either a waiter or a stashed early submission. */
 interface ManualCodeSlot {
@@ -1179,17 +1181,18 @@ export function oauthLoginSummary(): Array<{ provider: string; loggedIn: boolean
 }
 
 export function clearLoginState(provider: string): void {
-  loginAbort.get(provider)?.abort("cleared");
+  loginAbort.get(provider)?.controller.abort("cleared");
   loginAbort.delete(provider);
   clearManualCodeSlot(provider);
   loginState.delete(provider);
 }
 
-export function cancelLoginFlow(provider: string): boolean {
-  const ctrl = loginAbort.get(provider);
+export function cancelLoginFlow(provider: string, flowId?: string): boolean {
+  const active = loginAbort.get(provider);
   const existing = loginState.get(provider);
-  if (!ctrl && (!existing || existing.done)) return false;
-  ctrl?.abort("cancelled");
+  if (flowId !== undefined && active?.flowId !== flowId) return false;
+  if (!active && (!existing || existing.done)) return false;
+  active?.controller.abort("cancelled");
   loginAbort.delete(provider);
   clearManualCodeSlot(provider);
   loginState.set(provider, { done: true, error: "Login cancelled" });
@@ -1210,7 +1213,8 @@ export async function startLoginFlow(
   clearManualCodeSlot(provider);
   loginState.set(provider, { done: false });
   const abort = new AbortController();
-  loginAbort.set(provider, abort);
+  loginAbort.set(provider, { controller: abort, flowId: lifecycle?.flowId });
+  const ownsActiveLogin = () => loginAbort.get(provider)?.controller === abort;
   return new Promise((resolve, reject) => {
     let urlResolved = false;
     const ctrl: OAuthController = {
@@ -1231,6 +1235,12 @@ export async function startLoginFlow(
         // A successful credential/config commit is not fully live until its owner reconciles the
         // runtime config. For an already-failed login, keep the original recovery error.
         if (finalError === undefined) finalError = settleError;
+      }
+      // A cancelled attempt may settle after its replacement has started. Never let that old
+      // promise delete or overwrite the replacement's provider-level state.
+      if (!ownsActiveLogin()) {
+        if (!urlResolved && finalError !== undefined) reject(finalError);
+        return;
       }
       if (finalError === undefined) {
         loginAbort.delete(provider);
@@ -1256,6 +1266,10 @@ export async function startLoginFlow(
       (e: unknown) => settle(e),
     ).catch((e: unknown) => {
       // settle catches lifecycle failures, so this is only a defensive promise-boundary guard.
+      if (!ownsActiveLogin()) {
+        if (!urlResolved) reject(e);
+        return;
+      }
       loginAbort.delete(provider);
       clearManualCodeSlot(provider);
       const msg = e instanceof Error ? e.message : String(e);
