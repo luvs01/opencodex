@@ -10,7 +10,6 @@ import { useT } from "../i18n/shared";
 import { formatProviderDisplayName } from "../provider-icons";
 import { useProviderAccountPools } from "../hooks/useProviderAccountPools";
 import { useCodexAccountPool } from "../hooks/useCodexAccountPool";
-import { useJsonConfigEditor } from "../hooks/useJsonConfigEditor";
 import { useKeyedClientResource } from "../client-resource";
 import { readSessionListCache } from "../session-list-cache";
 import type { ProvidersConfig } from "./providers-shared";
@@ -143,18 +142,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     switchAccount, switchApiKey, removeApiKey, addApiKeyValue, editCredentialAlias,
     removeAccount, activeAccountNeedsReauth,
   } = pools;
-  const jsonEditor = useJsonConfigEditor({
-    apiBase, config,
-    notify,
-    fetchConfig, fetchProviderQuotas, onSaved: () => setModelsRefreshToken(n => n + 1),
-    t: t as unknown as Parameters<typeof useJsonConfigEditor>[0]["t"],
-  });
-  const {
-    draft, setDraft, jsonEditorOpen, jsonSaving, jsonLeaveOpen,
-    saveConfig, openJsonEditor, discardJsonEditor, requestCloseJsonEditor, restoreJsonEditor,
-    jsonIsDirty, setJsonLeaveOpen,
-  } = jsonEditor;
-
   useEffect(() => {
     // Deferred by a microtask, not a timer. A timer had to be cancelled in cleanup, so navigating
     // away within the same tick dropped both requests with nothing to retry them and the page came
@@ -274,17 +261,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         selectedName={workspaceSelected}
         onSelect={setWorkspaceSelected}
         onAddProvider={intent => { setAddIntent(intent ?? null); setAdding(true); }}
-        onEditConfig={openJsonEditor}
-        jsonEditor={{
-          open: jsonEditorOpen,
-          draft,
-          isDirty: jsonIsDirty,
-          onDraftChange: setDraft,
-          onSave: () => saveConfig(),
-          onClose: requestCloseJsonEditor,
-          onRestore: restoreJsonEditor,
-        }}
-        jsonSaving={jsonSaving}
         modelsRefreshToken={modelsRefreshToken}
         activeAccountNeedsReauth={activeAccountNeedsReauth}
         quotaRefreshEpoch={quotaRefresh.epoch}
@@ -350,8 +326,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           ? Object.entries(config.providers).find(([name, provider]) => name !== removeConfirmName && provider.disabled !== true)?.[0] ?? null
           : null}
         codexLoginOpen={codexLoginOpen}
-        jsonLeaveOpen={jsonLeaveOpen}
-        jsonSaving={jsonSaving}
         oauthTosPending={oauthTosPending}
         onCloseAdd={() => {
           if (busy) void cancelLoginOAuth(busy);
@@ -382,9 +356,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         }}
         onCancelRemove={() => setRemoveConfirmName(null)}
         onConfirmRemove={() => { void confirmRemoveProvider(removeConfirmName); }}
-        onCancelJsonLeave={() => { if (!jsonSaving) setJsonLeaveOpen(false); }}
-        onDiscardJson={discardJsonEditor}
-        onSaveJson={() => { void saveConfig(); }}
         onCancelOauthTos={() => setOauthTosPending(null)}
         onContinueOauthTos={() => {
           const pending = oauthTosPending;
