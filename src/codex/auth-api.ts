@@ -75,7 +75,7 @@ export { maskEmail } from "../lib/privacy";
 import type { CodexAccount, OcxConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
-import { readBoundedResponseBody } from "../lib/bounded-body";
+import { BOUNDED_BODY_MAX_BYTES, readBoundedResponseBody } from "../lib/bounded-body";
 import {
   oauthAccountHealthFields,
   projectCodexAccountHealth,
@@ -1465,7 +1465,18 @@ export async function handleCodexAuthAPI(
           await resp.body?.cancel().catch(() => {});
           return jsonResponse({ error: `Upstream error ${resp.status}` }, resp.status);
         }
-        return jsonResponse(safeResetCreditsDto(await resp.json()));
+        try {
+          const body = await readBoundedResponseBody(resp, {
+            maxBytes: BOUNDED_BODY_MAX_BYTES,
+            fatalUtf8: true,
+          });
+          if (!body.displaySafe) {
+            return jsonResponse({ error: "Invalid upstream reset-credit response" }, 502);
+          }
+          return jsonResponse(safeResetCreditsDto(JSON.parse(body.text)));
+        } catch {
+          return jsonResponse({ error: "Invalid upstream reset-credit response" }, 502);
+        }
       });
       return result.ok ? result.value : result.response;
     } catch (e) {
