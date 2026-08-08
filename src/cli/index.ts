@@ -368,8 +368,8 @@ async function handleStart(options: { block?: boolean } = {}) {
   // System-wide env injection AFTER signal handlers are registered (crash safety:
   // syncCleanup reverts even if injection itself or subsequent startup steps fail).
   await injectSystemEnv(port, config).catch(() => {});
-  // Auto-install .zshrc hook (idempotent — skips if already present).
-  installShellHook();
+  // Auto-install .zshrc hook only with the same explicit opt-in as env injection.
+  installShellHook(config);
 
   await maybeShowStarPrompt(); // once-only Yes/No GitHub-star prompt on first interactive start
   // Post-startup sync drives the readiness gate AND the #1046 stale app-server

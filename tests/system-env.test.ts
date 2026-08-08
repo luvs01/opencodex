@@ -5,6 +5,7 @@ import type { OcxConfig } from "../src/types";
 import {
   cleanStaleSystemEnv,
   injectSystemEnv,
+  installShellHook,
   revertSystemEnv,
 } from "../src/server/system-env";
 
@@ -83,6 +84,27 @@ afterEach(() => {
 });
 
 describe("system environment injection", () => {
+  test("installShellHook requires explicit system environment opt-in", () => {
+    expect(installShellHook({ ...baseConfig, claudeCode: {} })).toEqual({
+      installed: false,
+      reason: "systemEnv disabled",
+    });
+    expect(installShellHook({ ...baseConfig, claudeCode: { enabled: false, systemEnv: true } })).toEqual({
+      installed: false,
+      reason: "claude disabled",
+    });
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test("installShellHook installs after explicit system environment opt-in", () => {
+    expect(installShellHook(baseConfig)).toEqual({ installed: true });
+    expect(writeSpy).toHaveBeenCalledWith(
+      expect.stringContaining(".zshrc"),
+      expect.stringContaining("# opencodex claude-env hook"),
+      { encoding: "utf8", mode: 0o644 },
+    );
+  });
+
   test("injectSystemEnv sets the Claude launchctl variables on macOS", async () => {
     expect(await injectSystemEnv(4567, baseConfig)).toEqual({ injected: true });
 
