@@ -152,6 +152,8 @@ function normalizeResetAt(value: unknown): number | undefined {
       ? Number(value)
       : undefined;
   if (typeof numeric !== "number" || !Number.isFinite(numeric) || numeric < 0) return undefined;
+  const milliseconds = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  if (!Number.isFinite(new Date(milliseconds).getTime())) return undefined;
   return numeric;
 }
 

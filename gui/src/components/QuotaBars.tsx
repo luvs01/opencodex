@@ -341,9 +341,8 @@ function StackedQuotaRow({ row, threshold, t, locale, incomplete }: {
 }
 
 function formatResetAt(resetAt: number | undefined, t: TFn, locale: Locale): { day: string; time: string } {
-  if (typeof resetAt !== "number" || !Number.isFinite(resetAt)) return { day: "", time: "" };
-  const ms = resetAt < 10_000_000_000 ? resetAt * 1000 : resetAt;
-  const date = new Date(ms);
+  const date = resetAtDate(resetAt);
+  if (!date) return { day: "", time: "" };
   const now = new Date();
   const tag = bcp47(locale);
   const time = new Intl.DateTimeFormat(tag, { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
@@ -362,9 +361,9 @@ export function formatResetFuture(
   locale: Locale = "en",
   now = Date.now(),
 ): string {
-  if (typeof resetAt !== "number" || !Number.isFinite(resetAt)) return "";
-  const ms = resetAt < 10_000_000_000 ? resetAt * 1000 : resetAt;
-  const date = new Date(ms);
+  const date = resetAtDate(resetAt);
+  if (!date) return "";
+  const ms = date.getTime();
   const tag = bcp47(locale);
   const time = new Intl.DateTimeFormat(tag, { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
   const nowDate = new Date(now);
@@ -394,4 +393,11 @@ export function formatResetFuture(
   if (dayDiff === 0) return t("quota.resetsToday", { time });
 
   return t("quota.resetsAt", { date: dateStr, time, when: `${dateStr}, ${time}` });
+}
+
+function resetAtDate(resetAt: number | undefined): Date | null {
+  if (typeof resetAt !== "number" || !Number.isFinite(resetAt)) return null;
+  const milliseconds = resetAt < 10_000_000_000 ? resetAt * 1000 : resetAt;
+  const date = new Date(milliseconds);
+  return Number.isFinite(date.getTime()) ? date : null;
 }

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatCreditDate, formatCreditDateTime } from "../src/intl-formatters";
+import { formatResetFuture } from "../src/components/QuotaBars";
+import type { TFn } from "../src/i18n";
 
 describe("credit date formatting", () => {
   test("keeps the compact date format for grant dates", () => {
@@ -20,5 +22,13 @@ describe("credit date formatting", () => {
 
   test("handles invalid dates consistently", () => {
     expect(formatCreditDateTime("invalid")).toBe("—");
+  });
+});
+
+describe("quota reset formatting", () => {
+  test("ignores timestamps outside the JavaScript Date range", () => {
+    const t = ((key: string) => key) as TFn;
+
+    expect(formatResetFuture(1e20, t)).toBe("");
   });
 });

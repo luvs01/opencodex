@@ -34,6 +34,17 @@ describe("rate-limit reset credits", () => {
       expect(quota!.resetCredits).toBeUndefined();
     });
 
+    it("discards reset timestamps outside the JavaScript Date range", () => {
+      const quota = parseUsageQuota({
+        rate_limit: {
+          primary_window: { used_percent: 10, reset_at: 1e20 },
+          tertiary_window: { used_percent: 20, reset_at: 1e20 },
+        },
+      });
+
+      expect(quota).toEqual({ weeklyPercent: 10, monthlyPercent: 20 });
+    });
+
     it("handles credits-only response (no rate_limit)", () => {
       const data: WhamUsageResponse = {
         rate_limit_reset_credits: { available_count: 1 },
