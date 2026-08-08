@@ -8,6 +8,7 @@ import {
   setNormalizeCacheLimitsForTests,
   TIER_SPECS,
   IMAGE_NORMALIZE_CONCURRENCY,
+  MAX_IN_FLIGHT_PIXELS,
   normalizeImageTargets,
   type NormalizeTarget,
   type EncodeFn,
@@ -395,6 +396,29 @@ describe("bounded parallel first pass (WP170)", () => {
     expect(g.stats().active).toBe(0);
     // Every image reached the encoder (10 distinct hashes, one encode each).
     expect(g.stats().arrivals).toBe(10);
+  });
+
+  test("large images are serialized by the aggregate decoded-pixel budget", async () => {
+    const g = gatedEncoder();
+    const edge = Math.floor(Math.sqrt(MAX_IN_FLIGHT_PIXELS));
+    const images = [
+      fakePngBase64(edge, edge, 8192),
+      fakePngBase64(edge, edge, 8193),
+    ];
+    const run = normalizeAnthropicImages(
+      [userMsg(images.map(b64 => imageBlock(b64)))],
+      { encode: g.encode },
+    );
+
+    await g.waitForArrivals(1);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(g.stats().arrivals).toBe(1);
+    expect(g.stats().active).toBe(1);
+
+    g.release();
+    await run;
+    expect(g.stats().arrivals).toBe(2);
+    expect(g.stats().peak).toBe(1);
   });
 
   test("a thrown target callback rejects the call, settles in-flight work, and stops new pulls", async () => {
