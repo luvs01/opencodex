@@ -359,6 +359,8 @@ function renderSafeCommand(value: string): string {
       || /^(?:npm|bun|pnpm|yarn|node)$/.test(part)
       || /^-{1,2}[\w-]+$/.test(part)
       || /^(?:install|add|update|i)$/.test(part)
+      || part === PKG
+      || (part.startsWith(`${PKG}@`) && /^[\w.\-]+$/.test(part.slice(PKG.length + 1)))
       || /^opencodex(?:@[\w.\-]+)?$/.test(part)
       || /^(?:latest|preview|next|beta)$/.test(part)
       || /^\d[\w.\-]*$/.test(part));

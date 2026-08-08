@@ -1475,6 +1475,7 @@ describe("GUI update execution decisions", () => {
       spawnWorkerFn: () => { throw new Error("spawn denied"); },
     })).toThrow("Could not start update worker");
     expect(readUpdateJob()?.status).toBe("failed");
+    expect(readUpdateJob()?.command).toBe("bun add -g @bitkyc08/opencodex@2.7.41");
     // The message itself is deliberately NOT persisted: `spawn denied for Jane Doe` carries no
     // path and still names a person, so no content test can separate diagnostic from identity.
     // The error's type and size are what the record keeps.
