@@ -161,20 +161,20 @@ describe("antigravity CCA envelope", () => {
     expect(env.request.toolConfig?.functionCallingConfig?.mode).toBeUndefined();
   });
 
-  // ── Effort routing: base model + effort → wire model ID + thinkingConfig ──
+  // ── Gemini effort routing: the wire-model suffix is the complete effort signal ──
 
-  test("gemini-3.6-flash with effort=high routes to gemini-3.6-flash-high + thinkingConfig", async () => {
+  test("gemini-3.6-flash with effort=high routes to suffix without thinkingConfig", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.6-flash", "high"));
     const env = JSON.parse(req.body);
     expect(env.model).toBe("gemini-3.6-flash-high");
-    expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("high");
+    expect(env.request.generationConfig?.thinkingConfig).toBeUndefined();
   });
 
-  test("gemini-3.6-flash with effort=low routes to gemini-3.6-flash-low + thinkingConfig", async () => {
+  test("gemini-3.6-flash with effort=low routes to suffix without thinkingConfig", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.6-flash", "low"));
     const env = JSON.parse(req.body);
     expect(env.model).toBe("gemini-3.6-flash-low");
-    expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("low");
+    expect(env.request.generationConfig?.thinkingConfig).toBeUndefined();
   });
 
   test("gemini-3.6-flash with no effort defaults to medium wire ID, no thinkingConfig", async () => {
@@ -188,21 +188,21 @@ describe("antigravity CCA envelope", () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.6-flash", "max"));
     const env = JSON.parse(req.body);
     expect(env.model).toBe("gemini-3.6-flash-high");
-    expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("high");
+    expect(env.request.generationConfig?.thinkingConfig).toBeUndefined();
   });
 
-  test("gemini-3.1-pro with effort=low routes to gemini-3.1-pro-low + thinkingConfig", async () => {
+  test("gemini-3.1-pro with effort=low routes to suffix without thinkingConfig", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.1-pro", "low"));
     const env = JSON.parse(req.body);
     expect(env.model).toBe("gemini-3.1-pro-low");
-    expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("low");
+    expect(env.request.generationConfig?.thinkingConfig).toBeUndefined();
   });
 
-  test("gemini-3.1-pro with effort=high routes to gemini-pro-agent + thinkingConfig", async () => {
+  test("gemini-3.1-pro with effort=high routes to suffix without thinkingConfig", async () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.1-pro", "high"));
     const env = JSON.parse(req.body);
     expect(env.model).toBe("gemini-pro-agent");
-    expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("high");
+    expect(env.request.generationConfig?.thinkingConfig).toBeUndefined();
   });
 
   test("gemini-3.1-pro with no effort defaults to gemini-pro-agent (high)", async () => {
@@ -216,7 +216,7 @@ describe("antigravity CCA envelope", () => {
     const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort("gemini-3.1-pro", "medium"));
     const env = JSON.parse(req.body);
     expect(env.model).toBe("gemini-3.1-pro-low");
-    expect(env.request.generationConfig?.thinkingConfig?.thinkingLevel).toBe("low");
+    expect(env.request.generationConfig?.thinkingConfig).toBeUndefined();
   });
 
   // ── Suffix-ID precedence: suffix IS the effort, no thinkingConfig ──

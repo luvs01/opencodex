@@ -137,7 +137,7 @@ export function isAntigravitySuffixModelId(modelId: string): boolean {
  *
  * Precedence (evaluated in order):
  * 1. Suffix wire ID or compat alias → resolve via `resolveAntigravityWireModelId`, no thinkingConfig.
- * 2. Mapped Gemini base with effort → return mapped wire ID + thinkingLevel.
+ * 2. Mapped Gemini base with effort → return mapped wire ID, no thinkingConfig.
  * 3. Mapped Gemini base without effort → return default-effort wire ID, no thinkingConfig.
  * 4. Claude Opus with effort → return identity + thinkingLevel (no suffix variants exist).
  * 5. All other IDs → return `resolveAntigravityWireModelId(modelId)`, no thinkingConfig.
@@ -155,7 +155,7 @@ export function resolveAntigravityEffortWireModel(
   const effortMap = ANTIGRAVITY_EFFORT_WIRE_MAP[modelId];
   if (effortMap) {
     if (effort && effort in effortMap) {
-      return { wireModelId: effortMap[effort]!, thinkingLevel: effort };
+      return { wireModelId: effortMap[effort]! };
     }
     const defaultEffort = ANTIGRAVITY_DEFAULT_EFFORT[modelId]!;
     return { wireModelId: effortMap[defaultEffort]! };
