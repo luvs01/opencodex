@@ -1122,8 +1122,8 @@ export function submitManualLoginCode(provider: string, input: string): { ok: tr
   const slot = ensureManualCodeSlot(provider);
   // Synchronous validation (validated request/ack): reject un-parseable input and
   // authorization responses (url/query kind) whose state is missing or mismatched
-  // once the flow has registered its expected state. Raw codes stay in-session-PKCE
-  // protected. Early posts (flow not yet waiting, no expectedState) are stashed and
+  // once the flow has registered its expected state. Raw codes without a state stay
+  // in-session-PKCE protected; an explicit code#state suffix must match. Early posts
   // re-validated by the callback loop.
   const parsed = parseCallbackInput(trimmed);
   // Command Code's manual fallback accepts a pasted JSON callback payload
@@ -1131,7 +1131,7 @@ export function submitManualLoginCode(provider: string, input: string): { ok: tr
   // shared gate so the provider-specific parser can validate it.
   const isCommandCodeJson = provider === "command-code" && trimmed.startsWith("{") && !parsed.code;
   if (!parsed.code && !isCommandCodeJson) return { ok: false, error: "no authorization code found in input" };
-  if (parsed.kind !== "raw" && slot.expectedState !== undefined) {
+  if ((parsed.kind !== "raw" || parsed.state !== undefined) && slot.expectedState !== undefined) {
     if (parsed.state === undefined) return { ok: false, error: "redirect URL is missing the state parameter" };
     if (parsed.state !== slot.expectedState) return { ok: false, error: "state mismatch — paste the redirect URL from THIS login attempt" };
   }
