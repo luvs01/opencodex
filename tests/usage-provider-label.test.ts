@@ -25,9 +25,9 @@ describe("baseProviderLabel", () => {
     expect(baseProviderLabel("anthropic-pabc123")).toBe("anthropic");
   });
 
-  test("strips the legacy -main suffix so historical main-account rows aggregate", () => {
-    expect(baseProviderLabel("openai-main")).toBe("openai");
-    expect(baseProviderLabel("codex-main")).toBe("codex");
+  test("keeps configured provider names ending in -main distinct", () => {
+    expect(baseProviderLabel("openrouter-main")).toBe("openrouter-main");
+    expect(baseProviderLabel("azure-main")).toBe("azure-main");
   });
 
   test("keeps suffixes that do not match the pool log-label shape", () => {
