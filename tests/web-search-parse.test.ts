@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseSidecarSSE } from "../src/web-search/parse";
+import { parseSidecarSSE, SIDECAR_RESPONSE_MAX_BYTES } from "../src/web-search/parse";
 
 function sse(events: { type: string; [k: string]: unknown }[]): Response {
   const body = events.map(e => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
@@ -7,6 +7,19 @@ function sse(events: { type: string; [k: string]: unknown }[]): Response {
 }
 
 describe("parseSidecarSSE trailing Sources block", () => {
+  test("cancels and rejects a sidecar stream that exceeds the response byte cap", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(SIDECAR_RESPONSE_MAX_BYTES + 1));
+      },
+      cancel() { cancelled = true; },
+    });
+
+    await expect(parseSidecarSSE(new Response(body))).rejects.toMatchObject({ name: "QuotaExceededError" });
+    expect(cancelled).toBe(true);
+  });
+
   test("extracts sources from a markdown Sources block when annotations are empty", async () => {
     const text = "Node 24.18.0 is the latest LTS.\n\nSources:\n" +
       "- Node.js Download page: https://nodejs.org/en/download/current\n" +

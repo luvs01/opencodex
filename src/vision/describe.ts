@@ -3,6 +3,7 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { sidecarEnter } from "../lib/sidecar-tracker";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 import { fetchWithResetRetry } from "../lib/upstream-retry";
 import { parseSidecarSSE } from "../web-search/parse";
 import type { SidecarOutcomeRecorder } from "../web-search/executor";
@@ -98,9 +99,11 @@ export async function describeImage(
     );
     recordOutcome?.(res.status);
     if (!res.ok) {
-      const t = await res.text().catch(() => "");
+      const bounded = await readBoundedResponseBody(res, { signal: linkedSignal.signal }).catch(() => undefined);
+      const t = bounded?.displaySafe ? bounded.text : "";
       console.warn(`[vision] sidecar HTTP ${res.status} (${Date.now() - t0}ms)`);
-      return { text: "", error: `vision sidecar HTTP ${res.status}: ${redactSecretString(t.slice(0, 200))}` };
+      const detail = redactSecretString(t.slice(0, 200));
+      return { text: "", error: `vision sidecar HTTP ${res.status}${detail ? `: ${detail}` : ""}` };
     }
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     let parsed;

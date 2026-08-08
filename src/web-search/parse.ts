@@ -12,6 +12,9 @@ export interface WebSearchResult {
   error?: string;
 }
 
+/** Sidecar answers are short text; never buffer an untrusted stream beyond this ceiling. */
+export const SIDECAR_RESPONSE_MAX_BYTES = 1024 * 1024;
+
 interface AnnotationLike {
   type?: string;
   url?: string;
@@ -140,6 +143,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   if (!response.body) return { text: "", sources: [] };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  let responseBytes = 0;
   let buffer = "";
   const seen = new Set<string>();
   // Holder object — fields are mutated inside the closure, so they can't live as narrowed locals.
@@ -183,6 +187,15 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      responseBytes += value.byteLength;
+      if (responseBytes > SIDECAR_RESPONSE_MAX_BYTES) {
+        void reader.cancel(new DOMException("Sidecar response size limit reached", "QuotaExceededError"))
+          .catch(() => undefined);
+        throw new DOMException(
+          `sidecar response exceeded ${SIDECAR_RESPONSE_MAX_BYTES} bytes`,
+          "QuotaExceededError",
+        );
+      }
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
