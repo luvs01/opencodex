@@ -46,8 +46,34 @@ function collectAnnotation(ann: AnnotationLike | undefined, sources: WebSearchSo
  * URL punctuation (`;`, `,`, `)`, `]`, `.`). Prose that follows the source list is preserved.
  */
 const URL_RE = /https?:\/\/[^\s<>()\[\]]+/;
-// A "Sources:" / "Source:" header, allowing markdown prefixes (#, *, -, >) and bold/italic wrappers.
-const SOURCES_HEADER_RE = /^\s*(?:#{1,6}\s*)?[-*>\s]*\**\s*sources?\s*\**\s*:?\s*\**\s*$/i;
+
+/** Match a Sources header without applying a backtracking expression to provider-controlled text. */
+function isSourcesHeader(line: string): boolean {
+  const candidate = line.trim();
+  let index = 0;
+  if (candidate.startsWith("#")) {
+    while (candidate[index] === "#") index++;
+    if (index > 6) return false;
+    while (candidate[index]?.trim() === "") index++;
+  }
+  while (candidate[index] === "-" || candidate[index] === "*" || candidate[index] === ">") {
+    index++;
+    while (candidate[index]?.trim() === "") index++;
+  }
+
+  const word = candidate.slice(index, index + 7).toLowerCase() === "sources" ? "sources"
+    : candidate.slice(index, index + 6).toLowerCase() === "source" ? "source"
+    : "";
+  if (!word) return false;
+
+  let colonSeen = false;
+  for (const char of candidate.slice(index + word.length)) {
+    if (char.trim() === "" || char === "*") continue;
+    if (char === ":" && !colonSeen) { colonSeen = true; continue; }
+    return false;
+  }
+  return true;
+}
 
 /** Trim wrapping/trailing noise from a captured URL: angle brackets, then trailing punctuation. */
 function cleanUrl(url: string): string {
@@ -67,7 +93,7 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
   // Find the LAST line that is a "Sources:" header (markdown prefixes allowed).
   let headerIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (SOURCES_HEADER_RE.test(lines[i])) { headerIdx = i; break; }
+    if (isSourcesHeader(lines[i])) { headerIdx = i; break; }
   }
   if (headerIdx === -1) return { text, sources: [] };
   const sources: WebSearchSource[] = [];

@@ -68,6 +68,15 @@ describe("parseSidecarSSE trailing Sources block", () => {
     expect(out.sources).toEqual([]);
   });
 
+  test("rejects a long non-header markdown line without pathological parsing", async () => {
+    const text = `${" *".repeat(10_000)} X`;
+    const res = sse([
+      { type: "response.output_text.done", text },
+    ]);
+    const out = await parseSidecarSSE(res);
+    expect(out).toEqual({ text, sources: [] });
+  });
+
   test("recognizes a markdown-prefixed Sources header (### Sources: / **Sources**)", async () => {
     const text = "Latest is 24.18.0.\n\n### Sources:\n" +
       "- Node download: https://nodejs.org/en/download/current\n" +
