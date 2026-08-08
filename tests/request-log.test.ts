@@ -23,6 +23,7 @@ import {
   sealRequestAttemptIdentity,
   type RequestLogContext,
 } from "../src/server/request-log";
+import { MAX_RESPONSE_LOG_INSPECTION_BYTES } from "../src/server/relay";
 import { bridgeToResponsesSSE } from "../src/bridge";
 import type { AdapterEvent, OcxUsage } from "../src/types";
 import {
@@ -653,6 +654,23 @@ describe("request log metadata", () => {
         reasoningOutputTokens: 5,
       },
     });
+  });
+
+  test("deferred JSON logging forwards oversized bodies without retaining them for inspection", async () => {
+    const entries: RequestLogEntry[] = [];
+    const prefix = JSON.stringify({ model: "must-not-be-inspected", padding: "" }).slice(0, -2);
+    const text = `${prefix}${"x".repeat(MAX_RESPONSE_LOG_INSPECTION_BYTES)}"}`;
+    const response = responseWithDeferredRequestLog(
+      new Response(text, { headers: { "content-type": "application/json" } }),
+      "ocx-test-json-bounded",
+      Date.now(),
+      { model: "requested-model", provider: "openai" },
+      entry => entries.push(entry),
+    );
+
+    expect(await response.text()).toBe(text);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.resolvedModel).toBeUndefined();
   });
 
   test("deferred JSON logging accepts ChatCompletions-shape usage", async () => {

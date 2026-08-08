@@ -112,6 +112,26 @@ describe("consumeForInspection cancel finalization (#44)", () => {
 });
 
 describe("bounded post-disconnect inspection drain", () => {
+  test("metadata inspection detaches at its total byte limit", async () => {
+    const source = controlledStream();
+    const done = new Promise<void>(resolve => {
+      consumeForResponseLogMetadata(
+        source.stream,
+        {} as RequestLogContext,
+        undefined,
+        resolve,
+        undefined,
+        undefined,
+        { maxInspectionBytes: 8 },
+      );
+    });
+
+    source.push(encoder.encode("12345678"));
+    await done;
+
+    expect(source.cancelReasons).toEqual(["response log inspection byte limit reached"]);
+  });
+
   test("consumeForInspection stops at the injected byte bound, cancels the reader, and aborts upstream", async () => {
     const source = controlledStream();
     const clientGone = new AbortController();

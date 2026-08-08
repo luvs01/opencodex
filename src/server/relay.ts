@@ -17,6 +17,7 @@ const nativePassthroughSseResponses = new WeakSet<Response>();
 const eagerRelaySseResponses = new WeakSet<Response>();
 
 export const MAX_INSPECTION_SSE_FRAME_BYTES = 4 * 1024 * 1024;
+export const MAX_RESPONSE_LOG_INSPECTION_BYTES = 32 * 1024 * 1024;
 export const MAX_COMPLETED_OUTPUT_ITEMS = 256;
 export const MAX_COMPLETED_OUTPUT_ITEM_SOURCE_BYTES = 8 * 1024 * 1024;
 export const MAX_TAIL_ERROR_MESSAGE_CHARS = 512;
@@ -428,25 +429,58 @@ export function responseWithDeferredRequestLog(
   }
   if (!response.body || !contentType.includes("text/event-stream")) {
     if (response.body && (contentType.includes("application/json") || response.status >= 400)) {
-      const finalizeJsonLog = async () => {
-        const text = await response.text();
-        // Non-JSON error bodies: inspect/log only a bounded prefix (the stored
-        // upstreamError is 500 chars anyway); the FULL text is still forwarded to the
-        // client below, unchanged. JSON bodies keep full inspection (usage parsing).
-        const isJson = contentType.includes("application/json");
-        inspectResponseLogJson(logCtx, isJson ? text : text.slice(0, 8192));
+      const reader = response.body.getReader();
+      const isJson = contentType.includes("application/json");
+      const inspectionLimit = isJson ? MAX_RESPONSE_LOG_INSPECTION_BYTES : 8192;
+      const inspectedChunks: Uint8Array[] = [];
+      let inspectedBytes = 0;
+      let inspectionOverflowed = false;
+      let finalized = false;
+      const finalizeJsonLog = () => {
+        if (finalized) return;
+        finalized = true;
+        if (!inspectionOverflowed || !isJson) {
+          inspectResponseLogJson(logCtx, new TextDecoder().decode(joinedBytes(inspectedChunks, inspectedBytes)));
+        }
         addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
-        return text;
       };
       const body = new ReadableStream<Uint8Array>({
-        async start(controller) {
+        async pull(controller) {
           try {
-            controller.enqueue(new TextEncoder().encode(await finalizeJsonLog()));
-            controller.close();
+            const { done, value } = await reader.read();
+            if (done) {
+              finalizeJsonLog();
+              controller.close();
+              return;
+            }
+            if (!inspectionOverflowed) {
+              if (inspectedBytes + value.byteLength <= inspectionLimit) {
+                inspectedChunks.push(value.slice());
+                inspectedBytes += value.byteLength;
+              } else {
+                inspectionOverflowed = true;
+                if (isJson) {
+                  inspectedChunks.length = 0;
+                  inspectedBytes = 0;
+                } else {
+                  const remainingBytes = inspectionLimit - inspectedBytes;
+                  if (remainingBytes > 0) inspectedChunks.push(value.slice(0, remainingBytes));
+                  inspectedBytes = inspectionLimit;
+                }
+              }
+            }
+            controller.enqueue(value);
           } catch (err) {
-            addFinalRequestLog(requestId, start, logCtx, 502, { closeReason: "non_stream" }, addLog);
+            if (!finalized) {
+              finalized = true;
+              addFinalRequestLog(requestId, start, logCtx, 502, { closeReason: "non_stream" }, addLog);
+            }
             try { controller.error(err); } catch { /* already torn down */ }
           }
+        },
+        cancel(reason) {
+          finalizeJsonLog();
+          reader.cancel(reason).catch(() => {});
         },
       });
       return new Response(body, {
@@ -929,6 +963,8 @@ export type InspectionConsumerOptions = {
   drainBounds?: Partial<InspectionDrainBounds>;
   upstream?: AbortController;
   now?: () => number;
+  /** Maximum total bytes inspected before detaching from the provider stream. */
+  maxInspectionBytes?: number;
   /** Test seam for proving both public consumers dispose their owned inspector. */
   inspectorFactory?: (handlers: SseInspectorHandlers) => SseInspector;
 };
@@ -951,11 +987,13 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
   let clientGone = false;
   let clientGoneReason: unknown;
   let drainedBytes = 0;
+  let inspectedBytes = 0;
   let drainDeadline = Number.POSITIVE_INFINITY;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   let drainStopped = false;
   const drainMs = options.drainBounds?.ms ?? DEFAULT_INSPECTION_DRAIN_MS;
   const drainBytes = options.drainBounds?.bytes ?? DEFAULT_INSPECTION_DRAIN_BYTES;
+  const maxInspectionBytes = options.maxInspectionBytes ?? MAX_RESPONSE_LOG_INSPECTION_BYTES;
   const now = options.now ?? Date.now;
   let cancelFired = false;
   const fireCancel = () => {
@@ -1025,7 +1063,19 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
           break;
         }
         if (!clientGone) {
-          inspector.feed(value);
+          const remainingBytes = Math.max(0, maxInspectionBytes - inspectedBytes);
+          const inspectedValue = value.byteLength > remainingBytes
+            ? value.subarray(0, remainingBytes)
+            : value;
+          if (inspectedValue.byteLength > 0) inspector.feed(inspectedValue);
+          inspectedBytes += inspectedValue.byteLength;
+          if (value.byteLength > remainingBytes || inspectedBytes >= maxInspectionBytes) {
+            // This reader normally owns one branch of a tee. Cancelling only the
+            // inspection branch leaves delivery to the client intact and restores
+            // client backpressure instead of greedily draining an untrusted source.
+            await reader.cancel("response log inspection byte limit reached");
+            break;
+          }
           continue;
         }
         if (now() >= drainDeadline) {
