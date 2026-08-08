@@ -89,6 +89,10 @@ function parseContextWindowDraft(raw: string): number | null | undefined {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+function ownRecordValue<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 export default function Models({ apiBase }: { apiBase: string }) {
   /*
    * Tab state. The hash is the source of truth, so refresh, bookmark, and
@@ -438,18 +442,21 @@ export default function Models({ apiBase }: { apiBase: string }) {
       setContextError(t("models.contextInvalid"));
       return;
     }
-    const modelWindows: Record<string, number | null> = {};
+    const modelWindowEntries: Array<[string, number | null]> = [];
     for (const modelId of contextTouchedModels) {
-      const draft = contextModelDrafts[modelId] ?? "";
+      const draft = ownRecordValue(contextModelDrafts, modelId) ?? "";
       const parsed = parseContextWindowDraft(draft);
       if (parsed === undefined) {
         setContextError(t("models.contextInvalid"));
         return;
       }
       // Compare VALUES, not text. Retyping 64000 as "64,000" is not a change.
-      if (parsed === (contextSnapshot.modelContextWindows[modelId] ?? null)) continue;
-      modelWindows[modelId] = parsed;
+      if (parsed === (ownRecordValue(contextSnapshot.modelContextWindows, modelId) ?? null)) continue;
+      modelWindowEntries.push([modelId, parsed]);
     }
+    // Object.fromEntries defines data properties even for keys such as `__proto__`; assigning
+    // those keys onto `{}` would invoke Object.prototype's setter and silently drop the edit.
+    const modelWindows = Object.fromEntries(modelWindowEntries);
     const defaultChanged = contextDefaultTouched
       && providerWindow !== contextSnapshot.contextWindow;
 
@@ -1365,7 +1372,7 @@ export default function Models({ apiBase }: { apiBase: string }) {
                     <input
                       className="input"
                       inputMode="numeric"
-                      value={contextModelDrafts[contextModelId] ?? ""}
+                      value={ownRecordValue(contextModelDrafts, contextModelId) ?? ""}
                       onChange={event => {
                         setContextModelDrafts(current => ({
                           ...current,

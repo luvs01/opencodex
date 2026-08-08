@@ -112,7 +112,18 @@ test("Models page combines final visibility, atomic actions, discovery status, a
   });
   testWindow.localStorage.setItem("ocx-models-collapsed:v2", JSON.stringify([]));
   const provider = "fallback-provider";
-  const ids = ["claude-opus", "claude-sonnet", "gemini-pro", "gemini-flash", "gpt-oss"];
+  // Provider model IDs are arbitrary strings. Prototype property names must behave like normal
+  // IDs rather than reading inherited values from the context-window draft dictionary.
+  const ids = [
+    "__proto__",
+    "constructor",
+    "toString",
+    "claude-opus",
+    "claude-sonnet",
+    "gemini-pro",
+    "gemini-flash",
+    "gpt-oss",
+  ];
   let selected = ["gemini-pro", "gemini-flash"];
   const disabled = new Set(["gpt-oss"]);
   const visibilityBodies: Array<{ scope: string; targets: Array<{ id: string }>; enabled: boolean }> = [];
@@ -215,7 +226,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
 
     const switchFor = (id: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${provider}/${id}"]`)!;
     const buttonText = (text: string) => [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === text)!;
-    expect(container.textContent).toContain("2/5 visible");
+    expect(container.textContent).toContain("2/8 visible");
     expect(switchFor("gemini-pro").getAttribute("aria-pressed")).toBe("true");
     expect(switchFor("claude-sonnet").getAttribute("aria-pressed")).toBe("false");
     expect(container.querySelector(".badge.badge-amber")?.textContent).toContain("Discovery failed");
@@ -224,7 +235,17 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     await act(async () => buttonText("Context windows").click());
     const contextDialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Context windows"]')!;
     const contextInputs = contextDialog.querySelectorAll<HTMLInputElement>("input");
-    expect([...contextInputs].map(input => input.value)).toEqual(["256000", "64000"]);
+    expect([...contextInputs].map(input => input.value)).toEqual(["256000", ""]);
+    const pickContextModel = async (modelId: string, dialog: HTMLElement = contextDialog) => {
+      await act(async () => {
+        dialog.querySelector<HTMLButtonElement>('button.select-trigger[aria-label="Model"]')!.click();
+      });
+      const option = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+        .find(candidate => candidate.textContent === modelId)!;
+      await act(async () => option.click());
+    };
+    await pickContextModel("claude-opus");
+    expect(contextInputs[1]!.value).toBe("64000");
     const setValue = Object.getOwnPropertyDescriptor(
       testWindow.HTMLInputElement.prototype,
       "value",
@@ -235,14 +256,11 @@ test("Models page combines final visibility, atomic actions, discovery status, a
       setValue.call(contextInputs[1]!, "100000");
       contextInputs[1]!.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
     });
-    const pickContextModel = async (modelId: string, dialog: HTMLElement = contextDialog) => {
-      await act(async () => {
-        dialog.querySelector<HTMLButtonElement>('button.select-trigger[aria-label="Model"]')!.click();
-      });
-      const option = [...testWindow.document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-        .find(candidate => candidate.textContent === modelId)!;
-      await act(async () => option.click());
-    };
+    await pickContextModel("__proto__");
+    await act(async () => {
+      setValue.call(contextInputs[1]!, "90000");
+      contextInputs[1]!.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
+    });
     await pickContextModel("claude-sonnet");
     expect(contextInputs[1]!.value).toBe("");
     await act(async () => {
@@ -273,7 +291,7 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     // model mid-modal must not make Apply revert it.
     expect(contextBodies.at(-1)).toEqual({
       contextWindow: 350_000,
-      modelContextWindows: { "claude-opus": 100_000, "claude-sonnet": 80_000 },
+      modelContextWindows: { "__proto__": 90_000, "claude-opus": 100_000, "claude-sonnet": 80_000 },
     });
     expect(container.querySelector('[role="dialog"][aria-label="Context windows"]')).toBeNull();
 
