@@ -234,6 +234,7 @@ export default function AnthropicAccountPoolSettings({
           <AccountPoolStrategyControls
             strategy={strategy}
             stickyDraft={stickyDraft}
+            copy="anthropic"
             disabled={saving}
             strategySelectId="anthropic-pool-strategy"
             stickyInputId="anthropic-pool-sticky-limit"

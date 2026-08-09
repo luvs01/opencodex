@@ -22,6 +22,8 @@ const STRATEGY_HINT_KEYS = {
 export interface AccountPoolStrategyControlsProps {
   strategy: AccountPoolStrategy;
   stickyDraft: string;
+  /** Use session-oriented copy for providers that do not use Codex task bindings. */
+  copy?: "codex" | "anthropic";
   disabled?: boolean;
   strategySelectId?: string;
   stickyInputId?: string;
@@ -42,6 +44,7 @@ export interface AccountPoolStrategyControlsProps {
 export default function AccountPoolStrategyControls({
   strategy,
   stickyDraft,
+  copy = "codex",
   disabled = false,
   strategySelectId = "account-pool-strategy",
   stickyInputId = "account-pool-sticky-limit",
@@ -50,6 +53,7 @@ export default function AccountPoolStrategyControls({
   onStickyCommit,
 }: AccountPoolStrategyControlsProps) {
   const t = useT();
+  const isAnthropic = copy === "anthropic";
   const strategyOptions = ACCOUNT_POOL_STRATEGIES.map((value) => ({
     value,
     label: t(STRATEGY_LABEL_KEYS[value]),
@@ -69,9 +73,9 @@ export default function AccountPoolStrategyControls({
       <div className="setting-row">
         <div className="setting-label">
           <span className="title" id={`${strategySelectId}-label`}>{t("accountPool.strategy")}</span>
-          <span className="desc">{t("accountPool.strategyDesc")}</span>
-          <span className="desc">{t(STRATEGY_HINT_KEYS[strategy])}</span>
-          <span className="desc">{t("accountPool.unboundDefinition")}</span>
+          <span className="desc">{t(isAnthropic ? "anthropicPool.strategyDesc" : "accountPool.strategyDesc")}</span>
+          <span className="desc">{t(isAnthropic ? "anthropicPool.strategyHint" : STRATEGY_HINT_KEYS[strategy])}</span>
+          {!isAnthropic && <span className="desc">{t("accountPool.unboundDefinition")}</span>}
         </div>
         <div className="setting-controls">
           <Select
@@ -87,8 +91,8 @@ export default function AccountPoolStrategyControls({
       {strategy === "round-robin" && (
         <div className="setting-row">
           <label className="setting-label" htmlFor={stickyInputId}>
-            <span className="title">{t("accountPool.stickyLimit")}</span>
-            <span className="desc">{t("accountPool.stickyLimitHelp")}</span>
+            <span className="title">{t(isAnthropic ? "anthropicPool.stickyLimit" : "accountPool.stickyLimit")}</span>
+            <span className="desc">{t(isAnthropic ? "anthropicPool.stickyLimitHelp" : "accountPool.stickyLimitHelp")}</span>
           </label>
           <div className="setting-controls">
             <span className="codex-auto-switch-input-wrap">
@@ -102,7 +106,7 @@ export default function AccountPoolStrategyControls({
               inputMode="numeric"
               value={stickyDraft}
               disabled={disabled}
-              aria-label={t("accountPool.stickyLimitAria")}
+              aria-label={t(isAnthropic ? "anthropicPool.stickyLimitAria" : "accountPool.stickyLimitAria")}
               onChange={(event) => onStickyDraftChange(event.target.value)}
               onBlur={() => onStickyCommit()}
               onKeyDown={(event) => {

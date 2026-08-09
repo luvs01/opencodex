@@ -932,6 +932,12 @@ export const de: Record<TKey, string> = {
   "anthropicPool.on": "An",
   "anthropicPool.off": "Aus",
 
+  "anthropicPool.strategyDesc": "Wie neue Sitzungen ein Konto aus dem Pool wählen.",
+  "anthropicPool.strategyHint": "Gilt nur für neue Sitzungen; bestehende Threads behalten die Kontenaffinität.",
+  "anthropicPool.stickyLimit": "Sticky-Erfolge vor Rotation",
+  "anthropicPool.stickyLimitAria": "Sticky-Erfolge vor Rotation",
+  "anthropicPool.stickyLimitHelp": "Das gewählte Konto für so viele erfolgreiche neue Sitzungsbindungen behalten, bevor weitergeschaltet wird.",
+
   "accountPool.strategy": "Rotationsstrategie",
   "accountPool.strategyDesc": "Wie OpenCodex einer neuen/ungebundenen Aufgabe ein Konto zuweist.",
   "accountPool.strategyQuota": "Kontingent",

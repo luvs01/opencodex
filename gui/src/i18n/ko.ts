@@ -956,6 +956,12 @@ export const ko: Record<TKey, string> = {
   "anthropicPool.on": "켜짐",
   "anthropicPool.off": "꺼짐",
 
+  "anthropicPool.strategyDesc": "새 세션이 풀에서 계정을 고르는 방식입니다.",
+  "anthropicPool.strategyHint": "새 세션에만 적용됩니다. 기존 스레드는 계정 어피니티를 유지합니다.",
+  "anthropicPool.stickyLimit": "회전 전 sticky 성공 횟수",
+  "anthropicPool.stickyLimitAria": "회전 전 sticky 성공 횟수",
+  "anthropicPool.stickyLimitHelp": "다음으로 진행하기 전에 선택된 계정을 이 횟수의 성공한 새 세션 바인딩 동안 유지합니다.",
+
   "accountPool.strategy": "로테이션 전략",
   "accountPool.strategyDesc": "OpenCodex가 새 작업/바인딩 없는 작업에 계정을 배정하는 방식입니다.",
   "accountPool.strategyQuota": "할당량",

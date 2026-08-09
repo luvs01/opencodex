@@ -1335,6 +1335,12 @@ export const ja: Record<TKey, string> = {
   "anthropicPool.on": "オン",
   "anthropicPool.off": "オフ",
 
+  "anthropicPool.strategyDesc": "新規セッションがプールからアカウントを選ぶ方法です。",
+  "anthropicPool.strategyHint": "新規セッションにのみ適用されます。既存スレッドはアカウント親和性を維持します。",
+  "anthropicPool.stickyLimit": "ローテーション前の固定成功数",
+  "anthropicPool.stickyLimitAria": "ローテーション前の固定成功数",
+  "anthropicPool.stickyLimitHelp": "次へ進む前に、選んだアカウントをこの回数の成功した新規セッション紐付け分保持します。",
+
   "accountPool.strategy": "ローテーション戦略",
   "accountPool.strategyDesc": "OpenCodex が新規/未紐付けタスクへアカウントを割り当てる方法です。",
   "accountPool.strategyQuota": "クォータ",

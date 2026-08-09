@@ -1388,6 +1388,12 @@ export const en = {
   "anthropicPool.on": "On",
   "anthropicPool.off": "Off",
 
+  "anthropicPool.strategyDesc": "How new sessions pick an account from the pool.",
+  "anthropicPool.strategyHint": "Applies to new sessions only; existing threads keep account affinity.",
+  "anthropicPool.stickyLimit": "Sticky successes before rotate",
+  "anthropicPool.stickyLimitAria": "Sticky successes before rotate",
+  "anthropicPool.stickyLimitHelp": "Keep the selected account for this many successful new-session binds before advancing.",
+
   "accountPool.strategy": "Rotation strategy",
   "accountPool.strategyDesc": "How OpenCodex assigns an account to a new/unbound task.",
   "accountPool.strategyQuota": "Quota",

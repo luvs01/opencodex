@@ -949,6 +949,12 @@ export const zh: Record<TKey, string> = {
   "anthropicPool.on": "开",
   "anthropicPool.off": "关",
 
+  "anthropicPool.strategyDesc": "新会话如何从账号池中选择账号。",
+  "anthropicPool.strategyHint": "仅适用于新会话；现有线程保持账号亲和性。",
+  "anthropicPool.stickyLimit": "轮换前的粘性成功次数",
+  "anthropicPool.stickyLimitAria": "轮换前的粘性成功次数",
+  "anthropicPool.stickyLimitHelp": "在推进到下一个账号之前，将所选账号保留这么多次成功的新会话绑定。",
+
   "accountPool.strategy": "轮换策略",
   "accountPool.strategyDesc": "OpenCodex 如何为新建/未绑定任务分配账号。",
   "accountPool.strategyQuota": "配额",

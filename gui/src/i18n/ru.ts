@@ -1377,6 +1377,12 @@ export const ru: Record<TKey, string> = {
   "anthropicPool.on": "Вкл",
   "anthropicPool.off": "Выкл",
 
+  "anthropicPool.strategyDesc": "Как новые сессии выбирают аккаунт из пула.",
+  "anthropicPool.strategyHint": "Применяется только к новым сессиям; существующие треды сохраняют привязку к аккаунту.",
+  "anthropicPool.stickyLimit": "Успешных запросов до ротации",
+  "anthropicPool.stickyLimitAria": "Успешных запросов до ротации",
+  "anthropicPool.stickyLimitHelp": "Удерживать выбранный аккаунт на указанное число успешных привязок новых сессий, прежде чем перейти дальше.",
+
   "accountPool.strategy": "Стратегия ротации",
   "accountPool.strategyDesc": "Как OpenCodex назначает аккаунт новой/непривязанной задаче.",
   "accountPool.strategyQuota": "Квота",

@@ -230,6 +230,7 @@ describe("AccountPoolStrategyControls", () => {
         <AccountPoolStrategyControls
           strategy="round-robin"
           stickyDraft="3"
+          copy="anthropic"
           strategySelectId="anthropic-pool-strategy"
           stickyInputId="anthropic-pool-sticky-limit"
           onStrategyChange={() => {}}
@@ -238,11 +239,13 @@ describe("AccountPoolStrategyControls", () => {
         />
       </LanguageProvider>,
     );
-    expect(markup).toContain("How OpenCodex assigns an account to a new/unbound task.");
-    expect(markup).toContain("Round-robin rotates only tasks without a live binding");
+    expect(markup).toContain("How new sessions pick an account from the pool.");
+    expect(markup).toContain("Applies to new sessions only");
+    expect(markup).not.toContain("OpenCodex");
+    expect(markup).not.toContain("proxy or affinity reset");
     expect(markup).toContain('id="anthropic-pool-strategy"');
     // Round-robin adds its own row, and the sticky help text is a desc rather than a card-sub.
-    expect(markup).toContain("New/unbound assignments before rotate");
+    expect(markup).toContain("Sticky successes before rotate");
     expect((markup.match(/class="setting-row"/g) ?? []).length).toBe(2);
   });
 });
