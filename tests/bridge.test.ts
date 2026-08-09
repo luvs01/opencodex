@@ -982,6 +982,36 @@ describe("Responses bridge web_search_call native item", () => {
       type: "url_citation", url: "https://nodejs.org", title: "Node.js", start_index: 0, end_index: 0,
     }]);
   });
+
+  test("unsafe and oversized web-search citations are not relayed to clients", async () => {
+    const sources = [
+      { url: "javascript:alert(1)", title: "unsafe" },
+      { url: "data:text/html,unsafe" },
+      { url: "https://control.test/path\u0000" },
+      { url: "https://title.test", title: "bad\u0001title" },
+      { url: "https://oversized.test", title: "x".repeat(257) },
+      { url: "https://safe.test/docs", title: "Safe docs" },
+      ...Array.from({ length: 25 }, (_, index) => ({ url: `https://safe.test/${index}` })),
+    ];
+    const events: AdapterEvent[] = [
+      { type: "web_search_call_end", id: "ws_safe", queries: ["docs"], sources },
+      { type: "text_delta", text: "answer" },
+      { type: "done" },
+    ];
+    const frames = await collectSse(bridgeToResponsesSSE(replay(events), "routed/model"));
+    const done = frames.find(f => f.event === "response.output_item.done"
+      && (f.data.item as Record<string, unknown>)?.type === "message");
+    const streamingPart = ((done!.data.item as Record<string, unknown>).content as Record<string, unknown>[])[0];
+    expect((streamingPart.annotations as unknown[]).slice(0, 1)).toEqual([
+      { type: "url_citation", url: "https://safe.test/docs", title: "Safe docs", start_index: 0, end_index: 0 },
+    ]);
+    expect(streamingPart.annotations).toHaveLength(20);
+
+    const json = buildResponseJSON(events, "routed/model");
+    const message = (json.output as Record<string, unknown>[]).find(item => item.type === "message")!;
+    const batchPart = (message.content as Record<string, unknown>[])[0];
+    expect(batchPart.annotations).toEqual(streamingPart.annotations);
+  });
 });
 
 describe("Responses bridge stopReason threading (issue #246)", () => {

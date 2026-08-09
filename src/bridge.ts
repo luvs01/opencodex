@@ -5,6 +5,7 @@ import { encodeReasoningEnvelope, type ReasoningEnvelope } from "./responses/rea
 import { rememberReasoningForCall } from "./responses/reasoning-replay-cache";
 import { resolveStallTimeoutSec } from "./stall-timeout";
 import { usageDisplayTotalTokens } from "./usage/totals";
+import { appendSafeWebSearchSource, safeWebSearchSources } from "./web-search/sources";
 import {
   isTranslatorBudgetExceededError,
   releaseTranslatedEvent,
@@ -1073,15 +1074,13 @@ export function bridgeToResponsesSSE(
                 });
                 currentWebSearch = { itemId: wsItemId2, eventId: event.id, outputIndex };
               }
-              closeCurrentWebSearch(event.status ?? "completed", event.queries, event.sources);
+              const safeSources = safeWebSearchSources(event.sources ?? []);
+              closeCurrentWebSearch(event.status ?? "completed", event.queries, safeSources);
               // Queue this search's sources for the next assistant message (dedup by URL).
-              if (event.sources) {
-                const seen = new Set(pendingWebSources.map(s => s.url));
-                for (const s of event.sources) {
-                  if (!seen.has(s.url)) {
-                    seen.add(s.url);
+              if (safeSources.length > 0) {
+                for (const s of safeSources) {
+                  if (appendSafeWebSearchSource(pendingWebSources, s)) {
                     chargeValue(s, "tool_search_sources");
-                    pendingWebSources.push(s);
                   }
                 }
               }
@@ -1673,18 +1672,16 @@ function buildResponseJSONWithBudget(
         if (currentSummaryReasoning) flushSummaryReasoning();
         if (currentRawReasoning) flushRawReasoning();
         flushToolCall();
+        const safeSources = safeWebSearchSources(e.sources ?? []);
         pushOutput({
           type: "web_search_call", id: `ws_${uuid()}`, status: e.status ?? "completed",
           action: webSearchAction(e.queries),
-          ...(e.sources && e.sources.length > 0 ? { sources: e.sources } : {}),
+          ...(safeSources.length > 0 ? { sources: safeSources } : {}),
         });
-        if (e.sources) {
-          const seen = new Set(pendingWebSources.map(s => s.url));
-          for (const s of e.sources) {
-            if (!seen.has(s.url)) {
-              seen.add(s.url);
+        if (safeSources.length > 0) {
+          for (const s of safeSources) {
+            if (appendSafeWebSearchSource(pendingWebSources, s)) {
               budget?.chargeRetained(bytesOf(JSON.stringify(s)), { kind: "tool_search_sources" });
-              pendingWebSources.push(s);
             }
           }
         }

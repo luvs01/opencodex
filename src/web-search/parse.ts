@@ -1,3 +1,5 @@
+import { appendSafeWebSearchSource } from "./sources";
+
 /** A single web source backing the sidecar's answer. */
 export interface WebSearchSource {
   url: string;
@@ -30,8 +32,9 @@ interface OutputItem {
 /** Push a `url_citation` annotation as a source, de-duplicated by URL. */
 function collectAnnotation(ann: AnnotationLike | undefined, sources: WebSearchSource[], seen: Set<string>): void {
   if (!ann || ann.type !== "url_citation" || typeof ann.url !== "string" || seen.has(ann.url)) return;
-  seen.add(ann.url);
-  sources.push({ url: ann.url, ...(ann.title ? { title: ann.title } : {}) });
+  if (appendSafeWebSearchSource(sources, { url: ann.url, ...(ann.title !== undefined ? { title: ann.title } : {}) })) {
+    seen.add(ann.url);
+  }
 }
 
 /**
@@ -101,8 +104,7 @@ function extractTrailingSources(text: string): { text: string; sources: WebSearc
     const title = cleanTitle(inlinePrefix) || (pendingTitle ? cleanTitle(pendingTitle) : "");
     pendingTitle = null;
     if (seen.has(url)) continue;
-    seen.add(url);
-    sources.push(title ? { url, title } : { url });
+    if (appendSafeWebSearchSource(sources, title ? { url, title } : { url })) seen.add(url);
   }
   if (sources.length === 0) return { text, sources: [] };
   // Keep text before the header AND any prose after the consumed source lines.
@@ -200,9 +202,8 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
     || acc.deltaText;
   // Merge sources from the final output[] and the streaming annotation events.
   const sources = [...(acc.final?.sources ?? [])];
-  const seenMerge = new Set(sources.map(s => s.url));
   for (const s of acc.streamSources) {
-    if (!seenMerge.has(s.url)) { seenMerge.add(s.url); sources.push(s); }
+    appendSafeWebSearchSource(sources, s);
   }
   // Hosted web_search usually omits url_citation annotations and lists sources in a trailing
   // `Sources:` markdown block instead. Pull those out (and strip the block from the answer so the
@@ -210,9 +211,7 @@ export async function parseSidecarSSE(response: Response): Promise<WebSearchResu
   // only fill a gap. URL-deduped against annotation sources.
   const { text: body, sources: textSources } = extractTrailingSources(typeof text === "string" ? text : "");
   for (const s of textSources) {
-    if (seenMerge.has(s.url)) continue;
-    seenMerge.add(s.url);
-    sources.push(s);
+    appendSafeWebSearchSource(sources, s);
   }
   const finalText = textSources.length > 0 ? body : (typeof text === "string" ? text : "");
   if (!finalText.trim() && acc.error) return { text: "", sources, error: acc.error };
