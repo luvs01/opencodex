@@ -88,11 +88,22 @@ function enableManualImport(): void {
   process.env[MANUAL_IMPORT_ENV] = "1";
 }
 
+function manualAccessToken(
+  email = "manual-test@example.test",
+  chatgptAccountId = "acct-manual-test",
+): string {
+  const payload = Buffer.from(JSON.stringify({
+    email,
+    chatgpt_account_id: chatgptAccountId,
+  })).toString("base64url");
+  return `header.${payload}.signature`;
+}
+
 function manualImportBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "manual-test",
     email: "manual-test@example.test",
-    accessToken: "access-manual-test",
+    accessToken: manualAccessToken(),
     refreshToken: "refresh-manual-test",
     chatgptAccountId: "acct-manual-test",
     ...overrides,
@@ -2239,13 +2250,45 @@ describe("codex-auth API", () => {
     expect(config.codexAccounts?.map(a => a.id)).toEqual(["manual-enabled"]);
     expect(config.codexAccounts?.[0]?.logLabel).toMatch(CODEX_ACCOUNT_LOG_LABEL_RE);
     expect(getCodexAccountCredential("manual-enabled")).toMatchObject({
-      accessToken: "access-manual-test",
+      accessToken: expect.stringMatching(/^header\./),
       refreshToken: "refresh-manual-test",
       chatgptAccountId: "acct-manual-test",
     });
     expect(readCodexAccountRecord("manual-enabled")?.lastCodexValidationStatus).toBe("ok");
     expect(readCodexAccountRecord("manual-enabled")?.lastCodexValidatedAt).toBeNumber();
     expect(warmup.calls()).toBe(1);
+  });
+
+  test("POST /api/codex-auth/accounts uses token email to reject a changed-email duplicate", async () => {
+    enableManualImport();
+    mockCodexWarmupSuccess();
+    const config = makeConfig();
+    const firstBody = manualImportBody({ id: "manual-original" });
+    const firstRequest = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(firstBody),
+    });
+    expect((await handleCodexAuthAPI(firstRequest, new URL(firstRequest.url), config))!.status).toBe(200);
+
+    const duplicateRequest = new Request("http://localhost/api/codex-auth/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(manualImportBody({
+        id: "manual-copy",
+        email: "changed@example.test",
+        plan: "business",
+      })),
+    });
+    const duplicateResponse = await handleCodexAuthAPI(duplicateRequest, new URL(duplicateRequest.url), config);
+
+    expect(duplicateResponse!.status).toBe(400);
+    expect(await duplicateResponse!.json()).toMatchObject({
+      error: "Account is already in the pool (manual-original).",
+    });
+    expect(config.codexAccounts).toHaveLength(1);
+    expect(config.codexAccounts?.[0]?.email).toBe("manual-test@example.test");
+    expect(getCodexAccountCredential("manual-copy")).toBeNull();
   });
 
   test("POST /api/codex-auth/accounts allows a pool account matching the main login", async () => {
@@ -2263,6 +2306,7 @@ describe("codex-auth API", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(manualImportBody({
         id: "manual-main-match",
+        accessToken: manualAccessToken("manual-test@example.test", "acct-main-login"),
         chatgptAccountId: "acct-main-login",
       })),
     });

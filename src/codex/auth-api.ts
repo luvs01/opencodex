@@ -43,7 +43,13 @@ import {
   parseAccountPoolStrategy,
   parseAccountPriority,
 } from "./pool-rotation";
-import { checkAccountIdCollision, getMainChatgptAccountId, readCodexTokens, readCodexTokensResult } from "./auth-collision";
+import {
+  checkAccountIdCollision,
+  checkManualImportCollision,
+  getMainChatgptAccountId,
+  readCodexTokens,
+  readCodexTokensResult,
+} from "./auth-collision";
 export { checkAccountIdCollision, getMainChatgptAccountId } from "./auth-collision";
 export { clearAccountNeedsReauth, isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
 import { clearAccountNeedsReauth, isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
@@ -67,7 +73,7 @@ export {
   setAccountQuotaFromParsed,
   updateAccountQuota,
 } from "./quota";
-import { extractAccountId, decodeJwtPayload } from "../oauth/chatgpt";
+import { extractAccountId, decodeJwtPayload, extractEmail } from "../oauth/chatgpt";
 import { getMainAccountPlan, MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan } from "./main-account";
 import { captureConfigGeneration, registerStateSweepAfterTick } from "../lib/state-store-sweeper";
 import { reconcileLiveStateStores } from "../lib/state-store-registrations";
@@ -1226,9 +1232,13 @@ export async function handleCodexAuthAPI(
     const runtimeConfig = getRuntimeConfig(config);
     const preflightConflict = codexAccountPersistenceConflict(runtimeConfig, body.id, "create");
     if (preflightConflict) return jsonResponse({ error: preflightConflict }, 400);
-    // 1.1: Duplicate check is scoped by personal vs workspace plan bucket.
+    // Manual-import identity must come from the token, not request-controlled metadata.
     const derivedAccountId = extractAccountId(undefined, body.accessToken) ?? body.chatgptAccountId;
-    const collision = checkAccountIdCollision(derivedAccountId, body.email, body.plan);
+    const derivedEmail = extractEmail(undefined, body.accessToken);
+    if (!derivedEmail) {
+      return jsonResponse({ error: "Access token does not contain an email claim" }, 400);
+    }
+    const collision = checkManualImportCollision(derivedAccountId);
     if (collision.collision) {
       return jsonResponse({ error: collision.reason }, 400);
     }
@@ -1249,7 +1259,7 @@ export async function handleCodexAuthAPI(
     markCodexAccountValidated(body.id, warmup.validatedAt);
     clearAccountNeedsReauth(body.id);
     const accounts = latestConfig.codexAccounts ?? [];
-    accounts.push(withCodexAccountLogLabel({ id: body.id, email: body.email, plan: body.plan, isMain: false }, accounts));
+    accounts.push(withCodexAccountLogLabel({ id: body.id, email: derivedEmail, plan: body.plan, isMain: false }, accounts));
     latestConfig.codexAccounts = accounts;
     saveRuntimeConfig(config, latestConfig);
     reconcileLiveStateStores();

@@ -105,3 +105,18 @@ export function checkAccountIdCollision(
   }
   return { collision: false };
 }
+
+// Manual imports do not have provider-verified email or plan metadata, so they cannot safely use
+// those fields to distinguish members that share an account id.
+export function checkManualImportCollision(
+  chatgptAccountId: string,
+): { collision: true; reason: string } | { collision: false } {
+  for (const account of loadConfig().codexAccounts ?? []) {
+    if (!isSelectableCodexPoolAccount(account)) continue;
+    const cred = getCodexAccountCredential(account.id);
+    if (cred?.chatgptAccountId === chatgptAccountId) {
+      return { collision: true, reason: `Account is already in the pool (${account.id}).` };
+    }
+  }
+  return { collision: false };
+}
