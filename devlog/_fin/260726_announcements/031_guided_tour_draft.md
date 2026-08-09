@@ -394,14 +394,12 @@ available from a manual entry point.
 Closing the window is a decision, and treating it as one is more honest than
 trapping the user in a flow they walked away from.
 
-### D4 — `040` gains a positive verification procedure
+### D4 — positive verification procedure withdrawn
 
-Closes R3. Since H3 makes the geometry unassertable in happy-dom, the gate list
-must contain a way to make the tour APPEAR, not only checks that it stays hidden:
-
-```
-OPENCODEX_HOME=$(mktemp -d) ocx start   # genuine first run, real config untouched
-```
+The proposed `OPENCODEX_HOME`-only procedure is unsafe and does not close R3.
+As D4′ establishes, no positive first-run procedure should be documented until
+the implementation pass verifies full isolation of Codex, Grok, shell and
+system-environment state, together with use of a non-default port.
 
 ### D5 — the cost question is answered by scope, not by argument
 
