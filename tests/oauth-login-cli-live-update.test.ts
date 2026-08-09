@@ -94,4 +94,32 @@ describe("CLI OAuth live-update credential preservation", () => {
       await server.stop(true);
     }
   }, 15_000);
+
+  test("pins credential-bearing live updates to loopback", async () => {
+    let requestHost = "";
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/healthz") {
+          return Response.json({ service: "opencodex", status: "ok" });
+        }
+        requestHost = request.headers.get("host") ?? "";
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const config = loadConfig();
+      config.hostname = "localhost";
+      config.port = server.port;
+      saveConfig(config);
+
+      await notifyRunningProxyAfterOAuthLogin("xai");
+
+      expect(requestHost).toBe(`127.0.0.1:${server.port}`);
+    } finally {
+      await server.stop(true);
+    }
+  });
 });

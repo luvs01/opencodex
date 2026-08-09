@@ -1,7 +1,7 @@
 import * as readline from "node:readline";
 import { openUrl } from "../lib/open-url";
 import { loadConfig, saveConfig } from "../config";
-import { findLiveProxy, probeHostname } from "../server/proxy-liveness";
+import { findLiveProxy } from "../server/proxy-liveness";
 import { isPublicOAuthProvider, listOAuthProviders, runLogin } from "./index";
 import { KEY_LOGIN_PROVIDERS, isKeyLoginProvider, validateApiKey, type KeyLoginProvider } from "./key-providers";
 import type { OcxProviderConfig } from "../types";
@@ -22,7 +22,10 @@ export async function notifyRunningProxy(name: string, provider: unknown): Promi
   const live = await findLiveProxy();
   if (!live) return;
   try {
-    await fetch(`http://${probeHostname(live.hostname)}:${live.port}/api/providers`, {
+    // Provider configs can contain freshly entered credentials. Liveness is only an
+    // availability signal, so never use its unauthenticated hostname as a secret-bearing
+    // request destination.
+    await fetch(`http://127.0.0.1:${live.port}/api/providers`, {
       method: "POST",
       headers: runningProxyUpdateHeaders(),
       body: JSON.stringify({ name, provider }),
