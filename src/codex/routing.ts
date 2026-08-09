@@ -162,14 +162,6 @@ const NATIVE_MODEL_QUOTA_SCOPES: Readonly<Record<string, CodexQuotaScope>> = {
   "gpt-5.3-codex-spark": "spark",
 };
 
-// A thread can have one legacy binding plus one binding for each known scope.
-// This upper-bound guard avoids an exact map scan until it can be over capacity.
-const MAX_THREAD_AFFINITY_SCOPES = new Set([
-  LEGACY_THREAD_AFFINITY_SCOPE,
-  "shared",
-  ...Object.values(NATIVE_MODEL_QUOTA_SCOPES),
-]).size;
-
 export function codexQuotaScopeForModel(modelId: string | undefined): CodexQuotaScope | undefined {
   if (!modelId?.trim()) return undefined;
   return NATIVE_MODEL_QUOTA_SCOPES[modelId.trim().toLowerCase()] ?? "shared";
@@ -854,26 +846,6 @@ function pruneExpiredThreadAffinities(now: number): void {
   }
 }
 
-function pruneLruThreadAffinities(): void {
-  if (threadAccountMap.size * MAX_THREAD_AFFINITY_SCOPES <= CODEX_THREAD_AFFINITY_MAX_ENTRIES) return;
-  while (threadAffinityEntryCount() > CODEX_THREAD_AFFINITY_MAX_ENTRIES) {
-    let oldestThreadId: string | null = null;
-    let oldestScope: ThreadAffinityScope | null = null;
-    let oldestLastUsedAt = Number.POSITIVE_INFINITY;
-    for (const [threadId, affinities] of threadAccountMap) {
-      for (const [scope, entry] of affinities) {
-        if (entry.lastUsedAt < oldestLastUsedAt) {
-          oldestThreadId = threadId;
-          oldestScope = scope;
-          oldestLastUsedAt = entry.lastUsedAt;
-        }
-      }
-    }
-    if (!oldestThreadId || !oldestScope) return;
-    deleteThreadAffinity(oldestThreadId, oldestScope === LEGACY_THREAD_AFFINITY_SCOPE ? undefined : oldestScope);
-  }
-}
-
 function bindThreadAffinity(
   threadId: string,
   accountId: string,
@@ -895,7 +867,6 @@ function bindThreadAffinity(
     lastReevalAt: now,
   });
   threadAccountMap.set(threadId, affinities);
-  pruneLruThreadAffinities();
 }
 
 function getEligiblePoolAccounts(
@@ -1404,6 +1375,19 @@ export function resolveCodexAccountForThreadDetailed(
       return { status: "selected", accountId: entry.accountId };
     }
     deleteThreadAffinity(threadId, quotaScope);
+  }
+
+  if (threadId) {
+    pruneExpiredThreadAffinities(now);
+    // Never make a live binding forgettable just to admit a new thread. An
+    // unknown thread at capacity must fail closed; otherwise it could evict an
+    // existing affinity and let that thread silently rebind to another account.
+    if (threadAffinityEntryCount() >= CODEX_THREAD_AFFINITY_MAX_ENTRIES) {
+      return {
+        status: "expired",
+        accountId: getEffectiveActiveCodexAccountId(config) ?? MAIN_CODEX_ACCOUNT_ID,
+      };
+    }
   }
 
   const strategyPick = pickUnboundStrategyAccount(config, threadId, now, true, quotaScope, selectionOptions);

@@ -960,22 +960,23 @@ describe("codex routing", () => {
     )).toEqual({ status: "expired", accountId: "a" });
   });
 
-  test("thread affinity LRU cap evicts the oldest mapping", () => {
+  test("thread affinity cap preserves live mappings and fails closed for new threads", () => {
     const config = makeConfig();
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 10);
     const now = 1_800_000_000_000;
-    for (let i = 0; i < CODEX_THREAD_AFFINITY_MAX_ENTRIES + 1; i += 1) {
+    for (let i = 0; i < CODEX_THREAD_AFFINITY_MAX_ENTRIES; i += 1) {
       expect(resolveCodexAccountForThread(`lru-${i}`, config, now + i)).toBe("a");
     }
 
     config.activeCodexAccountId = "b";
 
     expect(resolveCodexAccountForThread("lru-1", config, now + CODEX_THREAD_AFFINITY_MAX_ENTRIES + 1)).toBe("a");
-    expect(resolveCodexAccountForThread("lru-0", config, now + CODEX_THREAD_AFFINITY_MAX_ENTRIES + 2)).toBe("b");
+    expect(resolveCodexAccountForThread("lru-new", config, now + CODEX_THREAD_AFFINITY_MAX_ENTRIES + 2)).toBeNull();
+    expect(resolveCodexAccountForThread("lru-0", config, now + CODEX_THREAD_AFFINITY_MAX_ENTRIES + 3)).toBe("a");
   });
 
-  test("thread affinity LRU cap includes legacy and native quota scopes", () => {
+  test("thread affinity cap includes legacy and native quota scopes", () => {
     const config = makeConfig();
     const now = 1_800_000_000_000;
     const threads = Math.floor(CODEX_THREAD_AFFINITY_MAX_ENTRIES / 3) + 1;
@@ -984,16 +985,18 @@ describe("codex routing", () => {
       const threadId = `scoped-lru-${i}`;
       expect(resolveCodexAccountForThread(threadId, config, now + i * 3)).toBe("a");
       expect(resolveCodexAccountForThread(threadId, config, now + i * 3 + 1, "shared")).toBe("a");
-      expect(resolveCodexAccountForThread(threadId, config, now + i * 3 + 2, "spark")).toBe("a");
+      expect(resolveCodexAccountForThread(threadId, config, now + i * 3 + 2, "spark"))
+        .toBe(i === threads - 1 ? null : "a");
     }
 
-    // The oldest legacy entry was evicted, while the same thread's later
-    // shared and Spark entries remain independently affined to A.
+    // The final Spark binding is refused at capacity, while every admitted
+    // live binding remains affined to A.
     config.activeCodexAccountId = "b";
     const after = now + threads * 3;
     expect(resolveCodexAccountForThread("scoped-lru-0", config, after, "shared")).toBe("a");
     expect(resolveCodexAccountForThread("scoped-lru-0", config, after + 1, "spark")).toBe("a");
-    expect(resolveCodexAccountForThread("scoped-lru-0", config, after + 2)).toBe("b");
+    expect(resolveCodexAccountForThread("scoped-lru-0", config, after + 2)).toBe("a");
+    expect(resolveCodexAccountForThread(`scoped-lru-${threads - 1}`, config, after + 3, "spark")).toBeNull();
   });
 
   test("generation mismatch invalidates a mapped thread before reuse", () => {
