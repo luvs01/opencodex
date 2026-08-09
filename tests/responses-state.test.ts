@@ -1529,6 +1529,22 @@ describe("Responses previous_response_id state", () => {
     expect(existsSync(join(home, second))).toBe(true);
   });
 
+  test("stale temp recovery closes an enumeration iterator when it reaches a cap", () => {
+    let closed = false;
+    recoverStaleResponseStateTemps(home, {
+      list: function* () {
+        try {
+          yield "unrelated.txt";
+        } finally {
+          closed = true;
+        }
+      },
+      maxEntries: 0,
+    });
+
+    expect(closed).toBe(true);
+  });
+
   test("stale temp recovery remains best-effort when enumeration fails", () => {
     const result = recoverStaleResponseStateTemps(home, {
       list: function* () {
