@@ -120,6 +120,20 @@ describe("custom-model API rejects out-of-enum input modalities", () => {
     expect(persistCalls).toBe(0);
   });
 
+  test("custom-model writes reject non-object JSON bodies", async () => {
+    for (const body of [null, [], "model"]) {
+      persistCalls = 0;
+      const posted = await callCustomModels("POST", body);
+      expect(posted?.status).toBe(400);
+      expect(await posted!.json()).toEqual({ error: "invalid JSON body" });
+
+      const put = await callCustomModels("PUT", body, "/api/custom-models/existing-uuid");
+      expect(put?.status).toBe(400);
+      expect(await put!.json()).toEqual({ error: "invalid JSON body" });
+      expect(persistCalls).toBe(0);
+    }
+  });
+
   test("an accepted modality set still passes", async () => {
     persistCalls = 0;
     const res = await callCustomModels("POST", {
