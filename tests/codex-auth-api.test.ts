@@ -63,6 +63,7 @@ import {
   listOpenAiForwardSidecarCandidates,
   resolveFirstUsableOpenAiSidecar,
 } from "../src/providers/openai-sidecar";
+import { BOUNDED_BODY_MAX_BYTES } from "../src/lib/bounded-body";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-codex-auth-api-test");
 const TEST_CODEX_HOME = join(TEST_DIR, "codex");
@@ -1947,6 +1948,42 @@ describe("codex-auth API", () => {
       expect(await resp!.json()).toEqual({ code: "reset", remaining: 2 });
       expect(usageCalls).toBe(1);
       expect(getAccountQuota("pool-reset")?.resetCredits).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("reset-credit consume bounds successful upstream response bodies", async () => {
+    const config = makeConfig();
+    seedPoolAccount(config, { id: "pool-oversized", email: "oversized@example.test" });
+    const originalFetch = globalThis.fetch;
+    let cancelled = false;
+    let usageCalls = 0;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/backend-api/wham/rate-limit-reset-credits/consume")) {
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(BOUNDED_BODY_MAX_BYTES + 1).fill(0x61));
+            },
+            cancel() { cancelled = true; },
+          }));
+        }
+        if (url.includes("/backend-api/wham/usage")) usageCalls += 1;
+        return originalFetch(input);
+      }) as typeof fetch;
+
+      const req = new Request("http://localhost/api/codex-auth/reset-credits/consume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accountId: "pool-oversized" }),
+      });
+      const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+      expect(resp!.status).toBe(500);
+      expect(await resp!.json()).toEqual({ error: "Reset credit consume response exceeded safe limits" });
+      expect(cancelled).toBe(true);
+      expect(usageCalls).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }
