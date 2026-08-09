@@ -101,10 +101,11 @@ export function activeModelOptions(
 }
 
 /** `null` = no preference yet → caller should default to all groups collapsed. */
-export function readCollapsedProviders(storage: StorageLike = localStorage): Set<string> | null {
+export function readCollapsedProviders(storage?: StorageLike): Set<string> | null {
   try {
+    const target = storage ?? localStorage;
     // v2 only — older keys defaulted to "all open".
-    const saved = storage.getItem(COLLAPSED_KEY_V2);
+    const saved = target.getItem(COLLAPSED_KEY_V2);
     if (saved === null) return null;
     const parsed = JSON.parse(saved) as unknown;
     return Array.isArray(parsed)
@@ -115,12 +116,12 @@ export function readCollapsedProviders(storage: StorageLike = localStorage): Set
   }
 }
 
-export function writeCollapsedProviders(collapsed: Set<string>, storage: StorageLike = localStorage): void {
+export function writeCollapsedProviders(collapsed: Set<string>, storage?: StorageLike): void {
   try {
-    storage.setItem(COLLAPSED_KEY_V2, JSON.stringify([...collapsed]));
+    const target = storage ?? localStorage;
+    target.setItem(COLLAPSED_KEY_V2, JSON.stringify([...collapsed]));
   } catch {
     /* quota / private-mode */
   }
 }
-
 
