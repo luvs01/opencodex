@@ -157,6 +157,23 @@ describe("assessHygiene", () => {
     assert.equal(failures[0].code, "empty_catch");
   });
 
+  it("detects an empty catch added across hunks with an unrelated deletion", () => {
+    const patch = [
+      "@@ -10,2 +10,3 @@",
+      "+} catch (error) {",
+      " const nearby = true;",
+      "@@ -30,2 +31,1 @@",
+      "-obsolete();",
+      " const distant = true;",
+      "@@ -50,1 +50,2 @@",
+      "+}",
+    ].join("\n");
+    const failures = assessHygiene({ files: [
+      { filename: "docs/example.ts", patch },
+    ] });
+    assert.equal(failures[0].code, "empty_catch");
+  });
+
   it("does not flag a nonempty catch in a hunk with unrelated deletions", () => {
     const failures = assessHygiene({ files: [
       { filename: "docs/example.ts", patch: " catch (e) {\n   report(e);\n-  old();\n }" },

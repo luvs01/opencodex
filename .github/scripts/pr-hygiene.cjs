@@ -190,9 +190,12 @@ function assessHygiene({ files = [], labels = [] }) {
     if (lines.some((line) => FOCUSED_TEST_PATTERN.test(line))) {
       focusedTests.push(file.filename);
     }
-    // Scan hunk by hunk: an empty catch has to be empty within one window.
+    // Scan additions across the whole patch so an empty catch added across hunk
+    // boundaries cannot hide behind an unrelated deletion. Scan surviving text
+    // hunk by hunk as well so deleting a catch body is detected without joining
+    // unrelated context from separate windows.
     const catchWindows = hasDeletions(file.patch)
-      ? resultLinesByHunk(file.patch)
+      ? [lines, ...resultLinesByHunk(file.patch)]
       : [lines];
     if (catchWindows.some((window) => hasEmptyCatch(window))) {
       emptyCatches.push(file.filename);
