@@ -241,6 +241,45 @@ describe("fetchProviderQuotaReports", () => {
     expect(seen.find(row => row.url === "https://api.kimi.com/coding/v1/usages")?.authorization).toBe("Bearer kimi-access-secret");
   });
 
+  test("rejects quota responses that exceed the bounded JSON budget", async () => {
+    await saveCredential("xai", { access: "xai-access", refresh: "xai-refresh", expires: Date.now() + 3600_000 });
+    const config = testConfig();
+    config.providers = { xai: config.providers.xai! };
+
+    globalThis.fetch = (async () => new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(512 * 1024 + 1) },
+    })) as typeof fetch;
+    expect((await fetchProviderQuotaReports(config, true)).reports).toEqual([]);
+
+    globalThis.fetch = (async () => new Response("x".repeat(512 * 1024 + 1), {
+      status: 200,
+    })) as typeof fetch;
+    expect((await fetchProviderQuotaReports(config, true)).reports).toEqual([]);
+  });
+
+  test("bounds the number of Antigravity model records inspected", async () => {
+    await saveCredential("google-antigravity", {
+      access: "agy-access",
+      refresh: "agy-refresh",
+      expires: Date.now() + 3600_000,
+      projectId: "agy-project",
+    });
+    const models: Record<string, unknown> = Object.fromEntries(Array.from({ length: 256 }, (_, index) => [
+      `irrelevant-${index}`,
+      { displayName: "Autocomplete" },
+    ]));
+    models["gemini-after-limit"] = {
+      displayName: "Gemini after limit",
+      quotaInfo: { remainingFraction: 0.5 },
+    };
+    globalThis.fetch = (async () => Response.json({ models })) as typeof fetch;
+    const config = testConfig();
+    config.providers = { "google-antigravity": config.providers["google-antigravity"]! };
+
+    expect((await fetchProviderQuotaReports(config, true)).reports).toEqual([]);
+  });
+
   function kimiOnlyConfig(baseUrl = "https://api.kimi.com/coding/v1"): OcxConfig {
     return {
       defaultProvider: "kimi",

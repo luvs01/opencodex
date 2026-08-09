@@ -25,12 +25,15 @@ import {
   type CodexCapacityAggregation,
   type CodexCapacityQuota,
 } from "./codex-capacity";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
 
 const CACHE_TTL_MS = 5 * 60_000;
 const REQUEST_TIMEOUT_MS = 8_000;
+const QUOTA_RESPONSE_MAX_BYTES = 512 * 1024;
+const ANTIGRAVITY_MODEL_MAX_ENTRIES = 256;
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_USAGE_URL = `${KIMI_CODE_BASE_URL}/usages`;
 const A6API_BASE_URL = "https://api.a6api.com";
@@ -234,6 +237,21 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+async function readQuotaJson(response: Response): Promise<unknown> {
+  const contentLength = response.headers.get("content-length")?.trim();
+  if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > QUOTA_RESPONSE_MAX_BYTES) {
+    void response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const bounded = await readBoundedResponseBody(response, { maxBytes: QUOTA_RESPONSE_MAX_BYTES });
+  if (bounded.oversized || bounded.truncated) return null;
+  try {
+    return JSON.parse(bounded.text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 function isBuiltInChatGptForwardProvider(name: string, provider: OcxProviderConfig): boolean {
   return name === OPENAI_CODEX_PROVIDER_ID && isCanonicalOpenAiForwardProvider(provider);
 }
@@ -280,8 +298,12 @@ async function fetchA6apiQuota(provider: string, config: OcxProviderConfig): Pro
       ? TERMINAL_QUOTA_FAILURE
       : null;
   }
-  const subscription = a6apiPayload(await subscriptionResponse.json().catch(() => null));
-  const token = a6apiPayload(await tokenResponse.json().catch(() => null));
+  const [subscriptionBody, tokenBody] = await Promise.all([
+    readQuotaJson(subscriptionResponse),
+    readQuotaJson(tokenResponse),
+  ]);
+  const subscription = a6apiPayload(subscriptionBody);
+  const token = a6apiPayload(tokenBody);
   const limitUsd = firstFinite(subscription, ["hard_limit_usd"]);
   const grantedUnits = firstFinite(token, ["total_granted"]);
   const usedUnits = firstFinite(token, ["total_used"]);
@@ -427,7 +449,7 @@ async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | nu
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   const config = asRecord(body?.config);
   if (!config) return null;
   const limitCents = centsValue(config.monthlyLimit);
@@ -471,7 +493,7 @@ async function fetchAnthropicUsageQuota(accessToken: string): Promise<ProviderQu
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) return null;
-    const body = asRecord(await response.json().catch(() => null));
+    const body = asRecord(await readQuotaJson(response));
     if (!body) return null;
     const fiveHour = parseClaudeBucket(body.five_hour);
     const sevenDay = parseClaudeBucket(body.seven_day);
@@ -884,7 +906,7 @@ async function fetchKimiQuota(provider: string, config: OcxProviderConfig): Prom
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const quota = parseKimiQuotaPayload(await response.json().catch(() => null));
+  const quota = parseKimiQuotaPayload(await readQuotaJson(response));
   return quota ? report(provider, "kimi:usages", quota) : null;
 }
 
@@ -1008,7 +1030,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   if (!body) return null;
 
   // Prefer the gpt-4 bucket (historical "fast requests"); else first model with used+limit.
@@ -1122,12 +1144,16 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
-  const body = asRecord(await response.json().catch(() => null));
+  const body = asRecord(await readQuotaJson(response));
   const models = asRecord(body?.models);
   if (!models) return null;
 
   const windows = new Map<string, ProviderQuotaWindow>();
-  for (const [modelId, rawModelInfo] of Object.entries(models)) {
+  let inspectedModels = 0;
+  for (const modelId in models) {
+    if (!Object.hasOwn(models, modelId)) continue;
+    if (inspectedModels++ >= ANTIGRAVITY_MODEL_MAX_ENTRIES) break;
+    const rawModelInfo = models[modelId];
     const modelInfo = asRecord(rawModelInfo);
     if (!modelInfo) continue;
     for (const quotaInfo of quotaInfoEntries(modelInfo)) {
