@@ -453,6 +453,38 @@ describe("routing profile management editor API", () => {
     expect(saves).toBe(0);
   });
 
+  test("PUT update ignores inherited modelMap properties when checking alias collisions", async () => {
+    const config = baseConfig();
+    config.claudeCode = {
+      enabled: false,
+      modelMap: { "ocx/fast": "a/m1" },
+    };
+    let saves = 0;
+    const req = new ManagementRequest("http://localhost/api/routing-profiles", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "fast",
+        mode: "update",
+        profile: {
+          alias: "constructor",
+          candidates: [{ provider: "a", model: "m1" }],
+        },
+      }),
+    });
+    const response = await handleManagementAPI(
+      req,
+      new URL(req.url),
+      config,
+      deps(() => { saves += 1; }),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(config.routingProfiles?.fast).toMatchObject({ alias: "constructor" });
+    expect(config.claudeCode?.modelMap).toEqual({ constructor: "a/m1" });
+    expect(saves).toBe(1);
+  });
+
   test("DELETE removes a profile, persists, and refreshes the catalog", async () => {
     const config = baseConfig();
     let saves = 0;

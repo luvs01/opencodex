@@ -175,10 +175,10 @@ function modelMapMigrationCollision(
   const map = config.claudeCode?.modelMap;
   if (!map) return null;
   if (oldPublicModel === newPublicModel) return null;
+  if (!Object.hasOwn(map, oldPublicModel)) return null;
   const oldTarget = map[oldPublicModel];
-  if (oldTarget === undefined) return null;
+  if (!Object.hasOwn(map, newPublicModel)) return null;
   const newTarget = map[newPublicModel];
-  if (newTarget === undefined) return null;
   if (oldTarget === newTarget) return null;
   return `modelMap already maps \"${newPublicModel}\" to \"${newTarget}\"; renaming \"${oldPublicModel}\" (→ \"${newTarget}\") would drop one mapping. Resolve the conflict and retry.`;
 }
