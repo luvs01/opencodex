@@ -272,6 +272,15 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
       .not.toContain("stored-side-account");
   });
 
+  test("catalog discovery hides account-qualified rows when the picker is disabled", () => {
+    const config = {
+      codexAccountPickerEnabled: false,
+      codexAccountNamespaces: { desktop: "@main" },
+    };
+    expect(visibleCodexAccountSelectors(config)).toEqual([]);
+    expect(accountBoundNativeModelSlugs(config, ["gpt-5.5"])).toEqual([]);
+  });
+
   test("catalog sync flips supported natives to visibility hide and restores list on re-enable", () => {
     const native = nativeTemplate();
     const disabledOnce = mergeCatalogEntriesForSync(

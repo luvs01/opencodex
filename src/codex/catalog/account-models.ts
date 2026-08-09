@@ -1,5 +1,5 @@
 import type { OcxConfig } from "../../types";
-import { isMainCodexAccountTarget } from "../account-namespaces";
+import { codexAccountPickerEnabled, isMainCodexAccountTarget } from "../account-namespaces";
 import type { RawEntry } from "./parsing";
 
 /** Stable nonsemantic marker used to distinguish generated rows from provider-owned rows. */
@@ -14,8 +14,10 @@ export const CODEX_ACCOUNT_BOUND_CATALOG_KIND = "account-selector-v1";
  * namespace validation. Only those public keys leave this boundary; private account ids do not.
  */
 export function visibleCodexAccountSelectors(
-  config: Pick<OcxConfig, "codexAccounts" | "codexAccountNamespaces">,
+  config: Pick<OcxConfig, "codexAccounts" | "codexAccountNamespaces" | "codexAccountPickerEnabled">,
 ): string[] {
+  if (!codexAccountPickerEnabled(config)) return [];
+
   const storedPoolAccounts = new Set(
     (config.codexAccounts ?? [])
       .filter(account => !account.isMain)
