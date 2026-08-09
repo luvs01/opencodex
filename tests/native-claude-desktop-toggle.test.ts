@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
 import { setIntegrationEnabled } from "../src/codex/desired-state";
+import { armClaudeCodeBaseline, saveConfigPreservingClaudeCode } from "../src/config";
 import type { ManagementApiDeps } from "../src/server/management/context";
 import type { OcxConfig } from "../src/types";
 
@@ -243,4 +244,43 @@ test("POST /apply leaves the reused server snapshot agreeing with disk", async (
     body: JSON.stringify({ profile: { mode: "static" } }),
   }, deps, staleSnapshot);
   expect(persistedIntent()).toBeUndefined();
+});
+
+test("POST /apply rebases the Claude hand-edit guard after its scoped profile save", async () => {
+  const snapshot = {
+    ...config(),
+    claudeCode: { authMode: "subscription" as const, nativePassthrough: true },
+  };
+  writeFileSync(join(root, "config.json"), JSON.stringify(snapshot));
+  armClaudeCodeBaseline(snapshot);
+
+  const response = await dispatch("/api/claude-desktop/apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "static" }),
+  }, {
+    fetchAllModels: async () => [],
+    writeDesktop3pConfig: () => ({ written: true, path: join(library, "applied.json"), fingerprint: "fingerprint" }),
+  }, snapshot);
+  expect(response!.status).toBe(200);
+
+  const handEdited = JSON.parse(readFileSync(join(root, "config.json"), "utf8")) as OcxConfig;
+  handEdited.claudeCode = {
+    ...handEdited.claudeCode,
+    authMode: "proxy",
+    nativePassthrough: false,
+    anthropicBaseUrl: "http://127.0.0.1:19999",
+  };
+  writeFileSync(join(root, "config.json"), JSON.stringify(handEdited));
+
+  snapshot.disabledModels = ["unrelated/model"];
+  saveConfigPreservingClaudeCode(snapshot);
+
+  const saved = JSON.parse(readFileSync(join(root, "config.json"), "utf8")) as OcxConfig;
+  expect(saved.claudeCode).toMatchObject({
+    authMode: "proxy",
+    nativePassthrough: false,
+    anthropicBaseUrl: "http://127.0.0.1:19999",
+  });
+  expect(saved.disabledModels).toEqual(["unrelated/model"]);
 });

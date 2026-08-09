@@ -2516,6 +2516,24 @@ export function claudeCodeBaselineArmed(config: OcxConfig): boolean {
 }
 
 /**
+ * Adopt a field-scoped Claude Code write into a long-lived config snapshot.
+ *
+ * Scoped writers commit against the current file rather than serializing the
+ * whole snapshot. Mirror that committed subtree and rebase the hand-edit guard
+ * together so a later unrelated save does not mistake the scoped write for an
+ * outstanding in-memory mutation.
+ */
+export function adoptPersistedClaudeCode(
+  config: OcxConfig,
+  persistedClaudeCode: OcxConfig["claudeCode"],
+): void {
+  config.claudeCode = structuredClone(persistedClaudeCode);
+  if (claudeCodeBaseline.has(config)) {
+    claudeCodeBaseline.set(config, structuredClone(persistedClaudeCode));
+  }
+}
+
+/**
  * Structural compare of parsed subtrees. NOT `JSON.stringify`: key order must not
  * decide whether a user's hand edit survives.
  */

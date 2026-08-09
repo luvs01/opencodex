@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
 import {
+  adoptPersistedClaudeCode,
   DEFAULT_SUBAGENT_MODELS,
   codexAutoStartEnabled,
   hasOwnProvider,
@@ -105,12 +106,12 @@ function persistDesktopProfileField(
 ): { ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" } {
   const outcome = mutatePersistedConfig(persisted => {
     persisted.claudeCode = { ...(persisted.claudeCode ?? {}), desktopProfile };
-    return { changed: true, value: true };
+    return { changed: true, value: structuredClone(persisted.claudeCode) };
   });
   // Only mirror into memory once the durable write actually landed; an
   // `unavailable` outcome must not leave the snapshot claiming a saved profile.
   if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  config.claudeCode = { ...(config.claudeCode ?? {}), desktopProfile };
+  adoptPersistedClaudeCode(config, outcome.value);
   return { ok: true };
 }
 
