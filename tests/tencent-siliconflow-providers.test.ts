@@ -5,7 +5,7 @@ import { PROVIDER_REGISTRY } from "../src/providers/registry";
 import { routeModel } from "../src/router";
 import type { OcxConfig } from "../src/types";
 import { en } from "../gui/src/i18n/en";
-import { interpolate, type TFn } from "../gui/src/i18n/shared";
+import { interpolate, type TFn } from "../gui/src/i18n/interpolate";
 import { formatProviderDisplayName, isCatalogProviderId } from "../gui/src/provider-icons";
 
 const englishT: TFn = (key, vars) => interpolate(en[key], vars);

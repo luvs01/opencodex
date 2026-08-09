@@ -29,7 +29,7 @@ import {
   providerIconSrc,
 } from "../gui/src/provider-icons";
 import { en } from "../gui/src/i18n/en";
-import { interpolate, type TFn } from "../gui/src/i18n/shared";
+import { interpolate, type TFn } from "../gui/src/i18n/interpolate";
 import {
   bucketPresets,
   filterPresets,

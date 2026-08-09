@@ -5,6 +5,9 @@ import { ko } from "./ko";
 import { zh } from "./zh";
 import { ru } from "./ru";
 import { ja } from "./ja";
+import type { TFn } from "./interpolate";
+
+export { interpolate, type TFn, type Vars } from "./interpolate";
 
 export type Locale = "en" | "de" | "ko" | "zh" | "ru" | "ja";
 export type { TKey };
@@ -47,19 +50,9 @@ export function setActiveLocale(locale: Locale): void {
   activeLocale = locale;
 }
 
-export type Vars = Record<string, string | number>;
-export type TFn = (key: TKey, vars?: Vars) => string;
-
 export interface I18nContextValue { locale: Locale; setLocale: (l: Locale) => void; t: TFn }
 
 export const I18nContext = createContext<I18nContextValue | null>(null);
-
-export function interpolate(s: string, vars?: Vars): string {
-  if (!vars) return s;
-  let out = s;
-  for (const k of Object.keys(vars)) out = out.split(`{${k}}`).join(String(vars[k]));
-  return out;
-}
 
 export function useI18n(): I18nContextValue {
   const ctx = useContext(I18nContext);

@@ -10,7 +10,7 @@ import { routeModel } from "../src/router";
 import type { OcxConfig } from "../src/types";
 import { buildProviderPostBody } from "../gui/src/provider-payload";
 import { en } from "../gui/src/i18n/en";
-import { interpolate, type TFn } from "../gui/src/i18n/shared";
+import { interpolate, type TFn } from "../gui/src/i18n/interpolate";
 import { formatProviderDisplayName, isCatalogProviderId } from "../gui/src/provider-icons";
 import { withTestTranslatorBudget } from "./helpers/translator-budget";
 
