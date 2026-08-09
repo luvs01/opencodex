@@ -16,12 +16,20 @@ async function collect(gen: AsyncGenerator<AdapterEvent>): Promise<AdapterEvent[
 }
 
 describe("openai-chat stream EOF fail-closed", () => {
-  test("truncated stream (no [DONE], no finish_reason) yields done when content was emitted", async () => {
+  test("truncated stream (no [DONE], no finish_reason) fails after emitting content", async () => {
     const response = new Response('data: {"choices":[{"delta":{"content":"par"}}]}\n\n');
+    const bridgedResponse = response.clone();
     const events = await collect(createOpenAIChatAdapter(provider).parseStream(response));
     const last = events[events.length - 1];
-    expect(last.type).toBe("done");
-    expect(events.some(e => e.type === "error")).toBe(false);
+    expect(last.type).toBe("error");
+    expect(events.some(e => e.type === "done")).toBe(false);
+
+    const bridged = await new Response(bridgeToResponsesSSE(
+      createOpenAIChatAdapter(provider).parseStream(bridgedResponse),
+      "openai-chat/test-model",
+    )).text();
+    expect(bridged).toContain("event: response.failed");
+    expect(bridged).not.toContain("event: response.completed");
   });
 
   test("empty EOF without content still errors", async () => {
@@ -189,12 +197,13 @@ describe("openai-chat stream EOF fail-closed", () => {
     expect(events.some(e => e.type === "error")).toBe(false);
   });
 
-  test("genuinely truncated stream WITHOUT a trailing newline completes when content was emitted", async () => {
-    // Mid-content frame, no terminator, no newline — content was yielded, so accept done.
+  test("genuinely truncated stream WITHOUT a trailing newline fails after emitting content", async () => {
+    // Mid-content frame, no terminator, no newline — preserve content but fail closed at EOF.
     const response = new Response('data: {"choices":[{"delta":{"content":"par"}}]}');
     const events = await collect(createOpenAIChatAdapter(provider).parseStream(response));
-    expect(events.at(-1)?.type).toBe("done");
-    expect(events.some(e => e.type === "error")).toBe(false);
+    expect(events).toContainEqual({ type: "text_delta", text: "par" });
+    expect(events.at(-1)?.type).toBe("error");
+    expect(events.some(e => e.type === "done")).toBe(false);
   });
 
   test("EOF with pending tool calls and no finish_reason fails closed", async () => {
