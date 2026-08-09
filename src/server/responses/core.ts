@@ -1765,18 +1765,26 @@ async function handleResponsesInner(
   const visionPlan = planVisionSidecar(config, route.provider, route.modelId, parsed, openAiSidecar);
   const recordSidecarOutcome = openAiSidecar?.recordOutcome;
   if (visionPlan) {
-    await describeImagesInPlace(
-      parsed,
-      visionPlan,
-      openAiSidecar?.headers ?? selectedForwardHeaders,
-      options.abortSignal,
-      recordSidecarOutcome,
-      translatorBudget,
-    );
+    try {
+      await describeImagesInPlace(
+        parsed,
+        visionPlan,
+        openAiSidecar?.headers ?? selectedForwardHeaders,
+        options.abortSignal,
+        recordSidecarOutcome,
+        translatorBudget,
+      );
+    } finally {
+      // Local validation can reject every image before the sidecar fetch records an outcome.
+      // Vision-only turns must hand that unused cooldown probe back; when a fetch did run the
+      // outcome already consumed it, so this generation-bound release is a safe no-op.
+      if (!needsOpenAiSearch) openAiSidecar?.releaseProbeLease?.();
+    }
   } else if (modelInList(route.provider.noVisionModels, route.modelId)) {
     // Sidecar-covered model but NO plan (no forward provider / missing forwarded auth / sidecar
     // disabled): fail closed — never forward raw images to a text-only upstream.
     stripImagesInPlace(parsed, translatorBudget);
+    if (!needsOpenAiSearch) openAiSidecar?.releaseProbeLease?.();
   }
 
   const recordTerminalOutcomes = options.recordTerminalOutcomes !== false;

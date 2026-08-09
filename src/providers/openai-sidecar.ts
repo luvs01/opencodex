@@ -4,6 +4,7 @@ import {
   headersForCodexAuthContext,
   hasCallerCodexBearer,
   isCodexAuthContextUsable,
+  releaseCodexAuthContextProbeLease,
   resolveCodexAuthContext,
   type CodexAccountSelectionAdmission,
   type CodexAuthContext,
@@ -29,6 +30,8 @@ export interface ResolvedOpenAiForwardSidecar extends OpenAiForwardSidecarCandid
   authContext: CodexAuthContext;
   headers: Headers;
   recordOutcome?: (outcome: CodexUpstreamOutcome) => void;
+  /** Hand back an acquired recovery probe when no sidecar request reached upstream. */
+  releaseProbeLease?: () => void;
 }
 
 /**
@@ -135,6 +138,7 @@ export async function resolveFirstUsableOpenAiSidecar(
             writerGeneration: authContext.writerGeneration,
           },
         ),
+        releaseProbeLease: () => releaseCodexAuthContextProbeLease(authContext),
       };
     }
     if (candidate.accountMode === "direct") {
@@ -166,6 +170,7 @@ export async function resolveFirstUsableOpenAiSidecar(
               writerGeneration: authContext.writerGeneration,
             },
           ),
+          releaseProbeLease: () => releaseCodexAuthContextProbeLease(authContext),
         }
         : {}),
     };
