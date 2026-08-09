@@ -30,7 +30,7 @@ import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 
-import { activeCodexModelsCachePath, applyJawcodeCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, catalogBackupPathFor, catalogHasRoutedEntries, catalogModelSlug, ensureStrictCatalogFields, findNativeTemplate, isDefaultCatalogPath, isRoutedModelCompatibilityExcluded, legacyCatalogBackupPath, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readNativeBaseline } from "./parsing";
+import { activeCodexModelsCachePath, applyJawcodeCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, catalogBackupPathFor, catalogHasRoutedEntries, catalogModelSlug, ensureStrictCatalogFields, findNativeTemplate, isDefaultCatalogPath, isRoutedModelCompatibilityExcluded, legacyCatalogBackupPath, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readNativeBaseline, readNativeMultiAgentDefaults } from "./parsing";
 import type { CatalogModel, MultiAgentMode, RawCatalog, RawEntry } from "./parsing";
 import { applyNativeVisibility, disabledNativeSlugs, isUnsupportedOpenAiNativeSlug, nativeOpenAiSlugs, NATIVE_OPENAI_MODELS, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, shouldUpgradeToUpstreamEntry, SUPPORTED_NATIVE_OPENAI_SLUGS, upstreamNativeEntry } from "./metadata";
 import {
@@ -461,6 +461,7 @@ export function mergeCatalogEntriesForSync(
   hasPhysicalComboProvider = false,
   includeNativeOpenAi = true,
   accountBoundEntries: readonly RawEntry[] = [],
+  nativeMultiAgentDefaults?: ReadonlyMap<string, string | null>,
 ): RawEntry[] {
   const rank = new Map(featured.map((slug, i) => [slug, i] as const));
   const native = includeNativeOpenAi
@@ -633,6 +634,7 @@ export function mergeCatalogEntriesForSync(
     applyNativeVisibility(mergedEntries, disabledModels, alignedAccountBoundEntries.length > 0),
     multiAgentMode,
     isMultiAgentV2Enabled(),
+    nativeMultiAgentDefaults ?? new Map(),
   );
 }
 
@@ -838,6 +840,7 @@ function writeRetainedCatalogSync({
   // routed providers as namespaced slugs. Cursor and other adopted providers can expose model ids
   // like `gpt-5.5`; those must not delete the native OpenAI/Codex base row.
   const baseline = readNativeBaseline(catalogPath);
+  const nativeMultiAgentDefaults = readNativeMultiAgentDefaults(catalogPath);
   const goIds = new Set(enabledGo.map(m => m.id));
   const gatheredProviderNames = new Set(
     Object.entries(config.providers ?? {})
@@ -877,6 +880,7 @@ function writeRetainedCatalogSync({
     hasPhysicalComboProvider,
     includeNativeOpenAi,
     accountBoundEntries,
+    nativeMultiAgentDefaults,
   );
   clampCatalogModelsToCodexSupport(catalog.models);
 

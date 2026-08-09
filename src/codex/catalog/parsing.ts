@@ -314,16 +314,28 @@ export type MultiAgentMode = "v1" | "default" | "v2";
  *   preserved: a genuine "v1" pin is a real capability statement and stays excluded.
  *   With the feature off the output is byte-identical to the historical behavior.
  */
-export function applyMultiAgentMode(entries: RawEntry[], mode: MultiAgentMode, v2FeatureEnabled = false): RawEntry[] {
+export function applyMultiAgentMode(
+  entries: RawEntry[],
+  mode: MultiAgentMode,
+  v2FeatureEnabled = false,
+  nativeDefaults?: ReadonlyMap<string, string | null>,
+): RawEntry[] {
   if (mode === "default") {
-    // Restore upstream defaults: clear any stale forced multi_agent_version and
-    // re-apply upstream pins from the snapshot for native entries that have one.
+    // Restore pristine installed-catalog defaults when available, falling back to
+    // the bundled snapshot for freshly built entries. Unknown preserved rows keep
+    // their live pin because the snapshot is not authoritative for them.
     for (const entry of entries) {
       const slug = typeof entry.slug === "string" ? entry.slug : "";
-      const upstream = UPSTREAM_NATIVE_ENTRIES.get(trustedAccountBoundNativeCatalogSlug(entry) ?? slug);
-      const upstreamPin = upstream?.multi_agent_version;
+      const nativeSlug = trustedAccountBoundNativeCatalogSlug(entry) ?? slug;
+      const hasNativeDefault = nativeDefaults?.has(nativeSlug) === true;
+      const upstream = UPSTREAM_NATIVE_ENTRIES.get(nativeSlug);
+      const upstreamPin = hasNativeDefault ? nativeDefaults?.get(nativeSlug) : upstream?.multi_agent_version;
       if (typeof upstreamPin === "string") {
         entry.multi_agent_version = upstreamPin;
+      } else if (nativeDefaults !== undefined && !hasNativeDefault && typeof entry.multi_agent_version === "string") {
+        // A preserved live/native row outside the pristine baseline may carry metadata
+        // newer than our bundled snapshot. It was not stamped by us, so keep its pin.
+        continue;
       } else if (v2FeatureEnabled) {
         entry.multi_agent_version = "v2";
       } else {
@@ -454,6 +466,15 @@ export function readNativeBaseline(catalogPath: string): Map<string, number> {
     if (typeof e.slug === "string" && !e.slug.includes("/") && typeof e.priority === "number") {
       out.set(e.slug, e.priority);
     }
+  }
+  return out;
+}
+
+export function readNativeMultiAgentDefaults(catalogPath: string): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  for (const entry of readCatalogBackup(catalogPath)?.models ?? []) {
+    if (typeof entry.slug !== "string" || entry.slug.includes("/")) continue;
+    out.set(entry.slug, typeof entry.multi_agent_version === "string" ? entry.multi_agent_version : null);
   }
   return out;
 }

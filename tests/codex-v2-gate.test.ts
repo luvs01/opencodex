@@ -1243,6 +1243,11 @@ describe("3-state multi-agent mode", () => {
     const merged = mergeCatalogEntriesForSync(
       [diskSol as never, diskLuna as never, diskNative as never],
       [], new Map(), [], false, new Set(), null, new Set(), new Set(), "default",
+      new Set(), false, true, [], new Map([
+        ["gpt-5.6-sol", "v2"],
+        ["gpt-5.6-luna", "v1"],
+        ["gpt-5.5", null],
+      ]),
     );
     const sol = merged.find(e => e.slug === "gpt-5.6-sol")!;
     const luna = merged.find(e => e.slug === "gpt-5.6-luna")!;
@@ -1253,6 +1258,18 @@ describe("3-state multi-agent mode", () => {
     expect(luna.multi_agent_version).toBe("v1");
     // gpt-5.5 has no upstream pin — cleared (codex flag decides)
     expect(native.multi_agent_version).toBeUndefined();
+  });
+
+  test("mode default preserves pins on live native rows outside the pristine baseline", () => {
+    const liveNative = { ...template(), slug: "gpt-5.4", multi_agent_version: "v1" };
+    const customNative = { ...template(), slug: "custom-native", multi_agent_version: "v2" };
+    const merged = mergeCatalogEntriesForSync(
+      [liveNative as never, customNative as never],
+      [], new Map(), [], false, new Set(), null, new Set(), new Set(), "default",
+    );
+
+    expect(merged.find(entry => entry.slug === "gpt-5.4")?.multi_agent_version).toBe("v1");
+    expect(merged.find(entry => entry.slug === "custom-native")?.multi_agent_version).toBe("v2");
   });
 });
 import { ManagementRequest as Request } from "./helpers/management-auth";
