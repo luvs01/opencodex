@@ -149,6 +149,29 @@ describe("bridge ocxr1 envelope emission", () => {
 });
 
 describe("parser ocxr1 decode + anthropic replay", () => {
+  test("redacted-only ocxr1 reasoning is preserved on the following assistant turn", () => {
+    const parsed = parseRequest({
+      model: "anthropic/claude-x",
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_redacted_only",
+          summary: [],
+          encrypted_content: encodeReasoningEnvelope({ red: ["ONLYRED"] }),
+        },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] },
+      ],
+    });
+
+    const assistant = parsed.context.messages.find(message => message.role === "assistant");
+    const thinking = (assistant as unknown as { content: OcxThinkingContent[] }).content.find(part => part.type === "thinking");
+    expect(thinking).toMatchObject({
+      thinking: "",
+      redacted: ["ONLYRED"],
+      itemId: "rs_redacted_only",
+    });
+  });
+
   test("reasoning input with ocxr1 envelope restores the real signature", async () => {
     const encrypted = encodeReasoningEnvelope({ sig: "RealSig1234567890==", red: ["RED1"] });
     const parsed = parseRequest({
