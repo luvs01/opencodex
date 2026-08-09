@@ -4113,6 +4113,8 @@ describe("GitHub Actions hardening", () => {
         seen["core.summary.addRaw"] = typeof core.summary.addRaw;
         seen["core.getInput(github-token)"] = core.getInput("github-token") !== "";
         seen["core.isDebug"] = core.isDebug();
+        core.saveState("same-run-probe", "saved");
+        seen["core.getState(same-run-probe)"] = core.getState("same-run-probe");
         return seen;
       `);
 
@@ -4127,6 +4129,10 @@ describe("GitHub Actions hardening", () => {
       // gate that never runs.
       expect(probe["core.getInput(github-token)"]).toBe(true);
       expect(probe["core.isDebug"]).toBe(false);
+      // `saveState` writes for a later post-action process. The current
+      // github-script invocation cannot read that value back through
+      // `getState`, so the harness must not provide a same-run state oracle.
+      expect(probe["core.getState(same-run-probe)"]).toBe("");
 
       // And the normal path is unaffected by the probe scenario.
       expect(methodsOf(result)).toEqual(readsAllowedBase());

@@ -505,7 +505,6 @@ export async function runEnforcePrTarget(
   const logs: string[] = [];
   const warnings: string[] = [];
   const outputs: { name: string; value: unknown }[] = [];
-  const states = new Map<string, unknown>();
   const failOn = new Set(options.failOn ?? []);
   if (options.failPermissionLookup) {
     // Route through `record` so the call appears in the recording even when it
@@ -953,13 +952,10 @@ export async function runEnforcePrTarget(
     setOutput: (name: unknown, value: unknown) => {
       outputs.push({ name: String(name), value });
     },
-    saveState: (name: unknown, value: unknown) => {
-      states.set(String(name), value);
-    },
-    getState: (name: unknown) => {
-      const stored = states.get(String(name));
-      return stored === undefined ? "" : String(stored);
-    },
+    // `saveState` emits state for a later post-action process; it does not
+    // update what `getState` observes during this github-script invocation.
+    saveState: (_name: unknown, _value: unknown) => {},
+    getState: (_name: unknown) => "",
     startGroup: (name: unknown) => { logs.push(`::group::${String(name)}`); },
     endGroup: () => { logs.push("::endgroup::"); },
     group: async (name: unknown, fn: () => Promise<unknown>) => {
