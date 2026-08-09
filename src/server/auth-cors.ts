@@ -12,6 +12,7 @@ import {
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   retryOn429PolicyConfigError,
+  stringArrayRecordConfigError,
 } from "../config";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
@@ -477,6 +478,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (maxInputError) return `provider ${name} ${maxInputError}`;
   const reasoningSummariesError = booleanRecordConfigError(raw.modelSupportsReasoningSummaries, "modelSupportsReasoningSummaries");
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
+  const inputModalitiesError = stringArrayRecordConfigError(raw.modelInputModalities, "modelInputModalities");
+  if (inputModalitiesError) return `provider ${name} ${inputModalitiesError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
     raw.modelReasoningSummaryDelivery,
     raw.modelSupportsReasoningSummaries,

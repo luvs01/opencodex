@@ -1405,6 +1405,18 @@ describe("opencodex config defaults", () => {
     expect(readConfigDiagnostics().error).toContain("providers.custom.modelMaxInputTokens");
   });
 
+  test("disk config rejects malformed modelInputModalities", () => {
+    writeConfig({
+      port: 10100,
+      providers: {
+        custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", modelInputModalities: { model: null } },
+      },
+      defaultProvider: "custom",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("providers.custom.modelInputModalities");
+  });
+
   test("disk config preserves valid OpenRouter routing and rejects invalid destinations", () => {
     writeConfig({
       port: 10100,

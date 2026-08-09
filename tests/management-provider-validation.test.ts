@@ -411,6 +411,18 @@ describe("provider management validation", () => {
       }
       expect(loadConfig().providers["custom-max-input"].modelMaxInputTokens).toEqual({ model: 1000 });
 
+      for (const invalid of [null, [], { model: null }, { model: "text" }, { model: ["text", null] }]) {
+        const rejected = await fetch(new URL("/api/providers", server.url), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "xai",
+            provider: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", modelInputModalities: invalid },
+          }),
+        });
+        expect(rejected.status).toBe(400);
+      }
+
       const acceptedSummaryCapability = await fetch(new URL("/api/providers", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },

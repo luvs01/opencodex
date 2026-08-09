@@ -746,6 +746,20 @@ export function booleanRecordConfigError(value: unknown, field: string): string 
   return null;
 }
 
+export function stringArrayRecordConfigError(value: unknown, field: string): string | null {
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return `${field} must be a plain object`;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return `${field} must be a plain object with own properties`;
+  for (const [key, entry] of Object.entries(value)) {
+    if (!key.trim()) return `${field} keys must be nonblank model ids`;
+    if (!Array.isArray(entry) || entry.some(item => typeof item !== "string")) {
+      return `${field}.${key} must be an array of strings`;
+    }
+  }
+  return null;
+}
+
 const REASONING_SUMMARY_DELIVERY_SET = new Set<string>(REASONING_SUMMARY_DELIVERY_VALUES);
 
 export function reasoningSummaryDeliveryRecordConfigError(
@@ -1272,6 +1286,17 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", name, "modelSupportsReasoningSummaries"],
         message: reasoningSummariesError,
+      });
+    }
+    const inputModalitiesError = stringArrayRecordConfigError(
+      (provider as { modelInputModalities?: unknown }).modelInputModalities,
+      "modelInputModalities",
+    );
+    if (inputModalitiesError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", name, "modelInputModalities"],
+        message: inputModalitiesError,
       });
     }
     const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
