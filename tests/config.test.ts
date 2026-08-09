@@ -882,6 +882,27 @@ describe("opencodex config defaults", () => {
     }
   });
 
+  test.each([
+    ["number", "123"],
+    ["boolean", "true"],
+    ["string", JSON.stringify("not-an-object")],
+    ["array", "[]"],
+    ["null", "null"],
+  ])("backs up a top-level %s instead of repairing it", (_kind, raw) => {
+    writeConfig(raw);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      expect(loadConfig()).toEqual(getDefaultConfig());
+      const backups = backupNames();
+      expect(backups).toHaveLength(1);
+      expect(readFileSync(join(testDir, backups[0]), "utf-8")).toBe(raw);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Could not load opencodex config"));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   test("backs up config when defaultProvider is absent from providers", () => {
     writeConfig({
       port: 10100,
