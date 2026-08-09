@@ -859,6 +859,31 @@ describe("codex-auth API", () => {
     }
   });
 
+  test("GET /api/codex-auth/accounts tolerates a non-string persisted plan", async () => {
+    const config = makeConfig({
+      codexAccounts: [
+        { id: "pool-invalid-plan", email: "invalid@example.test", plan: { tier: "go" }, isMain: false },
+      ] as unknown as OcxConfig["codexAccounts"],
+    });
+    saveCodexAccountCredential("pool-invalid-plan", {
+      accessToken: "access-invalid-plan",
+      refreshToken: "refresh-invalid-plan",
+      expiresAt: Date.now() + 5 * 60_000,
+      chatgptAccountId: "acct-invalid-plan",
+    });
+    updateAccountQuota("pool-invalid-plan", 91, 111, 33, 333);
+
+    const req = new Request("http://localhost/api/codex-auth/accounts", { method: "GET" });
+    const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+    const data = await resp!.json() as { accounts: Array<{ id: string; quota?: Record<string, unknown> }> };
+
+    expect(resp?.status).toBe(200);
+    expect(data.accounts.find(a => a.id === "pool-invalid-plan")?.quota).toMatchObject({
+      weeklyPercent: 91,
+      monthlyPercent: 33,
+    });
+  });
+
   test("GET /api/codex-auth/accounts maps go tertiary quota response to 30d display quota", async () => {
     const config = makeConfig({
       codexAccounts: [{ id: "pool-go-primary", email: "go-primary@example.test", plan: "go", isMain: false }],

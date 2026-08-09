@@ -314,9 +314,9 @@ function deleteScopedHealth(accountId: string, scope: CodexQuotaScope): void {
 export function computeCodexUsageScore(quota: {
   weeklyPercent?: number;
   monthlyPercent?: number;
-} | null, plan?: string | null): number {
+} | null, plan?: unknown): number {
   if (!quota) return CODEX_UNKNOWN_USAGE_SCORE;
-  const normalizedPlan = plan?.trim().toLowerCase();
+  const normalizedPlan = typeof plan === "string" ? plan.trim().toLowerCase() : undefined;
   if (normalizedPlan === "go" || normalizedPlan === "free") {
     return typeof quota.monthlyPercent === "number" && Number.isFinite(quota.monthlyPercent)
       ? quota.monthlyPercent

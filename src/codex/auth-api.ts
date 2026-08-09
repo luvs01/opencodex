@@ -181,8 +181,8 @@ function codexAccountPersistenceConflict(
     : undefined;
 }
 
-function isThirtyDayOnlyPlan(plan: string | null | undefined): boolean {
-  const normalized = plan?.trim().toLowerCase();
+function isThirtyDayOnlyPlan(plan: unknown): boolean {
+  const normalized = typeof plan === "string" ? plan.trim().toLowerCase() : undefined;
   return normalized === "go" || normalized === "free";
 }
 
