@@ -7,6 +7,12 @@ type Schema = Record<string, unknown>;
 const ALLOWED_TYPES = new Set(["string", "integer", "number", "boolean", "array", "object"]);
 const MAX_SCHEMA_DEPTH = 24; // Google's documented nesting limit is 32; leave headroom for CCA.
 const MAX_DEREF_DEPTH = 16;
+const MAX_SCHEMA_NODES = 1_024;
+
+interface SanitizeState {
+  activeRefs: Set<string>;
+  remainingNodes: number;
+}
 
 function isRecord(value: unknown): value is Schema {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -63,11 +69,12 @@ function sanitizeEnum(value: unknown): string[] | undefined {
 function normalizeAnyOf(
   value: unknown,
   defs: Map<string, unknown>,
+  state: SanitizeState,
   depth: number,
   refDepth: number,
 ): Schema {
   if (!Array.isArray(value) || value.length === 0) return {};
-  const schemas = value.map(item => sanitizeSchema(item, defs, depth + 1, refDepth, true));
+  const schemas = value.map(item => sanitizeSchema(item, defs, state, depth + 1, refDepth, true));
 
   const nonNullSchemas = schemas.filter(schema => schema.type !== "null");
   const nullSchemas = schemas.filter(schema => schema.type === "null");
@@ -98,6 +105,7 @@ function normalizeAnyOf(
 function sanitizeProperties(
   value: unknown,
   defs: Map<string, unknown>,
+  state: SanitizeState,
   depth: number,
   refDepth: number,
 ): Record<string, Schema> | undefined {
@@ -105,7 +113,7 @@ function sanitizeProperties(
   const properties: Record<string, Schema> = Object.create(null) as Record<string, Schema>;
   for (const [name, schema] of Object.entries(value)) {
     // Property names form a name bag and must never be interpreted as schema keywords.
-    properties[name] = sanitizeSchema(schema, defs, depth + 1, refDepth, false);
+    properties[name] = sanitizeSchema(schema, defs, state, depth + 1, refDepth, false);
   }
   return properties;
 }
@@ -113,20 +121,30 @@ function sanitizeProperties(
 function sanitizeSchema(
   node: unknown,
   defs: Map<string, unknown>,
+  state: SanitizeState,
   depth: number,
   refDepth: number,
   preserveNullType: boolean,
 ): Schema {
-  if (depth >= MAX_SCHEMA_DEPTH || !isRecord(node)) return {};
+  if (depth >= MAX_SCHEMA_DEPTH || !isRecord(node) || state.remainingNodes-- <= 0) return {};
 
-  if (typeof node.$ref === "string" && refDepth < MAX_DEREF_DEPTH) {
+  if (
+    typeof node.$ref === "string"
+    && refDepth < MAX_DEREF_DEPTH
+    && !state.activeRefs.has(node.$ref)
+  ) {
     const target = resolveRef(node.$ref, defs);
     if (isRecord(target)) {
       const merged: Schema = { ...target };
       for (const [key, value] of Object.entries(node)) {
         if (key !== "$ref") merged[key] = value;
       }
-      return sanitizeSchema(merged, defs, depth, refDepth + 1, preserveNullType);
+      state.activeRefs.add(node.$ref);
+      try {
+        return sanitizeSchema(merged, defs, state, depth, refDepth + 1, preserveNullType);
+      } finally {
+        state.activeRefs.delete(node.$ref);
+      }
     }
   }
 
@@ -140,18 +158,18 @@ function sanitizeSchema(
   const enumValues = sanitizeEnum(node.enum ?? (typeof node.const === "string" ? [node.const] : undefined));
   if (enumValues) out.enum = enumValues;
 
-  const properties = sanitizeProperties(node.properties, defs, depth, refDepth);
+  const properties = sanitizeProperties(node.properties, defs, state, depth, refDepth);
   if (properties) out.properties = properties;
 
   if (isRecord(node.items)) {
-    out.items = sanitizeSchema(node.items, defs, depth + 1, refDepth, false);
+    out.items = sanitizeSchema(node.items, defs, state, depth + 1, refDepth, false);
   }
 
   if (Array.isArray(node.required)) {
     out.required = [...new Set(node.required.filter((item): item is string => typeof item === "string"))];
   }
 
-  if (node.anyOf !== undefined) Object.assign(out, normalizeAnyOf(node.anyOf, defs, depth, refDepth));
+  if (node.anyOf !== undefined) Object.assign(out, normalizeAnyOf(node.anyOf, defs, state, depth, refDepth));
   return out;
 }
 
@@ -159,7 +177,8 @@ export function sanitizeGeminiToolParameters(parameters: unknown): Record<string
   try {
     const defs = new Map<string, unknown>();
     collectDefs(parameters, defs);
-    const root = sanitizeSchema(parameters, defs, 0, 0, false);
+    const state: SanitizeState = { activeRefs: new Set(), remainingNodes: MAX_SCHEMA_NODES };
+    const root = sanitizeSchema(parameters, defs, state, 0, 0, false);
 
     // Function arguments are always an object. Claude additionally rejects root composition and a
     // missing root type even when those forms are valid general-purpose JSON Schema.

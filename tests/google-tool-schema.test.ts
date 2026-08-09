@@ -296,6 +296,32 @@ describe("sanitizeGeminiToolParameters", () => {
     });
   });
 
+  test("bounds expansion of branching recursive refs", () => {
+    const out = sanitizeGeminiToolParameters({
+      type: "object",
+      properties: { tree: { $ref: "#/$defs/Tree" } },
+      $defs: {
+        Tree: {
+          type: "object",
+          properties: {
+            left: { $ref: "#/$defs/Tree" },
+            right: { $ref: "#/$defs/Tree" },
+          },
+        },
+      },
+    });
+
+    expect(out).toEqual({
+      type: "object",
+      properties: {
+        tree: {
+          type: "object",
+          properties: { left: {}, right: {} },
+        },
+      },
+    });
+  });
+
   test("never leaks the internal null type used while normalizing unions", () => {
     const out = sanitizeGeminiToolParameters({
       type: "object",
