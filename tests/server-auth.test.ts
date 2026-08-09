@@ -35,6 +35,7 @@ import {
 } from "../src/server";
 import { clearRequestLogsForTests, getRequestLogEntries } from "../src/server/request-log";
 import { handleManagementAPI } from "../src/server/management-api";
+import { handleResponses } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
@@ -343,6 +344,40 @@ describe("server local API auth", () => {
         throw new Error("unsupported");
       },
     })).toBe(false);
+  });
+
+  test("responses handler keeps the request timeout until the body is fully parsed", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value;
+      },
+    });
+    const req = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    let bodyRead = false;
+    const responsePromise = handleResponses(req, config(), {
+      model: "unknown",
+      provider: "unknown",
+    }, {
+      onRequestBodyRead: () => {
+        bodyRead = true;
+      },
+    });
+
+    controller.enqueue(new TextEncoder().encode('{"model":"missing/provider","input":"hello"'));
+    await Bun.sleep(10);
+    expect(bodyRead).toBe(false);
+
+    controller.enqueue(new TextEncoder().encode("}"));
+    controller.close();
+    const response = await responsePromise;
+    expect(bodyRead).toBe(true);
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBeLessThan(500);
   });
 
   test("loopback hostnames do not require opencodex API auth", () => {

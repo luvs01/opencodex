@@ -567,6 +567,8 @@ export interface ConsumedComboFailure {
 
 export interface HandleResponsesOptions {
   turnAdmissionLease?: AdmissionLease;
+  /** Called only after the complete inbound body has been read and parsed successfully. */
+  onRequestBodyRead?: () => void;
   forceEmptyResponseId?: boolean;
   abortSignal?: AbortSignal;
   /** One-shot TTFT callback: first non-empty model output observed (WP4). */
@@ -1366,6 +1368,7 @@ async function handleResponsesInner(
     }
     return formatErrorResponse(400, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
+  options.onRequestBodyRead?.();
   // Prefer a pre-populated id (routed Claude) over Responses headers that may be
   // absent or synthetically injected (session_id from prompt_cache_key).
   if (!logCtx.conversationId) {

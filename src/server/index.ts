@@ -872,7 +872,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}) {
       }
 
       if (url.pathname === "/v1/responses" && req.method === "POST") {
-        disableResponsesRequestTimeout(req, requestServer);
         if (isDraining()) {
           return drainingResponse(req);
         }
@@ -901,6 +900,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}) {
         return runAdmittedHttpTurn(req, async turnAdmissionLease => {
           const response = await handleResponses(req, config, logCtx, {
             turnAdmissionLease,
+            onRequestBodyRead: () => disableResponsesRequestTimeout(req, requestServer),
             abortSignal: req.signal,
             onFirstOutput: () => recordFirstOutput(logCtx, start),
             onNativePassthroughTerminal: status => {
