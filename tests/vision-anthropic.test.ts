@@ -155,6 +155,39 @@ describe("Anthropic vision executor", () => {
     expect(terminal).toEqual({ text: "", error: "overloaded" });
   });
 
+  test("rejects and cancels an oversized SSE response", async () => {
+    let cancelled = false;
+    const oversized = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(65_537).fill(0x61));
+      },
+      cancel() { cancelled = true; },
+    }));
+
+    expect(await parseAnthropicVisionSSE(oversized)).toEqual({
+      text: "",
+      error: "anthropic vision sidecar response exceeded the size limit",
+    });
+    await Bun.sleep(0);
+    expect(cancelled).toBe(true);
+  });
+
+  test("bounds and cancels non-success response bodies", async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(65_537).fill(0x61));
+      },
+      cancel() { cancelled = true; },
+    }), { status: 500 })) as typeof fetch;
+
+    expect(await describeImageAnthropic(
+      DATA_IMAGE, "high", "", "anthropic-vision-test", anthropicProvider, settings,
+    )).toEqual({ text: "", error: "anthropic vision sidecar HTTP 500" });
+    await Bun.sleep(0);
+    expect(cancelled).toBe(true);
+  });
+
   test("returns graceful errors for aborts and timeouts and cancels the pending fetch", async () => {
     let aborts = 0;
     globalThis.fetch = ((_url, init) => new Promise((_resolve, reject) => {

@@ -1,6 +1,7 @@
 import type { OcxProviderConfig } from "../types";
 import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "../adapters/client-fingerprint";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import { fetchWithResetRetry } from "../lib/upstream-retry";
 import { getValidAccessToken } from "../oauth";
@@ -44,14 +45,11 @@ function buildImageBlock(imageUrl: string): { block?: AnthropicImageBlock; error
 }
 
 /** Fold Anthropic Messages text deltas into one description. Malformed frames are ignored. */
-export async function parseAnthropicVisionSSE(res: Response): Promise<DescribeOutcome> {
+export async function parseAnthropicVisionSSE(res: Response, signal?: AbortSignal): Promise<DescribeOutcome> {
   if (!res.body) return { text: "", error: "anthropic vision sidecar returned no response body" };
 
   let text = "";
   let terminalError = "";
-  const decoder = new TextDecoder();
-  const reader = res.body.getReader();
-  let buffer = "";
 
   const processFrame = (rawFrame: string): void => {
     let dataLine = "";
@@ -73,18 +71,17 @@ export async function parseAnthropicVisionSSE(res: Response): Promise<DescribeOu
   };
 
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
-      let separator: number;
-      while ((separator = buffer.indexOf("\n\n")) !== -1) {
-        processFrame(buffer.slice(0, separator));
-        buffer = buffer.slice(separator + 2);
+    const body = await readBoundedResponseBody(res, { signal });
+    if (!body.displaySafe) {
+      terminalError = body.oversized
+        ? "anthropic vision sidecar response exceeded the size limit"
+        : "anthropic vision sidecar stream ended abnormally";
+    } else {
+      const frames = body.text.replace(/\r\n/g, "\n").split("\n\n");
+      for (const frame of frames) {
+        if (frame.trim()) processFrame(frame);
       }
     }
-    buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
-    if (buffer.trim()) processFrame(buffer);
   } catch {
     // A mid-stream read/decode failure after partial text is NOT a usable description. Mark it
     // terminal so the caller returns an error and never caches an incomplete result (review F1).
@@ -164,13 +161,17 @@ export async function describeImageAnthropic(
       { abortSignal: linkedSignal.signal, label: "vision-sidecar-anthropic" },
     );
     if (!res.ok) {
-      const responseText = await res.text().catch(() => "");
+      const responseBody = await readBoundedResponseBody(res, { signal: linkedSignal.signal }).catch(() => undefined);
+      const responseText = responseBody?.displaySafe ? responseBody.text.slice(0, 200) : "";
       console.warn(`[vision] anthropic sidecar HTTP ${res.status} (${Date.now() - startedAt}ms)`);
-      return { text: "", error: `anthropic vision sidecar HTTP ${res.status}: ${responseText.slice(0, 200)}` };
+      return {
+        text: "",
+        error: `anthropic vision sidecar HTTP ${res.status}${responseText ? `: ${responseText}` : ""}`,
+      };
     }
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     try {
-      return await parseAnthropicVisionSSE(res);
+      return await parseAnthropicVisionSSE(res, linkedSignal.signal);
     } finally {
       detachBodyGuard();
     }
