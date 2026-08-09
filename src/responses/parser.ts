@@ -33,6 +33,15 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Only inline image data may cross the provider boundary. Remote URLs would be fetched by the
+ * selected provider, whose network may reach destinations that the caller cannot reach directly.
+ */
+function inlineImageDataUrl(value: unknown): string | undefined {
+  const url = nonEmptyString(value);
+  return url && /^data:image\/[a-z0-9.+-]+;base64,/i.test(url) ? url : undefined;
+}
+
 function inputContentParts(blocks: unknown): string | OcxContentPart[] {
   if (typeof blocks === "string") return blocks;
   // The catch-all can also hand back a non-array `content` (an object, a number), which would
@@ -49,7 +58,7 @@ function inputContentParts(blocks: unknown): string | OcxContentPart[] {
       if (typeof raw.text === "string") parts.push({ type: "text", text: raw.text });
     } else if (block.type === "input_image") {
       const b = block as { image_url?: string; file_id?: string; detail?: string };
-      const imageUrl = nonEmptyString(b.image_url);
+      const imageUrl = inlineImageDataUrl(b.image_url);
       const fileId = nonEmptyString(b.file_id);
       const detail = nonEmptyString(b.detail);
       if (imageUrl) {
@@ -228,7 +237,7 @@ function outputToToolResultContent(output: string | unknown[] | undefined): stri
       if (typeof raw.text === "string") parts.push({ type: "text", text: raw.text });
     } else if (raw.type === "refusal" && typeof raw.refusal === "string") {
       parts.push({ type: "text", text: `[refusal: ${raw.refusal}]` });
-    } else if (raw.type === "input_image" && typeof raw.image_url === "string") {
+    } else if (raw.type === "input_image" && inlineImageDataUrl(raw.image_url)) {
       parts.push({ type: "image", imageUrl: raw.image_url, ...(typeof raw.detail === "string" ? { detail: normalizeImageDetail(raw.detail) } : {}) });
       hasImage = true;
     } else if (raw.type === "encrypted_content") {
