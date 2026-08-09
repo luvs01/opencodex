@@ -1606,6 +1606,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     adapter: "openai-chat",
     authKind: "key",
+    preserveCustomDestination: true,
     dashboardUrl: "https://bailian.console.aliyun.com/cn-beijing?tab=plan",
     defaultModel: "qwen3.8-max",
     models: ALIBABA_TOKEN_PLAN_MODELS,

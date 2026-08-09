@@ -146,32 +146,21 @@ test("stays silent for a non-string baseUrl (control: unchanged pre-existing beh
 });
 
 /**
- * The split this diagnostic exists for (#457): the Beijing Personal Edition entry is pinned, and
- * the international Team Edition is a separate provider that honors its configured endpoint.
- * Locking it here means a change to either registry entry has to face this test.
+ * The Beijing Personal Edition and international Team Edition have separate presets. A configured
+ * destination must nevertheless stay authoritative: silently moving an existing same-named key
+ * provider to the preset endpoint would send its credentials to the wrong host.
  */
-const ALIBABA_BEIJING_BASE_URL = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
 const ALIBABA_INTL_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 
-test("alibaba-token-plan is pinned to Beijing and warns about a saved international URL", () => {
+test("alibaba-token-plan preserves a configured destination", () => {
+  const customBaseUrl = "https://custom-gateway.example.test/openai/v1";
   const config = configFor("alibaba-token-plan", {
     adapter: "openai-chat",
-    baseUrl: ALIBABA_INTL_BASE_URL,
+    baseUrl: customBaseUrl,
   });
-  const warnings = routeCapturingWarnings(config, "alibaba-token-plan/qwen3.8-max");
-
-  expect(warnings).toHaveLength(1);
-  expect(warnings[0]).toContain("token-plan.ap-southeast-1.maas.aliyuncs.com");
-  expect(warnings[0]).toContain(ALIBABA_BEIJING_BASE_URL);
-
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
-    expect(routeModel(config, "alibaba-token-plan/qwen3.8-max").provider.baseUrl)
-      .toBe(ALIBABA_BEIJING_BASE_URL);
-  } finally {
-    console.warn = originalWarn;
-  }
+  expect(routeCapturingWarnings(config, "alibaba-token-plan/qwen3.8-max")).toEqual([]);
+  expect(routeModel(config, "alibaba-token-plan/qwen3.8-max").provider.baseUrl)
+    .toBe(customBaseUrl);
 });
 
 test("alibaba-token-plan-intl honors its configured international endpoint silently", () => {
