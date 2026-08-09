@@ -29,7 +29,6 @@ import {
 import { isCodexAccountPaused } from "./account-pause";
 import { slugEquals } from "../providers/slug-codec";
 import { isThreadSpawnRequest } from "../server/effort-policy";
-import { PROVIDER_REGISTRY } from "../providers/registry";
 import {
   CODEX_FORWARD_BASE_URL,
   OPENAI_CODEX_PROVIDER_ID,
@@ -58,7 +57,6 @@ type ModelHealth = {
 
 const modelHealth = new Map<string, ModelHealth>();
 const quotaPrimedAt = new Map<string, number>();
-const knownProviderIdSet = new Set(PROVIDER_REGISTRY.map(entry => entry.id.toLowerCase()));
 
 function tryRouteFallbackModel(config: OcxConfig, model: string): RouteResult | null {
   try {
@@ -175,22 +173,6 @@ function resolveRouteFallbackAccountId(
   return route?.codexAccountId ?? resolvePoolFallbackAccountId(config, accountId);
 }
 
-function isRoutableFallbackModel(model: string, config: OcxConfig): boolean {
-  const slash = model.indexOf("/");
-  if (slash > 0) {
-    if (codexAccountNamespaceForModel(config.codexAccountNamespaces, model)) return true;
-    const providerName = model.slice(0, slash);
-    if (!hasOwnProvider(config.providers, providerName)) {
-      // Allow well-known "vendor/model" ids (e.g. anthropic/claude-*) to flow as
-      // raw model ids through the default provider, but reject stale/typo prefixes.
-      return knownProviderIdSet.has(providerName.toLowerCase());
-    }
-    const provider = config.providers[providerName];
-    if (provider?.disabled === true) return false;
-  }
-  return true;
-}
-
 export function isNativeModelQuotaExhausted(
   model: string,
   config: OcxConfig,
@@ -233,7 +215,6 @@ export function isSubagentModelUnavailable(
   accountUsabilityOptions?: CodexAccountUsabilityOptions,
 ): boolean {
   if (isDisabledFallbackModel(model, config)) return true;
-  if (!isRoutableFallbackModel(model, config)) return true;
   const route = tryRouteFallbackModel(config, model);
   if (!route || route.provider.disabled === true) return true;
   if (isModelHealthBlocked(model, config, accountId, now)) return true;
