@@ -2002,11 +2002,13 @@ describe("detectAreaLabels", () => {
     assert.equal(labels.includes("platform"), false);
   });
 
-  it("uses heuristicBody translation text when Area is Other", () => {
+  it("uses appended heuristicBody translation text when Area is Other", () => {
+    const sourceBody = ["### Area", "Other", "### Summary", "原始描述"].join("\n");
     const labels = detectAreaLabels({
       title: "问题报告",
-      body: ["### Area", "Other", "### Summary", "原始描述"].join("\n"),
+      body: sourceBody,
       heuristicBody: [
+        sourceBody,
         "### Area",
         "Other",
         "### Summary",

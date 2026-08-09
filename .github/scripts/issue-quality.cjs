@@ -428,17 +428,22 @@ function canonicalise(raw) {
 }
 
 /**
- * Extract the text content of a markdown ### section by heading name.
- * Returns null when the heading is absent.
+ * Extract the text content of every markdown section with the given heading.
  */
-function extractSection(body, heading) {
-  if (typeof body !== "string") return null;
+function extractSections(body, heading) {
+  if (typeof body !== "string") return [];
   const lines = body.split("\n");
   const headingLower = heading.toLowerCase().trim();
   let capturing = false;
   let sectionDepth = 0;
   let fence = null;
-  const out = [];
+  let out = [];
+  const sections = [];
+  const flush = () => {
+    sections.push(out.join("\n").trim());
+    out = [];
+    capturing = false;
+  };
   for (const line of lines) {
     if (fence) {
       if (new RegExp(`^[ \\t]{0,3}${fence.marker}{${fence.length},}[ \\t]*$`).test(line)) {
@@ -458,7 +463,7 @@ function extractSection(body, heading) {
     const m = line.match(/^(#{2,4})\s+(.*)/);
     if (m) {
       const depth = m[1].length;
-      if (capturing && depth <= sectionDepth) break;
+      if (capturing && depth <= sectionDepth) flush();
       if (!capturing && m[2].toLowerCase().trim() === headingLower) {
         capturing = true;
         sectionDepth = depth;
@@ -467,8 +472,16 @@ function extractSection(body, heading) {
     }
     if (capturing) out.push(line);
   }
-  if (!capturing) return null;
-  return out.join("\n").trim();
+  if (capturing) flush();
+  return sections;
+}
+
+/**
+ * Extract the first markdown section with the given heading.
+ * Returns null when the heading is absent.
+ */
+function extractSection(body, heading) {
+  return extractSections(body, heading)[0] ?? null;
 }
 
 /**
@@ -790,8 +803,9 @@ function bodyForAreaHeuristics(body) {
   if (typeof body !== "string" || !body.trim()) return "";
   const parts = [];
   for (const heading of AREA_HEURISTIC_BODY_HEADINGS) {
-    const section = extractSection(body, heading);
-    if (section) parts.push(section);
+    for (const section of extractSections(body, heading)) {
+      if (section) parts.push(section);
+    }
   }
   return parts.join("\n\n");
 }
