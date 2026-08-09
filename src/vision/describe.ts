@@ -16,6 +16,8 @@ export interface VisionSettings {
 export type DescribeOutcome = { text: string; error?: string };
 
 const ALLOWED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"]);
+const MAX_MIME_CHARS = 127;
+const MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
 /** ~20 MB — generous enough for screenshots; rejects pathological payloads before forwarding. */
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
@@ -29,6 +31,7 @@ function validateImageUrl(url: string): string | null {
   if (url.startsWith("data:")) {
     const m = /^data:([^;,]+?)(;base64)?,(.*)$/s.exec(url);
     if (!m) return "malformed data URL";
+    if (m[1].length > MAX_MIME_CHARS || !MIME_PATTERN.test(m[1])) return "invalid image media type";
     const mime = m[1].toLowerCase();
     if (!ALLOWED_IMAGE_MIME.has(mime)) return `unsupported image type "${mime}"`;
     if (m[2]) {
