@@ -329,6 +329,27 @@ describe("gatherRoutedModels single-flight", () => {
     expect(filterCatalogVisibleModels(withSelModels, withSel).map(m => m.id)).toEqual(["keep-me"]);
   });
 
+  test("malformed persisted selectedModels does not break catalog gathering", async () => {
+    const config = {
+      port: 10100,
+      defaultProvider: "p",
+      providers: {
+        p: {
+          adapter: "openai-chat",
+          baseUrl: "https://sel.example.test/v1",
+          models: ["configured-model"],
+          liveModels: false,
+          selectedModels: 42,
+        },
+      },
+    } as unknown as OcxConfig;
+
+    const models = await gatherRoutedModels(config);
+
+    expect(models.map(model => model.id)).toEqual(["configured-model"]);
+    expect(filterCatalogVisibleModels(models, config).map(model => model.id)).toEqual(["configured-model"]);
+  });
+
   test("disabledModels-only config changes do not share a flight", async () => {
     let fetchCount = 0;
     let release!: () => void;

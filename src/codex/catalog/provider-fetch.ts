@@ -482,7 +482,7 @@ function providerCatalogFingerprint(name: string, prov: OcxProviderConfig): Reco
     base: prov.baseUrl ?? "",
     adapter: prov.adapter ?? "",
     models: [...(prov.models ?? [])].sort(),
-    selected: [...(prov.selectedModels ?? [])].sort(),
+    selected: Array.isArray(prov.selectedModels) ? [...prov.selectedModels].sort() : [],
     defaultModel: prov.defaultModel ?? null,
     ctx: prov.contextWindow ?? null,
     ctxW: prov.modelContextWindows ?? null,
