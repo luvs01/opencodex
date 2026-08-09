@@ -53,14 +53,37 @@ describe("policy candidate fallback", () => {
     ]);
   });
 
+  test("leaves request body parsing to the core handler", async () => {
+    const req = request();
+    let cloneCalls = 0;
+    Object.defineProperty(req, "clone", {
+      value: () => {
+        cloneCalls += 1;
+        throw new Error("fallback wrapper must not clone the request body");
+      },
+    });
+
+    const response = await handleResponsesWithPolicyFallback(
+      req,
+      {} as OcxConfig,
+      {} as RequestLogContext,
+      {},
+      { runCore: async () => new Response(null, { status: 204 }) },
+    );
+
+    expect(response.status).toBe(204);
+    expect(cloneCalls).toBe(0);
+  });
+
   test("retries the next policy candidate and keeps distinct physical attempts", async () => {
     const trace = policyTrace();
     const logCtx = { requestedModel: "policy/daily", routeDecision: trace, attempts: [] } as unknown as RequestLogContext;
     const seenModels: string[] = [];
 
     const response = await handleResponsesWithPolicyFallback(request(), {} as OcxConfig, logCtx, {}, {
-      runCore: async (req, _config, childLog) => {
+      runCore: async (req, _config, childLog, coreOptions) => {
         const body = await req.json() as { model: string };
+        coreOptions.onRequestBodyParsed?.(body);
         seenModels.push(body.model);
         const first = seenModels.length === 1;
         seedAttempt(childLog, first ? "provider-a" : "provider-b", first ? "model-a" : "model-b");

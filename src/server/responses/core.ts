@@ -638,6 +638,8 @@ export interface HandleResponsesOptions {
   onConsumedComboFailure?: (failure: ConsumedComboFailure) => void;
   /** Caller-owned for Chat/Claude replay; omitted only at genuine Responses ingress. */
   translatorBudget?: TranslatorBudget;
+  /** Internal handoff for retry wrappers that must reuse the already-accounted request body. */
+  onRequestBodyParsed?: (body: unknown) => void;
 }
 
 
@@ -1368,6 +1370,7 @@ async function handleResponsesInner(
   } catch (err) {
     return decodeRequestErrorResponse(err, "responses");
   }
+  options.onRequestBodyParsed?.(body);
   const comboId = !options.comboAttempt ? comboIdFromRawBody(body, config) : null;
   if (comboId && Object.hasOwn(config.combos ?? {}, comboId)) {
     return handleComboResponses(req, body, comboId, config, logCtx, options);

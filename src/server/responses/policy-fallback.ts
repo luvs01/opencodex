@@ -1,6 +1,5 @@
 import { comboFailureDecision } from "../../combos/failover";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
-import { readJsonRequestBody } from "../request-decompress";
 import { finishRequestAttempt, type RequestLogContext } from "../request-log";
 import type { OcxConfig } from "../../types";
 import type { RouteCandidateTrace, RouteDecisionTraceV1 } from "../../routing/trace";
@@ -114,14 +113,14 @@ export async function handleResponsesWithPolicyFallback(
 ): Promise<Response> {
   const runCore = deps.runCore ?? handleResponsesCore;
   let rawBody: Record<string, unknown> | null = null;
-  try {
-    const parsed = await readJsonRequestBody(req.clone());
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rawBody = parsed as Record<string, unknown>;
-  } catch {
-    // Core owns the client-facing parse/decompression error.
-  }
-
-  let response = await runCore(req, config, logCtx, options);
+  const coreOptions: CoreOptions = {
+    ...options,
+    onRequestBodyParsed: body => {
+      options.onRequestBodyParsed?.(body);
+      if (body && typeof body === "object" && !Array.isArray(body)) rawBody = body as Record<string, unknown>;
+    },
+  };
+  let response = await runCore(req, config, logCtx, coreOptions);
   const initialTrace = logCtx.routeDecision;
   const initialRequestedModel = logCtx.requestedModel;
   if (!rawBody || !isPolicyDecision(initialTrace)) return response;
@@ -139,7 +138,7 @@ export async function handleResponsesWithPolicyFallback(
     finishFailedPolicyAttempt(logCtx, response.status);
     const retryRequest = requestWithCandidate(req, rawBody, next);
     try {
-      response = await runCore(retryRequest, config, logCtx, options);
+      response = await runCore(retryRequest, config, logCtx, coreOptions);
     } finally {
       logCtx.requestedModel = initialRequestedModel;
       logCtx.routeDecision = initialTrace;
