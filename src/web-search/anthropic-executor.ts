@@ -3,6 +3,7 @@ import { getValidAccessToken } from "../oauth";
 import { ANTHROPIC_OAUTH_BETA, CLAUDE_CODE_SYSTEM_INSTRUCTION } from "../oauth/anthropic";
 import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "../adapters/client-fingerprint";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
+import { readBoundedResponseBody } from "../lib/bounded-body";
 import { redactSecretString } from "../lib/redact";
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import { fetchWithResetRetry } from "../lib/upstream-retry";
@@ -13,6 +14,11 @@ import { BASE_INSTRUCTION, IMAGE_INSTRUCTION, type SidecarOutcome, type SidecarS
 const ANTHROPIC_MAX_USES = 3;
 /** Answer budget; the injected tool_result is clamped downstream, so this only bounds the sidecar turn. */
 const ANTHROPIC_MAX_TOKENS = 8192;
+/** Memory ceilings for the upstream-controlled Messages event stream. */
+const ANTHROPIC_MAX_SSE_BYTES = 4 * 1024 * 1024;
+const ANTHROPIC_MAX_FRAME_CHARS = 1024 * 1024;
+const ANTHROPIC_MAX_TEXT_CHARS = 512 * 1024;
+const ANTHROPIC_MAX_SOURCES = 64;
 
 function isRec(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -30,7 +36,7 @@ export async function parseAnthropicSidecarSSE(res: Response): Promise<SidecarOu
   const sources: WebSearchSource[] = [];
   const seen = new Set<string>();
   const pushSource = (url: unknown, title: unknown): void => {
-    if (typeof url !== "string" || url.length === 0 || seen.has(url)) return;
+    if (sources.length >= ANTHROPIC_MAX_SOURCES || typeof url !== "string" || url.length === 0 || seen.has(url)) return;
     seen.add(url);
     sources.push(typeof title === "string" && title.length > 0 ? { url, title } : { url });
   };
@@ -42,6 +48,13 @@ export async function parseAnthropicSidecarSSE(res: Response): Promise<SidecarOu
   const decoder = new TextDecoder();
   const reader = res.body.getReader();
   let buffer = "";
+  let receivedBytes = 0;
+  let limitError: string | undefined;
+
+  const exceedLimit = (message: string): void => {
+    limitError = message;
+    void reader.cancel(new DOMException(message, "QuotaExceededError")).catch(() => undefined);
+  };
 
   const handleFrame = (data: Record<string, unknown>): void => {
     const type = typeof data.type === "string" ? data.type : "";
@@ -59,7 +72,11 @@ export async function parseAnthropicSidecarSSE(res: Response): Promise<SidecarOu
     } else if (type === "content_block_delta") {
       const delta = isRec(data.delta) ? data.delta : {};
       if (delta.type === "text_delta" && typeof delta.text === "string") {
-        text += delta.text;
+        if (delta.text.length > ANTHROPIC_MAX_TEXT_CHARS - text.length) {
+          exceedLimit("anthropic sidecar answer exceeded the safe text limit");
+        } else {
+          text += delta.text;
+        }
       } else if (delta.type === "citations_delta") {
         const citation = isRec(delta.citation) ? delta.citation : {};
         if (citation.type === "web_search_result_location") pushSource(citation.url, citation.title);
@@ -69,6 +86,10 @@ export async function parseAnthropicSidecarSSE(res: Response): Promise<SidecarOu
 
   // Parse one SSE frame's `data:` payload and fold it. Shared by the streaming loop and the EOF flush.
   const processFrame = (rawFrame: string): void => {
+    if (rawFrame.length > ANTHROPIC_MAX_FRAME_CHARS) {
+      exceedLimit("anthropic sidecar SSE frame exceeded the safe size limit");
+      return;
+    }
     let dataLine = "";
     for (const line of rawFrame.split("\n")) {
       if (line.startsWith("data:")) dataLine += line.slice(line.startsWith("data: ") ? 6 : 5);
@@ -83,6 +104,11 @@ export async function parseAnthropicSidecarSSE(res: Response): Promise<SidecarOu
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      receivedBytes += value?.byteLength ?? 0;
+      if (receivedBytes > ANTHROPIC_MAX_SSE_BYTES) {
+        exceedLimit("anthropic sidecar response exceeded the safe body limit");
+        break;
+      }
       // Normalize CRLF on the ACCUMULATED buffer so a `\r\n` pair split across two network chunks
       // (chunk ends in `\r`, next starts with `\n`) still collapses to `\n` (audit round-2 F2).
       buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
@@ -91,14 +117,18 @@ export async function parseAnthropicSidecarSSE(res: Response): Promise<SidecarOu
         const rawFrame = buffer.slice(0, sep);
         buffer = buffer.slice(sep + 2);
         processFrame(rawFrame);
+        if (limitError) break;
       }
+      if (limitError) break;
     }
     // Flush the decoder and process any final unterminated frame (a stream that ends without \n\n).
     buffer = (buffer + decoder.decode()).replace(/\r\n/g, "\n");
-    if (buffer.trim().length > 0) processFrame(buffer);
+    if (!limitError && buffer.trim().length > 0) processFrame(buffer);
   } catch {
     /* mid-stream abort/decode failure: fall through with whatever text/sources were gathered */
   }
+
+  if (limitError) return { text: "", sources: [], error: limitError };
 
   const trimmed = text.trim();
   if (trimmed.length === 0) {
@@ -167,10 +197,11 @@ export async function runAnthropicWebSearch(
       { abortSignal: linkedSignal.signal, label: "web-search-sidecar-anthropic" },
     );
     if (!res.ok) {
-      const t = await res.text().catch(() => "");
+      const body = await readBoundedResponseBody(res, { signal: linkedSignal.signal }).catch(() => undefined);
       console.warn(`[web-search] anthropic sidecar HTTP ${res.status} for query "${query.slice(0, 80)}" (${Date.now() - t0}ms)`);
       // Redact before surfacing: the body can echo auth headers/tokens (#398 review).
-      return { text: "", sources: [], error: `sidecar HTTP ${res.status}: ${redactSecretString(t.slice(0, 200))}` };
+      const detail = body?.displaySafe ? redactSecretString(body.text.slice(0, 200)) : "response body unavailable";
+      return { text: "", sources: [], error: `sidecar HTTP ${res.status}: ${detail}` };
     }
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     try {

@@ -161,6 +161,52 @@ describe("parseAnthropicSidecarSSE", () => {
     expect(out.text).toBe("Chunked CRLF answer.");
     expect(out.sources).toEqual([{ url: "https://split.example", title: "Split" }]);
   });
+
+  test("rejects an oversized SSE response instead of retaining it", async () => {
+    const oversized = new Uint8Array(4 * 1024 * 1024 + 1);
+    oversized.fill(97);
+    const res = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(oversized);
+        controller.close();
+      },
+    }));
+
+    const out = await parseAnthropicSidecarSSE(res);
+    expect(out).toEqual({ text: "", sources: [], error: "anthropic sidecar response exceeded the safe body limit" });
+  });
+
+  test("rejects an oversized unterminated frame within the total response budget", async () => {
+    const res = new Response(`data: ${"a".repeat(1024 * 1024)}`);
+
+    const out = await parseAnthropicSidecarSSE(res);
+    expect(out).toEqual({ text: "", sources: [], error: "anthropic sidecar SSE frame exceeded the safe size limit" });
+  });
+
+  test("rejects answer deltas that exceed the retained text budget", async () => {
+    const res = sseResponse([
+      { type: "content_block_delta", delta: { type: "text_delta", text: "a".repeat(512 * 1024 + 1) } },
+    ]);
+
+    const out = await parseAnthropicSidecarSSE(res);
+    expect(out).toEqual({ text: "", sources: [], error: "anthropic sidecar answer exceeded the safe text limit" });
+  });
+
+  test("caps sources retained from upstream search results", async () => {
+    const content = Array.from({ length: 100 }, (_, i) => ({
+      type: "web_search_result",
+      url: `https://example.com/${i}`,
+      title: `Result ${i}`,
+    }));
+    const res = sseResponse([
+      { type: "content_block_start", content_block: { type: "web_search_tool_result", content } },
+      { type: "content_block_delta", delta: { type: "text_delta", text: "Bounded answer." } },
+    ]);
+
+    const out = await parseAnthropicSidecarSSE(res);
+    expect(out.text).toBe("Bounded answer.");
+    expect(out.sources).toHaveLength(64);
+  });
 });
 
 describe("runAnthropicWebSearch request shape", () => {
@@ -205,5 +251,27 @@ describe("runAnthropicWebSearch request shape", () => {
     expect(system[0]).toEqual({ type: "text", text: CLAUDE_CODE_SYSTEM_INSTRUCTION });
     const tools = c.body.tools as { type: string; name: string; max_uses: number }[];
     expect(tools[0]).toEqual({ type: "web_search_20250305", name: "web_search", max_uses: 3 });
+  });
+
+  test("bounds non-success response bodies before reporting the upstream error", async () => {
+    let cancelled = false;
+    globalThis.fetch = (async () => new Response(new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(65_537));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }), { status: 503 })) as unknown as typeof fetch;
+
+    const out = await runAnthropicWebSearch(
+      "latest bun release",
+      "anthropic",
+      anthropicProvider,
+      { model: "claude-sonnet-5", reasoning: "low", timeoutMs: 5000, describeImages: false },
+    );
+
+    expect(cancelled).toBeTrue();
+    expect(out.error).toBe("sidecar HTTP 503: response body unavailable");
   });
 });
