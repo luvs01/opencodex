@@ -3,7 +3,7 @@ import type { AdapterEvent, OcxProviderConfig } from "../types";
 import type { ProviderAdapter } from "./base";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { cursorExecDeniedMessage, cursorRequestDeclaresFullAccess } from "./cursor/exec-policy";
-import { isCursorBenignCancelError, isCursorInvalidArgumentError, safeCursorErrorMessage } from "./cursor/cursor-errors";
+import { isCursorBenignCancelError, isCursorInvalidArgumentError } from "./cursor/cursor-errors";
 import { isCursorExternalWireModel } from "./cursor/discovery";
 import { createCursorKvStore, type CursorKvStore } from "./cursor/kv-store";
 import { mapCursorServerMessage } from "./cursor/message-mapper";
@@ -47,8 +47,6 @@ function safeCursorTransportError(err: unknown): string {
   if (err instanceof CursorMissingCredentialError) {
     return "Cursor live transport is enabled, but no Cursor access token is configured. Set provider.apiKey or OPENCODEX_CURSOR_TEST_TOKEN.";
   }
-  const message = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
-  if (message) return safeCursorErrorMessage(message);
   return "Cursor upstream error: transport failed before completion.";
 }
 
