@@ -141,4 +141,39 @@ describe("Codex shim install readiness", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("keeps install advisory when the Codex config cannot be read", () => {
+    if (process.platform === "win32") return;
+
+    const root = mkdtempSync(join(tmpdir(), "ocx-shim-unreadable-config-"));
+    const codexHome = join(root, "codex-home");
+    const opencodexHome = join(root, "opencodex-home");
+    const binDir = join(root, "bin");
+    mkdirSync(codexHome);
+    mkdirSync(opencodexHome);
+    mkdirSync(binDir);
+    try {
+      mkdirSync(join(codexHome, "config.toml"));
+      const codex = join(binDir, "codex");
+      writeFileSync(codex, "#!/bin/sh\nexit 0\n", "utf8");
+      chmodSync(codex, 0o755);
+
+      const result = spawnSync(process.execPath, [cliPath, "codex-shim", "install"], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          OPENCODEX_HOME: opencodexHome,
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        },
+        encoding: "utf8",
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toStartWith("⚠️  Codex autostart shim installed");
+      expect(result.stderr).toContain("Codex routing could not be verified");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
