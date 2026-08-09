@@ -7,7 +7,7 @@ import {
   resolvePublicAddresses,
 } from "./destination-policy";
 import { pinnedHttpGet } from "./pinned-http";
-import { outboundProxyConfigured } from "./proxy-env";
+import { proxyEnvPresent } from "./proxy-env";
 import { publicProviderBaseUrl } from "./provider-url";
 
 type ProviderGetInit = Omit<RequestInit, "body" | "method" | "redirect">;
@@ -25,10 +25,6 @@ export class ProviderOutboundPolicyError extends Error {
 
 function pickPinnedAddress(addresses: Array<{ address: string; family: number }>): { address: string; family: number } {
   return addresses.find(address => address.family === 4) ?? addresses[0]!;
-}
-
-function configuredProxyFor(): boolean {
-  return outboundProxyConfigured();
 }
 
 function normalizeProxyHostname(hostname: string): string {
@@ -68,6 +64,12 @@ function noProxyMatches(url: URL): boolean {
     if (hostname === entryHost || hostname.endsWith(`.${entryHost}`)) return true;
   }
   return false;
+}
+
+function configuredProxyFor(url: URL): boolean {
+  if (noProxyMatches(url)) return false;
+  const protocolProxy = url.protocol === "https:" ? "HTTPS_PROXY" : "HTTP_PROXY";
+  return proxyEnvPresent(protocolProxy) || proxyEnvPresent("ALL_PROXY");
 }
 
 let proxyBoundaryWarned = false;
@@ -131,7 +133,7 @@ export async function providerOutboundGet(
     return provider.fetch(url, { ...init, method: "GET", redirect: "manual" });
   }
   const parsed = new URL(url);
-  const proxyConfigured = configuredProxyFor();
+  const proxyConfigured = configuredProxyFor(parsed);
   const resolveAddresses = dependencies.resolveAddresses ?? resolvePublicAddresses;
   const pinnedGet = dependencies.pinnedGet ?? pinnedHttpGet;
   const allowPrivate = providerAllowsPrivateNetwork(name, provider);
