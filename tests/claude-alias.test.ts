@@ -68,14 +68,17 @@ describe("claude discovery aliases", () => {
     );
   });
 
-  test("literal '~' mints v2 (~t); v1 bare '~' and literal ~s/~t still resolve", () => {
+  test("literal '~' mints v2 (~t); v1 bare '~' aliases remain legacy slash escapes", () => {
     expect(aliasForRoute("demo", "old~model")).toBe(`${CLAUDE_ALIAS_PREFIX_V2}demo--old~tmodel`);
     expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V2}demo--old~tmodel`)).toBe("demo/old~model");
-    // Pre-escape v1 aliases kept literal tildes in the model portion.
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~model`)).toBe("demo/old~model");
-    // v1 literal ~s / ~t are preserved (the versioned-prefix compatibility fix).
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~smodel`)).toBe("demo/old~smodel");
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~tmodel`)).toBe("demo/old~tmodel");
+    // The original v1 encoder rejected literal tildes and encoded every slash
+    // as bare `~`, including when the next model-id character was s or t.
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~model`)).toBe("demo/old/model");
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~smodel`)).toBe("demo/old/smodel");
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~tmodel`)).toBe("demo/old/tmodel");
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}openrouter--anthropic~claude-opus-4-8`)).toBe(
+      "openrouter/anthropic/claude-opus-4-8",
+    );
   });
 
   test("v2 reserved escapes round-trip / and ~ without colliding with v1 literals", () => {
@@ -86,9 +89,9 @@ describe("claude discovery aliases", () => {
     expect(aliasForRoute("demo", "a~/b")).toBe(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~t~sb`);
     expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~t~sb`)).toBe("demo/a~/b");
 
-    // Same wire bytes under v1 stay literal — no silent remap to slash/tilde.
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~sb`)).toBe("demo/a~sb");
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~tb`)).toBe("demo/a~tb");
+    // Under v1, the bare tilde is the legacy slash escape and s/t are data.
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~sb`)).toBe("demo/a/sb");
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~tb`)).toBe("demo/a/tb");
   });
 
   test("resolveAlias rejects non-aliases and malformed ids", () => {

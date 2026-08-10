@@ -8,9 +8,9 @@
  * persist to Claude Code's settings.json `model` field).
  *
  * Versioned prefixes:
- *  - `claude-ocx-` (v1) — legacy / plain model ids with no `/` or `~`. Decode
- *    is literal (no escape expansion), so a persisted model id that literally
- *    contained the two-char sequences `~s` / `~t` keeps resolving.
+ *  - `claude-ocx-` (v1) — legacy aliases encoded `/` as bare `~`. Decode maps
+ *    every `~` back to `/` so aliases persisted by that encoder keep routing.
+ *    New plain model ids use this prefix only when they contain neither byte.
  *  - `claude-ocx2-` (v2) — used whenever the model id needs escape encoding
  *    (`/` → `~s`, `~` → `~t`). Decode expands those escapes. New slash/tilde
  *    models always mint v2 so they cannot collide with v1 literals.
@@ -27,7 +27,7 @@
 
 import { desktop3pAlias } from "./desktop-3p";
 
-/** Legacy / plain readable prefix (literal model portion on decode). */
+/** Legacy / plain readable prefix (bare `~` decodes to `/`). */
 export const CLAUDE_ALIAS_PREFIX_V1 = "claude-ocx-";
 /** Escape-encoded readable prefix (`~s`/`~t` expanded on decode). */
 export const CLAUDE_ALIAS_PREFIX_V2 = "claude-ocx2-";
@@ -121,9 +121,11 @@ export function resolveAlias(id: string): string | null {
   if (id.startsWith(CLAUDE_ALIAS_PREFIX_V1)) {
     const parts = splitAlias(id, CLAUDE_ALIAS_PREFIX_V1);
     if (!parts) return null;
-    // Literal decode — preserves pre-escape aliases whose model id contained
-    // the two-char sequences ~s / ~t.
-    return parts.provider === NATIVE_PSEUDO_PROVIDER ? parts.model : `${parts.provider}/${parts.model}`;
+    // The original v1 encoder rejected literal tildes and used every bare `~`
+    // as the stand-in for `/`. Do not interpret ~s/~t as v2 escapes here: the
+    // following character belongs to the legacy model id.
+    const model = parts.model.replaceAll("~", "/");
+    return parts.provider === NATIVE_PSEUDO_PROVIDER ? model : `${parts.provider}/${model}`;
   }
   return null;
 }
