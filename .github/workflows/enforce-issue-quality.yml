@@ -786,6 +786,7 @@ jobs:
               validateIssue,
               shouldReopen,
               shouldEnforceClosure,
+              isCanonicalIssueQualityComment,
               labelForKind,
               detectAreaLabels,
               AREA_LABELS,
@@ -890,9 +891,7 @@ jobs:
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number, per_page: 100,
             });
-            const botComment = comments.find(
-              (c) => c.user?.login === "github-actions[bot]" && c.body?.includes(BOT_MARKER),
-            );
+            const botComment = comments.find(isCanonicalIssueQualityComment);
 
             let botState = null;
             if (botComment) {

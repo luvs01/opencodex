@@ -16,6 +16,18 @@ const REPRODUCTION_ALIASES = [
   "Stack trace",
 ];
 
+const ISSUE_QUALITY_MARKER = "<!-- opencodex-issue-quality-bot -->";
+const ISSUE_QUALITY_STATE_PREFIX = "<!-- opencodex-issue-quality-state:";
+
+function isCanonicalIssueQualityComment(comment) {
+  return (
+    comment?.user?.login === "github-actions[bot]" &&
+    String(comment.body || "").startsWith(
+      `${ISSUE_QUALITY_MARKER}\n${ISSUE_QUALITY_STATE_PREFIX}`,
+    )
+  );
+}
+
 function extractEnvironmentField(environment, names) {
   if (environment == null) return null;
   const wanted = new Set(names.map((name) => name.toLowerCase()));
@@ -92,4 +104,5 @@ module.exports = {
   detectIssueKind,
   validateIssue,
   normalizeEquivalentBugEvidence,
+  isCanonicalIssueQualityComment,
 };

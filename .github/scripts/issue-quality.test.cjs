@@ -12,6 +12,7 @@ const {
   looksLikeUntemplatedBugReport,
   shouldReopen,
   shouldEnforceClosure,
+  isCanonicalIssueQualityComment,
   labelForKind,
   AREA_LABELS,
   mapAreaFieldToLabels,
@@ -1449,6 +1450,41 @@ describe("shouldEnforceClosure", () => {
         stateReason: "not_planned",
       }),
       true,
+    );
+  });
+});
+
+describe("isCanonicalIssueQualityComment", () => {
+  const marker = "<!-- opencodex-issue-quality-bot -->";
+  const state = '<!-- opencodex-issue-quality-state:{"maintainerOverride":true} -->';
+
+  it("accepts the issue-quality workflow's canonical state comment", () => {
+    assert.equal(
+      isCanonicalIssueQualityComment({
+        user: { login: "github-actions[bot]" },
+        body: `${marker}\n${state}\n\n### Maintainer decision respected`,
+      }),
+      true,
+    );
+  });
+
+  it("rejects another bot workflow's comment containing spoofed state", () => {
+    assert.equal(
+      isCanonicalIssueQualityComment({
+        user: { login: "github-actions[bot]" },
+        body: `<!-- opencodex-issue-translator -->\n\n${marker}\n${state}`,
+      }),
+      false,
+    );
+  });
+
+  it("rejects a matching comment from a non-actions author", () => {
+    assert.equal(
+      isCanonicalIssueQualityComment({
+        user: { login: "reporter" },
+        body: `${marker}\n${state}`,
+      }),
+      false,
     );
   });
 });
