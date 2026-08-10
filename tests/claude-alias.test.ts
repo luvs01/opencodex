@@ -68,17 +68,18 @@ describe("claude discovery aliases", () => {
     );
   });
 
-  test("literal '~' mints v2 (~t); v1 bare '~' and literal ~s/~t still resolve", () => {
+  test("literal '~' mints v2 while v1 keeps decoding historical escapes", () => {
     expect(aliasForRoute("demo", "old~model")).toBe(`${CLAUDE_ALIAS_PREFIX_V2}demo--old~tmodel`);
     expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V2}demo--old~tmodel`)).toBe("demo/old~model");
     // Pre-escape v1 aliases kept literal tildes in the model portion.
     expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~model`)).toBe("demo/old~model");
-    // v1 literal ~s / ~t are preserved (the versioned-prefix compatibility fix).
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~smodel`)).toBe("demo/old~smodel");
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~tmodel`)).toBe("demo/old~tmodel");
+    // Older releases minted escaped aliases under v1; persisted selections
+    // must keep resolving after new aliases move to v2.
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~smodel`)).toBe("demo/old/model");
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--old~tmodel`)).toBe("demo/old~model");
   });
 
-  test("v2 reserved escapes round-trip / and ~ without colliding with v1 literals", () => {
+  test("v2 reserved escapes round-trip while v1 remains backward-compatible", () => {
     expect(aliasForRoute("demo", "a/b")).toBe(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~sb`);
     expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~sb`)).toBe("demo/a/b");
     expect(aliasForRoute("demo", "a~b")).toBe(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~tb`);
@@ -86,9 +87,10 @@ describe("claude discovery aliases", () => {
     expect(aliasForRoute("demo", "a~/b")).toBe(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~t~sb`);
     expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V2}demo--a~t~sb`)).toBe("demo/a~/b");
 
-    // Same wire bytes under v1 stay literal — no silent remap to slash/tilde.
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~sb`)).toBe("demo/a~sb");
-    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~tb`)).toBe("demo/a~tb");
+    // The same wire bytes under v1 remain compatibility inputs for aliases
+    // minted before the v2 prefix was introduced.
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~sb`)).toBe("demo/a/b");
+    expect(resolveAlias(`${CLAUDE_ALIAS_PREFIX_V1}demo--a~tb`)).toBe("demo/a~b");
   });
 
   test("resolveAlias rejects non-aliases and malformed ids", () => {

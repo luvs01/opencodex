@@ -92,7 +92,7 @@ user-agent 会获得易读的 CLI 形式，其他客户端会获得 Desktop 哈�
 不含 `/` 或 `~` 的普通 model ID 继续使用 v1 前缀 `claude-ocx-…`。包含 `/` 或 `~` 的 model ID
 会使用 v2 前缀 `claude-ocx2-…` 并转义（`/` → `~s`，`~` → `~t`），例如
 `openrouter/anthropic/claude-opus-4-8` → `claude-ocx2-openrouter--anthropic~sclaude-opus-4-8`。
-v1 别名按字面解码（历史上 model ID 中包含的两字符序列 `~s` / `~t` 会被保留）；v2 别名会展开转义。
+v1 和 v2 别名都会展开这些转义；保留 v1 解码是为了兼容在引入 v2 前已写入设置的别名。
 易读形式无法表达的路由会回退到哈希别名。模型 ID **可以**包含 `--`（解析时只按第一个 `--` 分割）；
 含 `--` 的原生 slug 会回退到哈希形式。
 

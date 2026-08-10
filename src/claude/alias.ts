@@ -8,9 +8,9 @@
  * persist to Claude Code's settings.json `model` field).
  *
  * Versioned prefixes:
- *  - `claude-ocx-` (v1) — legacy / plain model ids with no `/` or `~`. Decode
- *    is literal (no escape expansion), so a persisted model id that literally
- *    contained the two-char sequences `~s` / `~t` keeps resolving.
+ *  - `claude-ocx-` (v1) — legacy / plain model ids. Decode still expands the
+ *    historical `~s` / `~t` escapes so aliases minted by older releases remain
+ *    stable.
  *  - `claude-ocx2-` (v2) — used whenever the model id needs escape encoding
  *    (`/` → `~s`, `~` → `~t`). Decode expands those escapes. New slash/tilde
  *    models always mint v2 so they cannot collide with v1 literals.
@@ -121,9 +121,11 @@ export function resolveAlias(id: string): string | null {
   if (id.startsWith(CLAUDE_ALIAS_PREFIX_V1)) {
     const parts = splitAlias(id, CLAUDE_ALIAS_PREFIX_V1);
     if (!parts) return null;
-    // Literal decode — preserves pre-escape aliases whose model id contained
-    // the two-char sequences ~s / ~t.
-    return parts.provider === NATIVE_PSEUDO_PROVIDER ? parts.model : `${parts.provider}/${parts.model}`;
+    // Older releases minted escaped model ids under v1. Keep expanding those
+    // escapes so persisted picker selections continue to resolve identically.
+    const model = decodeEscapedModelId(parts.model);
+    if (!model) return null;
+    return parts.provider === NATIVE_PSEUDO_PROVIDER ? model : `${parts.provider}/${model}`;
   }
   return null;
 }
