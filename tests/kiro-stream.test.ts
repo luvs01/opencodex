@@ -1751,6 +1751,24 @@ describe("kiro adapter — parseResponse (web-search sidecar non-streaming path)
     expect(start).toMatchObject({ id: "t1", name: "bash" });
   });
 
+  test("bounds events while collecting a non-streaming response", async () => {
+    const budget = createTranslatorBudget({ maxTurnBytes: 500 });
+    try {
+      const adapter = createKiroAdapterProduction(provider);
+      const response = new Response(streamOf(
+        eventFrame({ content: "a".repeat(80) }),
+        eventFrame({ content: "b".repeat(80) }),
+      ));
+
+      await expect(adapter.parseResponse!(response, budget)).rejects.toMatchObject({
+        code: "translation_buffer_limit",
+      });
+      expect(budget.snapshot().currentBytes).toBe(0);
+    } finally {
+      budget.dispose();
+    }
+  });
+
   // The parity test above never calls buildRequest(), so the contextInputEstimate closure that
   // buildRequest() installs is never activated on the non-streaming path. Build a long-history
   // request first, then assert the terminal usage carries the absolute checkpoint rather than only

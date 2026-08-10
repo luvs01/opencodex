@@ -19,6 +19,8 @@ import { createKiroToolNameRegistry, fallbackToolUseId, fingerprint, invocationI
 import { namespacedToolName } from "../types";
 import {
   isTranslatorBudgetExceededError,
+  releaseTranslatedEvent,
+  retainTranslatedEvent,
   type TranslatorBudget,
 } from "../lib/translator-budget";
 import type {
@@ -1906,19 +1908,27 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     // tool failed with "web-search sidecar requires a non-streaming adapter" (kiro-only).
     async parseResponse(response: Response, budget: TranslatorBudget): Promise<AdapterEvent[]> {
       const events: AdapterEvent[] = [];
-      for await (const e of parseKiroStream(
-        response,
-        budget,
-        modelId,
-        inputTokens,
-        contextWindow,
-        toolNameMap,
-        conversationId,
-        completionMode,
-        completionMode === "required" ? fallbackFactory : undefined,
-        contextInputEstimate,
-      )) events.push(e);
-      return events;
+      try {
+        for await (const e of parseKiroStream(
+          response,
+          budget,
+          modelId,
+          inputTokens,
+          contextWindow,
+          toolNameMap,
+          conversationId,
+          completionMode,
+          completionMode === "required" ? fallbackFactory : undefined,
+          contextInputEstimate,
+        )) {
+          retainTranslatedEvent(e, budget, events.length === 0);
+          events.push(e);
+        }
+        return events;
+      } catch (error) {
+        for (const event of events) releaseTranslatedEvent(event, budget);
+        throw error;
+      }
     },
   };
 }
