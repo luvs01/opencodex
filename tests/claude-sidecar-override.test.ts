@@ -124,3 +124,17 @@ test("unset Claude overrides inherit the global sidecar backend and model", () =
     settings: { model: "global-vision" },
   });
 });
+
+test("unset OpenAI vision model uses the operator-visible default", () => {
+  const config: OcxConfig = {
+    port: 10100,
+    defaultProvider: "routed",
+    providers: { routed, forward },
+    visionSidecar: { backend: "openai" },
+  };
+
+  expect(planVisionSidecar(config, routed, "text-model", request, openAiSidecar)).toMatchObject({
+    backend: "openai",
+    settings: { model: "gpt-5.6-luna" },
+  });
+});
