@@ -5,7 +5,7 @@
  */
 
 export type SidecarBackend = "openai" | "anthropic";
-export interface SidecarOverride { backend?: SidecarBackend; model?: string }
+export interface SidecarOverride { backend?: SidecarBackend | null; model?: string }
 
 export interface ClaudeManualEnvState {
   /**

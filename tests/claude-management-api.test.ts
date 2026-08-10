@@ -329,17 +329,17 @@ test("Claude sidecar overrides round-trip, partially update, clear, and reject u
     expect(loadConfig().claudeCode?.webSearchSidecar).toEqual({ backend: "anthropic", model: "claude-search-2" });
     expect(loadConfig().claudeCode?.visionSidecar).toEqual({ backend: "openai", model: "gpt-vision" });
 
-    // null backend is the explicit Auto/inherit transition; empty model deletes only model.
+    // null backend is explicit Auto; empty model deletes only model.
     response = await put({
       webSearchSidecar: { backend: null },
       visionSidecar: { backend: null, model: "" },
     });
     expect(response.status).toBe(200);
-    expect(loadConfig().claudeCode?.webSearchSidecar).toEqual({ model: "claude-search-2" });
-    expect(loadConfig().claudeCode?.visionSidecar).toBeUndefined();
+    expect(loadConfig().claudeCode?.webSearchSidecar).toEqual({ backend: null, model: "claude-search-2" });
+    expect(loadConfig().claudeCode?.visionSidecar).toEqual({ backend: null });
     get = await fetch(new URL("/api/claude-code", server.url)).then(r => r.json()) as Record<string, unknown>;
-    expect(get.webSearchSidecar).toEqual({ model: "claude-search-2" });
-    expect(get.visionSidecar).toBeUndefined();
+    expect(get.webSearchSidecar).toEqual({ backend: null, model: "claude-search-2" });
+    expect(get.visionSidecar).toEqual({ backend: null });
 
     // null and empty sections both clear the whole override.
     response = await put({ webSearchSidecar: null, visionSidecar: {} });

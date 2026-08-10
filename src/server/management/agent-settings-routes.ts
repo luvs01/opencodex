@@ -1021,8 +1021,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
       const requested = section as { backend?: "openai" | "anthropic" | null; model?: string };
       const override: NonNullable<OcxClaudeCodeConfig[typeof field]> = { ...next[field] };
-      if (requested.backend === null) delete override.backend;
-      else if (requested.backend !== undefined) override.backend = requested.backend;
+      if (requested.backend !== undefined) override.backend = requested.backend;
       if (requested.model === "") delete override.model;
       else if (requested.model !== undefined) override.model = requested.model;
       if (Object.keys(override).length > 0) next[field] = override;
