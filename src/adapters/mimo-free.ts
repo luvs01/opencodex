@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
+import { fetchWithAttemptDeadline } from "../lib/upstream-retry";
 import type { OcxProviderConfig, OcxParsedRequest } from "../types";
 import { createOpenAIChatAdapter } from "./openai-chat";
 import type { ProviderAdapter, AdapterRequest, IncomingMeta } from "./base";
@@ -203,7 +204,7 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
     name: "mimo-free",
 
     async buildRequest(parsed: OcxParsedRequest, incoming: IncomingMeta): Promise<AdapterRequest> {
-      const jwt = await getMimoJwt();
+      const jwt = await getMimoJwt(incoming.abortSignal);
 
       // Let the base adapter build the wire body (handles reasoning, tools, etc.)
       // but override the URL and headers after.
@@ -230,12 +231,12 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
     },
 
     async fetchResponse(request: AdapterRequest, ctx): Promise<Response> {
-      const response = await fetch(request.url, {
+      const fetchAttempt = (headers: Record<string, string>) => fetchWithAttemptDeadline(request.url, {
         method: request.method,
-        headers: request.headers as Record<string, string>,
+        headers,
         body: request.body,
-        signal: ctx?.abortSignal,
-      });
+      }, ctx?.timeoutMs ?? 200_000, ctx?.abortSignal, ctx?.stream);
+      const response = await fetchAttempt(request.headers as Record<string, string>);
 
       // Retry predicate: 401 (expired/invalid JWT) retries ONCE with a fresh token.
       // 403 is NOT retried — Xiaomi uses it for anti-abuse "Illegal access" and there is
@@ -249,12 +250,7 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
           ...(request.headers as Record<string, string>),
           "Authorization": `Bearer ${freshJwt}`,
         };
-        return fetch(request.url, {
-          method: request.method,
-          headers: retryHeaders,
-          body: request.body,
-          signal: ctx?.abortSignal,
-        });
+        return fetchAttempt(retryHeaders);
       }
 
       return response;

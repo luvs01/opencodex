@@ -2658,7 +2658,11 @@ async function handleResponsesInner(
   let initialRequest: AdapterRequest | undefined;
   let inputTokenEstimate: number | undefined;
   try {
-    initialRequest = await activeAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    initialRequest = await activeAdapter.buildRequest(parsed, {
+      headers: selectedForwardHeaders,
+      translatorBudget,
+      abortSignal: upstream.signal,
+    });
     recordAdapterReasoning(logCtx, initialRequest);
     inputTokenEstimate = typeof initialRequest.usageLog?.inputTokens === "number"
       ? initialRequest.usageLog.inputTokens
@@ -2756,6 +2760,7 @@ async function handleResponsesInner(
           retryRequest = await activeAdapter.buildRequest(parsed, {
             headers: selectedForwardHeaders,
             translatorBudget,
+            abortSignal: upstream.signal,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
           });
           recordAdapterReasoning(logCtx, retryRequest);

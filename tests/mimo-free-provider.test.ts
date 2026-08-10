@@ -268,7 +268,7 @@ describe("mimo-free auth retry predicate", () => {
         calls.push("bootstrap");
         return new Response(JSON.stringify({ jwt: fakeJwt }), { status: 200 });
       }
-      calls.push(`chat:${(init?.headers as Record<string, string>)?.["Authorization"] ?? "none"}`);
+      calls.push(`chat:${new Headers(init?.headers).get("Authorization") ?? "none"}`);
       if (calls.filter(c => c.startsWith("chat:")).length === 1) {
         return new Response("expired", { status: 401 });
       }
@@ -308,6 +308,43 @@ describe("mimo-free auth retry predicate", () => {
       resetMimoJwtCache();
     }
   });
+
+  test("chat fetch honors the adapter header timeout", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      })) as unknown as typeof fetch;
+    try {
+      const adapter = adapterForRetry();
+      await expect(adapter.fetchResponse!(
+        { url: MIMO_CHAT_URL, method: "POST", headers: {}, body: "{}" },
+        { timeoutMs: 10 },
+      )).rejects.toThrow();
+      const signal = (globalThis.fetch as ReturnType<typeof mock>).mock.calls[0]?.[1]?.signal;
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("chat fetch propagates caller cancellation", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.signal?.aborted) throw init.signal.reason;
+      return new Response("unexpected", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const adapter = adapterForRetry();
+      await expect(adapter.fetchResponse!(
+        { url: MIMO_CHAT_URL, method: "POST", headers: {}, body: "{}" },
+        { abortSignal: AbortSignal.abort() },
+      )).rejects.toThrow();
+      expect((globalThis.fetch as ReturnType<typeof mock>).mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("mimo-free adapter request building", () => {
@@ -324,7 +361,7 @@ describe("mimo-free adapter request building", () => {
       const adapter = createMimoFreeAdapter(provider);
       const parsed = minimalRequest();
       parsed.options.reasoning = "high";
-      const req = await adapter.buildRequest(parsed);
+      const req = await adapter.buildRequest(parsed, { headers: new Headers(), translatorBudget: {} as never });
       const headers = req.headers as Record<string, string>;
 
       expect(req.url).toBe(MIMO_CHAT_URL);
@@ -340,6 +377,27 @@ describe("mimo-free adapter request building", () => {
         wireField: "reasoning_effort",
         wireValue: "high",
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+      resetMimoJwtCache();
+    }
+  });
+
+  test("buildRequest propagates caller cancellation to JWT bootstrap", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.signal?.aborted) throw init.signal.reason;
+      return new Response(JSON.stringify({ jwt: "unused" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const provider: OcxProviderConfig = providerConfigSeed(PROVIDER_REGISTRY.find(e => e.id === "mimo-free")!);
+      const adapter = createMimoFreeAdapter(provider);
+      await expect(adapter.buildRequest(minimalRequest(), {
+        headers: new Headers(),
+        translatorBudget: {} as never,
+        abortSignal: AbortSignal.abort(),
+      })).rejects.toThrow();
+      expect((globalThis.fetch as ReturnType<typeof mock>).mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
     } finally {
       globalThis.fetch = originalFetch;
       resetMimoJwtCache();
