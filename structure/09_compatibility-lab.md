@@ -50,8 +50,9 @@ host-shaped, so `ETIMEDOUT request after 30 seconds` is untouched.
 
 **Weak** markers (`upstream`, `connect to`) read as English at least as often as
 they name a host, so they redact only a candidate that is already host-shaped
-and is not a plain dotted namespace. `upstream provider.metric.p95 exceeded` and
-`Unable to connect to your account` both survive.
+and is not a plain dotted namespace. For `connect to`, an immediately following
+network failure term also makes a bare target unambiguous, so `connect to
+gateway failed` is redacted while `Unable to connect to your account` survives.
 
 ### Known limits
 
@@ -59,7 +60,6 @@ Recorded rather than implied, so a reader knows what is not covered:
 
 | Form | Behavior |
 |------|----------|
-| Bare service name after natural-language `connect to` with no port at all (`connect to gateway failed`) | not redacted — the phrase is prose too often to trust. A port in either notation (`gateway:443`, `gateway on port 443`) does make it a host |
 | Bare `db.prod-1` outside any network context | not redacted — indistinguishable from a metric namespace |
 | Standalone UUID, standalone `user_…`, bare-label value (`org: engineering`) | not redacted — indistinguishable from request, trace, and correlation ids |
 | Phone numbers, generic high-entropy blobs | not redacted — no non-destructive pattern |

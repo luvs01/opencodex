@@ -158,6 +158,8 @@ const HOSTNAME_RE = /(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}(
 // Markers differ in confidence, and treating them alike cost accuracy both
 // ways. STRONG markers are resolver/socket errors and `host=`: whatever
 // follows is a host by construction, so a bare `redis` or `localhost` counts.
+// `connect to` additionally requires a host-shaped value, port, or an immediate
+// network-failure term before a bare destination is accepted.
 // WEAK markers appear in ordinary prose (`upstream provider.metric.p95
 // exceeded`), so they only redact a candidate that is already host-shaped.
 const STRONG_HOST_CONTEXT_RE =
@@ -511,8 +513,17 @@ function scrubString(value: string): string {
     if (ported?.[1] && !PROSE_AFTER_MARKER.has(ported[1].toLowerCase())) {
       return m.replace(ported[1], "[host]");
     }
+    // A failure immediately following an unported connect-to target supplies
+    // the missing network context without making ordinary connective prose
+    // (`connect to your account`) host-bearing.
+    const failedConnectTarget = /\bconnect(?:ing)?\s+to\b/i.test(m)
+      ? tail.match(/^([A-Za-z][A-Za-z0-9]{0,254})\s+(?:failed|refused|unreachable|reset|timed\s+out)\b/i)
+      : null;
+    if (failedConnectTarget?.[1]) {
+      return m.replace(failedConnectTarget[1], "[host]");
+    }
     // Otherwise only a resolver marker licenses a bare name. Natural-language
-    // `connect to` does not: `Unable to connect to your account` is prose.
+    // `connect to` alone does not: `Unable to connect to your account` is prose.
     const resolver = /ENOTFOUND|EAI_AGAIN|lookup|host/i.test(m);
     for (const token of tail.split(/[\s:]+/)) {
       if (token && isHostCandidate(token, resolver)) return m.replace(token, "[host]");
