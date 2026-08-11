@@ -1138,6 +1138,39 @@ describe("CL-02 phase-2 review regressions", () => {
     });
   });
 
+  test.each(["scratch", "export"] as const)(
+    "%s purge refuses a symbolic-link directory root",
+    (action) => {
+      withHome((home) => {
+        const authority = loadCaseAuthority();
+        const caseRecord = discoverScenarios(authority, ["responses-core"])[0]!;
+        const { event } = persistConformanceResult(
+          syntheticPassResult(caseRecord),
+          caseRecord,
+          authority,
+          { configDir: home, recordedAt: 1000 },
+        );
+        const outside = join(home, `outside-${action}`);
+        const labDir = join(home, "lab", action);
+        mkdirSync(outside);
+        writeFileSync(join(outside, "keep.txt"), "keep");
+        rmSync(labDir, { recursive: true });
+        symlinkSync(outside, labDir, process.platform === "win32" ? "junction" : "dir");
+
+        expect(() =>
+          purgeSensitiveEvidence({
+            configDir: home,
+            targetEventIds: [event.eventId],
+            targetArtifactDigests: [],
+            purgeActions: [action],
+            recordedAt: 5000,
+          }),
+        ).toThrow(/must be a real directory/);
+        expect(existsSync(join(outside, "keep.txt"))).toBe(true);
+      });
+    },
+  );
+
   test("behavior fingerprint includes frozen runtime keys deterministically", () => {
     const authority = loadCaseAuthority();
     const caseRecord = discoverScenarios(authority, ["responses-core"])[0]!;

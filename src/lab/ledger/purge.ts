@@ -26,6 +26,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readdirSync,
   renameSync,
@@ -128,6 +129,13 @@ function deleteArtifactsFailClosed(dir: TrustedArtifactDir, digests: string[]): 
 
 function purgeBoundedDirectory(dirPath: string): void {
   if (!existsSync(dirPath)) return;
+  const metadata = lstatSync(dirPath);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new PurgeError(
+      "scratch_export_unsafe_directory",
+      `refusing to purge non-directory or symbolic-link path: ${dirPath}`,
+    );
+  }
   const entries = readdirSync(dirPath, { withFileTypes: true });
   for (const entry of entries) {
     const full = join(dirPath, entry.name);
