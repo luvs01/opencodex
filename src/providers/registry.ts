@@ -1690,6 +1690,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     dashboardUrl: "https://bigmodel.cn/console/usercenter/apikeys",
     defaultModel: "glm-4.6",
     models: ZHIPU_BIGMODEL_MODELS,
+    liveModels: false,
     // The GLM families here are the same ones the `zai` metadata bundle already describes, so the
     // bundle owns context windows and modalities for the whole list instead of a hand-copied table.
     jawcodeBundle: "zai",
@@ -1710,8 +1711,8 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
       ZHIPU_BIGMODEL_THINKING_TOGGLE_MODELS.map(id => [id, true]),
     ),
     preserveReasoningContentModels: ZHIPU_BIGMODEL_THINKING_TOGGLE_MODELS,
-    // No liveModels: GET /api/paas/v4/models has not been observed to answer on this host, and a
-    // false live claim yields an empty picker at runtime. Flip it on once someone verifies it.
+    // GET /api/paas/v4/models has not been observed to answer on this host, and an unverified live
+    // claim can yield an empty picker at runtime. Flip it on once someone verifies it.
     note: "Domestic BigModel pay-as-you-go endpoint (open.bigmodel.cn)",
   },
   // BigModel's Coding Plan is a SEPARATE endpoint from the pay-as-you-go row above, and that is

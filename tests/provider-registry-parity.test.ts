@@ -1025,4 +1025,10 @@ describe("free-provider directory isolation", () => {
       expect(map?.max, `${provider}/${model} max`).toBe("max");
     }
   });
+
+  test("Zhipu BigModel keeps its static catalog until live discovery is verified", () => {
+    const zhipu = PROVIDER_REGISTRY.find(entry => entry.id === "zhipu-bigmodel");
+    expect(zhipu?.liveModels).toBe(false);
+    expect(providerConfigSeed(zhipu!).liveModels).toBe(false);
+  });
 });
