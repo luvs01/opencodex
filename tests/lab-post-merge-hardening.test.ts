@@ -191,6 +191,8 @@ test("event privacy admission rejects raw POSIX path bypass forms", () => {
     "cwd=/home/@alice",
     "cwd=/home/josé/work",
     "x-/home/alice",
+    "detail=file:///etc/passwd",
+    "detail=file:///home/alice/secret.txt",
   ]) {
     try {
       enforceEventStructureLimits({ detail });
