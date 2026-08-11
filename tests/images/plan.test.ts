@@ -116,7 +116,7 @@ describe("planImageBridge", () => {
     parsed.options.toolChoice = { name: "generate_image" };
     const aliasPlan = await planImageBridge(cfg, parsed, routed);
     expect(aliasPlan).toBeDefined();
-    expect(aliasPlan!.toolNames.has("image_gen")).toBe(false);
+    expect(aliasPlan!.toolNames.has("image_gen")).toBe(true);
     expect(aliasPlan!.toolNames.has("generate_image")).toBe(true);
   });
 
