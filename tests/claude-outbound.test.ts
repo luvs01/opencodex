@@ -617,6 +617,34 @@ describe("claude outbound SSE", () => {
     expect(events.at(-1)!.name).toBe("message_stop");
   });
 
+  test("idle keepalive pings flow before semantic output during upstream silence", async () => {
+    const PING_INTERVAL_MS = 25;
+    const SILENCE_MS = 300;
+    const encoder = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(sse("response.created", { response: {} })));
+        await new Promise(r => setTimeout(r, SILENCE_MS));
+        controller.enqueue(encoder.encode(sse("response.completed", { response: { status: "completed" } })));
+        controller.close();
+      },
+    });
+    const events = await collectEvents(responsesSseToAnthropicSse(upstream, "m", { pingIntervalMs: PING_INTERVAL_MS }));
+    const messageStartIndex = events.findIndex(e => e.name === "message_start");
+    expect(events.slice(0, messageStartIndex).filter(e => e.name === "ping").length).toBeGreaterThanOrEqual(2);
+    expect(events.at(-1)!.name).toBe("message_stop");
+  });
+
+  test("upstream heartbeats remain transport-only before an initial error", async () => {
+    const upstream = [
+      sse("response.created", { response: {} }),
+      sse("response.heartbeat", {}),
+      sse("response.failed", { response: { status: "failed", error: { status: 500, message: "failed" } } }),
+    ].join("");
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m", { pingIntervalMs: 0 }));
+    expect(events.map(e => e.name)).toEqual(["ping", "error"]);
+  });
+
   test("no-output completed still emits a valid empty message", async () => {
     const upstream = sse("response.created", { response: {} }) + sse("response.completed", { response: { status: "completed" } });
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));

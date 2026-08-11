@@ -267,12 +267,12 @@ export function responsesSseToAnthropicSse(
         emit("message_start", { type: "message_start", message: messageSnapshot(model) });
         emit("ping", { type: "ping" });
       };
-      // Once a semantic Anthropic message has started, keepalive pings protect remote
-      // deployments behind LB/NAT idle timeouts. Transport-only Responses prelude frames
-      // must not manufacture a message before a possible initial error.
+      // Keepalive pings protect remote deployments behind LB/NAT idle timeouts, including
+      // while waiting for the first semantic frame. A ping is transport-only, so it does
+      // not manufacture an Anthropic message before a possible initial error.
       if (pingIntervalMs > 0) {
         pingTimer = setInterval(() => {
-          if (terminated || !started) return;
+          if (terminated) return;
           try {
             emit("ping", { type: "ping" });
           } catch { /* controller torn down; the read loop is ending anyway */ }
@@ -366,7 +366,7 @@ export function responsesSseToAnthropicSse(
             // Transport prelude only. Start Anthropic framing on semantic output or completion.
             break;
           case "response.heartbeat":
-            if (started) emit("ping", { type: "ping" });
+            emit("ping", { type: "ping" });
             break;
           case "response.output_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
