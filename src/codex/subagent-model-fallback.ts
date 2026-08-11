@@ -765,8 +765,16 @@ export function hasCodexAgentModelFallbackField(role: string, codexHome = CODEX_
 }
 
 /** Roles whose TOML still carries `model_fallback`, including empty arrays. */
-export function scanCodexAgentRolesWithTomlModelFallback(codexHome = CODEX_HOME): string[] {
-  return listCodexAgentRoles(codexHome).filter(role => hasCodexAgentModelFallbackField(role, codexHome));
+export function scanCodexAgentRolesWithTomlModelFallback(
+  codexHome = CODEX_HOME,
+  onListError?: (cause: unknown) => void,
+): string[] {
+  try {
+    return listCodexAgentRoles(codexHome).filter(role => hasCodexAgentModelFallbackField(role, codexHome));
+  } catch (cause) {
+    onListError?.(cause);
+    return [];
+  }
 }
 
 export function listCodexAgentRoles(codexHome = CODEX_HOME): string[] {
