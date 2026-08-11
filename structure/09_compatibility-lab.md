@@ -25,14 +25,13 @@ Redacted: filesystem paths including UNC shares, HTTP(S) URLs, credential-bearin
 and other-scheme URIs, JWT-shaped tokens, email addresses including internationalized local parts and domains, prefixed account
 identifiers (`acct_`, `cus_`, `sub_`, `org-`), account values under an
 ID-bearing label (`user_id`, `userID`, `organization_id`, `accountId`, …; matched case-insensitively), MAC addresses in either colon or hyphen notation, IPv4,
-IPv6 including mapped and scoped forms, and multi-label hostnames whose final
-label is alphabetic or punycode.
+IPv6 including mapped and scoped forms, and multi-label hostnames, including
+private suffixes containing digits or hyphens.
 
-**Hostname limit.** A final label containing digits or hyphens — `db.prod-1`,
-`api.us-east-1` — is simultaneously a valid internal hostname and a valid
-metric or version namespace (`provider.metric.p95`, `lib.v2-rc1`). Shape cannot
-separate them. Those forms are therefore redacted only when an unambiguous
-network marker introduces them, and survive otherwise.
+Multi-label hostnames and dotted metric or version namespaces have overlapping
+grammar (`db.prod-1`, `provider.metric.p95`, `lib.v2-rc1`). Provider-controlled
+text is persisted as durable evidence, so ambiguous dotted tokens fail closed
+and are redacted as hostnames even without a network marker.
 
 Markers carry two confidence levels, because treating them alike lost accuracy
 in both directions.
@@ -60,17 +59,17 @@ Recorded rather than implied, so a reader knows what is not covered:
 | Form | Behavior |
 |------|----------|
 | Bare service name after natural-language `connect to` with no port at all (`connect to gateway failed`) | not redacted — the phrase is prose too often to trust. A port in either notation (`gateway:443`, `gateway on port 443`) does make it a host |
-| Bare `db.prod-1` outside any network context | not redacted — indistinguishable from a metric namespace |
+| Dotted metric or version namespace (`provider.metric.p95`, `lib.v2-rc1`) | **over-redacted to `[host]`** — indistinguishable from a real internal hostname |
 | Standalone UUID, standalone `user_…`, bare-label value (`org: engineering`) | not redacted — indistinguishable from request, trace, and correlation ids |
 | Phone numbers, generic high-entropy blobs | not redacted — no non-destructive pattern |
 | Cisco dotted MAC (`0123.4567.89ab`), ideographic-dot IDN | not redacted — unusual notations |
 | Escaped-quote mail local part | partially redacted; the address is broken but a fragment of the local part can remain |
 | Percent-encoding nested more than six deep | not decoded further |
-| Fully alphabetic dotted namespace (`provider.timeout`, `provider.request.duration`) | **over-redacted to `[host]`** — indistinguishable from a real hostname. A namespace whose last label carries a digit (`provider.metric.p95`) survives |
+| Fully alphabetic dotted namespace (`provider.timeout`, `provider.request.duration`) | **over-redacted to `[host]`** — indistinguishable from a real hostname |
 
 The marker behaviors and the redacted categories are asserted in both
 directions — positive cases for what must be removed, negative cases for the
-ordinary diagnostics that must survive — so those cannot drift silently. The
+non-host diagnostics that must survive — so those cannot drift silently. The
 limits table is a description of current behavior; only the entries with a
 matching test are pinned, and the unusual-notation rows are not.
 A retained URL path also has identifier-shaped content redacted wherever it
@@ -94,9 +93,9 @@ leaks. `enforceEventStructureLimits` remains a backstop that rejects
 secret-shaped strings and raw paths; it is not the enforcement point.
 
 Both directions are enforced by tests: every redacted category has a positive
-case, and ordinary dotted diagnostics (`provider.metric.p95`, `lib.v2-rc1`,
-`foo.bar-baz`) have negative cases, because a sanitizer that destroys evidence
-fails this contract as surely as one that leaks it.
+case, while non-host diagnostics have negative cases. Ambiguous dotted
+diagnostics are deliberately redacted because confidentiality takes precedence
+when provider-controlled text becomes durable evidence.
 
 Non-contract artifacts declare `redactionPolicy: sanitized_evidence_v2`.
 Contract classes (fixtures and manifests) bypass mutation, so their pinned
