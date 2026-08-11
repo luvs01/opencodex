@@ -213,6 +213,10 @@ describe("SEC-02 sanitizer boundary", () => {
       .toBe("dial tcp [host]:443: connect: refused");
     expect(sanitizeDiagnostic("upstream api.us-east-1 unavailable"))
       .toBe("upstream [host] unavailable");
+    for (const host of ["internal.service1", "db.prod1", "api.v2"]) {
+      expect(sanitizeDiagnostic(`upstream ${host} unavailable`))
+        .toBe("upstream [host] unavailable");
+    }
     // Without such a marker they survive — a recorded limit, asserted so it
     // cannot drift silently in either direction.
     expect(sanitizeDiagnostic("db.prod-1")).toBe("db.prod-1");
