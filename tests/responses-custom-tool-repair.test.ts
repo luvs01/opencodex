@@ -702,6 +702,64 @@ describe("routed Responses custom-tool compatibility", () => {
     }
   });
 
+  test("handleResponses does not restore routed custom calls denied by tool_choice", async () => {
+    const savedFetch = globalThis.fetch;
+    const upstreamItem = {
+      type: "function_call",
+      id: "fc_exec",
+      call_id: "call_exec",
+      name: "exec",
+      arguments: "{\"input\":\"ignored policy\"}",
+      status: "completed",
+    };
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: "resp_json",
+      status: "completed",
+      output: [upstreamItem],
+    }), { headers: { "content-type": "application/json" } })) as typeof fetch;
+    const config = {
+      port: 0,
+      defaultProvider: "fixture",
+      providers: {
+        fixture: {
+          adapter: "openai-responses",
+          baseUrl: "https://fixture.test/v1",
+          authMode: "key",
+          apiKey: "fixture-key",
+        },
+      },
+    } as OcxConfig;
+    const deniedChoices = [
+      "none",
+      {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [{ type: "function", name: "ordinary" }],
+      },
+    ];
+
+    try {
+      for (const toolChoice of deniedChoices) {
+        const response = await handleResponses(new Request("http://localhost/v1/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "fixture/deepseek-v4-flash",
+            stream: false,
+            input: [{ role: "user", content: [{ type: "input_text", text: "list apps" }] }],
+            tools: [{ type: "custom", name: "exec", description: "Run JavaScript", format: { type: "grammar", syntax: "lark" } }],
+            tool_choice: toolChoice,
+          }),
+        }), config, { model: "", provider: "" });
+        const body = await response.json() as { output: Array<Record<string, unknown>> };
+
+        expect(body.output[0]).toEqual(upstreamItem);
+      }
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
   test("handleResponses leaves custom tools native for forward-auth passthrough", async () => {
     const savedFetch = globalThis.fetch;
     let outboundBody: Record<string, unknown> | undefined;
