@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { autoRestoreCodexShim, buildUnixCodexShim, buildWindowsCodexShim, buildWindowsPowerShellCodexShim, diagnoseCodexShim, findCodexOnPath, installCodexShim, isWindowsInteropDir, lastCodexDiscoveryError, setCodexShimFreshWriteHookForTests, setCodexShimGuardedWriteHookForTests, setCodexShimProbeHookForTests, setCodexShimProbeObservationMsForTests, setCodexShimProbeShellForTests, uninstallCodexShim } from "../src/codex/shim";
+import { autoRestoreCodexShim, buildUnixCodexShim, buildWindowsCodexShim, buildWindowsPowerShellCodexShim, diagnoseCodexShim, findCodexOnPath, installCodexShim, isWindowsInteropDir, lastCodexDiscoveryError, setCodexShimFreshWriteHookForTests, setCodexShimGuardedWriteHookForTests, setCodexShimObsoleteWriteHookForTests, setCodexShimProbeHookForTests, setCodexShimProbeObservationMsForTests, setCodexShimProbeShellForTests, uninstallCodexShim } from "../src/codex/shim";
 
 const SHIM_MARKER = "opencodex codex autostart shim";
 const UNIX_SHIM_REVISION_MARKER = "opencodex unix codex shim revision 2";
@@ -1279,6 +1279,34 @@ printf '%s\\n' child-codex
       expect(result.status).toBe("deferred");
       expect("message" in result && result.message).toContain("upgrade deferred because tracked launchers changed");
       expect(readFileSync(wrappers[0], "utf8")).toBe(concurrent);
+      expect(readFileSync(backups[0])).toEqual(oldBackup);
+      expect(readFileSync(statePath)).toEqual(oldState);
+      expect(readdirSync(binDir).some(name => name.includes(".upgrade-"))).toBe(false);
+    });
+  });
+
+  test("obsolete Unix shim rollback preserves a concurrent current shim", () => {
+    if (process.platform === "win32") return;
+    withInstalledShim(({ binDir, wrappers, backups, statePath }) => {
+      const current = readFileSync(wrappers[0], "utf8");
+      const obsolete = obsoleteUnixShim(current);
+      const replacement = join(binDir, ".concurrent-current-shim");
+      const oldBackup = readFileSync(backups[0]);
+      const oldState = readFileSync(statePath);
+      writeFileSync(wrappers[0], obsolete, "utf8");
+      writeFileSync(replacement, current, "utf8");
+      chmodSync(replacement, 0o755);
+      setCodexShimObsoleteWriteHookForTests(() => renameSync(replacement, wrappers[0]));
+
+      let result!: ReturnType<typeof autoRestoreCodexShim>;
+      try {
+        result = autoRestoreCodexShim({ enabled: () => true, stabilitySleep: skipStabilityWait });
+      } finally {
+        setCodexShimObsoleteWriteHookForTests(null);
+      }
+
+      expect(result.status).toBe("deferred");
+      expect(readFileSync(wrappers[0], "utf8")).toBe(current);
       expect(readFileSync(backups[0])).toEqual(oldBackup);
       expect(readFileSync(statePath)).toEqual(oldState);
       expect(readdirSync(binDir).some(name => name.includes(".upgrade-"))).toBe(false);

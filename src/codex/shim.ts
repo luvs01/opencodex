@@ -644,6 +644,7 @@ let codexShimProbeHookForTests: (() => void) | null = null;
 let codexShimProbeShellForTests: string | null = null;
 let codexShimGuardedWriteHookForTests: (() => void) | null = null;
 let codexShimFreshWriteHookForTests: (() => void) | null = null;
+let codexShimObsoleteWriteHookForTests: (() => void) | null = null;
 let codexShimProbeObservationMs = CODEX_SHIM_INSTALL_PROBE_TIMEOUT_MS;
 
 /** Narrow deterministic seam for transaction rollback tests. */
@@ -669,6 +670,11 @@ export function setCodexShimGuardedWriteHookForTests(hook: (() => void) | null):
 /** Narrow deterministic seam for fresh-install partial-write rollback tests. */
 export function setCodexShimFreshWriteHookForTests(hook: (() => void) | null): void {
   codexShimFreshWriteHookForTests = hook;
+}
+
+/** @internal Test-only hook for races immediately after an obsolete shim write. */
+export function setCodexShimObsoleteWriteHookForTests(hook: (() => void) | null): void {
+  codexShimObsoleteWriteHookForTests = hook;
 }
 
 function readProbeMetadata(path: string, maxBytes: number): string | null {
@@ -1596,9 +1602,8 @@ function rollbackObsoleteUnixShimRefresh(journal: readonly ObsoleteUnixShimJourn
       const wrapper = stableShimPathProbe(entry.file.wrapperPath);
       const ownsWrapper = entry.wrapperWriteStarted
         && wrapper !== null
-        && (entry.writtenWrapperFingerprint
-          ? sameFingerprint(wrapper.fingerprint, entry.writtenWrapperFingerprint)
-          : wrapper.prefix.includes(UNIX_SHIM_REVISION_MARKER));
+        && entry.writtenWrapperFingerprint !== undefined
+        && sameFingerprint(wrapper.fingerprint, entry.writtenWrapperFingerprint);
       if (ownsWrapper) unlinkSync(entry.file.wrapperPath);
     });
     attempt(() => {
@@ -1654,6 +1659,7 @@ function refreshObsoleteUnixShims(files: readonly ShimFileState[]): ObsoleteUnix
       }
       entry.wrapperWriteStarted = true;
       const writtenInode = writeShim(file.wrapperPath, file.realPath ?? file.backupPath);
+      codexShimObsoleteWriteHookForTests?.();
       const writtenWrapper = stableShimPathProbe(file.wrapperPath);
       if (!writtenWrapper || !isCurrentUnixShimProbe(writtenWrapper)) {
         throw new Error("Codex autostart shim upgrade could not fingerprint the regenerated wrapper");
