@@ -23,8 +23,9 @@ the resolved `CODEX_HOME`.
 Service install-state ownership uses this same resolver. In WSL, an unset `CODEX_HOME` may resolve
 to the single discoverable Windows Desktop home; recording Linux `~/.codex` instead would make a
 later repair or uninstall look foreign even though the service and runtime were started from the
-same environment. An explicit `CODEX_HOME` remains authoritative, and existing foreign ownership
-records are never migrated implicitly.
+same environment. Ownership checks therefore accept that exact legacy Linux-home record when WSL
+now discovers a Windows home. An explicit `CODEX_HOME` remains authoritative, and other foreign
+ownership records are never migrated implicitly.
 
 [Decision Log]
 - 목적과 의도: Keep service ownership metadata aligned with the Codex home the proxy actually uses.
