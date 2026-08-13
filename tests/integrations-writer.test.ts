@@ -311,6 +311,20 @@ describe("OMP source preservation", () => {
     if (!result.ok) expect(result.reason).toBe("unsafe");
     expect(readFileSync(configPath, "utf8")).toBe(edited);
   });
+
+  test("refuses disable when removing the managed block would break a YAML alias", () => {
+    const configPath = installOmp();
+    expect(applyIntegration(input({ clientId: "omp" })).ok).toBe(true);
+    const edited = readFileSync(configPath, "utf8")
+      .replace("    baseUrl:", "    baseUrl: &opencodex_url")
+      .concat("settings:\n  inheritedBase: *opencodex_url\n");
+    writeFileSync(configPath, edited);
+
+    const result = disableIntegration(input({ clientId: "omp" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unsafe");
+    expect(readFileSync(configPath, "utf8")).toBe(edited);
+  });
 });
 
 describe("restore", () => {
