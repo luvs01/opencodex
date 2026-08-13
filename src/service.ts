@@ -1978,8 +1978,7 @@ export async function registerFreshWindowsSchedulerTask(
   }
 }
 
-function installWindows(): void {
-  recordOwnedConfigPath(getConfigDir(), serviceStatePath());
+function removeNativeWindowsServiceForScheduler(): void {
   // Transactional backend switch: installing the scheduler backend removes a native
   // service first — two live managers would both respawn the proxy (conflict).
   if (statusWinswRaw() !== "nonexistent") {
@@ -1993,6 +1992,11 @@ function installWindows(): void {
       throw new Error(`Native service registration could not be re-verified after the removal attempt — aborting switch. Check 'sc.exe query ${WINSW_SERVICE_ID}' and remove it manually if present.`);
     }
   }
+}
+
+function installWindows(): void {
+  recordOwnedConfigPath(getConfigDir(), serviceStatePath());
+  removeNativeWindowsServiceForScheduler();
   // End a running task BEFORE rewriting the assets it is executing — cmd.exe reading the
   // script mid-rewrite runs a torn batch file, and its open handle can fail the write.
   try { stopWindows(); } catch { /* not running */ }
@@ -2596,6 +2600,7 @@ export interface FreshWindowsSchedulerInstallDeps {
   stageRegistrationXml?: (attemptNonce: string) => string;
   register?: (xmlPath: string, attemptNonce: string) => Promise<void>;
   prepare?: () => Promise<void>;
+  removeNativeService?: () => void;
   publishAssets?: () => void;
   runTask?: () => void;
   writeState?: () => void;
@@ -2617,6 +2622,7 @@ export async function installFreshWindowsSchedulerSafely(
   const stage = deps.stageRegistrationXml ?? stageWindowsSchedulerRegistrationXml;
   const register = deps.register ?? registerFreshWindowsSchedulerTask;
   const prepare = deps.prepare ?? (() => prepareServiceInstall("scheduler"));
+  const removeNativeService = deps.removeNativeService ?? removeNativeWindowsServiceForScheduler;
   const publishAssets = deps.publishAssets ?? writeWindowsSchedulerAssets;
   const runTask = deps.runTask ?? startWindows;
   const writeState = deps.writeState ?? (() => writeServiceInstallState("scheduler"));
@@ -2638,6 +2644,7 @@ export async function installFreshWindowsSchedulerSafely(
 
     // The destructive boundary begins only after Task Scheduler accepted the definition.
     await prepare();
+    removeNativeService();
     publishAssets();
     runTask();
     started = true;

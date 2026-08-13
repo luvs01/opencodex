@@ -800,6 +800,7 @@ describe("service lifecycle cleanup ordering", () => {
         calls.push(`register:${path}`);
       },
       prepare: async () => { calls.push("prepare:stop-managers-and-proxy"); },
+      removeNativeService: () => { calls.push("remove-native-service"); },
       publishAssets: () => { calls.push("publish-assets"); },
       runTask: () => { calls.push("run-task"); },
       writeState: () => { calls.push("write-state"); },
@@ -811,6 +812,7 @@ describe("service lifecycle cleanup ordering", () => {
       "stage",
       "register:attempt.xml",
       "prepare:stop-managers-and-proxy",
+      "remove-native-service",
       "publish-assets",
       "run-task",
       "write-state",
@@ -832,6 +834,7 @@ describe("service lifecycle cleanup ordering", () => {
         throw new Error("UAC prompt was cancelled");
       },
       prepare: async () => { calls.push("prepare"); },
+      removeNativeService: () => { calls.push("remove-native-service"); },
       publishAssets: () => { calls.push("publish-assets"); },
       runTask: () => { calls.push("run-task"); },
       writeState: () => { calls.push("write-state"); },
@@ -853,6 +856,7 @@ describe("service lifecycle cleanup ordering", () => {
       stageRegistrationXml: () => "attempt.xml",
       register: async () => { calls.push("register"); },
       prepare: async () => { calls.push("prepare"); throw new Error("standalone stop failed"); },
+      removeNativeService: () => { calls.push("remove-native-service"); },
       publishAssets: () => { calls.push("publish-assets"); },
       runTask: () => { calls.push("run-task"); },
       writeState: () => { calls.push("write-state"); },
@@ -869,6 +873,7 @@ describe("service lifecycle cleanup ordering", () => {
       stageRegistrationXml: () => "attempt.xml",
       register: async () => { calls.push("register"); },
       prepare: async () => { calls.push("prepare"); },
+      removeNativeService: () => { calls.push("remove-native-service"); },
       publishAssets: () => { calls.push("publish-assets"); },
       runTask: () => { calls.push("run-task"); },
       writeState: () => { calls.push("write-state"); throw new Error("state write failed"); },
@@ -879,9 +884,33 @@ describe("service lifecycle cleanup ordering", () => {
     expect(calls).toEqual([
       "register",
       "prepare",
+      "remove-native-service",
       "publish-assets",
       "run-task",
       "write-state",
+      "remove-stage",
+    ]);
+  });
+
+  test("fresh scheduler install rolls back before publication when native service removal fails", async () => {
+    const calls: string[] = [];
+    await expect(installFreshWindowsSchedulerSafely({
+      stageRegistrationXml: () => "attempt.xml",
+      register: async () => { calls.push("register"); },
+      prepare: async () => { calls.push("prepare"); },
+      removeNativeService: () => { calls.push("remove-native-service"); throw new Error("native service remains"); },
+      publishAssets: () => { calls.push("publish-assets"); },
+      runTask: () => { calls.push("run-task"); },
+      writeState: () => { calls.push("write-state"); },
+      rollbackTask: async () => { calls.push("rollback-task"); return null; },
+      removeStagedXml: () => { calls.push("remove-stage"); },
+    })).rejects.toThrow("native service remains");
+
+    expect(calls).toEqual([
+      "register",
+      "prepare",
+      "remove-native-service",
+      "rollback-task",
       "remove-stage",
     ]);
   });
