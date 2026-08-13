@@ -136,6 +136,31 @@ describe("OAuth account-scoped reauth", () => {
     expect(getAccountCredential("kiro", set.activeAccountId)?.access).toBe("identified-access");
   });
 
+  test("forced Kimi add-account preserves a legacy identity-less account", async () => {
+    await saveCredential("kimi", {
+      access: "legacy-access",
+      refresh: "legacy-refresh",
+      expires: Date.now() + 60_000,
+    });
+    const original = OAUTH_PROVIDERS.kimi.login;
+    OAUTH_PROVIDERS.kimi.login = async () => ({
+      access: "identified-access",
+      refresh: "identified-refresh",
+      expires: Date.now() + 60_000,
+      accountId: "new-kimi-user",
+    });
+    try {
+      await runLogin("kimi", {} as OAuthController, { forceLogin: true });
+    } finally {
+      OAUTH_PROVIDERS.kimi.login = original;
+    }
+
+    const set = getAccountSet("kimi")!;
+    expect(set.accounts).toHaveLength(2);
+    expect(set.accounts.some(account => account.credential.access === "legacy-access")).toBe(true);
+    expect(getAccountCredential("kimi", set.activeAccountId)?.access).toBe("identified-access");
+  });
+
   test("non-force Kiro login upgrades a legacy identity-less slot in place", async () => {
     await saveCredential("kiro", {
       access: "legacy-access",
