@@ -130,6 +130,8 @@ function upstreamAdapter(protocol: string): string {
       return "anthropic";
     case "openai-chat":
       return "openai-chat";
+    case "cursor-protobuf":
+      return "cursor-protobuf";
     default:
       throw new Error(`unsupported protocol identity: ${protocol}`);
   }

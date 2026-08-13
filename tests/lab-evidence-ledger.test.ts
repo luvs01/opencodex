@@ -659,6 +659,25 @@ describe("CL-02 projection rebuild determinism", () => {
 });
 
 describe("CL-02 CL-01 integration", () => {
+  test("mcp-core cursor-protobuf result produces protocol evidence", () => {
+    withHome((home) => {
+      const authority = loadCaseAuthority();
+      const caseRecord = discoverScenarios(authority, ["mcp-core"]).find(
+        (c) => c.id === "mcp-core.protocol.namespace-mapping",
+      )!;
+
+      const { event } = observationFromConformanceResult(
+        syntheticPassResult(caseRecord),
+        caseRecord,
+        authority,
+        { configDir: home },
+      );
+
+      expect(event.subject.effectiveAdapter).toBe("cursor-protobuf");
+      expect(event.subject.upstreamProtocol).toBe("cursor-protobuf");
+    });
+  });
+
   test("run → observation → JSONL → replay → SQLite protocol projection", async () => {
     await withHome(async (home) => {
       const authority = loadCaseAuthority();
