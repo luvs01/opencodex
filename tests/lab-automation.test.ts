@@ -380,6 +380,12 @@ describe("CL-08 lab automation", () => {
     }
   });
 
+  test("server startup reads scheduler intent from the committed automation config", () => {
+    const src = readFileSync(join(process.cwd(), "src/server/index.ts"), "utf8");
+    expect(src).toContain("loadLabAutomationConfig(labConfigDir).policy.enabled");
+    expect(src).not.toContain("loadLabAutomationPolicy(labConfigDir).enabled");
+  });
+
   test("corrupt scheduler state fails closed on load", () => {
     withHome((home) => {
       const path = join(home, "lab");

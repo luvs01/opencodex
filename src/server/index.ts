@@ -49,7 +49,7 @@ import {
   setLabAutomationDispatchDeps,
   startLabAutomationScheduler,
 } from "../lab/automation/orchestrator";
-import { loadLabAutomationPolicy } from "../lab/automation/persistence";
+import { loadLabAutomationConfig } from "../lab/automation/config-persistence";
 import { createProductionLabRouteExecutor } from "../lib/lab-live-route-production";
 import { runOpenAiTierStartupMigration } from "../providers/openai-tier-startup";
 import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-startup";
@@ -1744,7 +1744,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     loadConfig: () => config,
     routeExecutor: productionLabRouteExecutor,
   });
-  if (loadLabAutomationPolicy(labConfigDir).enabled) {
+  if (loadLabAutomationConfig(labConfigDir).policy.enabled) {
     startLabAutomationScheduler(labConfigDir);
   }
 
