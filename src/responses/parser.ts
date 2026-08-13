@@ -130,6 +130,11 @@ function mapToolChoice(value: unknown): OcxRequestOptions["toolChoice"] {
     if (t === "image_generation" || t === "image_gen") {
       return { name: IMAGE_GEN_TOOL_NAME };
     }
+    // Hosted web-search choices force the synthetic routed search tool. Treating this shape as
+    // `auto` would also advertise unrelated client tools when the sidecar injects web_search.
+    if (t === "web_search" || t === "web_search_preview") {
+      return { name: WEB_SEARCH_TOOL_NAME };
+    }
     if (t === "allowed_tools" && Array.isArray(value.tools)) {
       const names = value.tools
         .map(allowedToolName)
