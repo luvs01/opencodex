@@ -76,4 +76,25 @@ describe("dispatchCommand exit codes", () => {
       expect(await dispatchCommand(head, fakeDeps), `${name} must be unknown`).toBe(1);
     }
   });
+
+  test("preserves a failure exit code set by the service command", async () => {
+    const previousExitCode = process.exitCode;
+    try {
+      process.exitCode = undefined;
+      const deps = {
+        ...fakeDeps,
+        args: ["service", "start"],
+        serviceCommand: async () => {
+          process.exitCode = 1;
+        },
+      };
+
+      expect(await dispatchCommand(
+        { kind: "command", command: "service", args: deps.args },
+        deps,
+      )).toBe(1);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
 });
