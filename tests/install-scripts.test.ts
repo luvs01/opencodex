@@ -1,6 +1,10 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chmodTree } from "../scripts/prepare-package";
 
 // Windows CI runners spawn Node/Bun child processes slowly ("Slow filesystem detected");
 // the package-main import test measured 9.4s there vs bun's 5s default. Same remedy as
@@ -65,6 +69,30 @@ describe("install scripts", () => {
     expect(guiReadme).toContain("bun run dev:proxy");
     expect(guiReadme).toContain("bun run dev:gui");
     expect(guiReadme).not.toContain("This template provides a minimal setup");
+  });
+
+  test("package preparation does not chmod through GUI dist symlinks", () => {
+    if (process.platform === "win32") return;
+
+    const fixture = mkdtempSync(join(tmpdir(), "ocx-prepare-package-"));
+    const dist = join(fixture, "dist");
+    const outside = join(fixture, "outside");
+    const secret = join(outside, "secret.txt");
+    try {
+      mkdirSync(dist);
+      mkdirSync(outside);
+      writeFileSync(secret, "secret");
+      chmodSync(outside, 0o700);
+      chmodSync(secret, 0o600);
+      symlinkSync(outside, join(dist, "attacker-link"));
+
+      chmodTree(dist);
+
+      expect(statSync(outside).mode & 0o777).toBe(0o700);
+      expect(statSync(secret).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   test("POSIX installer matches the Node launcher prerequisite", async () => {
