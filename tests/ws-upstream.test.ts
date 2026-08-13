@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, jest, test } from "bun:test";
 import { providerFetch } from "../src/server/responses/fetch-helpers";
-import { codexWsUpstreamFetch, shouldUseCodexWsUpstream } from "../src/server/responses/ws-upstream";
+import {
+  codexWsUpstreamFetch,
+  MAX_CODEX_WS_FRAME_BYTES,
+  MAX_CODEX_WS_QUEUE_BYTES,
+  shouldUseCodexWsUpstream,
+} from "../src/server/responses/ws-upstream";
 import type { OcxProviderConfig } from "../src/types";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -245,6 +250,37 @@ describe("codexWsUpstreamFetch", () => {
     // relaySseWithFailedTail() only synthesizes response.failed when the body
     // read throws. The read must therefore reject, like a reset TCP socket.
     await expect(response.text()).rejects.toThrow("closed before a Responses terminal event");
+  });
+
+  test("rejects an oversized upstream frame before parsing or enqueueing it", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: "x".repeat(MAX_CODEX_WS_FRAME_BYTES + 1) });
+    });
+    const response = await codexWsUpstreamFetch(CODEX_URL, streamingInit(), (() => {
+      throw new Error("fallback must not run after open");
+    }) as unknown as typeof fetch);
+
+    await expect(response.text()).rejects.toThrow("frame exceeds the response size limit");
+    expect(FakeWebSocket.instances[0].closed).toBe(true);
+  });
+
+  test("disconnects an upstream that fills the bounded response queue", async () => {
+    const delta = "x".repeat(Math.floor(MAX_CODEX_WS_QUEUE_BYTES / 3));
+    installFake(ws => {
+      ws.emit("open", {});
+      for (let index = 0; index < 4; index += 1) {
+        ws.emit("message", {
+          data: JSON.stringify({ type: "response.output_text.delta", delta, index }),
+        });
+      }
+    });
+    const response = await codexWsUpstreamFetch(CODEX_URL, streamingInit(), (() => {
+      throw new Error("fallback must not run after open");
+    }) as unknown as typeof fetch);
+
+    await expect(response.text()).rejects.toThrow("buffered queue limit");
+    expect(FakeWebSocket.instances[0].closed).toBe(true);
   });
 
   test("a mid-stream drop surfaces as a synthesized failed terminal through the passthrough relay", async () => {

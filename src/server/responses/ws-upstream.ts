@@ -18,6 +18,12 @@ const WS_BETA = "responses_websockets=2026-02-06";
 // If the 101 never arrives (network black hole), give SSE a chance well before
 // the caller's connect timeout (default 200s) would fire.
 const UPGRADE_DEADLINE_MS = 10_000;
+// Keep the push-based WS transport inside the same memory envelope as the
+// bounded SSE relays that consume this response. Unlike fetch response bodies,
+// a WebSocket cannot be paused when a ReadableStream applies backpressure, so
+// an upstream that outruns the consumer must be disconnected.
+export const MAX_CODEX_WS_FRAME_BYTES = 4 * 1024 * 1024;
+export const MAX_CODEX_WS_QUEUE_BYTES = 8 * 1024 * 1024;
 
 export function shouldUseCodexWsUpstream(url: string, init?: RequestInit): boolean {
   if (url !== CODEX_RESPONSES_HTTP_URL) return false;
@@ -91,6 +97,13 @@ export function codexWsUpstreamFetch(
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
 
+    const failStream = (message: string) => {
+      if (terminal) return;
+      terminal = true;
+      try { controller?.error(new Error(message)); } catch { /* stream already done */ }
+      try { ws.close(); } catch { /* already closing */ }
+    };
+
     const upgradeTimer = setTimeout(() => {
       if (opened || settledPreOpen) return;
       settledPreOpen = true;
@@ -138,7 +151,7 @@ export function codexWsUpstreamFetch(
       const stream = new ReadableStream<Uint8Array>({
         start(c) { controller = c; },
         cancel() { try { ws.close(); } catch { /* already closing */ } },
-      });
+      }, new ByteLengthQueuingStrategy({ highWaterMark: MAX_CODEX_WS_QUEUE_BYTES }));
       resolve(new Response(stream, {
         status: 200,
         // The 101 response headers (x-codex-*-reset-at quota hints) are not
@@ -151,6 +164,18 @@ export function codexWsUpstreamFetch(
       if (!controller || terminal) return;
       const text = typeof event.data === "string" ? event.data : "";
       if (!text) return;
+      // UTF-8 byte length is always at least the JS string length. Reject this
+      // cheap lower-bound before parsing so an obviously oversized frame does
+      // not create another large object graph.
+      if (text.length > MAX_CODEX_WS_FRAME_BYTES) {
+        failStream("codex websocket frame exceeds the response size limit");
+        return;
+      }
+      const encodedText = encoder.encode(text);
+      if (encodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
+        failStream("codex websocket frame exceeds the response size limit");
+        return;
+      }
       let type: unknown;
       try { type = (JSON.parse(text) as { type?: unknown }).type; } catch { return; }
       if (typeof type !== "string") return;
@@ -158,8 +183,20 @@ export function codexWsUpstreamFetch(
       // frames (codex.rate_limits, responsesapi.websocket_timing) are dropped
       // so downstream clients see exactly the stream shape they always got.
       if (!type.startsWith("response.") && type !== "error") return;
+      const prefix = encoder.encode(`event: ${type}\ndata: `);
+      const suffix = encoder.encode("\n\n");
+      const frameBytes = prefix.byteLength + encodedText.byteLength + suffix.byteLength;
+      const availableBytes = controller.desiredSize ?? 0;
+      if (frameBytes > availableBytes) {
+        failStream("codex websocket response exceeded the buffered queue limit");
+        return;
+      }
+      const sseFrame = new Uint8Array(frameBytes);
+      sseFrame.set(prefix);
+      sseFrame.set(encodedText, prefix.byteLength);
+      sseFrame.set(suffix, prefix.byteLength + encodedText.byteLength);
       try {
-        controller.enqueue(encoder.encode(`event: ${type}\ndata: ${text}\n\n`));
+        controller.enqueue(sseFrame);
       } catch {
         return;
       }
