@@ -791,6 +791,36 @@ wait "$child"
     }
   });
 
+  test("Unix fresh install restores an original that cannot be content-probed", () => {
+    if (process.platform === "win32") return;
+
+    const binDir = mkdtempSync(join(tmpdir(), "ocx-shim-install-empty-bin-"));
+    const home = mkdtempSync(join(tmpdir(), "ocx-shim-install-empty-home-"));
+    const oldPath = process.env.PATH;
+    const oldHome = process.env.OPENCODEX_HOME;
+    const codexPath = join(binDir, "codex");
+    try {
+      process.env.PATH = prependPath(binDir, oldPath);
+      process.env.OPENCODEX_HOME = home;
+      writeFileSync(codexPath, "", "utf8");
+      chmodSync(codexPath, 0o755);
+
+      expect(() => installCodexShim()).toThrow("could not fingerprint the staged launcher");
+
+      expect(existsSync(codexPath)).toBe(true);
+      expect(readFileSync(codexPath, "utf8")).toBe("");
+      expect(existsSync(`${codexPath}.opencodex-real`)).toBe(false);
+      expect(existsSync(join(home, "codex-shim.json"))).toBe(false);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = oldHome;
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("Unix fresh install removes its marker-bearing partial wrapper before rollback", () => {
     if (process.platform === "win32") return;
 

@@ -403,6 +403,14 @@ function stableShimPathProbe(path: string): StableShimPathProbe | null {
   return contentSize > 0 ? { fingerprint, prefix } : null;
 }
 
+function shimPathFingerprint(path: string): ShimPathFingerprint | null {
+  const fingerprint = statFingerprint(path, false);
+  if (!fingerprint) return null;
+  if (fingerprint.kind !== "symlink") return fingerprint;
+  const target = statFingerprint(path, true);
+  return target ? { ...fingerprint, target } : null;
+}
+
 function sameStableShimPathProbe(left: StableShimPathProbe, right: StableShimPathProbe): boolean {
   return left.prefix === right.prefix && sameFingerprint(left.fingerprint, right.fingerprint);
 }
@@ -830,9 +838,9 @@ function rollbackFreshShimInstall(journal: readonly FreshShimInstallJournalEntry
     }
     try {
       if (entry.originalMovedToBackup && existsSync(target.backupPath)) {
-        const movedOriginal = stableShimPathProbe(target.backupPath);
+        const movedOriginal = shimPathFingerprint(target.backupPath);
         if (!movedOriginal || !entry.movedOriginalFingerprint
-          || !sameFingerprint(movedOriginal.fingerprint, entry.movedOriginalFingerprint)) {
+          || !sameFingerprint(movedOriginal, entry.movedOriginalFingerprint)) {
           throw new Error("Codex shim fresh-install backup changed during rollback");
         }
         if (sourceOccupied) {
@@ -1833,9 +1841,14 @@ function installCodexShimInternal(options: InstallCodexShimInternalOptions): { i
         renameSync(target.originalPath, target.backupPath);
         entry.originalMovedToBackup = true;
         if (process.platform !== "win32") {
+          const movedOriginalFingerprint = shimPathFingerprint(target.backupPath);
+          if (!movedOriginalFingerprint) throw new Error("Codex shim fresh install could not fingerprint the staged launcher");
+          entry.movedOriginalFingerprint = movedOriginalFingerprint;
           const movedOriginal = stableShimPathProbe(target.backupPath);
           if (!movedOriginal) throw new Error("Codex shim fresh install could not fingerprint the staged launcher");
-          entry.movedOriginalFingerprint = movedOriginal.fingerprint;
+          if (!sameFingerprint(movedOriginal.fingerprint, movedOriginalFingerprint)) {
+            throw new Error("Codex shim fresh install staged launcher changed while being fingerprinted");
+          }
         }
       }
       if (!target.preserveOnly) {
