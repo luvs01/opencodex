@@ -90,9 +90,8 @@ tells you exactly what to change:
   A comment-only change to a source file is not a behavior change and owes no
   test.
 - **Cross-platform CI.** The suite runs sharded on Linux and in full on macOS for
-  every pull request. Windows runs at the shipping boundary — on promotion to
-  `main` or `preview` — so a slow or flaky Windows runner cannot decide when your
-  pull request turns green.
+  every pull request. Windows runs only when manually requested through
+  `workflow_dispatch`, so it does not gate pull requests or promotions.
   This runs for **every** pull request, whatever its base branch — including a
   stacked child whose base is another open PR's head. The `paths:` filter, not
   the base branch, decides whether the jobs run at all: a PR touching only docs

@@ -27,7 +27,7 @@ description: OpenCodex pull request 的審查就緒門檻、貢獻者責任、�
   CodeRabbit 的狀態留言編輯不會觸發 PR gate。CodeRabbit 成功的 `CodeRabbit` commit status 會透過 `status` 事件喚醒受信任的預設分支 gate。gate 將該 status SHA 對應到確切一個目前 head 仍相符的 open PR，然後在變更檢查清單、label、留言或 draft 狀態之前，重新讀取即時的 review thread 與 review body。模糊或過時的 SHA 關聯會被忽略，且不會以 gate 的具寫入權限 token 執行任何 PR head 程式碼。
 
 - **Hygiene。** 行為變更需要測試；新增 lint 或 type suppression、聚焦或跳過的測試、空的 catch 區塊、編輯產生的輸出，以及未隨 manifest 一起變更的 lockfile，每項都需要明確的核准 label。僅對原始檔做留言層級的變更不算行為變更，也不需要測試。
-- **跨平台 CI。** 每個 pull request 的測試套件在 Linux 上分片執行，並在 macOS 上完整執行。Windows 在釋出邊界執行——即提升到 `main` 或 `preview` 時——所以慢速或不穩定的 Windows runner 不能決定你的 pull request 何時變綠。
+- **跨平台 CI。** 每個 pull request 的測試套件在 Linux 上分片執行，並在 macOS 上完整執行。Windows 僅在透過 `workflow_dispatch` 手動要求時執行，因此不會阻擋 pull request 或提升作業。
   這對**每個** pull request 都執行，無論其 base 分支為何——包括 base 是另一個 open PR head 的 stacked child。由 `paths:` filter，而非 base 分支，決定 jobs 是否執行：只碰 docs 或 `devlog/` 的 PR 不會佇列任何 job。
 
 - **Type label。** `label` 檢查會從你的 PR title 推導出 `bug` / `enhancement` / `documentation` / `chore`。沒有可辨識前綴的 title（例如 `stack 3/5: …`）會回退到 PR 的 commits，通常仍是慣例格式；`chore` 家族的 commits（`test:`、`ci:`、`refactor:`）不能推翻 `fix:` 或 `feat:`。真正混合多種型別的 PR 會保持未標記而非猜測，而且人工設定的 label 永不被覆寫。

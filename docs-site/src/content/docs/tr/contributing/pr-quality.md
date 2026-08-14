@@ -96,10 +96,9 @@ PR-head kodu yürütülmez.
   dosyadaki yalnızca yorum değişikliği bir davranış değişikliği değildir ve test
   gerektirmez.
 - **Çapraz platform CI.** Test paketi her çekme isteği için Linux'ta parçalı
-  (sharded) ve macOS'ta tam olarak çalışır. Windows, dağıtım sınırında çalışır —
-  `main` veya `preview` dalına yükseltmede — bu nedenle yavaş veya kararsız bir
-  Windows çalıştırıcısı çekme isteğinizin ne zaman yeşile döneceğine karar
-  veremez.
+  (sharded) ve macOS'ta tam olarak çalışır. Windows yalnızca
+  `workflow_dispatch` ile elle istendiğinde çalışır; bu nedenle çekme isteklerini
+  veya yükseltmeleri engellemez.
 Bu, temel dalı ne olursa olsun **her** çekme isteği için çalışır — temeli başka
 bir açık PR'ın head'i olan yığılmış (stacked) bir alt öğe dahil. İşlerin çalışıp
 çalışmayacağına temel dal değil `paths:` filtresi karar verir: yalnızca
