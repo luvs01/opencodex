@@ -153,6 +153,7 @@ describe("OpenAI Responses key-auth URL construction", () => {
       ["https://api.openai.example/v1/", "https://api.openai.example/v1/responses"],
       ["https://api.openai.example/v1/responses", "https://api.openai.example/v1/responses"],
       ["https://api.openai.example/v1/responses/", "https://api.openai.example/v1/responses"],
+      ["https://responses", "https://responses/v1/responses"],
     ] as const) {
       expect(buildKeyAuthUrl(baseUrl)).toBe(expectedUrl);
     }
