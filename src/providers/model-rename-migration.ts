@@ -42,6 +42,11 @@ export interface ModelRename {
    * but lose the reasoning picker entirely.
    */
   dropReasoningEffortMap?: boolean;
+  /**
+   * Keep a saved default whose legacy id carries request semantics that the
+   * replacement id cannot encode. Other catalog fields are still renamed.
+   */
+  preserveDefaultModel?: boolean;
 }
 
 /**
@@ -77,6 +82,9 @@ export const MODEL_RENAMES: readonly ModelRename[] = [
     // The retired Flash tiers were wire ids, so any saved per-model record keyed by one
     // may also hold one as a value. 3.7 expresses tiers as thinkingLevel names instead.
     dropReasoningEffortMap: true,
+    // Tier-specific retired ids remain valid routing aliases. Replacing one when it is
+    // the saved default would discard its encoded tier and make 3.7 default to medium.
+    preserveDefaultModel: from !== "gemini-3.6-flash",
   })),
 ];
 
@@ -237,7 +245,7 @@ export function projectModelRenames(
       row[field] = next;
       touched = true;
     }
-    if (prov.defaultModel === rename.from) {
+    if (prov.defaultModel === rename.from && !rename.preserveDefaultModel) {
       prov.defaultModel = rename.to;
       touched = true;
     }

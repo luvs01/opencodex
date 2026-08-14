@@ -157,7 +157,13 @@ describe("a saved config survives the retirement", () => {
 
   test("migrating a tier id does not duplicate an already-present 3.7 entry", () => {
     const { config } = projectModelRenames(configWith(["gemini-3.6-flash-high", "gemini-3.7-flash"]));
-    expect(config.providers["google-antigravity"]!.selectedModels).toEqual(["gemini-3.7-flash"]);
+    const prov = config.providers["google-antigravity"]!;
+    expect(prov.selectedModels).toEqual(["gemini-3.7-flash"]);
+    expect(prov.defaultModel).toBe("gemini-3.6-flash-high");
+    expect(resolveAntigravityEffortWireModel(prov.defaultModel!)).toEqual({
+      wireModelId: "gemini-3.7-flash-tiered",
+      thinkingLevel: "high",
+    });
   });
 
   test("an unrelated selection is left alone", () => {
