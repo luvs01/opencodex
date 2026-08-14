@@ -841,6 +841,10 @@ async function readUsageEntriesIncrementally(
     // A shrink means truncation or replacement-in-place; the retained rows may no
     // longer correspond to file contents, so refuse to extend them.
     if (size < retained.coveredThroughBytes) return null;
+    // Extending retained state is only an optimization; never let a large burst turn
+    // the bounded management read into an unbounded read of everything appended since
+    // the previous poll. A full read below will load only the requested tail window.
+    if (size - retained.coveredThroughBytes > maxReadBytes) return null;
     // Verify the retained REGION is unchanged before anything is reused. Identity keeps
     // dev/ino/birthtime, and an append and an in-place rewrite both move mtime/ctime
     // forward, so only the bytes themselves settle it.
