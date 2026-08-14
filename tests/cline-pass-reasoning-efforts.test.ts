@@ -113,7 +113,7 @@ describe("ClinePass reasoning effort capabilities", () => {
         "cline-pass": {
           ...config.providers!["cline-pass"],
           reasoningEfforts: ["low"],
-          reasoningWireFormat: "gateway-object",
+          reasoningWireFormat: undefined,
         },
       },
     };

@@ -272,7 +272,7 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
   // installs clamped forever. This branch is reached only after canonical transport matching, so
   // same-named custom destinations and every other explicit ladder still retain user precedence.
   const repairLegacyClinePassReasoningEfforts = providerName === "cline-pass"
-    && provider.reasoningWireFormat === "gateway-object"
+    && (provider.reasoningWireFormat === undefined || provider.reasoningWireFormat === "gateway-object")
     && provider.reasoningEfforts?.length === 1
     && provider.reasoningEfforts[0] === "low";
   const modelContextWindows = providerName === OPENAI_API_PROVIDER_ID
