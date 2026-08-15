@@ -63,6 +63,7 @@ export interface ProbeRunner {
     stderr: string;
     timedOut: boolean;
     spawnFailed: boolean;
+    spawnErrorCode?: string;
   };
 }
 
@@ -84,13 +85,15 @@ export const defaultProbeRunner: ProbeRunner = (file, args) => {
     windowsHide: true,
     timeout: SERVICE_PROBE_TIMEOUT_MS,
   });
+  const spawnErrorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  const timedOut = spawnErrorCode === "ETIMEDOUT" || result.signal !== null;
   return {
     status: result.status,
     stdout: String(result.stdout ?? ""),
     stderr: String(result.stderr ?? ""),
-    // `signal` is SIGTERM when the timeout fired; a spawn failure sets `error`.
-    timedOut: result.signal !== null && result.error === undefined,
-    spawnFailed: result.error !== undefined,
+    timedOut,
+    spawnFailed: result.error !== undefined && !timedOut,
+    spawnErrorCode,
   };
 };
 
@@ -264,8 +267,12 @@ function inspectSystemd(deps: Required<Pick<ProbeDeps, "run" | "home">>): Servic
     "--user", "show", TASK,
     "-p", "LoadState", "-p", "ActiveState", "-p", "FragmentPath", "-p", "NeedDaemonReload",
   ]);
-  if (shown.spawnFailed) return { kind: "absent" };
   if (shown.timedOut) return unknown("systemctl could not be asked: timed out");
+  if (shown.spawnFailed) {
+    return shown.spawnErrorCode === "ENOENT"
+      ? { kind: "absent" }
+      : unknown(`systemctl could not be spawned: ${shown.stderr.trim() || shown.spawnErrorCode || "unknown error"}`);
+  }
   if (shown.status !== 0) {
     // A missing unit still exits ZERO and says not-found; a non-zero status means
     // the question never reached the bus.
