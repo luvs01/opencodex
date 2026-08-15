@@ -473,8 +473,18 @@ export async function enqueueManualLabRun(
     return { state: next, value: run };
   });
   if (!created) return null;
-  // Manual execution is independent of automation enablement/layer toggles.
-  await runDispatchBatch(configDir, { manualRunId: created.runId, abortSignal });
+  // Manual execution can run without activation or a scheduler, so it must own a shutdown
+  // hook for the lifetime of its dispatch instead of relying on either of those paths.
+  const detachShutdownHook = registerOptionalShutdownHook(
+    `lab-automation-manual:${created.runId}`,
+    requestLabAutomationShutdown,
+  );
+  try {
+    // Manual execution is independent of automation enablement/layer toggles.
+    await runDispatchBatch(configDir, { manualRunId: created.runId, abortSignal });
+  } finally {
+    detachShutdownHook();
+  }
   return loadLabAutomationState(configDir).runs.find((row) => row.runId === created.runId) ?? created;
 }
 
