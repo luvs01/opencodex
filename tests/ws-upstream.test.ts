@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, jest, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { providerFetch } from "../src/server/responses/fetch-helpers";
 import { handleResponses } from "../src/server/responses";
 import { isEagerRelaySseResponse } from "../src/server/relay";
@@ -411,7 +411,11 @@ describe("codexWsUpstreamFetch", () => {
   });
 
   test("falls back to the HTTP fetch when the upgrade deadline elapses without open or close", async () => {
-    jest.useFakeTimers();
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
     try {
       installFake(() => { /* handshake never settles */ });
       const sentinel = new Response("sse-timeout-fallback", { status: 200 });
@@ -423,7 +427,6 @@ describe("codexWsUpstreamFetch", () => {
 
       const responsePromise = codexWsUpstreamFetch(CODEX_URL, streamingInit(), fallback);
       expect(FakeWebSocket.instances).toHaveLength(1);
-      jest.advanceTimersByTime(10_000);
       const response = await responsePromise;
 
       expect(response).toBe(sentinel);
@@ -431,7 +434,7 @@ describe("codexWsUpstreamFetch", () => {
       expect(fallbackCalls).toBe(1);
       expect(FakeWebSocket.instances[0].closed).toBe(true);
     } finally {
-      jest.useRealTimers();
+      globalThis.setTimeout = realSetTimeout;
     }
   });
 
