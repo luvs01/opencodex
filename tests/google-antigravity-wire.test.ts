@@ -288,6 +288,24 @@ describe("antigravity CCA envelope", () => {
     }
   });
 
+  test("routes partial Gemini 3.7 discovery tiers through thinkingLevel", async () => {
+    for (const [modelId, thinkingLevel] of [
+      ["gemini-3.7-flash-low", "low"],
+      ["gemini-3.7-flash-medium", "medium"],
+      ["gemini-3.7-flash-high", "high"],
+    ] as const) {
+      expect(resolveAntigravityEffortWireModel(modelId)).toEqual({
+        wireModelId: "gemini-3.7-flash-tiered",
+        thinkingLevel,
+      });
+
+      const req = await createGoogleAdapter(effortProvider).buildRequest(parsedWithEffort(modelId));
+      const env = JSON.parse(req.body);
+      expect(env.model).toBe("gemini-3.7-flash-tiered");
+      expect(env.request.generationConfig.thinkingConfig).toEqual({ thinkingLevel });
+    }
+  });
+
   test("ignores inherited CCA model and alias properties", () => {
     const inheritedModels = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(inheritedModels, "__proto__", {

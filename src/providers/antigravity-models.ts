@@ -49,6 +49,15 @@ const RETIRED_FLASH_TIERS: Record<string, string> = {
   "gemini-3-flash-agent": "high",
 };
 
+// Some discovery responses still publish the current Flash thinking levels as
+// separate rows. These IDs are picker-visible when the response contains only a
+// partial tier set, but CCA accepts them only through the tiered wire ID.
+const CURRENT_FLASH_DISCOVERY_TIERS: Record<string, string> = {
+  "gemini-3.7-flash-low": "low",
+  "gemini-3.7-flash-medium": "medium",
+  "gemini-3.7-flash-high": "high",
+};
+
 const ANTIGRAVITY_WIRE_MODELS = [
   "gemini-3.7-flash-tiered",
   "gemini-3.1-pro-low",
@@ -511,17 +520,25 @@ export function retiredAntigravityFlashTier(modelId: string): string | undefined
  * Resolve a picker-visible base model + optional reasoning effort to the CCA wire model ID.
  *
  * Precedence (evaluated in order):
- * 1. Suffix wire ID or compat alias → resolve via `resolveAntigravityWireModelId`, no thinkingConfig.
- * 2. Mapped Gemini base with effort → return mapped wire ID + thinkingLevel.
- * 3. Mapped Gemini base without effort → return default-effort wire ID, no thinkingConfig.
- * 4. Claude Opus with effort → return identity + thinkingLevel (no suffix variants exist).
- * 5. All other IDs → return `resolveAntigravityWireModelId(modelId)`, no thinkingConfig.
+ * 1. Current Flash discovery tier → tiered wire ID + its thinkingLevel.
+ * 2. Suffix wire ID or compat alias → resolve via `resolveAntigravityWireModelId`, no thinkingConfig.
+ * 3. Mapped Gemini base with effort → return mapped wire ID + thinkingLevel.
+ * 4. Mapped Gemini base without effort → return default-effort wire ID, no thinkingConfig.
+ * 5. Claude Opus with effort → return identity + thinkingLevel (no suffix variants exist).
+ * 6. All other IDs → return `resolveAntigravityWireModelId(modelId)`, no thinkingConfig.
  */
 export function resolveAntigravityEffortWireModel(
   modelId: string,
   effort?: string,
   baseUrl?: string,
 ): { wireModelId: string; thinkingLevel?: string } {
+  const discoveryTier = Object.hasOwn(CURRENT_FLASH_DISCOVERY_TIERS, modelId)
+    ? CURRENT_FLASH_DISCOVERY_TIERS[modelId]
+    : undefined;
+  if (discoveryTier) {
+    return { wireModelId: GEMINI_FLASH_WIRE_ID, thinkingLevel: discoveryTier };
+  }
+
   // A collapsed picker row reports ONE representative wire id (whichever tier CCA
   // listed first), so live discovery cannot describe a ladder — it can only name a
   // single rung. Letting it answer for a base model we already have a ladder for
