@@ -1403,6 +1403,52 @@ describe("server combo failover 030 activation matrix", () => {
     expect(inputText.split("next turn")).toHaveLength(2);
   });
 
+  test("combo continuation expansion respects the client task scope", async () => {
+    const { rememberResponseState } = await import("../src/responses/state");
+    rememberResponseState(
+      { model: "combo/free", input: "legacy private history" },
+      {
+        id: "resp_combo_legacy_unscoped",
+        status: "completed",
+        output: [{ type: "message", role: "assistant", content: "legacy reply" }],
+      },
+    );
+    rememberResponseState(
+      { model: "combo/free", input: "scoped private history" },
+      {
+        id: "resp_combo_scoped",
+        status: "completed",
+        output: [{ type: "message", role: "assistant", content: "scoped reply" }],
+      },
+      undefined,
+      { clientThreadId: "combo-task" },
+    );
+    const bodies: Array<Record<string, unknown>> = [];
+    const a = serve(async request => {
+      bodies.push(await request.json() as Record<string, unknown>);
+      return chatSuccess("continued", "m1");
+    });
+    const config = comboConfig({ a: provider("openai-chat", baseUrl(a), "key-a") });
+    const headers = { "x-codex-parent-thread-id": "combo-task" };
+
+    const legacyResponse = await post(config, {
+      previous_response_id: "resp_combo_legacy_unscoped",
+      input: "fresh scoped input",
+    }, {}, headers);
+    const scopedResponse = await post(config, {
+      previous_response_id: "resp_combo_scoped",
+      input: "continue scoped task",
+    }, {}, headers);
+
+    expect(legacyResponse.status).toBe(200);
+    expect(scopedResponse.status).toBe(200);
+    expect(bodies).toHaveLength(2);
+    expect(JSON.stringify(bodies[0])).not.toContain("legacy private history");
+    expect(JSON.stringify(bodies[0])).toContain("fresh scoped input");
+    expect(JSON.stringify(bodies[1])).toContain("scoped private history");
+    expect(JSON.stringify(bodies[1])).toContain("continue scoped task");
+  });
+
   test("disabled image input rejects an image restored from previous_response_id before dispatch", async () => {
     const { rememberResponseState } = await import("../src/responses/state");
     rememberResponseState(

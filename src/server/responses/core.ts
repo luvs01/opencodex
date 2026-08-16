@@ -1201,7 +1201,8 @@ export async function handleComboResponses(
   // Expand previous_response_id before image policy and child dispatch so a
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
-  const body = expandPreviousResponseInput(rawBody);
+  const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
+  const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
   if (previousResponseReplayFailure(body)) {
     return formatErrorResponse(
       400,
