@@ -19,6 +19,7 @@ import {
 } from "../src/providers/request-pacing";
 import {
   acquireNativeMainProfileDrain,
+  getActiveTurnCount,
   getNativeMainProfileRequestCount,
   resetLifecycleDrainStateForTests,
 } from "../src/server/lifecycle";
@@ -633,6 +634,52 @@ test("POST /v1/chat/completions forwards response_format to routed openai-chat",
       json_schema: { name: "answer", schema: { type: "object" }, strict: true },
     });
   } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("native chat streams hold their active-turn lease until stream completion", async () => {
+  const encoder = new TextEncoder();
+  let upstreamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const upstream = Bun.serve({
+    port: 0,
+    fetch() {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstreamController = controller;
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: "held" } }] })}\n\n`,
+          ));
+        },
+      }), { headers: { "Content-Type": "text/event-stream" } });
+    },
+  });
+  saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`));
+  const server = startServer(0);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    const response = await fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mock/test-model",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    reader = response.body!.getReader();
+    expect((await reader.read()).done).toBe(false);
+    expect(getActiveTurnCount()).toBe(1);
+
+    upstreamController!.enqueue(encoder.encode("data: [DONE]\n\n"));
+    upstreamController!.close();
+    while (!(await reader.read()).done) { /* drain the completed response */ }
+    reader = undefined;
+    expect(getActiveTurnCount()).toBe(0);
+  } finally {
+    await reader?.cancel();
     await server.stop(true);
     upstream.stop(true);
   }

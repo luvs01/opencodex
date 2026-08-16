@@ -20,6 +20,7 @@ import {
   isTranslatorBudgetExceededError,
   type TranslatorBudget,
 } from "../lib/translator-budget";
+import type { AdmissionLease } from "../lib/admission";
 import {
   hasKeyPoolFailover,
   rateLimitRetryDelayMs,
@@ -39,6 +40,7 @@ import {
   type RequestLogContext,
 } from "./request-log";
 import { jsonCompletionSse, nativeChatSse, structuredError, usageFromChat } from "./chat-native-sse";
+import { trackStreamLifetime } from "./lifecycle";
 
 type Rec = Record<string, unknown>;
 
@@ -78,7 +80,7 @@ interface HandleNativeChatOptions {
   req: Request;
   config: OcxConfig;
   logCtx: RequestLogContext;
-  logIds?: { requestId: string; start: number };
+  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease };
   route: RouteResult;
   chatBody: Rec;
   requestedModel: string;
@@ -298,7 +300,8 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       } : {}),
     });
     if (requestedStream) {
-      return new Response(stream, {
+      const trackedStream = trackStreamLifetime(stream, upstream, undefined, logIds?.turnAdmissionLease);
+      return new Response(trackedStream, {
         status: 200,
         headers: {
           "Content-Type": "text/event-stream; charset=utf-8",
