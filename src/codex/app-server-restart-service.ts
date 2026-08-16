@@ -127,18 +127,22 @@ async function runCodexRestart(io: CodexRestartServiceIo): Promise<CodexRestartR
     code: before.state === "unknown" ? "enumeration_unavailable" : "nothing_running",
   });
 
-  // `unknown` is not only the empty enumeration-failure case: the classifier also
-  // returns it WITH processes when the catalog mtime or a start time is unreadable.
-  // In that state it has not established that any server predates the catalog, so
-  // signalling would kill a possibly-current app-server on a guess.
-  if (before.state === "unknown" || before.processes.length === 0) return nothingToDo();
+  // Only a stale verdict establishes that any server predates the catalog.
+  // `unknown` can include processes with unreadable timestamps, while `fresh`
+  // explicitly establishes that none should be interrupted.
+  const catalogMtimeMs = before.catalogMtimeMs;
+  if (before.state !== "stale" || catalogMtimeMs === null || before.processes.length === 0) {
+    return nothingToDo();
+  }
 
   // The classifier carries { pid, startedAtMs } and no command line, but
   // restartCodexAppServers needs the full identity so it can refuse to signal a
   // recycled pid. Re-list and intersect on pid rather than reconstructing an
   // identity we never verified.
   const classifiedStarts = new Map(
-    before.processes.map(entry => [entry.pid, entry.startedAtMs] as const),
+    before.processes
+      .filter(entry => entry.startedAtMs !== null && entry.startedAtMs <= catalogMtimeMs)
+      .map(entry => [entry.pid, entry.startedAtMs] as const),
   );
   const live = (io.listProcesses ?? listCodexAppServerProcesses)(io.processIo ?? {});
   const candidates = live.filter(process => classifiedStarts.has(process.pid));

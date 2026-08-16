@@ -95,6 +95,46 @@ describe("performCodexRestart", () => {
     expect(result.requested).toEqual([]);
   });
 
+  test("a fresh classifier reading signals nothing", async () => {
+    let restarted = false;
+    const result = await performCodexRestart(baseIo({
+      collectState: () => ({
+        state: "fresh",
+        processes: [{ pid: 100, startedAtMs: 20 }],
+        catalogMtimeMs: 10,
+      }),
+      listProcesses: () => [proc(100)],
+      restart: () => {
+        restarted = true;
+        return { requested: [100], stopped: [100], surviving: [], failed: [] };
+      },
+    }));
+
+    expect(restarted).toBe(false);
+    expect(result.code).toBe("nothing_running");
+    expect(result.stateBefore).toBe("fresh");
+    expect(result.requested).toEqual([]);
+  });
+
+  test("a mixed stale and fresh reading signals only stale app-servers", async () => {
+    let received: CodexAppServerProcess[] = [];
+    await performCodexRestart(baseIo({
+      collectState: () => ({
+        state: "stale",
+        processes: [{ pid: 100, startedAtMs: 5 }, { pid: 200, startedAtMs: 20 }],
+        catalogMtimeMs: 10,
+      }),
+      listProcesses: () => [proc(100), proc(200)],
+      readStartMs: () => new Map([[100, 5], [200, 20]]),
+      restart: targets => {
+        received = [...targets];
+        return { requested: [100], stopped: [100], surviving: [], failed: [] };
+      },
+    }));
+
+    expect(received.map(entry => entry.pid)).toEqual([100]);
+  });
+
   test("a survivor makes the result partially_stopped and unsuccessful", async () => {
     const result = await performCodexRestart(baseIo({
       collectState: () => ({
