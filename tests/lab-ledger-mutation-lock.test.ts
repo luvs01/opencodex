@@ -147,7 +147,7 @@ test("appendLabEvent waits for the shared ledger mutation lock", async () => {
   }
 });
 
-test("appendLabEventIfAbsent immediately recovers a lock owned by an exited process", async () => {
+test("appendLabEventIfAbsent recovers an aged lock owned by an exited process", async () => {
   const home = tempHome();
   const ledgerPath = join(home, "lab", "compatibility.jsonl");
   const lockPath = `${ledgerPath}.lock`;
@@ -158,7 +158,7 @@ test("appendLabEventIfAbsent immediately recovers a lock owned by an exited proc
     import { writeFileSync } from "node:fs";
     writeFileSync(
       ${JSON.stringify(lockPath)},
-      JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "dead-holder" }),
+      JSON.stringify({ pid: process.pid, createdAt: Date.now() - 61_000, token: "dead-holder" }),
       { mode: 0o600 },
     );
     writeFileSync(${JSON.stringify(readyPath)}, "ready");

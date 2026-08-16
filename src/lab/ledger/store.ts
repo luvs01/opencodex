@@ -76,7 +76,7 @@ function isLockHolderAlive(pid: number): boolean {
   }
 }
 
-/** Return true when a ledger lock file has dead metadata and can be recovered. */
+/** Return true when a ledger lock file has old, dead metadata and can be recovered. */
 function isLedgerLockStale(lockPath: string): boolean {
   const meta = readLedgerLockMeta(lockPath);
   if (!meta) {
@@ -86,7 +86,12 @@ function isLedgerLockStale(lockPath: string): boolean {
       return false;
     }
   }
-  return !isLockHolderAlive(meta.pid);
+  // A dead PID alone is not enough: between checking its liveness and
+  // unlinking, another process can replace the path with its own live lock.
+  // Keeping the same grace period as malformed locks prevents a freshly
+  // replaced lock from being selected for stale recovery.
+  return Date.now() - meta.createdAt > LEDGER_LOCK_STALE_MS
+    && !isLockHolderAlive(meta.pid);
 }
 
 /** Write lock ownership metadata to a newly created exclusive lock file. */
