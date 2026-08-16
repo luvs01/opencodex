@@ -1095,11 +1095,6 @@ async function restartAfterUpdate(
     intervalMs: 100,
     scanIntervalMs: 500,
     killOcxHolders: true,
-    // Windows scheduler wrappers can mint a *new* bun PID during the wait; keep
-    // killing every ocx listener on this port, not only the pre-wait snapshot.
-    // npm rename trees under `@bitkyc08/.opencodex-*` are classified as ocx by
-    // isOcxStartCommandLine — never kill unknown foreign claimants on this port.
-    killAllOcxOnPort: true,
     onlyKillPids,
   });
 
@@ -1220,7 +1215,6 @@ async function restartAfterUpdate(
   if (serviceInstalled) stopWindowsServiceWrappersBestEffort();
   // Reclaim the captured port before the pinned start. Spawning `--port` while the old
   // socket is still busy is how Windows updates used to fail health checks (or hop).
-  // killAllOcxOnPort covers wrapper-respawned bun PIDs minted during the wait.
   const directAllow = reclaimKillAllowlist();
   const freed = await waitFn(port, hostname, reclaimOptsFor(directAllow));
   if (!freed) {
@@ -1375,15 +1369,7 @@ function stopWindowsServiceWrappersBestEffort(): void {
 function killWindowsServiceWrapperProcesses(): void {
   if (process.platform !== "win32") return;
   try {
-    const ps = [
-      "$pats = @('opencodex-service.cmd','opencodex-service-launcher.vbs');",
-      "Get-CimInstance Win32_Process | Where-Object {",
-      "  if ($_.ProcessId -eq $PID) { return $false };",
-      "  $c = $_.CommandLine; if (-not $c) { return $false };",
-      "  foreach ($p in $pats) { if ($c -like ('*' + $p + '*')) { return $true } };",
-      "  $false",
-      "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
-    ].join(" ");
+    const ps = buildWindowsServiceWrapperCleanupScript(getConfigDir());
     spawnSync(resolveTrustedWindowsPowerShellExe(), [
       "-NoProfile", "-NoLogo", "-NonInteractive",
       "-Command", ps,
@@ -1392,6 +1378,29 @@ function killWindowsServiceWrapperProcesses(): void {
     /* best-effort */
   }
 }
+
+function buildWindowsServiceWrapperCleanupScript(configDir: string): string {
+  const psQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+  const wrappers = [
+    { name: "cmd.exe", path: join(configDir, "opencodex-service.cmd") },
+    { name: "wscript.exe", path: join(configDir, "opencodex-service-launcher.vbs") },
+  ];
+  return [
+    `$targets = @(${wrappers.map(wrapper => (
+      `@{ Name = ${psQuote(wrapper.name)}; Path = ${psQuote(wrapper.path)} }`
+    )).join(",")});`,
+    "Get-CimInstance Win32_Process | Where-Object {",
+    "  if ($_.ProcessId -eq $PID) { return $false };",
+    "  $c = $_.CommandLine; if (-not $c) { return $false };",
+    "  foreach ($t in $targets) {",
+    "    if ($_.Name -ieq $t.Name -and $c.IndexOf($t.Path, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }",
+    "  };",
+    "  $false",
+    "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+  ].join(" ");
+}
+
+export const buildWindowsServiceWrapperCleanupScriptForTests = buildWindowsServiceWrapperCleanupScript;
 
 /** Exposed for tests: drives the non-service restart path with injected io. */
 export function restartAfterUpdateForTests(

@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildWindowsServiceWrapperCleanupScriptForTests,
   checkForUpdate,
   confirmRestartAfterUpdateForTests,
   finishGuiUpdateRestart,
@@ -42,6 +43,19 @@ afterEach(() => {
 });
 
 describe("GUI update check", () => {
+  test("Windows wrapper cleanup is scoped to wrapper hosts in the current home", () => {
+    const home = String.raw`C:\Users\Alice's Work\ocx`;
+    const script = buildWindowsServiceWrapperCleanupScriptForTests(home);
+
+    expect(script).toContain("Name = 'cmd.exe'");
+    expect(script).toContain("Name = 'wscript.exe'");
+    expect(script).toContain(join(home, "opencodex-service.cmd").replace("'", "''"));
+    expect(script).toContain(join(home, "opencodex-service-launcher.vbs").replace("'", "''"));
+    expect(script).toContain("OrdinalIgnoreCase");
+    expect(script).not.toContain("$pats");
+    expect(script).not.toContain("-like");
+  });
+
   test("surfaces an npm update with the launcher-safe command", () => {
     const result = checkForUpdate("latest", {
       currentVersion: () => "2.6.17",
@@ -537,12 +551,12 @@ describe("GUI update execution decisions", () => {
     expect(waited).toEqual([{
       port: 12345,
       hostname: "127.0.0.1",
-      opts: { killOcxHolders: true, onlyKillPids: [], killAllOcxOnPort: true },
+      opts: { killOcxHolders: true, onlyKillPids: [], killAllOcxOnPort: undefined },
     }]);
     expect(spawned).toEqual([{ port: 12345 }]);
   });
 
-  test("restart reclaim allowlists the trusted oldPid and kills any ocx on the port", async () => {
+  test("restart reclaim only enables kills for the trusted oldPid snapshot", async () => {
     const optsSeen: Array<{ killOcxHolders?: boolean; onlyKillPids?: number[]; killAllOcxOnPort?: boolean }> = [];
     const job: UpdateJobState = {
       id: "restart-oldpid",
@@ -571,7 +585,7 @@ describe("GUI update execution decisions", () => {
       },
       spawnStart: () => {},
     });
-    expect(optsSeen).toEqual([{ killOcxHolders: true, onlyKillPids: [4242], killAllOcxOnPort: true }]);
+    expect(optsSeen).toEqual([{ killOcxHolders: true, onlyKillPids: [4242], killAllOcxOnPort: undefined }]);
   });
 
   test("restart reclaim also allowlists leftover ocx listeners on the captured port", async () => {
