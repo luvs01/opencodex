@@ -199,7 +199,7 @@ function pinnedHttpRequest(
     req.on("socket", (socket) => {
       const connectedEvent = parsed.protocol === "https:" ? "secureConnect" : "connect";
       if (!socket.connecting) {
-        if (!usesLegacyIdleTimeout) startFirstByteTimer();
+        startFirstByteTimer();
         return;
       }
       if (connectTimeoutMs !== undefined) {
@@ -210,7 +210,7 @@ function pinnedHttpRequest(
       }
       socket.once(connectedEvent, () => {
         clearConnectTimer();
-        if (!usesLegacyIdleTimeout) startFirstByteTimer();
+        startFirstByteTimer();
       });
       socket.once("error", () => {
         clearConnectTimer();
