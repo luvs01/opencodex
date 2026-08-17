@@ -108,15 +108,19 @@ export function writeJournal(options: WriteJournalOptions = {}): void {
   atomicWriteFile(JOURNAL_PATH, JSON.stringify(journal));
 }
 
-export function markJournalInjectedState(config: string, profile: string | null): void {
+export function markJournalInjectedState(
+  config: string,
+  profile: string | null,
+  injectedOpenaiBaseUrl: string | null,
+): void {
   const journal = readJournal();
   if (!journal) return;
   if (journal.injectedConfigHash) return;
   journal.injectedConfigHash = sha256(config) ?? undefined;
   journal.injectedProfileHash = sha256(profile);
-  // Read from the bytes we are about to install, not from the file: another writer may
-  // already have rewritten it, and then the recorded value would describe their config.
-  journal.injectedOpenaiBaseUrl = rootTomlString(config, "openai_base_url");
+  // The caller supplies the URL it actually wrote. Deriving it from `config` would mistake
+  // a preserved user-owned root override for injected routing.
+  journal.injectedOpenaiBaseUrl = injectedOpenaiBaseUrl;
   journal.injectedCatalogPath = rootTomlString(config, "model_catalog_json");
   atomicWriteFile(JOURNAL_PATH, JSON.stringify(journal));
 }

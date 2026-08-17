@@ -39,7 +39,7 @@ const INJECT_REWRITE_RESTORE = [
   "  const rewritten = injected",
   "    .split(String.fromCharCode(10))",
   '    .filter(line => !line.trim().startsWith("#"))',
-  "    .join(String.fromCharCode(10));",
+  "    .join(String.fromCharCode(10)) + String.fromCharCode(10) + '# app rewrite';",
   '  fs.writeFileSync(configPath, rewritten, "utf8");',
   "  const result = restoreNativeCodex();",
   "  console.log(JSON.stringify({ success: result.success, message: result.message }));",
@@ -109,8 +109,9 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
   }, 15_000);
 
   test("a user's own openai_base_url written before injection is preserved", () => {
+    // Force a byte mismatch so exact journal restore cannot hide a fallback ownership bug.
     // The mirror-image risk of the fix: stripping ANY unmarked openai_base_url would
-    // delete a URL we never wrote. The journaled baseline is the arbiter, not the key name.
+    // delete a URL we never wrote. The journaled ownership evidence is the arbiter.
     writeFileSync(
       join(testDir, "config.toml"),
       'openai_base_url = "https://my-own-gateway.example/v1"\nmodel = "gpt-5.5"\n',

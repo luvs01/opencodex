@@ -553,7 +553,7 @@ describe("codex-journal", () => {
 
     const r = runScript(testDir, `
       const { markJournalInjectedState } = require("./src/codex/journal");
-      markJournalInjectedState("# injected\\n", null);
+      markJournalInjectedState("# injected\\n", null, null);
       console.log(String(process.pid));
     `);
     expect(r.status).toBe(0);

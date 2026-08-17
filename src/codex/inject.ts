@@ -894,7 +894,11 @@ export async function injectCodexConfig(
     });
     atomicWriteFile(CODEX_CONFIG_PATH, content);
     atomicWriteFile(CODEX_PROFILE_PATH, profileContent);
-    markJournalInjectedState(content, profileContent);
+    markJournalInjectedState(
+      content,
+      profileContent,
+      keptUserBaseUrl ? null : rootTomlString(content, "openai_base_url"),
+    );
   };
 
   /*
