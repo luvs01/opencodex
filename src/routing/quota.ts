@@ -41,6 +41,7 @@ function codexAccountQuotaEvidence(accountId: string, plan?: string): RouteQuota
   const percents = [
     ...(monthly ? [] : [quota.weeklyPercent]),
     quota.monthlyPercent,
+    quota.shortPercent,
   ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   const maxPercent = percents.length > 0 ? Math.max(...percents) : undefined;
   // Credits-only snapshots prove neither usage nor exhaustion. Unknown must not
@@ -49,6 +50,7 @@ function codexAccountQuotaEvidence(accountId: string, plan?: string): RouteQuota
   const resets = [
     ...(monthly ? [] : [quota.weeklyResetAt]),
     quota.monthlyResetAt,
+    quota.shortResetAt,
   ].filter((value): value is number => typeof value === "number" && Number.isFinite(value))
     .filter(value => value > Date.now());
   return {

@@ -119,6 +119,7 @@ describe("codex routing", () => {
   test("usage score uses the hottest known quota window", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 81 })).toBe(81);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 })).toBe(91);
+    expect(computeCodexUsageScore({ weeklyPercent: 10, shortPercent: 100 }, "k12")).toBe(100);
     expect(computeCodexUsageScore({ weeklyPercent: 15 })).toBe(15);
   });
 
@@ -179,6 +180,7 @@ describe("codex routing", () => {
   test("go and free plans use only the 30d quota window", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 99, monthlyPercent: 12 }, "go")).toBe(12);
     expect(computeCodexUsageScore({ weeklyPercent: 99, monthlyPercent: 13 }, "free")).toBe(13);
+    expect(computeCodexUsageScore({ weeklyPercent: 99, monthlyPercent: 13, shortPercent: 80 }, "free")).toBe(80);
     expect(computeCodexUsageScore({ weeklyPercent: 1 }, "go")).toBe(CODEX_UNKNOWN_USAGE_SCORE);
   });
 

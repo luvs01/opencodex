@@ -55,4 +55,23 @@ describe("Codex pool quota evidence for routing policies", () => {
       { accountId: "credits-only", plan: "plus" },
     ])).toEqual({ known: false });
   });
+
+  test("includes burst-window usage and reset in cached route evidence", () => {
+    const shortResetAt = Date.now() + 60_000;
+    setAccountQuotaFromParsed("burst", {
+      weeklyPercent: 10,
+      shortPercent: 100,
+      shortResetAt,
+      shortWindowSeconds: 18_000,
+    });
+    expect(codexPoolQuotaEvidence([
+      { accountId: "burst", plan: "k12" },
+    ])).toEqual({
+      known: true,
+      exhausted: true,
+      headroom: 0,
+      resetAtMs: shortResetAt,
+      source: "codex-pool",
+    });
+  });
 });

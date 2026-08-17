@@ -406,6 +406,22 @@ describe("rate-limit reset credits", () => {
       });
     });
 
+    it("retains a parsed burst window in the shared quota cache", () => {
+      const quota = parseUsageQuota({
+        rate_limit: {
+          primary_window: { used_percent: 100, reset_at: 2000000000, limit_window_seconds: 18000 },
+          secondary_window: { used_percent: 10, reset_at: 2000586800, limit_window_seconds: 604800 },
+        },
+      });
+      setAccountQuotaFromParsed("burst", quota);
+      expect(getAccountQuota("burst")).toMatchObject({
+        shortPercent: 100,
+        shortResetAt: 2000000000,
+        shortWindowSeconds: 18000,
+        weeklyPercent: 10,
+      });
+    });
+
     it("preserves monthly quota when weekly-only headers arrive", () => {
       clearAccountQuota();
       updateAccountQuota("weekly-only", 10, 111, 50, 222);

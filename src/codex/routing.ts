@@ -322,14 +322,15 @@ function deleteScopedHealth(accountId: string, scope: CodexQuotaScope): void {
 export function computeCodexUsageScore(quota: {
   weeklyPercent?: number;
   monthlyPercent?: number;
+  shortPercent?: number;
 } | null, plan?: unknown): number {
   if (!quota) return CODEX_UNKNOWN_USAGE_SCORE;
   if (isThirtyDayOnlyCodexPlan(plan)) {
-    return typeof quota.monthlyPercent === "number" && Number.isFinite(quota.monthlyPercent)
-      ? quota.monthlyPercent
-      : CODEX_UNKNOWN_USAGE_SCORE;
+    const values = [quota.monthlyPercent, quota.shortPercent]
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return values.length > 0 ? Math.max(...values) : CODEX_UNKNOWN_USAGE_SCORE;
   }
-  const values = [quota.weeklyPercent, quota.monthlyPercent]
+  const values = [quota.weeklyPercent, quota.monthlyPercent, quota.shortPercent]
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   return values.length > 0 ? Math.max(...values) : CODEX_UNKNOWN_USAGE_SCORE;
 }
