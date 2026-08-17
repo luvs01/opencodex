@@ -472,6 +472,19 @@ describe("Cursor code mode tool guidance", () => {
     expect(note).not.toContain("they are not separate top-level tools");
   });
 
+  test("keeps a visible top-level apply_patch callable in code mode", () => {
+    const note = buildCursorToolGuidanceSystemNote([
+      codeModeExec(),
+      { name: "apply_patch", description: "Patch files", parameters: {}, freeform: true },
+    ]);
+    expect(note).toBeDefined();
+    if (!note) throw new Error("Expected Cursor tool guidance note");
+
+    expect(note).toContain("including `apply_patch`, remains callable at the top level as usual");
+    expect(note).toContain("For file edits, use the `apply_patch` tool");
+    expect(note).not.toContain("`apply_patch` at the top level here");
+  });
+
   test("keeps flat-catalog shell-bridge guidance when a bare bridge is advertised", () => {
     const note = buildCursorToolGuidanceSystemNote([{ name: "exec_command", description: "Run", parameters: {} }]);
     expect(note).toBeDefined();

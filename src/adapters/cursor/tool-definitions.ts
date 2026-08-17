@@ -596,6 +596,11 @@ export function buildCursorToolGuidanceSystemNote(
     : [];
   const shellBridgeLabel = quotedNames(shellBridgeNames.length > 0 ? shellBridgeNames : [...CODEX_SHELL_BRIDGE_TOOL_NAMES]);
   const hasApplyPatch = cursorRequestAdvertisesApplyPatch(tools, toolChoice);
+  const codeModeNestedOnlyNames = [
+    "exec_command",
+    "shell_command",
+    ...(hasApplyPatch ? [] : ["apply_patch"]),
+  ];
   const structuredEditNames = tools
     ?.filter(tool => !tool.namespace && isCursorStructuredEditToolName(tool.name))
     .map(tool => tool.name) ?? [];
@@ -615,7 +620,7 @@ export function buildCursorToolGuidanceSystemNote(
     // Code mode: shell/edit/MCP live inside freeform `exec` as nested helpers. Without this the
     // model probes for a top-level shell tool that is not there.
     codeMode
-      ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. Read the tool description for the exact nested helpers this turn provides. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\`, \`shell_command\`, or \`apply_patch\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}.`
+      ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. Read the tool description for the exact nested helpers this turn provides. Those nested helpers are not themselves top-level tools, so do not call ${quotedNames(codeModeNestedOnlyNames)} at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}.`
       : undefined,
     codeMode
       ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
