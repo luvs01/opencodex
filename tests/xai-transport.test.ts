@@ -261,6 +261,33 @@ describe("xAI auth-mode transport selection", () => {
     expect(xaiParameters.$defs).toEqual(schema.$defs);
   });
 
+  test("omits a compact $ref union whose expanded variant count is excessive", () => {
+    const $defs: Record<string, unknown> = {
+      leaf: { type: "object", properties: { mode: { const: "leaf" } } },
+    };
+    for (let depth = 1; depth <= 20; depth += 1) {
+      $defs[`level${depth}`] = {
+        oneOf: [
+          { $ref: `#/$defs/${depth === 1 ? "leaf" : `level${depth - 1}`}` },
+          { $ref: `#/$defs/${depth === 1 ? "leaf" : `level${depth - 1}`}` },
+        ],
+      };
+    }
+    const request = createOpenAIChatAdapter(cliProvider()).buildRequest({
+      ...parsed(),
+      context: {
+        messages: [],
+        tools: [{
+          name: "excessive",
+          description: "Excessive",
+          parameters: { $defs, $ref: "#/$defs/level20" },
+        }],
+      },
+    });
+
+    expect(JSON.parse(request.body).tools).toBeUndefined();
+  });
+
   test("omits an xAI $ref union that would collapse to an empty object", () => {
     const schema = {
       $defs: {

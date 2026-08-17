@@ -974,26 +974,36 @@ function lookupLocalJsonPointer(root: unknown, ref: string): unknown {
   return current;
 }
 
-/** Resolve local `#/` `$ref`s. Unresolvable or cyclic refs return undefined. */
+const XAI_SCHEMA_MAX_DEPTH = 64;
+const XAI_SCHEMA_MAX_VARIANTS = 256;
+
+/** Resolve local `#/` `$ref`s. Unresolvable, cyclic, or excessively deep refs return undefined. */
 function resolveXaiSchemaRefs(
   schema: unknown,
   root: Record<string, unknown>,
   stack: Set<string> = new Set(),
+  cache: Map<string, unknown> = new Map(),
+  depth = 0,
 ): unknown | undefined {
+  if (depth > XAI_SCHEMA_MAX_DEPTH) return undefined;
   if (!isXaiObjectSchema(schema)) return schema;
   if (typeof schema.$ref === "string") {
     const ref = schema.$ref;
     if (stack.has(ref)) return undefined;
-    const target = lookupLocalJsonPointer(root, ref);
-    if (target === undefined) return undefined;
-    stack.add(ref);
-    const resolvedTarget = resolveXaiSchemaRefs(target, root, stack);
-    stack.delete(ref);
-    if (resolvedTarget === undefined) return undefined;
+    let resolvedTarget = cache.get(ref);
+    if (resolvedTarget === undefined) {
+      const target = lookupLocalJsonPointer(root, ref);
+      if (target === undefined) return undefined;
+      stack.add(ref);
+      resolvedTarget = resolveXaiSchemaRefs(target, root, stack, cache, depth + 1);
+      stack.delete(ref);
+      if (resolvedTarget === undefined) return undefined;
+      cache.set(ref, resolvedTarget);
+    }
     const rest: Record<string, unknown> = { ...schema };
     delete rest.$ref;
     if (Object.keys(rest).length === 0) return resolvedTarget;
-    const resolvedRest = resolveXaiSchemaRefs(rest, root, stack);
+    const resolvedRest = resolveXaiSchemaRefs(rest, root, stack, cache, depth + 1);
     if (resolvedRest === undefined || !isXaiObjectSchema(resolvedTarget) || !isXaiObjectSchema(resolvedRest)) {
       return undefined;
     }
@@ -1005,7 +1015,7 @@ function resolveXaiSchemaRefs(
     if ((key === "oneOf" || key === "anyOf") && Array.isArray(value)) {
       const items: unknown[] = [];
       for (const item of value) {
-        const next = resolveXaiSchemaRefs(item, root, stack);
+        const next = resolveXaiSchemaRefs(item, root, stack, cache, depth + 1);
         if (next === undefined) return undefined;
         items.push(next);
       }
@@ -1015,7 +1025,7 @@ function resolveXaiSchemaRefs(
     if (key === "properties" && isXaiObjectSchema(value)) {
       const properties: Record<string, unknown> = {};
       for (const [name, property] of Object.entries(value)) {
-        const next = resolveXaiSchemaRefs(property, root, stack);
+        const next = resolveXaiSchemaRefs(property, root, stack, cache, depth + 1);
         if (next === undefined) return undefined;
         properties[name] = next;
       }
@@ -1113,7 +1123,11 @@ function composeXaiObjectSchemas(
   return composed;
 }
 
-function expandXaiRootObjectSchemas(schema: unknown): Record<string, unknown>[] | undefined {
+function expandXaiRootObjectSchemas(
+  schema: unknown,
+  depth = 0,
+): Record<string, unknown>[] | undefined {
+  if (depth > XAI_SCHEMA_MAX_DEPTH) return undefined;
   if (!isXaiObjectSchema(schema)) return undefined;
   const compositionKey = ["oneOf", "anyOf"].find(key => Array.isArray(schema[key]));
   if (!compositionKey) {
@@ -1126,8 +1140,9 @@ function expandXaiRootObjectSchemas(schema: unknown): Record<string, unknown>[] 
   if (!Array.isArray(branches)) return undefined;
   const expanded: Record<string, unknown>[] = [];
   for (const branch of branches) {
-    const variants = expandXaiRootObjectSchemas(branch);
+    const variants = expandXaiRootObjectSchemas(branch, depth + 1);
     if (!variants) return undefined;
+    if (expanded.length + variants.length > XAI_SCHEMA_MAX_VARIANTS) return undefined;
     for (const variant of variants) expanded.push(composeXaiObjectSchemas(siblings, variant));
   }
   return expanded.length > 0 ? expanded : undefined;
