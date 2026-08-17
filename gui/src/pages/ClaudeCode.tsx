@@ -104,7 +104,7 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
   );
 
   // Auto-compact window presets (devlog 020 + user request): dropdown like the model
-  // pickers. "" = 350k default; a saved off-ladder value is surfaced as its own option.
+  // pickers. "" = 829.8k default; a saved off-ladder value is surfaced as its own option.
   const autoCompactOptions = useMemo(() => {
     const ladder = [100_000, 200_000, 250_000, 300_000, 350_000, 400_000, 500_000, 600_000, 750_000, 900_000, 1_000_000];
     // Compact SI-style units (1M / 350k) — technical number format, not prose.
