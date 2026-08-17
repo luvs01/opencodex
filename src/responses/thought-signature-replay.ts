@@ -41,16 +41,16 @@ const STORE_VERSION = 4;
 /** Bound on remembered entries; real signatures are a few hundred bytes, so this stays small. */
 const MAX_ENTRIES = 16_384;
 /**
- * Total bytes of remembered signature material.
+ * Total serialized bytes of remembered entries.
  *
  * An entry count alone is not a memory bound: a single signature may be 64KiB, so 16,384
  * entries is a ~1GiB ceiling. This is the bound that actually holds.
  */
-const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
 /** A signature is needed for the immediate next turn; a long TTL also covers resumed threads. */
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-type StoredEntry = { sig: string; savedAt: number };
+type StoredEntry = { sig: string; savedAt: number; storageBytes: number };
 
 /** Outcome of a remember attempt. `conflict` is a real signal, not a no-op. */
 export type ThoughtSignatureRememberResult =
@@ -64,6 +64,8 @@ let entries = new Map<string, StoredEntry>();
 let totalBytes = 0;
 let loaded = false;
 let persistChain: Promise<void> = Promise.resolve();
+let persistRunning = false;
+let persistDirty = false;
 
 function storePath(): string {
   return join(getConfigDir(), STORE_FILE_NAME);
@@ -110,6 +112,12 @@ export function thoughtSignatureReplaySalt(): Buffer | undefined {
 
 function nonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function storageBytes(key: string, sig: string, savedAt: number): number {
+  // Count the serialized representation rather than string code units. This also bounds
+  // provider/client-controlled key fields and JSON escaping overhead in the disk snapshot.
+  return Buffer.byteLength(JSON.stringify({ key, sig, savedAt }), "utf8") + 1;
 }
 
 /**
@@ -175,8 +183,10 @@ function load(): void {
       if (typeof key !== "string" || typeof sig !== "string" || typeof savedAt !== "number") continue;
       if (savedAt <= nowMs - TTL_MS) continue;
       if (!isCarryableSignature(sig)) continue;
-      entries.set(key, { sig, savedAt });
-      totalBytes += sig.length;
+      const entryBytes = storageBytes(key, sig, savedAt);
+      if (entryBytes > MAX_TOTAL_BYTES) continue;
+      entries.set(key, { sig, savedAt, storageBytes: entryBytes });
+      totalBytes += entryBytes;
     }
   } catch {
     // Corrupt store: ignore it; a later remember() rewrites a clean snapshot.
@@ -190,7 +200,7 @@ function prune(nowMs: number): void {
   for (const [key, entry] of entries) {
     if (nowMs - entry.savedAt > TTL_MS) {
       entries.delete(key);
-      totalBytes -= entry.sig.length;
+      totalBytes -= entry.storageBytes;
     }
   }
   if (entries.size <= MAX_ENTRIES && totalBytes <= MAX_TOTAL_BYTES) return;
@@ -198,21 +208,29 @@ function prune(nowMs: number): void {
   for (const [key, entry] of sorted) {
     if (entries.size <= MAX_ENTRIES && totalBytes <= MAX_TOTAL_BYTES) break;
     entries.delete(key);
-    totalBytes -= entry.sig.length;
+    totalBytes -= entry.storageBytes;
   }
 }
 
 function persist(): Promise<void> {
-  persistChain = persistChain
-    .then(async () => {
+  persistDirty = true;
+  if (persistRunning) return persistChain;
+  persistRunning = true;
+  persistChain = (async () => {
+    while (persistDirty) {
+      persistDirty = false;
       const snapshot = JSON.stringify({
         version: STORE_VERSION,
         entries: [...entries].map(([key, entry]) => ({ key, sig: entry.sig, savedAt: entry.savedAt })),
       });
       await atomicWriteFileAsync(storePath(), snapshot);
-    })
+    }
+  })()
     .catch(() => {
       // Best-effort persistence: the in-memory store still serves the running process.
+    })
+    .finally(() => {
+      persistRunning = false;
     });
   return persistChain;
 }
@@ -241,8 +259,11 @@ export function rememberThoughtSignatureForReplay(
     if (existing.sig === signature) return { result: "already-equal", durable: Promise.resolve() };
     return { result: "conflict", durable: Promise.resolve() };
   }
-  entries.set(key, { sig: signature, savedAt: Date.now() });
-  totalBytes += signature.length;
+  const savedAt = Date.now();
+  const entryBytes = storageBytes(key, signature, savedAt);
+  if (entryBytes > MAX_TOTAL_BYTES) return { result: "ignored", durable: Promise.resolve() };
+  entries.set(key, { sig: signature, savedAt, storageBytes: entryBytes });
+  totalBytes += entryBytes;
   prune(Date.now());
   return { result: "stored", durable: persist() };
 }
@@ -302,7 +323,7 @@ export function lookupReplayThoughtSignature(
   if (!entry) return undefined;
   if (Date.now() - entry.savedAt > TTL_MS) {
     entries.delete(key);
-    totalBytes -= entry.sig.length;
+    totalBytes -= entry.storageBytes;
     return undefined;
   }
   return entry.sig;
@@ -316,6 +337,8 @@ export function resetThoughtSignatureReplayForTests(): void {
   persistChain = Promise.resolve();
   cachedSalt = undefined;
   saltLoaded = false;
+  persistRunning = false;
+  persistDirty = false;
 }
 
 export function thoughtSignatureReplayCountForTests(): number {

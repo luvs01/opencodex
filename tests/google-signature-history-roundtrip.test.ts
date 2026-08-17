@@ -14,6 +14,7 @@ import {
   lookupReplayThoughtSignature,
   rememberThoughtSignatureForReplay,
   resetThoughtSignatureReplayForTests,
+  thoughtSignatureReplayCountForTests,
 } from "../src/responses/thought-signature-replay";
 import { durableReplayDestinationIdentity } from "../src/responses/reasoning-replay-cache";
 import type { AdapterEvent, OcxParsedRequest, OcxProviderConfig } from "../src/types";
@@ -300,6 +301,30 @@ describe("#1735 thought signature survives history replay", () => {
     await durable;
     expect(lookupReplayThoughtSignature("call_durable", scopeFor())).toBe(SIGNATURE);
   });
+
+  test("bursty remembers share one coalesced persistence worker", async () => {
+    const first = rememberThoughtSignatureForReplay("call_batch_1", SIGNATURE, scopeFor());
+    const second = rememberThoughtSignatureForReplay("call_batch_2", SIGNATURE_B, scopeFor());
+
+    expect(second.durable).toBe(first.durable);
+    await second.durable;
+    expect(lookupReplayThoughtSignature("call_batch_1", scopeFor())).toBe(SIGNATURE);
+    expect(lookupReplayThoughtSignature("call_batch_2", scopeFor())).toBe(SIGNATURE_B);
+  });
+
+  test("bounds the serialized snapshot even when signatures approach the wire limit", async () => {
+    const largeSignature = "s".repeat(64 * 1024);
+    let durable = Promise.resolve();
+    for (let index = 0; index < 70; index++) {
+      ({ durable } = rememberThoughtSignatureForReplay(`call_large_${index}`, largeSignature, scopeFor()));
+    }
+
+    await durable;
+    expect(thoughtSignatureReplayCountForTests()).toBeLessThan(70);
+    expect(lookupReplayThoughtSignature("call_large_0", scopeFor())).toBeUndefined();
+    expect(lookupReplayThoughtSignature("call_large_69", scopeFor())).toBe(largeSignature);
+  });
+
   test("the proxy-side store survives a process restart via its snapshot", async () => {
     rememberThoughtSignatureForReplay("call_disk_1", SIGNATURE, scopeFor());
     await flushThoughtSignatureReplayForTests();
