@@ -8,6 +8,7 @@ import {
   hasOwnProvider,
   isValidProviderName,
   multiAgentGuidanceEnabled,
+  mutatePersistedConfig,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   saveConfigPreservingClaudeCode,
@@ -175,9 +176,28 @@ async function syncEnabledClientIntegrations(
         config.claudeCode?.desktopProfile,
         nativeContextLimits(config),
       );
-      out.push(r.written
-        ? { client: "claude-desktop", ok: true, changed: true }
-        : { client: "claude-desktop", ok: false, reason: r.reason ?? "Claude Desktop write failed" });
+      if (!r.written || !r.fingerprint) {
+        out.push({ client: "claude-desktop", ok: false, reason: r.reason ?? "Claude Desktop write failed" });
+      } else {
+        const { emptyDesktopProfile } = await import("../../claude/desktop-profile");
+        const marked = mutatePersistedConfig(persisted => {
+          const profile = persisted.claudeCode?.desktopProfile
+            ?? config.claudeCode?.desktopProfile
+            ?? emptyDesktopProfile();
+          persisted.claudeCode = {
+            ...(persisted.claudeCode ?? {}),
+            desktopProfile: {
+              ...profile,
+              appliedFingerprint: r.fingerprint,
+              appliedAt: new Date().toISOString(),
+            },
+          };
+          return { changed: true, value: true };
+        });
+        out.push(marked.status === "unavailable"
+          ? { client: "claude-desktop", ok: false, reason: `Claude Desktop applied marker was not saved (${marked.reason})` }
+          : { client: "claude-desktop", ok: true, changed: true });
+      }
     } catch (error) {
       out.push({ client: "claude-desktop", ok: false, reason: error instanceof Error ? error.message : String(error) });
     }
