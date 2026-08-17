@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGoogleAdapter as createGoogleAdapterProduction } from "../src/adapters/google";
 import { __resetAntigravityReplayCache } from "../src/adapters/google-antigravity-replay";
-import { parseRequest } from "../src/responses/parser";
+import { hydrateReplayThoughtSignatures, parseRequest } from "../src/responses/parser";
 import {
   flushThoughtSignatureReplayForTests,
   lookupReplayThoughtSignature,
@@ -174,6 +174,25 @@ describe("#1735 thought signature survives history replay", () => {
       ],
       tools: [{ type: "function", name: "shell_command", description: "run", parameters: { type: "object" } }],
     });
+    const request = await createGoogleAdapter(provider).buildRequest(parsed);
+    const part = modelParts(request.body as string).find(candidate => "functionCall" in candidate);
+    expect(part?.thoughtSignature).toBe(SIGNATURE);
+  });
+
+  test("the server can restore a signature after its route scope is bound", async () => {
+    const scope = scopeFor();
+    rememberThoughtSignatureForReplay("call_shell_late", SIGNATURE, scope);
+    const parsed = parseRequest({
+      model: MODEL,
+      input: [
+        { type: "function_call", call_id: "call_shell_late", name: "shell_command", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_shell_late", output: "/workspace" },
+      ],
+    });
+
+    parsed._reasoningReplayScope = scope;
+    hydrateReplayThoughtSignatures(parsed);
+
     const request = await createGoogleAdapter(provider).buildRequest(parsed);
     const part = modelParts(request.body as string).find(candidate => "functionCall" in candidate);
     expect(part?.thoughtSignature).toBe(SIGNATURE);

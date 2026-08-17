@@ -755,6 +755,23 @@ export function parseRequest(
 }
 
 /**
+ * Restore provider-opaque signatures after routing has supplied the complete replay scope.
+ * The initial request parse necessarily happens before provider and credential selection, so
+ * production callers use this once the route-bound scope has been populated.
+ */
+export function hydrateReplayThoughtSignatures(parsed: OcxParsedRequest): void {
+  const scope = parsed._reasoningReplayScope;
+  for (const message of parsed.context.messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part.type !== "toolCall" || part.providerMetadata || !part.id) continue;
+      const remembered = replayThoughtSignatureMetadata(part.id, scope);
+      if (remembered) part.providerMetadata = remembered;
+    }
+  }
+}
+
+/**
  * The Responses `text.format` object when it requests structured output (json_schema or
  * json_object), undefined otherwise. Acceptance is identical to the boolean detector this
  * replaces; unknown or malformed formats are ignored, never rejected, so the native
