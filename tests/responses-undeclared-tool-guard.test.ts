@@ -78,10 +78,8 @@ describe("collectDeclaredWireToolNames", () => {
       ],
     });
 
-    // Namespaced MCP tools are reachable under either coordinate system, so both are accepted.
-    expect([...names].sort()).toEqual(
-      ["apply_patch", "create_issue", "exec", "linear__create_issue"],
-    );
+    // Namespace members must not authorize a colliding top-level tool with the same bare name.
+    expect([...names].sort()).toEqual(["apply_patch", "exec", "linear__create_issue"]);
   });
 
   test("reads tools carried inside input as an additional_tools item", () => {
@@ -191,6 +189,22 @@ describe("undeclared tool call guard", () => {
     });
 
     expect(await relay(upstream, ["linear__create_issue"])).toBe(upstream);
+  });
+
+  test("rejects a bare call declared only inside a namespace", async () => {
+    const declared = collectDeclaredWireToolNames({
+      tools: [
+        { type: "namespace", name: "safe", tools: [{ type: "function", name: "exec" }] },
+      ],
+    });
+    const upstream = sse("response.output_item.added", {
+      output_index: 0,
+      item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "exec", arguments: "{}" },
+    });
+
+    const out = await relay(upstream, declared);
+    expect(out).toContain(`"code":"${UNDECLARED_TOOL_CALL_ERROR_CODE}"`);
+    expect(out).toContain('routed provider emitted undeclared client tool \\"exec\\"');
   });
 
   test("never blocks apply_patch when the request really declared it", async () => {

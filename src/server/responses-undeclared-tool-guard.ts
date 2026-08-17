@@ -19,11 +19,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function addWireToolName(names: Set<string>, tool: unknown, namespace?: string): void {
   if (!isPlainObject(tool) || typeof tool.name !== "string" || tool.name.length === 0) return;
-  names.add(tool.name);
   // Codex routes MCP calls by an explicit `namespace` field, so the same tool is reachable
-  // as a bare inner name or as the flattened form; accept both rather than guess which
-  // coordinate system this provider echoes back.
-  if (namespace) names.add(namespacedToolName(namespace, tool.name));
+  // as a bare inner name paired with that namespace or as the flattened form. Store only the
+  // flattened coordinate so a namespace member cannot authorize a colliding top-level tool.
+  names.add(namespace ? namespacedToolName(namespace, tool.name) : tool.name);
 }
 
 function addWireToolSpecs(names: Set<string>, specs: unknown): void {
