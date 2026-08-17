@@ -103,6 +103,14 @@ async function postResponses(url: string | URL, authorization: string): Promise<
   });
 }
 
+async function postCompact(url: string | URL, authorization: string): Promise<Response> {
+  return originalFetch(new URL("/v1/responses/compact", url), {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization },
+    body: JSON.stringify({ model: "gpt-5.6-luna", input: [] }),
+  });
+}
+
 describe("#1686 env_key bearer admission reaches Direct with substitution", () => {
   test("an admission bearer is served and the stored main credential goes upstream", async () => {
     saveConfig(directConfig());
@@ -141,6 +149,21 @@ describe("#1686 env_key bearer admission reaches Direct with substitution", () =
     }
   });
 
+  test("compact substitution reports missing main credentials as authentication failure", async () => {
+    saveConfig(directConfig());
+    writeFileSync(join(codexHome, "auth.json"), JSON.stringify({ tokens: {} }));
+
+    const server = startServer(0);
+    try {
+      const response = await postCompact(server.url, `Bearer ${ADMISSION_SECRET}`);
+
+      expect(response.status).toBe(401);
+      expect(upstreamAuth).toHaveLength(0);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("a foreign bearer is still Codex Direct passthrough, not admission", async () => {
     saveConfig(directConfig());
     writeStoredMain(liveJwt());
@@ -156,4 +179,3 @@ describe("#1686 env_key bearer admission reaches Direct with substitution", () =
     }
   });
 });
-
