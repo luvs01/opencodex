@@ -361,18 +361,15 @@ const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
  * charset is checked explicitly. Remote URLs are out of scope: `McpImageContent` needs bytes, and
  * fetching here would put network IO inside request construction.
  */
-function decodeInlineImage(imageUrl: string): { bytes: Uint8Array; mimeType: string } | undefined {
+function inspectInlineImage(imageUrl: string): { base64: string; byteLength: number; mimeType: string } | undefined {
   const parsed = parseDataUrl(imageUrl);
   if (!parsed) return undefined;
   const base64 = parsed.base64.trim();
   if (base64.length === 0 || base64.length % 4 !== 0 || !BASE64_PATTERN.test(base64)) return undefined;
-  try {
-    const bytes = Uint8Array.from(Buffer.from(base64, "base64"));
-    if (bytes.length === 0) return undefined;
-    return { bytes, mimeType: parsed.mediaType || "application/octet-stream" };
-  } catch {
-    return undefined;
-  }
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  const byteLength = (base64.length / 4) * 3 - padding;
+  if (byteLength === 0) return undefined;
+  return { base64, byteLength, mimeType: parsed.mediaType || "application/octet-stream" };
 }
 
 /**
@@ -391,29 +388,28 @@ function imagePlaceholder(reason: string): string {
     : `${text.slice(0, LEGACY_IMAGE_PLACEHOLDER_BUDGET - 1)}]`;
 }
 
-type DecodedResultPart =
+type PreparedResultPart =
   | { kind: "text"; text: string }
-  | { kind: "image"; bytes: Uint8Array; mimeType: string }
+  | { kind: "image"; base64: string; byteLength: number; mimeType: string; bytes?: Uint8Array }
   | { kind: "undecodable" };
 
 type NormalizedToolResult = { text: string; isError: boolean };
 
 /**
- * Decode a tool result's parts ONCE. `toolCallStep` may re-serialize a step several times while
- * shrinking it to fit blob admission, and decoding base64 on every attempt made that loop
- * quadratic (an audit measured ~3s for 100 images).
+ * Validate image metadata without decoding. Images are materialized later, only after the
+ * zero-image step establishes how much room remains in the blob.
  */
-function decodeResultParts(message: OcxToolResultMessage): DecodedResultPart[] | undefined {
+function prepareResultParts(message: OcxToolResultMessage): PreparedResultPart[] | undefined {
   const content = message.content;
   if (typeof content === "string") return undefined;
-  return content.map((part): DecodedResultPart => {
+  return content.map((part): PreparedResultPart => {
     if (part.type === "text") return { kind: "text", text: part.text };
-    const decoded = decodeInlineImage(part.imageUrl);
-    return decoded ? { kind: "image", ...decoded } : { kind: "undecodable" };
+    const inspected = inspectInlineImage(part.imageUrl);
+    return inspected ? { kind: "image", ...inspected } : { kind: "undecodable" };
   });
 }
 
-function countImages(parts: DecodedResultPart[] | undefined): number {
+function countImages(parts: PreparedResultPart[] | undefined): number {
   return parts ? parts.filter(p => p.kind === "image").length : 0;
 }
 
@@ -427,11 +423,11 @@ function countImages(parts: DecodedResultPart[] | undefined): number {
  */
 function toolResultContentItems(
   message: OcxToolResultMessage,
-  decoded?: DecodedResultPart[],
+  prepared?: PreparedResultPart[],
   maxImages = Number.POSITIVE_INFINITY,
   normalizedText?: NormalizedToolResult,
 ) {
-  const parts = decoded ?? decodeResultParts(message);
+  const parts = prepared ?? prepareResultParts(message);
   const textItem = (text: string) => [create(McpToolResultContentItemSchema, {
     content: { case: "text" as const, value: create(McpTextContentSchema, { text }) },
   })];
@@ -478,9 +474,10 @@ function toolResultContentItems(
     }
     seen++;
     if (seen <= totalImages - allowed) {
-      pendingText.push(imagePlaceholder(`${part.bytes.byteLength}B over step limit`));
+      pendingText.push(imagePlaceholder(`${part.byteLength}B over step limit`));
       continue;
     }
+    part.bytes ??= Uint8Array.from(Buffer.from(part.base64, "base64"));
     flushText();
     items.push(create(McpToolResultContentItemSchema, {
       content: { case: "image" as const, value: create(McpImageContentSchema, {
@@ -530,7 +527,7 @@ function normalizedToolResult(message: OcxToolResultMessage, text: string): Norm
  */
 function normalizedDecodedTextResult(
   message: OcxToolResultMessage,
-  parts: DecodedResultPart[],
+  parts: PreparedResultPart[],
 ): NormalizedToolResult | undefined {
   if (parts.some(part => part.kind !== "text")) return undefined;
   return normalizedToolResult(message, parts.map(part => part.kind === "text" ? part.text : "").join("\n"));
@@ -552,7 +549,7 @@ function toolCallStep(
   const args: Record<string, Uint8Array> = {};
   for (const [key, value] of Object.entries(part.arguments ?? {})) args[key] = argBytes(value);
   const toolName = namespacedToolName(part.namespace, part.name);
-  const decodedResult = result ? decodeResultParts(result) : undefined;
+  const preparedResult = result ? prepareResultParts(result) : undefined;
   const serialize = (maxImages: number): Uint8Array => toBinary(ConversationStepSchema, create(ConversationStepSchema, {
     message: {
       case: "toolCall",
@@ -567,7 +564,7 @@ function toolCallStep(
               providerIdentifier: OCX_RESPONSES_TOOL_PROVIDER,
               args,
             }),
-            ...(result ? { result: toolResultPart(result, decodedResult, maxImages) } : {}),
+            ...(result ? { result: toolResultPart(result, preparedResult, maxImages) } : {}),
           }),
         },
       }),
@@ -580,16 +577,43 @@ function toolCallStep(
   // admitted step past the ceiling). Measure the real serialized size instead, then drop images —
   // oldest first, so the most recent screenshot survives — until the step fits.
   const limit = cursorBlobMaxEntryBytes();
-  const imageCount = countImages(decodedResult);
-  let encoded = serialize(imageCount);
-  for (let allowed = imageCount - 1; allowed >= 0 && encoded.byteLength > limit; allowed--) {
-    encoded = serialize(allowed);
+  const imageCount = countImages(preparedResult);
+  let encoded = serialize(0);
+  if (encoded.byteLength < limit && preparedResult) {
+    // The raw bytes are a lower bound on each image's wire cost. Starting from the zero-image
+    // encoding therefore bounds decoded-image allocation by the live entry limit, and avoids ever
+    // constructing an all-images blob for a request whose images cannot fit. Retain newest first.
+    let candidateCount = 0;
+    let candidateBytes = 0;
+    for (let i = preparedResult.length - 1; i >= 0; i--) {
+      const candidate = preparedResult[i];
+      if (candidate.kind !== "image") continue;
+      if (candidateBytes + candidate.byteLength > limit - encoded.byteLength) break;
+      candidateBytes += candidate.byteLength;
+      candidateCount++;
+    }
+
+    // Protobuf framing and mime strings can still make the conservative candidate too large.
+    // Binary search bounds reconstruction to O(log N), while cached bytes ensure each retained
+    // image is decoded at most once.
+    let low = 0;
+    let high = candidateCount;
+    while (low < high) {
+      const allowed = Math.ceil((low + high) / 2);
+      const attempt = serialize(allowed);
+      if (attempt.byteLength <= limit) {
+        low = allowed;
+        encoded = attempt;
+      } else {
+        high = allowed - 1;
+      }
+    }
   }
   return storeCursorBlob(encoded, requestScope);
 }
 
-function toolResultPart(message: OcxToolResultMessage, decoded?: DecodedResultPart[], maxImages?: number) {
-  const parts = decoded ?? decodeResultParts(message);
+function toolResultPart(message: OcxToolResultMessage, prepared?: PreparedResultPart[], maxImages?: number) {
+  const parts = prepared ?? prepareResultParts(message);
   const normalized = parts
     ? normalizedDecodedTextResult(message, parts)
     : normalizedToolResult(message, typeof message.content === "string" ? message.content : "");

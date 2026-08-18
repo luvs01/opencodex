@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import { handleCursorNativeKv, setCursorBlobLimitsForTests } from "../src/adapters/cursor/native-exec";
 import { encodeCursorRunRequest } from "../src/adapters/cursor/protobuf-request";
@@ -296,6 +296,24 @@ describe("Cursor tool-result image encoding never enlarges a step", () => {
       // Re-decoding base64 on every shrink attempt measured ~3s for 100 images before the fix.
       expect(elapsed).toBeLessThan(2000);
     } finally {
+      setCursorBlobLimitsForTests();
+    }
+  });
+
+  test("images that cannot fit are not decoded before blob admission", () => {
+    setCursorBlobLimitsForTests({ maxEntryBytes: 8192 });
+    const imageUrl = `data:image/png;base64,${Buffer.from(new Uint8Array(9 * 1024).fill(5)).toString("base64")}`;
+    const bufferFrom = spyOn(Buffer, "from");
+    try {
+      const items = toolResultItems(request(
+        Array.from({ length: 100 }, () => ({ type: "image" as const, imageUrl })),
+      ));
+
+      expect(items).toBeDefined();
+      expect(items!.every(i => i.content.case === "text")).toBe(true);
+      expect(bufferFrom.mock.calls.filter(call => call[1] === "base64")).toHaveLength(0);
+    } finally {
+      bufferFrom.mockRestore();
       setCursorBlobLimitsForTests();
     }
   });
