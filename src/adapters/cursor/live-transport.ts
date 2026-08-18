@@ -1116,7 +1116,7 @@ class LiveCursorTransport implements CursorTransport {
         }
         releaseBacklogLease();
         settler.settleFinish();
-      }, (err) => {
+      }).catch((err) => {
         failAndClear(err instanceof Error ? err : new Error(String(err)));
       });
     };
