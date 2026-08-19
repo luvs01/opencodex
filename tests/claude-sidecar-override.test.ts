@@ -124,3 +124,21 @@ test("unset Claude overrides inherit the global sidecar backend and model", () =
     settings: { model: "global-vision" },
   });
 });
+
+test("explicit Claude Auto backends do not inherit global backend choices", () => {
+  const config: OcxConfig = {
+    port: 10100,
+    defaultProvider: "routed",
+    providers: { routed, forward },
+    webSearchSidecar: { backend: "openai", model: "global-search" },
+    visionSidecar: { backend: "openai", model: "global-vision" },
+    claudeCode: {
+      webSearchSidecar: { backend: null, model: "claude-search" },
+      visionSidecar: { backend: null, model: "claude-vision" },
+    },
+  };
+
+  const effective = buildClaudeReplayConfig(config);
+  expect(effective.webSearchSidecar).toEqual({ backend: undefined, model: "claude-search" });
+  expect(effective.visionSidecar).toEqual({ backend: undefined, model: "claude-vision" });
+});

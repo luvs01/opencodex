@@ -59,15 +59,25 @@ function isRec(v: unknown): v is Rec {
 
 /** Resolve Claude-only sidecar overrides without mutating the shared server config. */
 export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
+  const webSearchOverride = config.claudeCode?.webSearchSidecar;
+  const visionOverride = config.claudeCode?.visionSidecar;
+  const { backend: webSearchBackend, ...webSearchFields } = webSearchOverride ?? {};
+  const { backend: visionBackend, ...visionFields } = visionOverride ?? {};
   return {
     ...config,
     webSearchSidecar: {
       ...config.webSearchSidecar,
-      ...config.claudeCode?.webSearchSidecar,
+      ...webSearchFields,
+      ...(webSearchOverride && "backend" in webSearchOverride
+        ? { backend: webSearchBackend ?? undefined }
+        : {}),
     },
     visionSidecar: {
       ...config.visionSidecar,
-      ...config.claudeCode?.visionSidecar,
+      ...visionFields,
+      ...(visionOverride && "backend" in visionOverride
+        ? { backend: visionBackend ?? undefined }
+        : {}),
     },
   };
 }

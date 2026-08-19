@@ -6,7 +6,7 @@
 import { AUTO_COMPACT_WINDOW_DEFAULT } from "./claude-code-types";
 
 export type SidecarBackend = "openai" | "anthropic";
-export interface SidecarOverride { backend?: SidecarBackend; model?: string }
+export interface SidecarOverride { backend?: SidecarBackend | null; model?: string }
 
 export interface ClaudeManualEnvState {
   /**

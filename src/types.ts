@@ -565,10 +565,10 @@ export interface OcxClaudeCodeConfig {
    * definition. Unset inherits the parent session effort.
    */
   subagentEffort?: "low" | "medium" | "high" | "xhigh" | "max";
-  /** Claude-originated web-search override. Unset fields inherit the global sidecar settings. */
-  webSearchSidecar?: { backend?: "openai" | "anthropic"; model?: string };
-  /** Claude-originated vision override. Unset fields inherit the global sidecar settings. */
-  visionSidecar?: { backend?: "openai" | "anthropic"; model?: string };
+  /** Claude-originated web-search override. Null backend means Auto; an absent field inherits global. */
+  webSearchSidecar?: { backend?: "openai" | "anthropic" | null; model?: string };
+  /** Claude-originated vision override. Null backend means Auto; an absent field inherits global. */
+  visionSidecar?: { backend?: "openai" | "anthropic" | null; model?: string };
   /** Persisted Claude Desktop four-family routing profile. */
   desktopProfile?: OcxClaudeDesktopProfile;
   /** Auto-reconcile Desktop 3P config when provider catalog changes. Default: enabled. */
