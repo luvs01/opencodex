@@ -206,6 +206,20 @@ describe("Responses parser", () => {
     expect(parsed.options.toolChoice).toEqual({ allowedTools: ["web_search"], mode: "required" });
   });
 
+  test("maps a forced hosted web_search choice to the synthetic routed tool", () => {
+    const parsed = parseRequest({
+      model: "umans/umans-kimi-k2.7",
+      input: "search",
+      tools: [
+        { type: "web_search" },
+        { type: "function", name: "run_shell", parameters: { type: "object" } },
+      ],
+      tool_choice: { type: "web_search" },
+    });
+
+    expect(parsed.options.toolChoice).toEqual({ name: "web_search" });
+  });
+
   test("maps type-only hosted image_generation tool_choice to required image_gen", () => {
     const parsed = parseRequest({
       model: "claude-opus-4-6",
