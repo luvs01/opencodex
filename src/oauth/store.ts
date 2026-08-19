@@ -4,8 +4,10 @@
  * Multiauth shape (260706): each provider value is a ProviderAccountSet
  * `{ activeAccountId, accounts: [{ id, credential, needsReauth?, addedAt? }] }`.
  * Legacy single-credential values (`{ access, refresh, expires, ... }`) normalize on load,
- * and the first new-shape persist writes a one-time `auth.json.pre-multiauth` backup so a
- * downgraded loader (which silently drops unknown shapes) cannot destroy refresh tokens.
+ * and the first non-destructive new-shape persist writes a one-time
+ * `auth.json.pre-multiauth` backup so a downgraded loader (which silently drops unknown
+ * shapes) cannot destroy refresh tokens. Destructive mutations remove that backup so
+ * logout and account deletion do not retain the deleted credentials.
  *
  * Exceptions:
  * - `chatgpt` stays single-slot (always replaced): codex-auth-api uses it as a scratch slot
@@ -234,6 +236,14 @@ function backupLegacyOnce(): void {
     copyFileSync(path, backup);
     try { chmodSync(backup, 0o600); } catch { /* best-effort */ }
   } catch { /* best-effort */ }
+}
+
+function removeLegacyBackup(): void {
+  try {
+    unlinkSync(`${getAuthStorePath()}.pre-multiauth`);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
 }
 
 function isCredentialSource(value: unknown): value is OAuthCredentialSource {
@@ -465,11 +475,12 @@ function serializeMutation<T>(work: () => Promise<T>, retainedValues: readonly u
   drainOAuthMutations();
   return result;
 }
-export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
+export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number; removeLegacyBackup?: boolean }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
     const { store, hadLegacy } = loadAuthStoreInternal();
-    if (hadLegacy) backupLegacyOnce();
+    if (hadLegacy && !options?.removeLegacyBackup) backupLegacyOnce();
     const result = await fn(store);
     persist(store);
+    if (options?.removeLegacyBackup) removeLegacyBackup();
     return result;
   }finally{guard.release();}}, retainedValues, options?.waitMs);
 }
@@ -601,7 +612,7 @@ export async function removeCredential(provider: string): Promise<void> {
       return;
     }
     set.activeAccountId = set.accounts[0]!.id;
-  }, [provider]);
+  }, [provider], { removeLegacyBackup: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +687,7 @@ export async function removeAccount(provider: string, accountId: string): Promis
     }
     if (set.activeAccountId === accountId) set.activeAccountId = set.accounts[0]!.id;
     return true;
-  }, [provider, accountId]);
+  }, [provider, accountId], { removeLegacyBackup: true });
   return removed;
 }
 

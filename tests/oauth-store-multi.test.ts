@@ -67,12 +67,39 @@ describe("multi-account auth store", () => {
       xai: { access: "legacy-access", refresh: "legacy-refresh", expires: Date.now() + 1000, email: "old@example.com" },
     }));
     expect(getCredential("xai")?.access).toBe("legacy-access");
-    // Any mutation persists the new shape + writes the downgrade backup.
+    // A non-destructive mutation persists the new shape + writes the downgrade backup.
     await saveCredential("xai", cred({ email: "old@example.com", access: "new-access" }));
     expect(getCredential("xai")?.access).toBe("new-access");
     const raw = JSON.parse(readFileSync(authPath, "utf-8"));
     expect(Array.isArray(raw.xai.accounts)).toBe(true);
     expect(existsSync(`${authPath}.pre-multiauth`)).toBe(true);
+  });
+
+  test("logout migrates a legacy store without retaining its credential backup", async () => {
+    const authPath = join(TEST_DIR, "auth.json");
+    writeFileSync(authPath, JSON.stringify({
+      xai: { access: "legacy-access", refresh: "legacy-refresh", expires: Date.now() + 1000 },
+    }));
+
+    await removeCredential("xai");
+
+    expect(JSON.parse(readFileSync(authPath, "utf-8"))).toEqual({});
+    expect(existsSync(`${authPath}.pre-multiauth`)).toBe(false);
+  });
+
+  test("account deletion removes an existing legacy credential backup", async () => {
+    const authPath = join(TEST_DIR, "auth.json");
+    const legacy = {
+      xai: { access: "legacy-access", refresh: "legacy-refresh", expires: Date.now() + 1000 },
+    };
+    writeFileSync(authPath, JSON.stringify(legacy));
+    writeFileSync(`${authPath}.pre-multiauth`, JSON.stringify(legacy));
+    const accountId = getAccountSet("xai")!.activeAccountId;
+
+    expect(await removeAccount("xai", accountId)).toBe(true);
+
+    expect(JSON.parse(readFileSync(authPath, "utf-8"))).toEqual({});
+    expect(existsSync(`${authPath}.pre-multiauth`)).toBe(false);
   });
 
   test("legacy credential WITHOUT identity gets a deterministic account id across loads", async () => {
