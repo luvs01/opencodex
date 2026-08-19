@@ -562,33 +562,43 @@ export function recoverStaleResponseStateTemps(
   let iterator: Iterator<string>;
   try { iterator = names[Symbol.iterator](); } catch { return result; }
   let scanned = 0;
-  for (;;) {
-    let next: IteratorResult<string>;
-    try { next = iterator.next(); } catch { return result; }
-    if (next.done) break;
-    const name = next.value;
-    scanned += 1;
-    if (scanned > maxEntries || result.removed + result.failed >= maxCleanups) break;
-    const match = RESPONSE_STATE_TEMP_NAME.exec(name);
-    if (!match) continue;
-    result.matched += 1;
-    const pid = Number(match[1]);
-    const sequence = Number(match[2]);
-    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(sequence) || sequence <= 0) continue;
-    const path = join(dir, name);
-    let file: ReturnType<ResponseStateTempRecoveryIO["inspect"]>;
-    try { file = io.inspect(path); } catch { continue; }
-    if (!file.isFile || io.now() - file.mtimeMs < STALE_TEMP_GRACE_MS) continue;
-    if (pid === process.pid || io.isProcessAlive(pid)) continue;
+  let exhausted = false;
+  try {
+    for (;;) {
+      let next: IteratorResult<string>;
+      try { next = iterator.next(); } catch { return result; }
+      if (next.done) {
+        exhausted = true;
+        break;
+      }
+      const name = next.value;
+      scanned += 1;
+      if (scanned > maxEntries || result.removed + result.failed >= maxCleanups) break;
+      const match = RESPONSE_STATE_TEMP_NAME.exec(name);
+      if (!match) continue;
+      result.matched += 1;
+      const pid = Number(match[1]);
+      const sequence = Number(match[2]);
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(sequence) || sequence <= 0) continue;
+      const path = join(dir, name);
+      let file: ReturnType<ResponseStateTempRecoveryIO["inspect"]>;
+      try { file = io.inspect(path); } catch { continue; }
+      if (!file.isFile || io.now() - file.mtimeMs < STALE_TEMP_GRACE_MS) continue;
+      if (pid === process.pid || io.isProcessAlive(pid)) continue;
 
-    try {
-      io.unlink(path);
-      result.removed += 1;
-      result.bytesRemoved += file.size;
-    } catch {
-      // Locked files remain for a later startup. Do not truncate by path: a same-user
-      // replacement could turn that fallback into an arbitrary symlink-target write.
-      result.failed += 1;
+      try {
+        io.unlink(path);
+        result.removed += 1;
+        result.bytesRemoved += file.size;
+      } catch {
+        // Locked files remain for a later startup. Do not truncate by path: a same-user
+        // replacement could turn that fallback into an arbitrary symlink-target write.
+        result.failed += 1;
+      }
+    }
+  } finally {
+    if (!exhausted) {
+      try { iterator.return?.(); } catch { /* Cleanup remains best-effort. */ }
     }
   }
   return result;
