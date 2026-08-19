@@ -93,8 +93,10 @@ function removeShellEnvFile(): void {
 const SHELL_HOOK_MARKER = "# opencodex claude-env hook";
 const SHELL_HOOK_LINE = `${SHELL_HOOK_MARKER}\n[ -f ~/.opencodex/claude-env.sh ] && source ~/.opencodex/claude-env.sh`;
 
-export function installShellHook(): { installed: boolean; reason?: string } {
+export function installShellHook(config?: OcxConfig): { installed: boolean; reason?: string } {
   if (process.platform !== "darwin") return { installed: false, reason: "not macOS" };
+  if (config?.claudeCode?.enabled === false) return { installed: false, reason: "claude disabled" };
+  if (config?.claudeCode?.systemEnv !== true) return { installed: false, reason: "systemEnv disabled" };
   const home = process.env.HOME;
   if (!home) return { installed: false, reason: "no HOME" };
   const zshrcPath = join(home, ".zshrc");
