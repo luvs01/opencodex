@@ -702,8 +702,18 @@ function repairOrphanedInputItems(body: unknown, dropReasoning: boolean, synthes
   };
   const reorderBatchOutputs = (items: unknown[]): unknown[] => {
     const ordered: unknown[] = [];
+    const claimedOutputIndexes = new Set<number>();
+    const outputIndexesByKey = new Map<string, number[]>();
+    for (let outputIndex = 0; outputIndex < items.length; outputIndex += 1) {
+      const outputKey = outputKeyOf(items[outputIndex]);
+      if (outputKey === null) continue;
+      const indexes = outputIndexesByKey.get(outputKey);
+      if (indexes) indexes.push(outputIndex);
+      else outputIndexesByKey.set(outputKey, [outputIndex]);
+    }
     let index = 0;
     while (index < items.length) {
+      if (claimedOutputIndexes.has(index)) { index += 1; continue; }
       const key = callKeyOf(items[index]);
       if (key === null) { ordered.push(items[index]); index += 1; continue; }
       const batch: unknown[] = [];
@@ -722,20 +732,19 @@ function repairOrphanedInputItems(body: unknown, dropReasoning: boolean, synthes
         index = cursor;
         continue;
       }
-      const remainder: unknown[] = [];
-      const batchOutputs: Array<{ key: string; item: unknown }> = [];
-      for (let probe = cursor; probe < items.length; probe += 1) {
-        const outputKey = outputKeyOf(items[probe]);
-        if (outputKey !== null && batchKeys.includes(outputKey)) {
-          batchOutputs.push({ key: outputKey, item: items[probe] });
-        } else {
-          remainder.push(items[probe]);
+      const batchOutputs: unknown[] = [];
+      const emittedKeys = new Set<string>();
+      for (const batchKey of batchKeys) {
+        if (emittedKeys.has(batchKey)) continue;
+        emittedKeys.add(batchKey);
+        for (const outputIndex of outputIndexesByKey.get(batchKey) ?? []) {
+          if (outputIndex < cursor || claimedOutputIndexes.has(outputIndex)) continue;
+          claimedOutputIndexes.add(outputIndex);
+          batchOutputs.push(items[outputIndex]);
         }
       }
-      batchOutputs.sort((left, right) => batchKeys.indexOf(left.key) - batchKeys.indexOf(right.key));
-      ordered.push(...batch, ...batchOutputs.map(output => output.item));
-      ordered.push(...reorderBatchOutputs(remainder));
-      return ordered;
+      ordered.push(...batch, ...batchOutputs);
+      index = cursor;
     }
     return ordered;
   };
