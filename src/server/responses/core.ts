@@ -1201,10 +1201,18 @@ async function resolveResponsesCodexAuth(
         response: formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication"),
       };
     }
+    // A bearer admission proves access with one of OpenCodex's own secrets. Routes that do not
+    // consume a stored Codex credential still need the caller's admission Authorization removed:
+    // some adapters intentionally use forwarded Authorization as their provider credential.
+    // Dedicated-header admission remains unchanged because its Authorization belongs upstream.
+    const stripAuthorization = options.admission?.source === "bearer" && !substituteMainCredential;
     return {
       ok: true,
       authCtx,
-      headers: materializeCodexUpstreamAuth(req.headers, authCtx, { substituteMainCredential }),
+      headers: materializeCodexUpstreamAuth(req.headers, authCtx, {
+        substituteMainCredential,
+        stripAuthorization,
+      }),
     };
   } catch (err) {
     if (err instanceof CodexAccountCooldownError) {

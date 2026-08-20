@@ -787,6 +787,21 @@ describe("Codex auth context", () => {
     );
     expect(headers.get("authorization")).toBe("Bearer user_chatgpt_token");
   });
+
+  test("a routed-provider admission bearer is removed while other headers remain", () => {
+    const headers = materializeCodexUpstreamAuth(
+      new Headers({
+        authorization: "Bearer ocx_data_localsecret",
+        "openai-beta": "responses=experimental",
+      }),
+      { kind: "main", accountId: null },
+      { stripAuthorization: true },
+    );
+
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.get("openai-beta")).toBe("responses=experimental");
+  });
+
   test("selected pool headers replace inbound main auth", () => {
     const headers = headersForCodexAuthContext(
       new Headers({ authorization: "Bearer main_token", "chatgpt-account-id": "main_acc", "openai-beta": "responses=experimental" }),

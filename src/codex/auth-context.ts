@@ -576,11 +576,13 @@ export class CodexMainSubstitutionUnavailableError extends Error {
  *   Silently forwarding would be the leak validateForwardAdmissionCredential exists to prevent.
  * - `main` with a dedicated-header caller keeps the existing intentional passthrough: the bearer
  *   there is the user's own ChatGPT credential, not ours.
+ * - `main` on a non-Codex route strips a bearer used for OpenCodex admission, because routed
+ *   adapters may otherwise interpret that forwarded header as their own upstream credential.
  */
 export function materializeCodexUpstreamAuth(
   headers: Headers,
   ctx: CodexAuthContext,
-  options: { substituteMainCredential?: boolean } = {},
+  options: { substituteMainCredential?: boolean; stripAuthorization?: boolean } = {},
 ): Headers {
   const selected = new Headers();
   for (const name of FORWARD_HEADERS) {
@@ -602,6 +604,7 @@ export function materializeCodexUpstreamAuth(
     if (stored.chatgptAccountId) selected.set("chatgpt-account-id", stored.chatgptAccountId);
     return selected;
   }
+  if (options.stripAuthorization === true) selected.delete("authorization");
   return selected;
 }
 
