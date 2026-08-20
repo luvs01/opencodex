@@ -237,7 +237,7 @@ describe("routed Responses tool-search compatibility", () => {
       arguments: {},
       status: "in_progress",
     });
-    expect(budget.snapshot().currentBytes).toBe(0);
+    expect(budget.snapshot().currentBytes).toBeGreaterThan(0);
 
     expect(rewrite(frame("response.function_call_arguments.done", {
       output_index: 0,
@@ -627,5 +627,26 @@ describe("routed Responses tool-search compatibility", () => {
       delta: "x",
     }));
     expect(trailing).toHaveLength(1);
+  });
+
+  test("bounds and budgets item ids retained for trailing argument frames", () => {
+    const budget = createTestTranslatorBudget();
+    const rewrite = createRoutedToolSearchRestoreBlockRewrite(new Set(["tool_search"]), budget);
+
+    for (let index = 0; index < 256; index += 1) {
+      rewrite(frame("response.output_item.done", {
+        output_index: index,
+        item: { type: "function_call", id: `fc_${index}`, name: "tool_search", arguments: "{}" },
+      }));
+    }
+
+    expect(budget.snapshot().currentBytes).toBeGreaterThan(0);
+    expect(() => rewrite(frame("response.output_item.done", {
+      output_index: 256,
+      item: { type: "function_call", id: "fc_overflow", name: "tool_search", arguments: "{}" },
+    }))).toThrow(/translator item_ids buffer exceeded/);
+
+    rewrite.dispose?.();
+    expect(budget.snapshot().currentBytes).toBe(0);
   });
 });
