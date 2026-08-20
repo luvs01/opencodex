@@ -43,6 +43,38 @@ function sameToolIdentity(
   return left.namespace === right.namespace && left.name === right.name;
 }
 
+type ToolIdentity = Pick<OcxTool, "namespace" | "name">;
+
+const toolChoiceCandidateIndexes = new WeakMap<
+  readonly ToolIdentity[],
+  ReadonlyMap<string, readonly ToolIdentity[]>
+>();
+
+function toolChoiceCandidateIndex(
+  tools: readonly ToolIdentity[],
+): ReadonlyMap<string, readonly ToolIdentity[]> {
+  const cached = toolChoiceCandidateIndexes.get(tools);
+  if (cached) return cached;
+
+  const index = new Map<string, ToolIdentity[]>();
+  const identities = new Map<string, Set<string>>();
+  for (const tool of tools) {
+    const identity = JSON.stringify([tool.namespace ?? null, tool.name]);
+    for (const selector of [...toolChoiceAliases(tool), tool.name]) {
+      const candidates = index.get(selector);
+      if (!candidates) {
+        index.set(selector, [tool]);
+        identities.set(selector, new Set([identity]));
+      } else if (!identities.get(selector)!.has(identity)) {
+        candidates.push(tool);
+        identities.get(selector)!.add(identity);
+      }
+    }
+  }
+  toolChoiceCandidateIndexes.set(tools, index);
+  return index;
+}
+
 /**
  * All tools that could be selected by one client-facing name. Bare logical names are included
  * here because they are a compatibility selector for namespaced tools, while wire and dotted
@@ -53,12 +85,7 @@ export function toolChoiceCandidates(
   name: string,
 ): Pick<OcxTool, "namespace" | "name">[] {
   if (!tools) return [];
-  const candidates: Pick<OcxTool, "namespace" | "name">[] = [];
-  for (const tool of tools) {
-    if (tool.name !== name && !toolChoiceAliases(tool).includes(name)) continue;
-    if (!candidates.some(candidate => sameToolIdentity(candidate, tool))) candidates.push(tool);
-  }
-  return candidates;
+  return [...(toolChoiceCandidateIndex(tools).get(name) ?? [])];
 }
 
 /**
