@@ -12,7 +12,7 @@ import {
   multiAgentGuidanceEnabled,
   resolveEnvValue,
 } from "../../config";
-import { parseRequest } from "../../responses/parser";
+import { hydrateReplayThoughtSignatures, parseRequest } from "../../responses/parser";
 import {
   bindReasoningReplayScope,
   reasoningReplayCodexCredentialIdentity,
@@ -2345,6 +2345,7 @@ async function handleResponsesInner(
     codexAuthContext: authCtx,
     forwardHeaders: selectedForwardHeaders,
   });
+  hydrateReplayThoughtSignatures(parsed);
   logCtx.providerAdapter = adapter.name;
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
