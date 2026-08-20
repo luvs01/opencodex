@@ -51,11 +51,12 @@ describe("ocx sync fans out to the client integrations that are switched on", ()
     // One catch per client: a broken Grok file is a warning, not a 500 on a command whose
     // main job (the Codex catalog) succeeded.
     expect(fn.match(/catch \(error\)/g)?.length).toBe(2);
-    // The Desktop write gets the native context limits, same as every other Desktop
-    // call site. 8b672205e threaded `nativeContextLimits` through those writers and
-    // left this assertion naming the retired `providerContextCap` spelling, so the
-    // source-shape check failed against the very change it is meant to pin.
     expect(fn).toContain("nativeContextLimits(config)");
+    // Cleanup accepts only the fingerprint of the exact credential-bearing profile we wrote.
+    // Sync must durably advance that ownership marker rather than leaving the old value behind.
+    expect(fn).toContain("mutatePersistedConfig(persisted =>");
+    expect(fn).toContain("appliedFingerprint: r.fingerprint");
+    expect(fn.indexOf("writeDesktop3pConfig(")).toBeLessThan(fn.indexOf("appliedFingerprint: r.fingerprint"));
     // A client that is off is omitted rather than reported: the caller has to be able to
     // tell "left alone" from "tried and failed", so there is no skipped state to emit.
     expect(fn).not.toContain('"skipped"');
