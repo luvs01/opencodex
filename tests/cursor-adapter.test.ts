@@ -136,11 +136,12 @@ describe("Cursor adapter live transport", () => {
     expect(requests[0]).toMatchObject({ modelId: "default", routingLevel: "intelligence" });
   });
 
-  test("runTurn sanitizes unexpected transport errors", async () => {
+  test("runTurn does not expose unexpected transport errors", async () => {
+    const secret = "ocx_cursor_secret_ABC123.raw.jwt.like";
     const adapter = createCursorAdapter(provider, {
       createTransport: () => ({
         async *run() {
-          throw new Error("gRPC error 16: Bearer secret-token-123 authorization=secret-token-123");
+          throw new Error(`upstream debug x-api-key: ${secret}`);
         },
         writeClient() {},
       }),
@@ -150,11 +151,11 @@ describe("Cursor adapter live transport", () => {
     await adapter.runTurn?.(parsed, { headers: new Headers() }, event => events.push(event));
 
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
+    expect(events).toEqual([{
       type: "error",
-      message: expect.stringContaining("gRPC error 16: Bearer [REDACTED] authorization=[REDACTED]"),
-    });
-    expect(JSON.stringify(events).includes("secret-token-123")).toBe(false);
+      message: "Cursor upstream error: transport failed before completion.",
+    }]);
+    expect(JSON.stringify(events)).not.toContain(secret);
   });
 
   test("derives distinct thread conversation ids per Cursor credential", async () => {
