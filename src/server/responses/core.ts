@@ -174,6 +174,7 @@ import type { WsData } from "../ws-bridge";
 import { codexAccountSelectionForTurn, registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle";
 import { redactSecretString, sanitizeLogMetadataString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
+import { guardResponseBodyInactivity } from "../../lib/response-body-inactivity";
 import type { AdmissionLease } from "../../lib/admission";
 import { supportedLadderFor } from "../effort-policy";
 import { isThreadSpawnRequest } from "../effort-policy";
@@ -2655,6 +2656,9 @@ async function handleResponsesInner(
     const upstream = new AbortController();
     linkAbortSignal(upstream, options.abortSignal);
     const connectMs = config.connectTimeoutMs ?? 200_000;
+    const bodyInactivityMs = typeof config.stallTimeoutSec === "number" && Number.isFinite(config.stallTimeoutSec) && config.stallTimeoutSec > 0
+      ? Math.floor(config.stallTimeoutSec * 1000)
+      : 300_000;
     let upstreamResponse: Response;
     const transportFailureResponse = (err: unknown): Response => {
       upstream.abort();
@@ -2927,6 +2931,7 @@ async function handleResponsesInner(
         }
       }
     }
+    upstreamResponse = guardResponseBodyInactivity(upstreamResponse, upstream, bodyInactivityMs);
     const headers = sanitizePassthroughHeaders(upstreamResponse.headers);
     const resolvedModel = headers.get("openai-model")?.trim();
     if (resolvedModel) logCtx.resolvedModel = resolvedModel;
@@ -4234,6 +4239,7 @@ async function handleResponsesInner(
       }
       break;
     }
+    upstreamResponse = guardResponseBodyInactivity(upstreamResponse, upstream, stallTimeoutMs);
     if (!upstreamResponse.ok) {
       if (options.comboAttempt) {
         // No pre-read guard: `consumeComboFailure` -> `readBoundedResponseBody` reads
