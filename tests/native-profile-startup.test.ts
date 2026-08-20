@@ -35,6 +35,7 @@ import {
   isNativeMainTrafficBlocked,
   nativeMainStartupGateSnapshot,
   NATIVE_MAIN_OWNERSHIP_RETRY_LIMIT,
+  startNativeMainStartupLifecycle,
   __resetNativeMainOwnershipRetries,
 } from "../src/codex/native-profile-startup";
 import type { NativeCodexOwnership } from "../src/integrations/native/ownership-preflight";
@@ -658,6 +659,34 @@ describe("an unknown service-ownership fence is retryable (#2108)", () => {
       expect(isNativeMainTrafficBlocked()).toBe(false);
     } finally {
       void fence.release();
+    }
+  });
+
+  test("a later successful probe starts owned recovery before reopening admission", async () => {
+    let finishRecovery!: () => void;
+    const recoveryBarrier = new Promise<void>(resolve => { finishRecovery = resolve; });
+    const f = await fixture("prepared", "source-exact");
+    const fence = blockNativeMainStartupForUnownedServiceHome("ownership-unknown", {
+      reprobe: () => "owned",
+      onOwned: () => startNativeMainStartupLifecycle({
+        manager: f.manager,
+        beforeRecovery: () => recoveryBarrier,
+      }),
+    });
+    try {
+      expect(isNativeMainTrafficBlocked()).toBe(true);
+      expect(nativeMainStartupGateSnapshot()).toEqual({
+        status: "blocked",
+        homeId: f.manager.context.homeId,
+        reason: "recovery-pending",
+      });
+
+      finishRecovery();
+      await fence.settled;
+      expect(isNativeMainTrafficBlocked()).toBe(false);
+    } finally {
+      finishRecovery();
+      await fence.release();
     }
   });
 

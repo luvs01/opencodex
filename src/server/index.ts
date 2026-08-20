@@ -709,7 +709,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         // is unownable. Hand the fence a way to re-ask so a host that becomes answerable
         // after boot reopens on its own instead of needing `ocx restart`. A `foreign`
         // verdict ignores this by design — that one is a fact, not a question.
-        { reprobe: () => inspectStartupOwnership(deps).ownership },
+        {
+          reprobe: () => inspectStartupOwnership(deps).ownership,
+          onOwned: () => startNativeMainStartupLifecycle(deps.nativeMainStartup),
+        },
       )
     : {
       homeId: null,

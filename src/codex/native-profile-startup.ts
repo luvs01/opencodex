@@ -327,6 +327,7 @@ const serviceOwnershipReprobes = new Map<NativeMainServiceOwnershipBlockReason, 
 
 interface ServiceOwnershipReprobe {
   readonly probe: () => NativeCodexOwnership;
+  readonly activate?: () => NativeMainStartupLifecycle;
   attempts: number;
   /** The fence that installed this hook; only its own release may drop the entry. */
   readonly owner: NativeMainStartupLifecycle;
@@ -369,14 +370,26 @@ function reprobeServiceOwnership(reason: NativeMainServiceOwnershipBlockReason):
     return false;
   }
   if (answer !== "owned") return false;
+  // Becoming ownable is only the beginning of startup. Arm the normal owned
+  // lifecycle before dropping this fence so recovery, owner registration, and
+  // stage cleanup all remain ahead of native-main admission.
+  try {
+    entry.activate?.();
+  } catch {
+    return false;
+  }
   // Release through the fence that installed this hook, and only that one.
   //
   // Several servers can hold a fence for the same reason while only one carries a hook, so
   // clearing the shared refcount here would unblock fences this probe never spoke for.
   // Decrementing here directly is just as wrong the other way: that fence's own release()
-  // would then pay a second time for one fence, leaving the count short. Delegating to the
-  // fence's idempotent release keeps exactly one payment per fence.
+  // would then pay a second time for one fence, leaving the count short. The
+  // fence's idempotent spend hook keeps exactly one payment per fence while
+  // preserving the transitioned lifecycle until the server itself releases it.
   entry.spend();
+  if (serviceOwnershipReprobes.get(reason) === entry) {
+    serviceOwnershipReprobes.delete(reason);
+  }
   return true;
 }
 
@@ -395,22 +408,35 @@ function serviceOwnershipSnapshot(
 /** Close native-main admission without resolving or creating any CODEX_HOME artifacts. */
 export function blockNativeMainStartupForUnownedServiceHome(
   reason: NativeMainServiceOwnershipBlockReason,
-  options?: { reprobe?: () => NativeCodexOwnership },
+  options?: {
+    reprobe?: () => NativeCodexOwnership;
+    onOwned?: () => NativeMainStartupLifecycle;
+  },
 ): NativeMainStartupLifecycle {
   serviceOwnershipRefs.set(reason, (serviceOwnershipRefs.get(reason) ?? 0) + 1);
   let released = false;
+  let fenceSpent = false;
+  let ownedLifecycle: NativeMainStartupLifecycle | undefined;
+  const spendFence = () => {
+    if (fenceSpent) return;
+    fenceSpent = true;
+    const remaining = Math.max(0, (serviceOwnershipRefs.get(reason) ?? 0) - 1);
+    if (remaining === 0) serviceOwnershipRefs.delete(reason);
+    else serviceOwnershipRefs.set(reason, remaining);
+  };
   const lifecycle: NativeMainStartupLifecycle = {
-    homeId: null,
-    settled: Promise.resolve(serviceOwnershipSnapshot(reason)),
+    get homeId() { return ownedLifecycle?.homeId ?? null; },
+    get settled() {
+      return ownedLifecycle?.settled ?? Promise.resolve(serviceOwnershipSnapshot(reason));
+    },
     async release() {
       if (released) return;
       released = true;
-      const remaining = Math.max(0, (serviceOwnershipRefs.get(reason) ?? 0) - 1);
-      if (remaining === 0) serviceOwnershipRefs.delete(reason);
-      else serviceOwnershipRefs.set(reason, remaining);
+      spendFence();
       if (serviceOwnershipReprobes.get(reason)?.owner === lifecycle) {
         serviceOwnershipReprobes.delete(reason);
       }
+      await ownedLifecycle?.release();
     },
   };
   // Do NOT reset an existing budget: keying the reprobe by reason means a caller raising
@@ -423,7 +449,10 @@ export function blockNativeMainStartupForUnownedServiceHome(
       probe: options.reprobe,
       attempts: 0,
       owner: lifecycle,
-      spend: () => { void lifecycle.release(); },
+      activate: options.onOwned
+        ? () => (ownedLifecycle ??= options.onOwned!())
+        : undefined,
+      spend: spendFence,
     });
   }
   return lifecycle;
