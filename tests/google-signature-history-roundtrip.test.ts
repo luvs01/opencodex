@@ -185,6 +185,24 @@ describe("#1735 thought signature survives history replay", () => {
       .toBe(SIGNATURE);
   });
 
+  test("streaming signatures only attach to function calls that follow them", async () => {
+    const adapter = createGoogleAdapter(provider);
+    await adapter.buildRequest(firstTurn());
+    const frame = `data: ${JSON.stringify(googleBody([
+      { functionCall: { name: "shell_command", args: { command: "pwd" } } },
+      { text: "thinking...", thought: true, thought_signature: SIGNATURE },
+      { functionCall: { name: "shell_command", args: { command: "ls" } } },
+    ]))}\n\n`;
+    const events: AdapterEvent[] = [];
+    for await (const event of adapter.parseStream(new Response(frame))) events.push(event);
+
+    const starts = events.filter((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> =>
+      event.type === "tool_call_start");
+    expect(starts).toHaveLength(2);
+    expect(starts[0].providerMetadata?.google?.thoughtSignature).toBeUndefined();
+    expect(starts[1].providerMetadata?.google?.thoughtSignature).toBe(SIGNATURE);
+  });
+
   test("a signature replayed through Responses history reaches the rebuilt Google part", async () => {
     // No cache is warmed here: this is a cold process replaying client-supplied history.
     const parsed = parseRequestScoped({

@@ -698,9 +698,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         // Antigravity use separate model namespaces so opaque provider state cannot cross routes.
         const replayModel = provider.googleMode === "cloud-code-assist" ? antigravityModel : vertexReplayModel;
         const replaySession = provider.googleMode === "cloud-code-assist" ? antigravitySession : vertexReplaySession;
+        let observedStreamThoughtSig = pendingStreamThoughtSig;
         if ((provider.googleMode === "cloud-code-assist" || provider.googleMode === "vertex")
           && parts && replayModel && replaySession) {
-          pendingStreamThoughtSig = observeAntigravityReplay(
+          observedStreamThoughtSig = observeAntigravityReplay(
             replayModel,
             replaySession,
             parts as unknown[],
@@ -747,6 +748,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               yield { type: "tool_call_end" };
             }
           }
+          // The observer scans the complete frame to populate replay state. Publish its carried
+          // signature only after emitting parts in source order, so a later thought part cannot
+          // supply fallback metadata to an earlier function call in the same frame.
+          pendingStreamThoughtSig = observedStreamThoughtSig;
         }
         return emittedContentEvent ? "content" : "continue";
       };
