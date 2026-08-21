@@ -950,7 +950,7 @@ describe("fetchProviderQuotaReports", () => {
 
     expect(valid.reports).toHaveLength(1);
     expect(noTotal.reports).toEqual([]);
-    expect(seen[0]?.url).toBe("https://www.minimax.io/v1/token_plan/remains");
+    expect(seen[0]?.url).toBe("https://api.minimax.io/v1/token_plan/remains");
     expect(seen[0]?.authorization).toBe("Bearer minimax-secret");
     expect(seen[0]?.redirect).toBe("error");
   });
