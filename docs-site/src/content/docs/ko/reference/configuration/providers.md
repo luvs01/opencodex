@@ -236,7 +236,7 @@ Cursor 브리지는 실험적입니다. `ocx login cursor`를 실행한 뒤 `pro
 | `cursor/auto-balance` | 균형 |
 | `cursor/auto-intelligence` | 지능 |
 
-명시적 변형은 Cursor의 `default` 모델과 그 `optimization` 매개변수를 함께 보내며, 매 요청마다 선택을 유지합니다. 라이브 발견에서 `default`가 빠져도 계속 사용할 수 있습니다.
+명시적 변형은 Cursor의 `default` 모델과 그 `optimization` 매개변수를 함께 보내며, 매 요청마다 선택을 유지합니다. 라이브 발견에 성공하면 계정별 응답이 허용한 명시적 변형만 표시되며, `cursor/auto`는 안전한 기본값으로 유지됩니다.
 
 Cursor 서버 주도 로컬 도구는 기본값으로 비활성화됩니다. Codex는 계속해서 `apply_patch`, `exec_command` 같은 자체 도구를 자체 승인 및 샌드박스 정책과 함께 사용합니다.
 

@@ -101,12 +101,18 @@ describe("Cursor discovery metadata", () => {
     expect(grok46.map(model => model.id)).toEqual(["grok-4.6", "grok-4.6-fast"]);
   });
 
-  test("live discovery filter always keeps all router levels when GetUsableModels omits them", () => {
+  test("live discovery filter keeps only the default router when explicit levels are omitted", () => {
     const filtered = filterCursorConfiguredModelsByLiveDiscovery(
       [...CURSOR_ROUTER_MODEL_IDS.map(id => ({ id })), { id: "gpt-5.4" }, { id: "claude-fable-5" }],
       ["gpt-5.4-high"],
     );
-    expect(filtered.map(model => model.id)).toEqual([...CURSOR_ROUTER_MODEL_IDS, "gpt-5.4"]);
+    expect(filtered.map(model => model.id)).toEqual(["auto", "gpt-5.4"]);
+
+    const authorized = filterCursorConfiguredModelsByLiveDiscovery(
+      CURSOR_ROUTER_MODEL_IDS.map(id => ({ id })),
+      ["auto-cost"],
+    );
+    expect(authorized.map(model => model.id)).toEqual(["auto", "auto-cost"]);
   });
 
   test("auto and every explicit routing level map to default on the Cursor wire", () => {

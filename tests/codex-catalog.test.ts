@@ -3461,7 +3461,7 @@ describe("Codex catalog routed normalization", () => {
     }
   });
 
-  test("Cursor live discovery keeps all router levels when GetUsableModels omits them", () => {
+  test("Cursor live discovery keeps only the default router when explicit levels are omitted", () => {
     const configured = [
       { id: "auto" },
       { id: "auto-cost" },
@@ -3472,9 +3472,6 @@ describe("Codex catalog routed normalization", () => {
     ];
     expect(filterCursorConfiguredModelsByLiveDiscovery(configured, ["gpt-5.4-high"]).map(model => model.id)).toEqual([
       "auto",
-      "auto-cost",
-      "auto-balance",
-      "auto-intelligence",
       "gpt-5.4",
     ]);
   });

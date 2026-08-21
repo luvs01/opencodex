@@ -238,7 +238,7 @@ Cursor Router 的优化层级会作为独立的 Codex id 暴露，因为选择�
 | `cursor/auto-balance` | Balance |
 | `cursor/auto-intelligence` | Intelligence |
 
-显式变体会携带 Cursor 的 `default` 模型及其 `optimization` 参数，从而在每次请求中保留该选择。即使实时发现未返回 `default`，它们仍然可用。
+显式变体会携带 Cursor 的 `default` 模型及其 `optimization` 参数，从而在每次请求中保留该选择。实时发现成功时，只显示账户专属响应允许的显式变体；`cursor/auto` 仍作为安全的回退选项。
 
 Cursor 由服务端驱动的本地工具默认是禁用的。Codex 继续使用自己的工具，例如 `apply_patch` 和 `exec_command`，并沿用自己的审批与沙箱策略：
 

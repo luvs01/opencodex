@@ -343,7 +343,8 @@ Cursor-specific model parameters:
 | `cursor/auto-intelligence` | Intelligence |
 
 Explicit variants send Cursor's `default` model with its `optimization` parameter, preserving the
-selection on every request. They remain available when live discovery omits `default`.
+selection on every request. When live discovery succeeds, an explicit variant is exposed only if
+the account-specific response advertises that variant; `cursor/auto` remains the safe fallback.
 
 Cursor server-driven local tools are disabled by default. Codex continues using its own tools such as
 `apply_patch` and `exec_command` with its own approval and sandbox policy:
