@@ -49,6 +49,12 @@ describe("parseCallbackInput kinds", () => {
   test("raw authorization code -> kind raw", () => {
     expect(parseCallbackInput("  raw-auth-code  ")).toEqual({ kind: "raw", code: "raw-auth-code", state: undefined });
   });
+
+  test("raw authorization code with state suffix preserves the state", () => {
+    expect(parseCallbackInput("raw-auth-code#oauth-state")).toEqual({
+      kind: "raw", code: "raw-auth-code", state: "oauth-state",
+    });
+  });
 });
 
 describe("OAuth manual login code fallback", () => {
@@ -214,6 +220,16 @@ describe("OAuth manual login code fallback", () => {
     }) as typeof fetch;
     try {
       await startLoginFlow("xai", { forceLogin: true });
+
+      const deadline = Date.now() + 5_000;
+      let mismatch = submitManualLoginCode("xai", "manual-auth-code#WRONG");
+      while (mismatch.ok && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 50));
+        mismatch = submitManualLoginCode("xai", "manual-auth-code#WRONG");
+      }
+      expect(mismatch.ok).toBe(false);
+      if (!mismatch.ok) expect(mismatch.error).toContain("state mismatch");
+
       const raw = submitManualLoginCode("xai", "manual-auth-code-only");
       expect(raw).toEqual({ ok: true });
       const statusDeadline = Date.now() + 10_000;
