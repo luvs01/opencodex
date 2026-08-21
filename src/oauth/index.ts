@@ -643,8 +643,11 @@ export async function refreshAnthropicAccountWithLock(
       clearOAuthRefreshIntent(provider, accountId, generation);
       return fresh.access;
     } catch (error) {
-      if (error instanceof OAuthMutationBusyError) throw error;
-      if (!terminal(error)) throw error;
+      if (error instanceof OAuthMutationBusyError || error instanceof OAuthTokenRefreshStaleError) throw error;
+      if (!terminal(error)) {
+        clearOAuthRefreshIntent(provider, accountId, generation);
+        throw error;
+      }
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
       clearOAuthRefreshIntent(provider, accountId, generation);
       throw new OAuthLoginRequiredError(provider);
