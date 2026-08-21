@@ -395,7 +395,11 @@ export function injectGrokConfig(
     // Adopt our own pre-fence entries (#511) BEFORE reserving user aliases, so the stale
     // duplicate is replaced instead of routed around forever. Runs inside the normalized
     // window so the user's dominant EOL is still restored below.
-    const orphans = findOpencodexOrphans(originalContent, originalRegion);
+    const emittedModelIds = new Set(
+      models.filter(model => !opts.excluded?.has(model.id)).map(model => model.id),
+    );
+    const orphans = findOpencodexOrphans(originalContent, originalRegion)
+      .filter(orphan => orphan.modelId !== undefined && emittedModelIds.has(orphan.modelId));
     const content = removeOrphanTables(originalContent, orphans);
     // Removing bytes above the fence MOVES it: recompute rather than adjust arithmetic,
     // so the splice below cannot cut the file in the wrong place.

@@ -160,6 +160,21 @@ describe("Grok orphan adoption (#511)", () => {
     injectGrokConfig(10100, MODELS, { grokHome });
     const content = readFileSync(configPath, "utf8");
     expect(content).toContain('default = "ocx-retired"');
+    expect(content).toContain("[model.ocx-retired]");
+    expect(content).toContain('model = "retired/model"');
+  });
+
+  test("keeps an orphan whose catalog model is excluded", () => {
+    writeOrphanedConfig();
+
+    injectGrokConfig(10100, MODELS, {
+      grokHome,
+      excluded: new Set(["gpt-5.6-sol"]),
+    });
+    const content = readFileSync(configPath, "utf8");
+    expect(content).toContain('default = "ocx-gpt-5-6-sol"');
+    expect(content).toContain("[model.ocx-gpt-5-6-sol]");
+    expect(content).not.toContain("[model.ocx-gpt-5-6-sol-2]");
   });
 
   // F7: the sweep must converge, or `changed` is meaningless to callers.
