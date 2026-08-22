@@ -450,6 +450,26 @@ describe("Responses parser", () => {
       { type: "image", imageUrl: "data:image/png;base64,aGVsbG8=", detail: "high" },
     ]);
   });
+
+  test("drops remote input_image URLs from function_call_output", () => {
+    const parsed = parseRequest({
+      model: "kiro/claude-sonnet-4.5",
+      input: [
+        { type: "function_call", call_id: "call-1", name: "get_app_state", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "call-1",
+          output: [
+            { type: "output_text", text: "captured" },
+            { type: "input_image", image_url: "http://127.0.0.1/private.png" },
+          ],
+        },
+      ],
+    });
+    const result = parsed.context.messages.find(m => m.role === "toolResult");
+
+    expect(result?.content).toBe("captured");
+  });
 });
 
 describe("codex-rs compat surface (260707)", () => {
