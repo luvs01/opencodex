@@ -345,6 +345,38 @@ describe("OpenAI provider option startup coordinator", () => {
     expect([...state.files.keys()].filter(path => path.endsWith(".tmp"))).toEqual([]);
   });
 
+  test("default backup creation fails closed when Windows ACL hardening fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-backup-acl-failure-"));
+    const source = join(root, "config.json");
+    const backup = `${source}.pre-openai-tiers-v2.bak`;
+    const previousPlatform = process.platform;
+    const previousUsername = process.env.USERNAME;
+    process.platform = "win32";
+    process.env.USERNAME = "ocx-test-user";
+    windowsAcl.resetHardenedStateForTests();
+    windowsAcl.setPlatformForTests("win32");
+    windowsAcl.setIcaclsRunnerForTests(() => ({
+      success: false,
+      exitCode: 5,
+      timedOut: false,
+      stdout: "Access is denied.",
+    }));
+    try {
+      writeFileSync(source, "original-secret");
+      expect(() => backupConfigBeforeOpenAiTierMigration(source)).toThrow();
+      expect(existsSync(backup)).toBe(false);
+      expect(readdirSync(root).filter(name => name.endsWith(".tmp"))).toEqual([]);
+    } finally {
+      windowsAcl.setIcaclsRunnerForTests(null);
+      windowsAcl.setPlatformForTests(null);
+      windowsAcl.resetHardenedStateForTests();
+      process.platform = previousPlatform;
+      if (previousUsername === undefined) delete process.env.USERNAME;
+      else process.env.USERNAME = previousUsername;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("backup temp cleanup forgets successful ACL memos and retains failed removals", () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-backup-acl-"));
     const source = join(root, "config.json");
