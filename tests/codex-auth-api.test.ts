@@ -2487,6 +2487,42 @@ describe("codex-auth API", () => {
     }
   });
 
+  test("reset-credit consume bounds successful upstream response bodies", async () => {
+    const config = makeConfig();
+    seedPoolAccount(config, { id: "pool-oversized", email: "oversized@example.test" });
+    const originalFetch = globalThis.fetch;
+    let cancelled = false;
+    let usageCalls = 0;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/backend-api/wham/rate-limit-reset-credits/consume")) {
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(BOUNDED_BODY_MAX_BYTES + 1).fill(0x61));
+            },
+            cancel() { cancelled = true; },
+          }));
+        }
+        if (url.includes("/backend-api/wham/usage")) usageCalls += 1;
+        return originalFetch(input);
+      }) as typeof fetch;
+
+      const req = new Request("http://localhost/api/codex-auth/reset-credits/consume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ accountId: "pool-oversized" }),
+      });
+      const resp = await handleCodexAuthAPI(req, new URL(req.url), config);
+      expect(resp!.status).toBe(500);
+      expect(await resp!.json()).toEqual({ error: "Reset credit consume response exceeded safe limits" });
+      expect(cancelled).toBe(true);
+      expect(usageCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("reset-credit already_redeemed refreshes quota and never invents a local decrement", async () => {
     const config = makeConfig();
     seedPoolAccount(config, { id: "pool-idempotent", email: "idem@example.test" });

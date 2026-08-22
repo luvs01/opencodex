@@ -1768,7 +1768,9 @@ export async function handleCodexAuthAPI(
           await resp.body?.cancel().catch(() => {});
           return jsonResponse({ error: `Upstream error ${resp.status}` }, resp.status);
         }
-        const result = safeResetCreditConsumeDto(await resp.json());
+        const consumeBody = await readBoundedResponseBody(resp);
+        if (!consumeBody.displaySafe) throw new Error("Reset credit consume response exceeded safe limits");
+        const result = safeResetCreditConsumeDto(JSON.parse(consumeBody.text));
         // After a successful redeem (or an idempotent already_redeemed), refresh WHAM usage
         // and return remaining only when that refresh freshly parsed available_count.
         // Do not fall back to a preserved cached resetCredits (failed/omitted refresh).
