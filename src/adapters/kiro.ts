@@ -1,6 +1,7 @@
 import { decodeEventStream } from "../lib/eventstream-decoder";
 import { estimateTokens } from "../lib/token-estimate";
 import { debugProviderDiagnostic } from "../lib/debug";
+import { isDebugEnabled } from "../lib/debug-settings";
 import { resolveKiroApiRegion, resolveKiroProfileArn } from "../oauth/kiro";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
@@ -1760,17 +1761,19 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     await normalizeKiroImages(built.payload);
     const contextInputEstimate = estimateKiroPayloadInputTokens(built.payload, parsed.modelId);
     const body = JSON.stringify(built.payload);
-    debugProviderDiagnostic("kiro", "request", {
-      region,
-      requestedModel: parsed.modelId,
-      completionMode: built.completionMode,
-      bodyBytes: new TextEncoder().encode(body).length,
-      messageCount: kiroPayloadMessages(parsed).length,
-      toolCount: parsed.context.tools?.length ?? 0,
-      hasProfileArn: Boolean(profileArn),
-      wireClient,
-      hasPreviousResponseId: Boolean(parsed.previousResponseId),
-    });
+    if (isDebugEnabled()) {
+      debugProviderDiagnostic("kiro", "request", {
+        region,
+        requestedModel: parsed.modelId,
+        completionMode: built.completionMode,
+        bodyBytes: new TextEncoder().encode(body).length,
+        messageCount: kiroPayloadMessages(parsed).length,
+        toolCount: parsed.context.tools?.length ?? 0,
+        hasProfileArn: Boolean(profileArn),
+        wireClient,
+        hasPreviousResponseId: Boolean(parsed.previousResponseId),
+      });
+    }
     return {
       request: {
         url: kiroRuntimeEndpoint(provider, region),

@@ -1729,6 +1729,19 @@ describe("kiro adapter — parseStream", () => {
       error.mockRestore();
     }
   });
+
+  test("buildRequest does not encode the request body for diagnostics when debug is disabled", async () => {
+    const encode = spyOn(TextEncoder.prototype, "encode").mockImplementation(() => {
+      throw new Error("diagnostic encoding must stay behind the debug gate");
+    });
+    try {
+      const request = await createKiroAdapter(provider).buildRequest(parsedWith([{ role: "user", content: "hello" }]));
+      expect(typeof request.body).toBe("string");
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
+  });
 });
 
 describe("kiro adapter — non-streaming parseResponse", () => {
