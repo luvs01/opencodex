@@ -231,24 +231,9 @@ export async function reclaimListenPort(
         }
         const isOcx = verifyOcxFn(pid) === pid;
         const allowlisted = allowedKillPids.has(pid);
-        // Pre-update PIDs can fail verify while still LISTENing (dead owner still
-        // listed, or cmdline probe raced). Allowlisted teardown PIDs may be killed;
-        // unknown foreign claimants must remain fail-closed.
         if (!isOcx) {
-          if (mayKill && allowlisted) {
-            if (!killed.has(pid)) {
-              try {
-                killFn(pid);
-                killed.add(pid);
-              } catch {
-                // Kill failed: never SetTcpEntry while the process may still own the port.
-                protectedOcxListener = true;
-              }
-            }
-            if (!isAliveFn(pid)) killed.delete(pid);
-            else protectedOcxListener = true;
-            continue;
-          }
+          // An allowlist is only a PID snapshot. It cannot establish identity after
+          // PID reuse or a failed cmdline probe, so fail closed for every live holder.
           foreignLive = true;
           continue;
         }
