@@ -44,6 +44,7 @@ import {
   responseContinuationRetainedStoreSnapshot,
   runPendingResponseStatePersistForTests,
   setResponseStateByteCapForTests,
+  setResponseStateSpillByteCapForTests,
   setResponseStatePersistAttemptHookForTests,
   getStoredResponseBytesForTests,
 } from "../src/responses/state";
@@ -144,6 +145,7 @@ describe("Responses previous_response_id state", () => {
     setPlatformForTests(null);
     resetHardenedStateForTests();
     setResponseStateByteCapForTests(null);
+    setResponseStateSpillByteCapForTests(null);
     clearResponseStateForTests();
     rmSync(home, { recursive: true, force: true });
     if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
@@ -2245,6 +2247,7 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
   afterEach(() => {
     setSpillIoForTest(null);
     setResponseStateByteCapForTests(null);
+    setResponseStateSpillByteCapForTests(null);
     setResponseSpillPayloadCapForTests(null);
     clearResponseStateForTests();
     rmSync(home, { recursive: true, force: true });
@@ -2290,6 +2293,20 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     expect((expandChained("resp_small_1") as { input: unknown[] }).input.length).toBeGreaterThan(1);
     expect((expandChained("resp_small_2") as { input: unknown[] }).input.length).toBeGreaterThan(1);
     expect((expandChained("resp_big") as { input: unknown[] }).input.length).toBeGreaterThan(1);
+  });
+
+  test("aggregate spill quota evicts oldest payloads before they can fill disk", () => {
+    setResponseStateByteCapForTests(1024);
+    setResponseStateSpillByteCapForTests(12 * 1024);
+
+    rememberResponseState({ model: "m", input: "one" }, completedResponse("resp_disk_1", "a".repeat(8 * 1024)));
+    rememberResponseState({ model: "m", input: "two" }, completedResponse("resp_disk_2", "b".repeat(8 * 1024)));
+
+    const files = spillFileNames(home);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toContain("resp_disk_2");
+    expect(responseStateMetrics()).toMatchObject({ count: 1, spillStubCount: 1 });
+    expect((expandChained("resp_disk_2") as { input: unknown[] }).input.length).toBeGreaterThan(1);
   });
 
   test("candidate fitting the cap stays resident at the boundary", () => {
