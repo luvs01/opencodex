@@ -663,6 +663,51 @@ describe("GUI update execution decisions", () => {
     expect(readUpdateJob(job.id)?.log.some(line => line.includes("waiting for ghost LISTEN rows to clear before pinned start"))).toBe(true);
   });
 
+  test("restart retries never kill a PID retained from an exited pinned start", async () => {
+    let now = 0;
+    let spawnCount = 0;
+    const killed: number[] = [];
+    const job: UpdateJobState = {
+      id: "restart-stale-child-pid",
+      status: "restarting",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentVersion: "2.10.1",
+      latestVersion: "2.10.2",
+      channel: "latest",
+      installer: "npm",
+      restart: true,
+      command: "",
+      log: [],
+    };
+    writeFileSync(updateJobPath(job.id), JSON.stringify(job));
+
+    await restartAfterUpdateForTests(job, { port: 10100, hostname: "127.0.0.1" }, {
+      serviceInstalledFn: () => false,
+      waitForPort: async () => true,
+      listListenPidsFn: () => [],
+      probeProxy: async () => false,
+      probeProxyIdentity: async () => null,
+      now: () => now,
+      sleepMs: async ms => { now += ms; },
+      isAliveFn: () => true,
+      spawnDetachedStartFn: () => {
+        spawnCount += 1;
+        const child = {
+          pid: 4242,
+          exitCode: 1,
+          signalCode: null,
+          once: () => child,
+        };
+        return child as unknown as ReturnType<typeof import("node:child_process").spawn>;
+      },
+      killProxyFn: pid => { killed.push(pid); },
+    });
+
+    expect(spawnCount).toBe(3);
+    expect(killed).toEqual([]);
+  });
+
   test("service restart waits on the captured port and clears OCX_BAKE_PORT after install", async () => {
     const waited: Array<{ port: number; hostname: string }> = [];
     const bakeDuringInstall: string[] = [];
