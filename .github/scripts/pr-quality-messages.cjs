@@ -259,10 +259,14 @@ function failureSummary(failures, { pr }) {
 }
 
 /** The notice shown when the gate's own claim check disproves a ticked box. */
-function buildClaimCheckNotice(violations, _liveHeadSha) {
+function buildClaimCheckNotice(violations, liveHeadSha) {
   const lines = [];
   for (const code of violations) {
-    if (code === "latest_dev") {
+    if (code === "ci_green") {
+      lines.push(
+        `GitHub CI is not green on the current head ${inlineCode(liveHeadSha.slice(0, 7))}; the **CI green** box has been unticked.`
+      );
+    } else if (code === "latest_dev") {
       lines.push(
         `The PR is more than ${READINESS_LATEST_DEV_BEHIND_MAX} commits behind ${inlineCode("dev")}; the **latest dev** box has been unticked.`
       );

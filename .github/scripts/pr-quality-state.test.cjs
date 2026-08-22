@@ -229,31 +229,48 @@ describe("completionIsStale", () => {
 });
 
 describe("readinessClaimViolations", () => {
-  it("passes when the head is current enough", () => {
-    assert.deepEqual(readinessClaimViolations({ behindBase: 0 }), []);
-    assert.deepEqual(readinessClaimViolations({ behindBase: 10 }), []);
+  it("passes when CI is green and the head is current", () => {
+    assert.deepEqual(
+      readinessClaimViolations({ ciGreen: true, behindBase: 0 }),
+      [],
+    );
+    assert.deepEqual(
+      readinessClaimViolations({ ciGreen: true, behindBase: 10 }),
+      [],
+    );
   });
 
-  it("never treats local CI as a bot-verifiable claim", () => {
-    // Fork contributors attest local green; repository CI is maintainer-started.
+  it("flags red CI", () => {
     assert.deepEqual(
-      readinessClaimViolations({ behindBase: 0, ciGreen: false }),
-      [],
+      readinessClaimViolations({ ciGreen: false, behindBase: 0 }),
+      ["ci_green"],
     );
   });
 
   it("flags a head more than the threshold behind the base", () => {
     assert.deepEqual(
       readinessClaimViolations({
+        ciGreen: true,
         behindBase: READINESS_LATEST_DEV_BEHIND_MAX + 1,
       }),
       ["latest_dev"],
     );
   });
 
+  it("flags both when both claims fail", () => {
+    assert.deepEqual(
+      readinessClaimViolations({
+        ciGreen: false,
+        behindBase: READINESS_LATEST_DEV_BEHIND_MAX + 20,
+      }),
+      ["ci_green", "latest_dev"],
+    );
+  });
+
   it("fails closed when the behind count is unknown", () => {
     assert.deepEqual(
       readinessClaimViolations({
+        ciGreen: true,
         behindBase: 0,
         behindUnknown: true,
       }),
@@ -263,7 +280,7 @@ describe("readinessClaimViolations", () => {
 
   it("honours a custom threshold", () => {
     assert.deepEqual(
-      readinessClaimViolations({ behindBase: 5, behindMax: 4 }),
+      readinessClaimViolations({ ciGreen: true, behindBase: 5, behindMax: 4 }),
       ["latest_dev"],
     );
   });

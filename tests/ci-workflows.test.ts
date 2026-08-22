@@ -1316,6 +1316,8 @@ describe("GitHub Actions hardening", () => {
           name !== "github.rest.repos.compareCommitsWithBasehead" &&
           name !== "github.rest.repos.listPullRequestsAssociatedWithCommit" &&
           name !== "github.rest.issues.listEvents" &&
+          // The claim check reads check-runs; it must never count as a write.
+          name !== "github.rest.checks.listForRef" &&
           // Hygiene reassessment reads the changed-file list; not a write.
           name !== "github.rest.pulls.listFiles",
       );
@@ -1582,6 +1584,7 @@ describe("GitHub Actions hardening", () => {
       // No prior enforcer history: the checklist completion alone lifts the
       // draft and notifies the maintainers from MAINTAINERS.md.
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -1683,6 +1686,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -1775,6 +1779,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -1911,14 +1916,14 @@ describe("GitHub Actions hardening", () => {
       expect(result.warnings.some(w => w.startsWith("setFailed:"))).toBe(false);
     });
 
-    test("red GitHub CI does not untick the local-CI attestation", async () => {
-      // Fork contributors attest local green; repository CI is
-      // maintainer-started. A red or missing GitHub `ci` check must not
-      // disprove the local box or block ready-for-review.
+    test("a complete checklist with red CI unchecks the CI box and re-drafts", async () => {
+      // The author ticked every box, but the head's `ci` check is red. The
+      // gate checks the CI claim itself and unticked the CI box instead of
+      // letting a false attestation lift the draft.
       const result = await run({
         pr: {
           base: { ref: "dev" },
-          draft: true,
+          draft: false,
           body: readinessChecklistBody(4),
         },
         maintainersFile: MAINTAINERS_FIXTURE,
@@ -1926,28 +1931,40 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
-        "issues.addLabels",
-        "graphql",
+        "pulls.get",
+        "pulls.update",
         "issues.createComment",
+        "graphql",
       ]));
-      expect(callsTo(result, "checks.listForRef")).toEqual([]);
-      expect(callsTo(result, "pulls.update")).toEqual([]);
-      const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      // Only the CI box is unticked; the other three stay checked.
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      expect(bodyUpdate.body).toContain("- [x] I pushed my PR to the latest dev commit.");
+      expect(bodyUpdate.body).toContain("- [x] My PR is ready for review.");
+      const drafts = callsTo(result, "graphql") as [{ query: string }];
+      expect(drafts).toHaveLength(2);
       expect(drafts[0]!.query).toContain("reviewThreads");
-      expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
-      expect(lastReadinessCommentBody(result)).toContain("**4/4** boxes ticked");
+      expect(drafts[1]!.query).toContain("convertPullRequestToDraft");
+      expect(drafts[1]!.query).not.toContain("markPullRequestReadyForReview");
+      const readinessBody = lastReadinessCommentBody(result);
+      expect(readinessBody).toContain(
+        "GitHub CI is not green on the current head `3f1c0de`; the **CI green** box has been unticked.",
+      );
+      expect(readinessBody).toContain("**3/4** boxes ticked");
+      expect(readinessBody).toContain('"completedAtHeadSha":null');
+      expect(readinessBody).toContain('"maintainersPinged":false');
       expect(result.warnings.some(w => w.startsWith("setFailed:"))).toBe(false);
     });
 
     test("a revalidation reset preserves bot ownership of the title prefix", async () => {
       // A wrong-base PR that the bot prefixed and later had retargeted to dev
-      // with a complete checklist hits a revalidation failure (stale vs `dev`
-      // unchecks a box). The reset must preserve `titlePrefixedByBot` long
-      // enough for the mustDraft strip to fire — otherwise the stale
-      // `[WRONG BRANCH] ` prefix stays on the title forever because ownership
-      // was forgotten.
+      // with a complete checklist hits a revalidation failure (red CI unchecks
+      // a box). The reset must preserve `titlePrefixedByBot` long enough for
+      // the mustDraft strip to fire — otherwise the stale `[WRONG BRANCH] `
+      // prefix stays on the title forever because ownership was forgotten.
       const result = await run({
         pr: {
           base: { ref: "dev" },
@@ -1956,9 +1973,7 @@ describe("GitHub Actions hardening", () => {
           body: readinessChecklistBody(4),
         },
         maintainersFile: MAINTAINERS_FIXTURE,
-        compareByBasehead: {
-          "dev...3f1c0de0a6a4d0a3f9a1b2c3d4e5f60718293a4b": { ahead_by: 0, behind_by: 11 },
-        },
+        checkRuns: [{ name: "ci", status: "completed", conclusion: "failure" }],
         comments: [botComment({
           version: 1,
           active: true,
@@ -1974,7 +1989,7 @@ describe("GitHub Actions hardening", () => {
       const readinessBody = lastReadinessCommentBody(result);
       expect(readinessBody).toContain('"titlePrefixedByBot":false');
       expect(readinessBody).toContain('"autoDraftedByBot":true');
-      expect(readinessBody).toContain("more than 10 commits behind `dev`");
+      expect(readinessBody).toContain("GitHub CI is not green");
     });
 
     test("a complete checklist more than 10 commits behind dev unchecks the latest-dev box and re-drafts", async () => {
@@ -1991,6 +2006,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "pulls.get",
@@ -1999,7 +2015,7 @@ describe("GitHub Actions hardening", () => {
         "graphql",
       ]));
       const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
-      // Only the latest-dev box is unticked; local CI stays checked.
+      // Only the latest-dev box is unticked; CI stays checked.
       expect(bodyUpdate.body).toContain("- [x] All CI tests are green on my local testing.");
       expect(bodyUpdate.body).toContain("- [ ] I pushed my PR to the latest dev commit.");
       expect(bodyUpdate.body).toContain("- [x] My PR is ready for review.");
@@ -2012,6 +2028,71 @@ describe("GitHub Actions hardening", () => {
         "The PR is more than 10 commits behind `dev`; the **latest dev** box has been unticked.",
       );
       expect(readinessBody).toContain("**3/4** boxes ticked");
+      expect(result.warnings.some(w => w.startsWith("setFailed:"))).toBe(false);
+    });
+
+    test("a complete checklist with red CI and a stale dev base unchecks both boxes", async () => {
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: false,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [{ name: "ci", status: "completed", conclusion: "failure" }],
+        compareByBasehead: {
+          "dev...3f1c0de0a6a4d0a3f9a1b2c3d4e5f60718293a4b": { ahead_by: 0, behind_by: 42 },
+        },
+      });
+
+      expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
+        "graphql",
+        "pulls.listReviews",
+        "pulls.get",
+        "pulls.update",
+        "issues.createComment",
+        "graphql",
+      ]));
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      expect(bodyUpdate.body).toContain("- [ ] I pushed my PR to the latest dev commit.");
+      expect(bodyUpdate.body).toContain("- [x] My PR is ready for review.");
+      const readinessBody = lastReadinessCommentBody(result);
+      expect(readinessBody).toContain("GitHub CI is not green on the current head");
+      expect(readinessBody).toContain("more than 10 commits behind `dev`");
+      expect(readinessBody).toContain("**2/4** boxes ticked");
+      expect(result.warnings.some(w => w.startsWith("setFailed:"))).toBe(false);
+    });
+
+    test("a checks lookup failure fails closed for the CI claim", async () => {
+      // Cannot verify CI: the claim is unverifiable, so the box is unticked
+      // and the PR stays a draft rather than riding on missing evidence.
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: false,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        failOn: ["checks.listForRef"],
+      });
+
+      expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
+        "graphql",
+        "pulls.listReviews",
+        "pulls.get",
+        "pulls.update",
+        "issues.createComment",
+        "graphql",
+      ]));
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      expect(bodyUpdate.body).toContain("- [x] I pushed my PR to the latest dev commit.");
+      const readinessBody = lastReadinessCommentBody(result);
+      expect(readinessBody).toContain("GitHub CI is not green on the current head");
+      expect(result.warnings.some(w => w.includes("Could not list checks for the readiness claim check"))).toBe(true);
       expect(result.warnings.some(w => w.startsWith("setFailed:"))).toBe(false);
     });
 
@@ -2029,6 +2110,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -2042,33 +2124,178 @@ describe("GitHub Actions hardening", () => {
       expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
     });
 
-    test("missing or pending GitHub CI does not block a complete local attestation", async () => {
-      for (const checkRuns of [
-        [],
-        [{ name: "ci", status: "in_progress", conclusion: null }],
-        [{
+    test("a head with no ci check fails closed for the CI claim", async () => {
+      // No CI run means the claim has no positive evidence, so the box is
+      // unticked and the PR stays in draft.
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: true,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [],
+      });
+
+      expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
+        "graphql",
+        "pulls.listReviews",
+        "pulls.get",
+        "pulls.update",
+        "issues.createComment",
+      ]));
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      const drafts = callsTo(result, "graphql") as [{ query: string }];
+      expect(drafts).toHaveLength(1);
+      expect(drafts[0]!.query).toContain("reviewThreads");
+      expect(lastReadinessCommentBody(result)).toContain(
+        "GitHub CI is not green on the current head",
+      );
+    });
+
+    test("a pending ci check cannot attest green", async () => {
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: false,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [{ name: "ci", status: "in_progress", conclusion: null }],
+      });
+
+      expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
+        "graphql",
+        "pulls.listReviews",
+        "pulls.get",
+        "pulls.update",
+        "issues.createComment",
+        "graphql",
+      ]));
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      const readinessBody = lastReadinessCommentBody(result);
+      expect(readinessBody).toContain("GitHub CI is not green on the current head");
+    });
+
+    test("a complete filtered trusted ci response attests green", async () => {
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: true,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [{ name: "ci", status: "completed", conclusion: "success" }],
+        checkRunTotalCount: 1,
+      });
+
+      expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
+        "graphql",
+        "pulls.listReviews",
+        "issues.addLabels",
+        "graphql",
+        "issues.createComment",
+      ]));
+      const checkCalls = callsTo(result, "checks.listForRef") as Array<{
+        app_id?: number;
+        check_name?: string;
+        filter?: string;
+      }>;
+      for (const call of checkCalls) {
+        expect(call.app_id).toBe(15368);
+        expect(call.check_name).toBe("ci");
+        expect(call.filter).toBe("latest");
+      }
+      expect(callsTo(result, "pulls.update")).toEqual([]);
+      const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
+      expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
+      expect(lastReadinessCommentBody(result)).toContain("**4/4** boxes ticked");
+    });
+
+    test("a truncated filtered ci response cannot attest green", async () => {
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: false,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [{ name: "ci", status: "completed", conclusion: "success" }],
+        checkRunTotalCount: 2,
+      });
+
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      expect(lastReadinessCommentBody(result)).toContain(
+        "GitHub CI is not green on the current head",
+      );
+    });
+
+    test("a foreign app check named ci cannot attest green", async () => {
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: false,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [{
           name: "ci",
           status: "completed",
           conclusion: "success",
           app: { id: 999999 },
         }],
-      ]) {
+      });
+
+      const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+      expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+      expect(lastReadinessCommentBody(result)).toContain("GitHub CI is not green on the current head");
+    });
+
+    test("conflicting trusted ci checks fail closed regardless of ordering", async () => {
+      const green = { name: "ci", status: "completed", conclusion: "success" };
+      const pending = { name: "ci", status: "in_progress", conclusion: null };
+      const failed = { name: "ci", status: "completed", conclusion: "failure" };
+
+      for (const checkRuns of [[green, pending], [pending, green], [green, failed], [failed, green]]) {
         const result = await run({
           pr: {
             base: { ref: "dev" },
-            draft: true,
+            draft: false,
             body: readinessChecklistBody(4),
           },
           maintainersFile: MAINTAINERS_FIXTURE,
           checkRuns,
         });
 
-        expect(callsTo(result, "checks.listForRef")).toEqual([]);
-        expect(callsTo(result, "pulls.update")).toEqual([]);
-        const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
-        expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
-        expect(lastReadinessCommentBody(result)).toContain("**4/4** boxes ticked");
+        const [bodyUpdate] = callsTo(result, "pulls.update") as [{ body: string }];
+        expect(bodyUpdate.body).toContain("- [ ] All CI tests are green on my local testing.");
+        expect(lastReadinessCommentBody(result)).toContain("GitHub CI is not green on the current head");
       }
+    });
+
+    test("multiple latest trusted green ci checks are consistent evidence", async () => {
+      const result = await run({
+        pr: {
+          base: { ref: "dev" },
+          draft: true,
+          body: readinessChecklistBody(4),
+        },
+        maintainersFile: MAINTAINERS_FIXTURE,
+        checkRuns: [
+          { name: "ci", status: "completed", conclusion: "success" },
+          { name: "ci", status: "completed", conclusion: "success" },
+        ],
+      });
+
+      expect(callsTo(result, "pulls.update")).toEqual([]);
+      const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
+      expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
     });
 
     test("an unresolved Codex thread unchecks the findings box and re-drafts", async () => {
@@ -2085,6 +2312,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "pulls.get",
@@ -2148,6 +2376,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -2189,6 +2418,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -2252,6 +2482,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -2280,6 +2511,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -2635,6 +2867,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -3429,6 +3662,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -3486,6 +3720,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -3786,6 +4021,7 @@ describe("GitHub Actions hardening", () => {
       });
 
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -3935,6 +4171,7 @@ describe("GitHub Actions hardening", () => {
       // created comment is the readiness checklist message, which did not
       // exist on the busy PR yet.
       expect(methodsOf(result)).toEqual(readsAllowedBasePaged([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "pulls.listReviews",
@@ -4057,6 +4294,7 @@ describe("GitHub Actions hardening", () => {
 
       expect(callsTo(result, "pulls.update")).toEqual([]);
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -4149,6 +4387,7 @@ describe("GitHub Actions hardening", () => {
           comments: [botComment(active)],
         });
         expect(methodsOf(restored)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -4207,6 +4446,7 @@ describe("GitHub Actions hardening", () => {
         comments: [botComment({ version: 1, active: "true", autoDraftedByBot: 1, titlePrefixedByBot: "yes" })],
       });
       expect(methodsOf(loose)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -4231,6 +4471,7 @@ describe("GitHub Actions hardening", () => {
         comments: [botComment({ version: 1, active: true, autoDraftedByBot: null, titlePrefixedByBot: 0 })],
       });
       expect(methodsOf(falsy)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
@@ -4403,6 +4644,7 @@ describe("GitHub Actions hardening", () => {
       // The first comment's state is the one honoured: it says the bot
       // prefixed and drafted, so both are undone.
       expect(methodsOf(result)).toEqual(readsAllowedBase([
+        "checks.listForRef",
         "graphql",
         "pulls.listReviews",
         "issues.addLabels",
