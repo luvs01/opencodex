@@ -269,11 +269,11 @@ export default function IntegrationsOverview({
   const installedFileClients = clients.filter(client => client.installed);
   /*
    * "Settled" is what separates a client the server omitted from one whose
-   * list has not answered yet. Only a cold state means we have never had an
-   * answer; a stale-with-error state still holds real rows.
+   * list has not answered successfully yet. The resource's data is undefined
+   * both before its first response and after a cold failure; a stale failure
+   * still holds the last real rows.
    */
-  const clientsSettled = statesResource.state.kind !== "cold"
-    && statesResource.state.kind !== "retrying-cold";
+  const clientsSettled = statesResource.state.data !== undefined;
   const native = nativeResource.state.data ?? null;
   // `readOptional` returns null for a failed probe. Only an actual array is a
   // settled contract; an empty array is meaningful and removes both switches.
