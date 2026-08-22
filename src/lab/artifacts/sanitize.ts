@@ -166,11 +166,12 @@ const WEAK_HOST_CONTEXT_RE =
   /\b(?:upstream)["']?\s*[\s=:]\s*["']?([A-Za-z0-9_.-]{1,255})/gi;
 
 /**
- * A dotted run of plain alphabetic words with no digits or hyphens in any
- * label — `provider.metric.p95` reads as a namespace, not a host. Under a
- * WEAK marker this is left alone; under a STRONG one the marker decides.
+ * A dotted run of plain alphabetic words, or the conventional
+ * `<name>.metric.p<digits>` shape, reads as a namespace rather than a host.
+ * Other digit-suffixed labels are host-shaped and must not receive this weak
+ * marker exemption. Under a STRONG marker the marker always decides.
  */
-const DOTTED_NAMESPACE_RE = /^[a-z]+(?:\.[a-z]+)*\.[a-z]+[0-9]*$/i;
+const DOTTED_NAMESPACE_RE = /^(?:[a-z]+(?:\.[a-z]+)+|[a-z]+(?:\.[a-z]+)*\.metric\.p[0-9]+)$/i;
 
 /**
  * Does this token look like a host rather than an English word?
