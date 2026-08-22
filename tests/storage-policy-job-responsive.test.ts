@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../src/config";
+import { loadConfig, saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { drainAndShutdown } from "../src/server/lifecycle";
 import type { OcxConfig } from "../src/types";
@@ -143,6 +143,47 @@ describe("storage cleanup policy job responsiveness", () => {
         if (body.job.status === "idle" && body.job.startedAt === runBody.job?.startedAt) break;
         await Bun.sleep(50);
       }
+    } finally {
+      await drainAndShutdown(server, 5_000);
+      await resetStorageCleanupPolicyJobForTestsAsync();
+    }
+  }, { timeout: 30_000 });
+
+  test("worker completion cannot resurrect a concurrently revoked API key", async () => {
+    const blockMs = 1200;
+    setStorageCleanupPolicyJobTestHooks({ blockMs });
+    seedArchived(isolatedCodexHome!.path);
+    const initial = loadConfig();
+    initial.apiKeys = [{ id: "revoked", name: "Revoked", key: "ocx_revoked", createdAt: "2026-01-01" }];
+    initial.storageCleanupPolicy = {
+      enabled: true,
+      trigger: { archivedBytesOver: 50 },
+      target: { removeOldestPercent: 50 },
+      schedule: "manual",
+      mode: "quarantine",
+    };
+    saveConfig(initial);
+
+    const server = startServer(0);
+    try {
+      const runRes = await fetch(new URL("/api/storage/cleanup-policy/run", server.url), { method: "POST" });
+      expect(runRes.status).toBe(200);
+      await Bun.sleep(200);
+
+      const revoked = loadConfig();
+      revoked.apiKeys = [];
+      saveConfig(revoked);
+
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const body = await (await fetch(new URL("/api/storage/cleanup-policy", server.url))).json() as {
+          job: { status: string };
+        };
+        if (body.job.status === "idle") break;
+        await Bun.sleep(50);
+      }
+      expect(loadConfig().apiKeys).toEqual([]);
+      expect(loadConfig().storageCleanupPolicy?.lastRun?.removed).toBe(1);
     } finally {
       await drainAndShutdown(server, 5_000);
       await resetStorageCleanupPolicyJobForTestsAsync();

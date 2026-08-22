@@ -101,6 +101,10 @@ the recorded service ownership.
 `atomicWriteFile` uses a temp file named `{path}.ocx.{pid}.{seq}.tmp` (process ID + incrementing
 sequence number) to avoid collisions when concurrent writers (e.g. `ocx stop` and the proxy's own
 shutdown handler) both restore Codex config simultaneously. The temp is renamed atomically into place.
+Background storage cleanup Workers never write `config.json`: they return a run-metadata patch for
+the parent isolate to merge into the latest policy and persist. This keeps full-config read/modify/write
+operations serialized with management saves on the proxy event loop and prevents a Worker snapshot
+from restoring concurrently revoked admission keys or stale provider settings.
 
 Windows secret-file hardening resolves the effective token SID through an absolute, trusted
 PowerShell path before granting the owner and removing inherited broad ACL entries. The normal
