@@ -15,6 +15,7 @@ import { loadConfig } from "./config";
 import { restoreNativeCodex, restoreNativeCodexAsync } from "./codex/inject";
 import { stripGrokConfig } from "./grok/inject";
 import { isWslRuntime, resolveCodexHomeDir, type CodexHomeDeps } from "./codex/home";
+import { resolveCodexSqliteHome } from "./codex/paths";
 import { BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV, durableBunRuntime } from "./lib/bun-runtime";
 import type { BunRuntimeSource } from "./lib/bun-runtime";
 import { isProcessAlive, stopProxy } from "./lib/process-control";
@@ -146,6 +147,8 @@ export interface ServiceInstallState {
   version: 1 | 2;
   codexHome: string;
   opencodexHome: string;
+  /** Effective Codex SQLite home used by this service's history integration. */
+  codexSqliteHome?: string;
   /** Baked at install; lets status flag paths gone stale after npm prefix/nvm moves. */
   bunPath?: string;
   cliPath?: string;
@@ -161,7 +164,7 @@ export function parseServiceInstallState(value: unknown): ServiceInstallState | 
   if (state.version !== 1 && state.version !== 2) return null;
   if (typeof state.codexHome !== "string" || state.codexHome.length === 0) return null;
   if (typeof state.opencodexHome !== "string" || state.opencodexHome.length === 0) return null;
-  for (const key of ["bunPath", "cliPath", "winswVersion", "winswSha256"] as const) {
+  for (const key of ["codexSqliteHome", "bunPath", "cliPath", "winswVersion", "winswSha256"] as const) {
     if (state[key] !== undefined && (typeof state[key] !== "string" || state[key].length === 0)) return null;
   }
   if (state.version === 1) {
@@ -178,6 +181,7 @@ function writeServiceInstallState(backend: ServiceBackend = "scheduler"): void {
     version: 2,
     codexHome: currentCodexHome(),
     opencodexHome: currentOpenCodexHome(),
+    codexSqliteHome: resolveCodexSqliteHome({ codexHome: currentCodexHome() }),
     bunPath: bun,
     cliPath: cli,
     backend,
@@ -330,6 +334,15 @@ export function assertServiceEnvironmentMatchesInstall(): void {
       `Service was installed with OPENCODEX_HOME=${state.opencodexHome}, but current OPENCODEX_HOME=${currentOpenCodexHome()}. ` +
         "Run the service command from the same OpenCodex home so service state and secrets match.",
     );
+  }
+  if (state.codexSqliteHome !== undefined) {
+    const actualCodexSqliteHome = resolveCodexSqliteHome({ codexHome: actualCodexHome });
+    if (normalizePathForCompare(state.codexSqliteHome) !== normalizePathForCompare(actualCodexSqliteHome)) {
+      throw new ServiceOwnershipError(
+        `Service was installed with Codex SQLite home=${state.codexSqliteHome}, but the current Codex SQLite home=${actualCodexSqliteHome}. ` +
+          "Run the service command with the same sqlite_home configuration and CODEX_SQLITE_HOME so native Codex history restore updates the correct database.",
+      );
+    }
   }
 }
 

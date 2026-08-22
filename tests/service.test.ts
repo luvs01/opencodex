@@ -17,6 +17,7 @@ import type { OcxConfig } from "../src/types";
 const TEST_DIR = join(import.meta.dir, ".tmp-service-test");
 const previousOpenCodexHome = process.env.OPENCODEX_HOME;
 const previousCodexHome = process.env.CODEX_HOME;
+const previousCodexSqliteHome = process.env.CODEX_SQLITE_HOME;
 const previousApiAuthToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 
 afterEach(() => {
@@ -24,6 +25,8 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousOpenCodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
+  if (previousCodexSqliteHome === undefined) delete process.env.CODEX_SQLITE_HOME;
+  else process.env.CODEX_SQLITE_HOME = previousCodexSqliteHome;
   if (previousApiAuthToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiAuthToken;
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -274,6 +277,23 @@ describe("service install auth preflight", () => {
     }) + "\n");
 
     expect(() => assertServiceEnvironmentMatchesInstall()).toThrow("Service was installed with CODEX_HOME");
+  });
+
+  test("rejects restore operations against a different Codex SQLite home than service install", () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.CODEX_HOME = join(TEST_DIR, "codex-home");
+    delete process.env.CODEX_SQLITE_HOME;
+    writeFileSync(join(TEST_DIR, "service-state.json"), JSON.stringify({
+      version: 2,
+      codexHome: process.env.CODEX_HOME,
+      codexSqliteHome: join(TEST_DIR, "installed-sqlite-home"),
+      opencodexHome: TEST_DIR,
+      backend: "scheduler",
+    }) + "\n");
+
+    expect(() => assertServiceEnvironmentMatchesInstall()).toThrow("Codex SQLite home");
   });
 });
 
@@ -1599,6 +1619,7 @@ describe("service diagnostics", () => {
     expect(parseServiceInstallState({ ...valid, backend: undefined })).toBeNull();
     expect(parseServiceInstallState({ ...valid, version: 1, backend: "scheduler" })).toBeNull();
     expect(parseServiceInstallState({ ...valid, version: 1, backend: undefined })?.version).toBe(1);
+    expect(parseServiceInstallState({ ...valid, codexSqliteHome: "" })).toBeNull();
   });
 
   test("status summary exposes the service log path", () => {
