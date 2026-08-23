@@ -361,6 +361,7 @@ function lookupPrefixSnapshot(
   const modelId = cursorCheckpointModelAffinityId(request.modelId);
   for (let covered = parsed.context.messages.length; covered >= 1; covered--) {
     const snapshot = getCursorCheckpointForPrefix({
+      conversationId: request.conversationId,
       prefixDigest: cursorCoveredPrefixDigest(parsed, covered),
       systemDigest,
       coveredMessageCount: covered,
@@ -407,7 +408,7 @@ function resolveCursorCheckpoint(
     snapshot = lookupPrefixSnapshot(parsed, request, identityScope);
     if (!snapshot) return { reason: "missing_ref" };
   }
-  if (!isolated && snapshot.conversationId !== request.conversationId && ref) {
+  if (!isolated && snapshot.conversationId !== request.conversationId) {
     return { reason: "conversation_changed" };
   }
   if (snapshot.identityScope !== identityScope) return { reason: "identity_changed" };

@@ -236,6 +236,7 @@ export function commitCursorCheckpoint(input: {
 }
 
 export function getCursorCheckpointForPrefix(input: {
+  conversationId: string;
   prefixDigest: string;
   systemDigest: string;
   coveredMessageCount: number;
@@ -250,6 +251,7 @@ export function getCursorCheckpointForPrefix(input: {
   const snapshot = getCursorCheckpoint(ref);
   if (!snapshot) return undefined;
   const identityScope = input.identityScope?.trim() || "local";
+  if (snapshot.conversationId !== input.conversationId) return undefined;
   if (snapshot.systemDigest !== input.systemDigest) return undefined;
   if (snapshot.coveredMessageCount !== input.coveredMessageCount) return undefined;
   if (snapshot.identityScope !== identityScope) return undefined;

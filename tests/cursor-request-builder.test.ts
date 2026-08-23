@@ -184,7 +184,7 @@ describe("Cursor request builder", () => {
     expect(helper.conversationId).not.toBe(main.conversationId);
   });
 
-  test("isolated helper turns keep their own cache and never reuse the parent checkpoint", () => {
+  test("isolated helper turns never reuse parent or sibling checkpoints", () => {
     clearCursorCheckpointsForTests();
     const parentBytes = toBinary(ConversationStateStructureSchema, create(ConversationStateStructureSchema, {
       pendingToolCalls: ["parent-fixture"],
@@ -254,8 +254,9 @@ describe("Cursor request builder", () => {
       },
     });
     expect(second.conversationId).not.toBe("cursor_parent_real");
-    expect(second.continuationMode).toBe("checkpoint");
-    expect(second.checkpointBytes?.byteLength).toBe(helperBytes.byteLength);
+    expect(second.continuationMode).toBe("full-replay");
+    expect(second.checkpointInvalidationReason).toBe("missing_ref");
+    expect(second.checkpointBytes).toBeUndefined();
     expect(getCursorCheckpoint(parentRef)?.ref).toBe(parentRef);
     clearCursorCheckpointsForTests();
   });
@@ -1224,6 +1225,7 @@ describe("Cursor request builder", () => {
     })).toBeDefined();
     const followUp = createCursorRequest({
       ...firstTurn,
+      _cursorConversationId: built.conversationId,
       context: {
         messages: [
           { role: "user", content: "unique sol prompt 7f3c", timestamp: 1 },
@@ -1234,6 +1236,44 @@ describe("Cursor request builder", () => {
     });
     expect(followUp.continuationMode).toBe("checkpoint");
     expect(followUp.checkpointBytes?.byteLength).toBe(checkpointBytes.byteLength);
+    clearCursorCheckpointsForTests();
+  });
+
+  test("does not reuse a unique covered prefix from an unrelated conversation", () => {
+    clearCursorCheckpointsForTests();
+    const firstTurn = {
+      ...base,
+      modelId: "cursor/gpt-5.6-sol",
+      _cursorIdentityScope: "acct-1",
+      context: { messages: [{ role: "user" as const, content: "shared prefix", timestamp: 1 }] },
+    };
+    const checkpointBytes = toBinary(ConversationStateStructureSchema, create(ConversationStateStructureSchema, {
+      pendingToolCalls: ["private-state"],
+    }));
+    expect(commitCursorCheckpoint({
+      conversationId: "cursor_original",
+      identityScope: "acct-1",
+      modelId: cursorCheckpointModelAffinityId(createCursorRequest(firstTurn).modelId),
+      checkpointBytes,
+      coveredMessageCount: 1,
+      prefixDigest: cursorCoveredPrefixDigest(firstTurn, 1),
+      systemDigest: cursorInstructionDigest(firstTurn),
+    })).toBeDefined();
+
+    const unrelated = createCursorRequest({
+      ...firstTurn,
+      _cursorConversationId: "cursor_unrelated",
+      context: {
+        messages: [
+          ...firstTurn.context.messages,
+          { role: "assistant" as const, content: [{ type: "text" as const, text: "reply" }], timestamp: 2 },
+          { role: "user" as const, content: "continue", timestamp: 3 },
+        ],
+      },
+    });
+    expect(unrelated.continuationMode).toBe("full-replay");
+    expect(unrelated.checkpointInvalidationReason).toBe("missing_ref");
+    expect(unrelated.checkpointBytes).toBeUndefined();
     clearCursorCheckpointsForTests();
   });
 });
