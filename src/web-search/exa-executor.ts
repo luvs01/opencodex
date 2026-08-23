@@ -10,9 +10,10 @@
  */
 import { fetchWithResetRetry } from "../lib/upstream-retry";
 import { signalWithTimeout } from "../lib/abort";
+import { readBoundedResponseBytes } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import { redactSecretString } from "../lib/redact";
-import type { WebSearchSource } from "./parse";
+import { MAX_SIDECAR_RESPONSE_BYTES, type WebSearchSource } from "./parse";
 import type { SidecarOutcome, SidecarSettings } from "./executor";
 
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
@@ -47,13 +48,26 @@ export async function runExaWebSearch(
       }),
       { abortSignal: linkedSignal.signal, label: "exa-web-search-sidecar" },
     );
+    const bounded = await readBoundedResponseBytes(res, {
+      maxBytes: MAX_SIDECAR_RESPONSE_BYTES,
+      signal: linkedSignal.signal,
+    });
+    if (bounded.oversized) {
+      const prefix = res.ok ? "exa sidecar response" : `exa sidecar HTTP ${res.status} response`;
+      return { text: "", sources: [], error: `${prefix} exceeded byte bound` };
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bounded.bytes);
     if (!res.ok) {
-      const t = await res.text().catch(() => "");
       // Scrub BEFORE truncating: slicing first can cut the literal key at the
       // boundary, leaving an unscrubbable key prefix in the surviving text.
-      return { text: "", sources: [], error: `exa sidecar HTTP ${res.status}: ${scrub(t).slice(0, 200)}` };
+      return { text: "", sources: [], error: `exa sidecar HTTP ${res.status}: ${scrub(text).slice(0, 200)}` };
     }
-    const payload = await res.json().catch(() => null);
+    let payload: unknown = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      // The mapper owns the stable malformed/empty JSON outcome.
+    }
     return mapExaSearchResponse(payload);
   } catch (e) {
     const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "connect_error";

@@ -6,6 +6,7 @@ import { runWithWebSearch, type WebSearchLoopDeps } from "../src/web-search/loop
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 import type { AdapterEvent, ProviderAdapter } from "../src/adapters/base";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
+import { MAX_SIDECAR_RESPONSE_BYTES } from "../src/web-search/parse";
 
 const routed: OcxProviderConfig = { adapter: "openai-chat", baseUrl: "https://routed.test/v1", apiKey: "k" };
 function config(overrides: Partial<OcxConfig> = {}): OcxConfig {
@@ -94,6 +95,28 @@ describe("runExaWebSearch key hygiene (canary)", () => {
       expect(captured[0]!.url).toBe("https://api.exa.ai/search");
       expect(captured[0]!.init.redirect).toBe("manual");
       expect((captured[0]!.init.headers as Record<string, string>)["x-api-key"]).toBe("key-1");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test.each([
+    ["success", 200],
+    ["error", 500],
+  ] as const)("oversized %s body is rejected and cancelled", async (_branch, status) => {
+    let bodyCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_SIDECAR_RESPONSE_BYTES + 1).fill(0x61));
+      },
+      cancel() { bodyCancelled = true; },
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(body, { status })) as typeof fetch;
+    try {
+      const out = await runExaWebSearch("q", "key-1", { model: "m", reasoning: "low", timeoutMs: 5000, describeImages: false });
+      expect(out.error).toContain("byte bound");
+      expect(bodyCancelled).toBe(true);
     } finally {
       globalThis.fetch = realFetch;
     }
