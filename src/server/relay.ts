@@ -24,6 +24,7 @@ export const MAX_INSPECTION_SSE_FRAME_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
 export const MAX_COMPLETED_OUTPUT_ITEMS = 256;
 export const MAX_COMPLETED_OUTPUT_ITEM_SOURCE_BYTES = 8 * 1024 * 1024;
 export const MAX_TAIL_ERROR_MESSAGE_CHARS = 512;
+const MAX_NON_JSON_ERROR_INSPECTION_BYTES = 8192;
 
 export type InspectionCounters = {
   frameBufferHighWaterBytes: number;
@@ -432,14 +433,10 @@ export function responseWithDeferredRequestLog(
     return response;
   }
   if (!response.body || !contentType.includes("text/event-stream")) {
-    if (response.body && (contentType.includes("application/json") || response.status >= 400)) {
+    if (response.body && contentType.includes("application/json")) {
       const finalizeJsonLog = async () => {
         const text = await response.text();
-        // Non-JSON error bodies: inspect/log only a bounded prefix (the stored
-        // upstreamError is 500 chars anyway); the FULL text is still forwarded to the
-        // client below, unchanged. JSON bodies keep full inspection (usage parsing).
-        const isJson = contentType.includes("application/json");
-        inspectResponseLogJson(logCtx, isJson ? text : text.slice(0, 8192));
+        inspectResponseLogJson(logCtx, text);
         addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
         return text;
       };
@@ -452,6 +449,55 @@ export function responseWithDeferredRequestLog(
             addFinalRequestLog(requestId, start, logCtx, 502, { closeReason: "non_stream" }, addLog);
             try { controller.error(err); } catch { /* already torn down */ }
           }
+        },
+      });
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
+    if (response.body && response.status >= 400) {
+      const reader = response.body.getReader();
+      const inspected: Uint8Array[] = [];
+      let inspectedBytes = 0;
+      let logged = false;
+      const finalize = (status = response.status) => {
+        if (logged) return;
+        logged = true;
+        const prefix = new Uint8Array(inspectedBytes);
+        let offset = 0;
+        for (const chunk of inspected) {
+          prefix.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        inspectResponseLogJson(logCtx, new TextDecoder().decode(prefix));
+        addFinalRequestLog(requestId, start, logCtx, status, { closeReason: "non_stream" }, addLog);
+      };
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read();
+            if (done) {
+              finalize();
+              controller.close();
+              return;
+            }
+            const remaining = MAX_NON_JSON_ERROR_INSPECTION_BYTES - inspectedBytes;
+            if (remaining > 0) {
+              const prefix = value.byteLength <= remaining ? value.slice() : value.slice(0, remaining);
+              inspected.push(prefix);
+              inspectedBytes += prefix.byteLength;
+            }
+            controller.enqueue(value);
+          } catch (err) {
+            finalize(502);
+            try { controller.error(err); } catch { /* already torn down */ }
+          }
+        },
+        cancel(reason) {
+          finalize();
+          reader.cancel(reason).catch(() => {});
         },
       });
       return new Response(body, {
