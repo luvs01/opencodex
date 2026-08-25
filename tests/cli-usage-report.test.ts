@@ -62,6 +62,19 @@ describe("formatUsageReport", () => {
     expect(out).not.toContain("item(s)");
   });
 
+  test("renders terminal control characters as inert text", () => {
+    const control = "demo-\x1b]52;c;SGVsbG8=\x07-after\nnext";
+    const out = formatUsageReport(payload({
+      providers: [{ provider: control, requests: 1, totalTokens: 2 }],
+      models: [{ provider: control, model: control, requests: 1, totalTokens: 2 }],
+      filter: { provider: control, model: control, matched: true, comboOverlap: false },
+    }) as never).join("\n");
+
+    expect(out).not.toContain("\x1b");
+    expect(out).not.toContain("\x07");
+    expect(out).toContain("demo-\\x1b]52;c;SGVsbG8=\\x07-after\\x0anext");
+  });
+
   test("a zero total is distinguishable from an unpriced one", () => {
     const priced = formatUsageReport(payload({
       summary: { requests: 5, totalTokens: 100, estimatedCostUsd: 0, unpricedRequests: 0, unmeteredRequests: 0 },
