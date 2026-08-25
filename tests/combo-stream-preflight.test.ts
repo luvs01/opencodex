@@ -90,4 +90,22 @@ describe("combo stream preflight", () => {
     expect(second.value).toBe(oversized);
     await reader.cancel();
   });
+
+  test("commits before tiny upstream chunks can amplify retained allocations", async () => {
+    const chunks = Array.from({ length: 1_100 }, () => new Uint8Array([32]));
+    let pulls = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[pulls++];
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+
+    const result = await preflightComboStreamResponse(response, { model: "m1", provider: "a" });
+
+    expect(result.kind).toBe("accepted");
+    expect(pulls).toBeLessThan(chunks.length);
+    expect((await result.response.arrayBuffer()).byteLength).toBe(chunks.length);
+  });
 });

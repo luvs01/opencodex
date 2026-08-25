@@ -4,6 +4,7 @@ import { createSseInspector } from "../relay";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
+const COMBO_STREAM_PREFLIGHT_MAX_CHUNKS = 1024;
 
 const PRE_OUTPUT_CONTROL_EVENTS = new Set([
   "response.created",
@@ -105,8 +106,8 @@ export type ComboStreamPreflightResult =
 /**
  * Buffer a combo child's downstream SSE only until the request becomes unsafe to
  * replay or reaches a terminal. This owns exactly one body reader. The aggregate
- * buffer is capped; hitting the cap commits the current target instead of growing
- * memory or guessing that replay is safe.
+ * buffer is capped by bytes and chunk count; hitting either cap commits the current
+ * target instead of growing memory or guessing that replay is safe.
  */
 export async function preflightComboStreamResponse(
   response: Response,
@@ -141,10 +142,11 @@ export async function preflightComboStreamResponse(
       if (next.done) {
         inspector.finish();
       } else {
-        if (bufferedBytes + next.value.byteLength > COMBO_STREAM_PREFLIGHT_MAX_BYTES) {
-          // Keep the cap about memory the preflight allocates. The upstream chunk already exists;
-          // copying it before committing would transiently exceed the boundary for no
-          // replay benefit. Preserve it unsliced behind the already-bounded prefix.
+        if (buffered.length >= COMBO_STREAM_PREFLIGHT_MAX_CHUNKS
+          || bufferedBytes + next.value.byteLength > COMBO_STREAM_PREFLIGHT_MAX_BYTES) {
+          // Keep both caps about memory the preflight allocates. The upstream chunk already
+          // exists; copying it before committing would exceed a boundary for no replay benefit.
+          // Preserve it unsliced behind the already-bounded prefix.
           return {
             kind: "accepted",
             response: replayBufferedResponse(response, reader, [...buffered, next.value]),
