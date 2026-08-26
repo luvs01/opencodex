@@ -64,6 +64,9 @@ const MAX_REPORTED_NAME_CHARS = 100;
 
 export const UNDECLARED_TOOL_CALL_ERROR_CODE = "undeclared_tool_call";
 
+/** Catalogs containing a namespaced `exec`, tracked separately from bare-name authority. */
+const CATALOGS_WITH_NAMESPACED_EXEC = new WeakSet<ReadonlySet<string>>();
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -79,11 +82,17 @@ function addWireToolName(names: Set<string>, tool: unknown, namespace?: string):
       ? nestedFunction.name
       : undefined;
   if (!name) return;
-  names.add(name);
   // Codex routes MCP calls by an explicit `namespace` field, so the same tool is reachable
   // as a bare inner name or as the flattened form; accept both rather than guess which
-  // coordinate system this provider echoes back.
-  if (namespace) names.add(namespacedToolName(namespace, name));
+  // coordinate system this provider echoes back. Keep a namespaced `exec` out of the bare
+  // declaration set, however: bare `exec` also authorizes legacy shell bridge aliases.
+  if (namespace) {
+    names.add(namespacedToolName(namespace, name));
+    if (name === "exec") CATALOGS_WITH_NAMESPACED_EXEC.add(names);
+    else names.add(name);
+    return;
+  }
+  names.add(name);
 }
 
 /**
@@ -282,6 +291,12 @@ function undeclaredNameInItem(
     // them, or an undeclared namespaced `exec_command` could slip through as bare `exec`.
     if (declared.has(namespacedToolName(item.namespace, name))) return undefined;
     return name;
+  }
+  // A provider may echo a namespaced tool under its bare child name. `exec` is kept out of
+  // the bare declaration set so it cannot authorize shell aliases, so recognize only this
+  // exact child-name echo before applying legacy normalization.
+  if (name === "exec" && CATALOGS_WITH_NAMESPACED_EXEC.has(declared)) {
+    return undefined;
   }
   const effectiveName = normalizeDeclaredToolName(name, declared);
   if (declared.has(effectiveName)) return undefined;

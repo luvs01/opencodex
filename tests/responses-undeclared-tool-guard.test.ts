@@ -90,7 +90,8 @@ describe("collectDeclaredWireToolNames", () => {
       ],
     });
 
-    // Namespaced MCP tools are reachable under either coordinate system, so both are accepted.
+    // Namespaced MCP tools are reachable under either coordinate system. A namespaced `exec`
+    // stays out of the bare-name set because bare `exec` authorizes legacy shell aliases.
     expect([...names].sort()).toEqual(
       ["apply_patch", "create_issue", "exec", "linear__create_issue"],
     );
@@ -1286,6 +1287,23 @@ describe("undeclaredToolCallNameInResponse", () => {
       "exec_command",
     );
     expect(undeclaredToolCallNameInResponse(namespaced, new Set(["exec", "mcp__server__exec_command"]))).toBeUndefined();
+  });
+
+  test("a namespaced exec declaration does not authorize bare shell bridge aliases", () => {
+    const declared = collectDeclaredWireToolNames({
+      tools: [{ type: "namespace", name: "mcp__server", tools: [{ type: "function", name: "exec" }] }],
+    });
+
+    expect([...declared]).toEqual(["mcp__server__exec"]);
+    expect(undeclaredToolCallNameInResponse({
+      output: [{ type: "function_call", name: "exec" }],
+    }, declared)).toBeUndefined();
+    expect(undeclaredToolCallNameInResponse({
+      output: [{ type: "function_call", name: "exec_command" }],
+    }, declared)).toBe("exec_command");
+    expect(undeclaredToolCallNameInResponse({
+      output: [{ type: "custom_tool_call", name: "shell_command" }],
+    }, declared)).toBe("shell_command");
   });
 });
 
