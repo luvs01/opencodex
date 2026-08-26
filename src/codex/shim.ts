@@ -633,8 +633,9 @@ export function isVersionManagerOwnedCodexPath(path: string): boolean {
  * the misleading green status in #2411).
  */
 function destroyedShimMessage(file: ShimFileState): string {
+  const wrapperProbe = stableShimPathProbe(file.wrapperPath);
   const wrapper = existsSync(file.wrapperPath)
-    ? isShim(file.wrapperPath) ? "present but unusable" : "present but not an opencodex shim"
+    ? wrapperProbe?.prefix.includes(SHIM_MARKER) ? "present but unusable" : "present but not an opencodex shim"
     : "missing";
   const backup = existsSync(file.backupPath) ? "present" : "missing";
   const base = `Codex autostart shim not restored: wrapper ${wrapper} at ${file.wrapperPath}; original backup ${backup} at ${file.backupPath}.`;
