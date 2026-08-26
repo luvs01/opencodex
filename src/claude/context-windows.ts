@@ -127,13 +127,12 @@ export function buildClaudeContextWindows(
       m.contextWindow > 0 &&
       !(m.provider === "anthropic" && m.contextWindow < ONE_MILLION),
   );
-  // Bare routed ids are registered only when unambiguous across providers (audit
-  // 021 #5) — natives are registered first, so a native slug always wins the bare
-  // key. Counted over the rows that can actually claim the key: a row this loop
-  // skips contributes no window, so letting it veto the bare key withholds an
-  // answer that was never in doubt.
+  // Bare routed ids are registered only when unambiguous across every provider
+  // that can route the id (audit 021 #5) — natives are registered first, so a
+  // native slug always wins the bare key. Rows without a registrable window must
+  // still count because they remain valid routing candidates for the bare id.
   const bareCounts = new Map<string, number>();
-  for (const m of registrable) bareCounts.set(m.id, (bareCounts.get(m.id) ?? 0) + 1);
+  for (const m of routedModels) bareCounts.set(m.id, (bareCounts.get(m.id) ?? 0) + 1);
   for (const m of registrable) {
     const window = m.contextWindow as number;
     put(`${m.provider}/${m.id}`, window);

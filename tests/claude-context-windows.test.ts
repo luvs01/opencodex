@@ -133,30 +133,31 @@ describe("auto-context (devlog 260712 020 + audit 021)", () => {
     expect(map["gpt-5.6-sol"]).toBe(272_000); // native default, not 999k
   });
 
-  test("a row that registers nothing does not make a bare id ambiguous", () => {
-    // Only one of these two rows can claim the bare key, so there is nothing to
-    // be ambiguous about — withholding it left a 1M model with no window, and a
-    // slot set to the bare id lost its [1m] marker.
+  test("rows without a registrable window still make a bare id ambiguous", () => {
+    // Both rows remain routing candidates even though only one has a window, so
+    // the bare selector cannot safely inherit either provider's metadata.
     const noWindow = buildClaudeContextWindows([], [
       { provider: "a", id: "shared-model", contextWindow: 1_000_000 },
       { provider: "b", id: "shared-model" } as CatalogModel,
     ]);
-    expect(noWindow["shared-model"]).toBe(1_000_000);
+    expect(noWindow["shared-model"]).toBeUndefined();
+    expect(noWindow["a/shared-model"]).toBe(1_000_000);
 
-    // Same for a row the anthropic sub-1M guard skips.
+    // Same for a row the anthropic sub-1M guard skips from registration.
     const anthropicSkipped = buildClaudeContextWindows([], [
       { provider: "openrouter", id: "claude-x", contextWindow: 1_000_000 },
       { provider: "anthropic", id: "claude-x", contextWindow: 200_000 },
     ]);
-    expect(anthropicSkipped["claude-x"]).toBe(1_000_000);
+    expect(anthropicSkipped["claude-x"]).toBeUndefined();
+    expect(anthropicSkipped["openrouter/claude-x"]).toBe(1_000_000);
     expect(anthropicSkipped["anthropic/claude-x"]).toBeUndefined();
 
-    // A zero or negative window is not a claim either.
+    // Zero and negative windows also remain routing candidates.
     const zeroWindow = buildClaudeContextWindows([], [
       { provider: "a", id: "shared-model", contextWindow: 400_000 },
       { provider: "b", id: "shared-model", contextWindow: 0 },
     ]);
-    expect(zeroWindow["shared-model"]).toBe(400_000);
+    expect(zeroWindow["shared-model"]).toBeUndefined();
   });
 
   test("two providers that both register keep the bare id withheld", () => {
