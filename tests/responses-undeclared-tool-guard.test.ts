@@ -1293,8 +1293,8 @@ describe("undeclaredToolCallNameInResponse", () => {
  * xAI runs hosted `x_search` itself and reports the activity as a `custom_tool_call` whose name
  * is absent from the request catalog. Probed 2026-08-23 against the OAuth CLI destination: the
  * provider's hosted calls carry an `xs_call-` call-id prefix. Observed names were
- * `x_keyword_search`, `x_semantic_search`, and `x_user_search`, so authorization keys on the
- * declaration, item type, and call-id prefix, never on the name.
+ * `x_keyword_search`, `x_semantic_search`, and `x_user_search`, so authorization requires one of
+ * those names as well as the declaration, item type, and call-id prefix.
  */
 describe("provider-executed hosted calls", () => {
   const declared = new Set(["shell"]);
@@ -1309,7 +1309,11 @@ describe("provider-executed hosted calls", () => {
 
   test("authorizes the provider's hosted call under any of its observed names", () => {
     expect(collectProviderExecutedCallTypes({ tools: [{ type: "x_search" }] }))
-      .toEqual(new Set([{ itemType: "custom_tool_call", callIdPrefix: "xs_call-" }]));
+      .toEqual(new Set([{
+        itemType: "custom_tool_call",
+        callIdPrefix: "xs_call-",
+        names: ["x_keyword_search", "x_semantic_search", "x_user_search"],
+      }]));
     for (const name of ["x_keyword_search", "x_semantic_search", "x_user_search"]) {
       expect(undeclaredToolCallNameInResponse(
         hostedCall(name), declared, nameless, xSearchAuthorized,
@@ -1337,7 +1341,7 @@ describe("provider-executed hosted calls", () => {
 
   test("#1700 still holds: an undeclared client tool is refused inside an authorized turn", () => {
     expect(undeclaredToolCallNameInResponse(
-      { output: [{ type: "custom_tool_call", name: "apply_patch", call_id: "call_patch" }] },
+      { output: [{ type: "custom_tool_call", name: "apply_patch", call_id: "xs_call-evil" }] },
       declared, nameless, xSearchAuthorized,
     )).toBe("apply_patch");
   });

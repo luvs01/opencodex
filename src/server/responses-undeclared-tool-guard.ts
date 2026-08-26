@@ -12,18 +12,23 @@ const CLIENT_EXECUTED_CALL_TYPES = new Set(["function_call", "custom_tool_call"]
  * xAI surfaces hosted `x_search` as `custom_tool_call`. Probed 2026-08-23 against the OAuth CLI
  * destination: its hosted calls use an `xs_call-` call-id prefix. Observed call names were
  * `x_keyword_search`, `x_semantic_search`, and `x_user_search` — three literals for one tool,
- * which is why authorization keys on the declaration, item type, and call-id prefix, never on
- * the name.
+ * so authorization accepts those measured names in addition to the declaration, item type, and
+ * call-id prefix.
  */
 export type ProviderExecutedCallType = Readonly<{
   itemType: string;
   callIdPrefix: string;
+  names: readonly string[];
 }>;
 
 type ProviderExecutedCallTypes = ReadonlySet<ProviderExecutedCallType>;
 
 export const PROVIDER_EXECUTED_DECLARATION_CALL_TYPES = new Map<string, ProviderExecutedCallType>([
-  ["x_search", { itemType: "custom_tool_call", callIdPrefix: "xs_call-" }],
+  ["x_search", {
+    itemType: "custom_tool_call",
+    callIdPrefix: "xs_call-",
+    names: ["x_keyword_search", "x_semantic_search", "x_user_search"],
+  }],
 ]);
 
 /** Nameless declaration kinds whose response items still require client execution. */
@@ -187,11 +192,12 @@ function isAuthorizedProviderExecutedCall(
   item: Record<string, unknown>,
   callTypes: ProviderExecutedCallTypes,
 ): boolean {
-  if (typeof item.call_id !== "string") return false;
+  if (typeof item.call_id !== "string" || typeof item.name !== "string") return false;
   for (const callType of callTypes) {
     if (
       item.type === callType.itemType
       && item.call_id.startsWith(callType.callIdPrefix)
+      && callType.names.includes(item.name)
     ) return true;
   }
   return false;
@@ -266,7 +272,7 @@ function undeclaredNameInItem(
   if (typeof item.type !== "string") return undefined;
   // The provider executes this exact measured shape itself, so there is no client name to
   // authorize. The caller supplies these signatures only for the matching destination and
-  // declarations; the item must additionally carry the hosted call-id prefix.
+  // declarations; the item must additionally carry the hosted call-id prefix and measured name.
   if (isAuthorizedProviderExecutedCall(item, providerExecutedCallTypes)) return undefined;
   const namelessDisplayName = NAMELESS_CLIENT_CALL_DISPLAY_NAMES.get(item.type);
   if (namelessDisplayName !== undefined) {
