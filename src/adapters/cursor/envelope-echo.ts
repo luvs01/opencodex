@@ -89,7 +89,7 @@ export type RoutingCommentaryDecision =
   | { kind: "flush" }
   | { kind: "hallucination" };
 
-const ROUTING_NATIVE_TOOL_NAME = /\b(shell|read|grep|list|bash)\b/giu;
+const ROUTING_NATIVE_TOOL_NAME = /(\b(?:shell|read|grep|list|bash)\b|네이티브\s*(?:셸|쉘))/giu;
 const ROUTING_TOOL_HINT =
   /(?:\b(?:shell|read|grep|list|bash)\b|exec_command|shell_command|브리지|네이티브\s*(?:셸|쉘))/iu;
 const ROUTING_FAILURE_CLAIM =

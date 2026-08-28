@@ -90,6 +90,9 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
     expect(multiline.feed("Shell was blocked.\n").kind).toBe("hold");
     expect(multiline.feed("Switching to exec_command.").kind).toBe("hallucination");
 
+    const localizedNativeShell = new CursorRoutingCommentarySniffer();
+    expect(localizedNativeShell.feed("네이티브 셸이 차단되어 exec_command로 전환합니다.").kind).toBe("hallucination");
+
     const legitimate = new CursorRoutingCommentarySniffer();
     expect(legitimate.feed("Shell is unavailable on this operating system.").kind).toBe("hold");
     expect(legitimate.finish().kind).toBe("flush");
