@@ -35,6 +35,7 @@ import { NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREA
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { trustedAccountBoundNativeCatalogSlug } from "./account-models";
 import { CODEX_NATIVE_ALIAS_CATALOG_KIND } from "./kinds";
+import { recordOwnedConfigPath } from "../../lib/config-ownership";
 
 export function legacyCatalogBackupPath(): string {
   return join(getConfigDir(), "catalog-backup.json");
@@ -669,10 +670,12 @@ export function writePristineCatalogBackup(backupPath: string, catalogPath: stri
   const onDisk = readCatalog(catalogPath);
   if (onDisk && !catalogHasRoutedEntries(onDisk)) {
     copyFileSync(catalogPath, backupPath);
+    recordOwnedConfigPath(getConfigDir(), backupPath);
     return;
   }
   if (!catalogHasRoutedEntries(catalog)) {
     atomicWriteFile(backupPath, JSON.stringify(catalog, null, 2) + "\n");
+    recordOwnedConfigPath(getConfigDir(), backupPath);
   }
 }
 
