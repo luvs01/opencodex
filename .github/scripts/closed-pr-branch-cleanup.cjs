@@ -16,6 +16,9 @@
 /** Branches that may never be deleted regardless of pull-request state. */
 const PROTECTED_BRANCHES = Object.freeze(["main", "dev", "preview", "gh-pages"]);
 
+/** Namespaces reserved for disposable, automation-created branches. */
+const DISPOSABLE_BRANCH_PREFIXES = Object.freeze(["codex/", "ingw/"]);
+
 /** Default grace period before a closed PR's head branch becomes eligible. */
 const DEFAULT_GRACE_DAYS = 14;
 
@@ -53,6 +56,7 @@ function toTimestamp(value) {
  */
 const KEEP_REASONS = Object.freeze({
   PROTECTED: "protected-branch",
+  OUTSIDE_DISPOSABLE_NAMESPACE: "outside-disposable-namespace",
   MERGED: "pull-request-merged",
   OPEN: "open-pull-request",
   BASE_OF_OPEN: "base-of-open-pull-request",
@@ -73,6 +77,8 @@ const KEEP_REASONS = Object.freeze({
  *   a head is closed and unmerged. One open or merged PR on the same branch
  *   keeps it, because reopening a PR whose head branch is gone cannot restore
  *   the commits.
+ * - Only explicitly disposable automation namespaces are candidates. A pull
+ *   request must not confer authority to delete an arbitrary repository ref.
  * - A branch that is the base of an open pull request is kept. Deleting it
  *   closes the stacked child PR that targets it.
  * - Cross-repository (fork) heads are never touched: they live in the
@@ -144,6 +150,14 @@ function planClosedPrBranchDeletions({
   for (const branch of [...existing.keys()].sort()) {
     if (isProtectedBranch(branch)) {
       keeps.push({ branch, reason: KEEP_REASONS.PROTECTED });
+      continue;
+    }
+
+    // PR creation/management authority is not repository-ref deletion
+    // authority. Only namespaces reserved for disposable automation branches
+    // may enter this privileged cleanup path.
+    if (!DISPOSABLE_BRANCH_PREFIXES.some((prefix) => branch.startsWith(prefix))) {
+      keeps.push({ branch, reason: KEEP_REASONS.OUTSIDE_DISPOSABLE_NAMESPACE });
       continue;
     }
 
@@ -219,6 +233,7 @@ function planClosedPrBranchDeletions({
 
 module.exports = {
   DEFAULT_GRACE_DAYS,
+  DISPOSABLE_BRANCH_PREFIXES,
   KEEP_REASONS,
   PROTECTED_BRANCHES,
   isProtectedBranch,

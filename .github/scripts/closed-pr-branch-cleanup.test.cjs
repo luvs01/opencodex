@@ -12,6 +12,7 @@ const {
 const NOW = Date.parse("2026-08-26T00:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
 const longAgo = new Date(NOW - 60 * DAY).toISOString();
+const HEAD_OID = "1111111111111111111111111111111111111111";
 
 function closedPr(overrides) {
   return {
@@ -20,6 +21,7 @@ function closedPr(overrides) {
     merged: false,
     isCrossRepository: false,
     headRefName: "codex/example",
+    headRefOid: HEAD_OID,
     baseRefName: "dev",
     closedAt: longAgo,
     ...overrides,
@@ -48,7 +50,7 @@ describe("planClosedPrBranchDeletions", () => {
   it("deletes a branch whose only pull request closed unmerged past the grace period", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 42, headRefName: "codex/stale" })],
-      branches: ["codex/stale", "dev"],
+      branches: [{ name: "codex/stale", oid: HEAD_OID }, "dev"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), ["codex/stale"]);
@@ -103,13 +105,13 @@ describe("planClosedPrBranchDeletions", () => {
   it("never touches a fork head branch", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [
-        closedPr({ number: 40, headRefName: "patch-1", isCrossRepository: true }),
+        closedPr({ number: 40, headRefName: "codex/patch-1", isCrossRepository: true }),
       ],
-      branches: ["patch-1"],
+      branches: ["codex/patch-1"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
-    assert.equal(keepReason(result, "patch-1"), KEEP_REASONS.CROSS_REPOSITORY);
+    assert.equal(keepReason(result, "codex/patch-1"), KEEP_REASONS.CROSS_REPOSITORY);
   });
 
   it("waits out the grace period so a mistaken close can be reopened", () => {
@@ -147,7 +149,10 @@ describe("planClosedPrBranchDeletions", () => {
   it("ignores branches that no pull request ever used", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 80, headRefName: "codex/known" })],
-      branches: ["codex/known", "codex/never-a-pr"],
+      branches: [
+        { name: "codex/known", oid: HEAD_OID },
+        { name: "codex/never-a-pr", oid: HEAD_OID },
+      ],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), ["codex/known"]);
@@ -161,5 +166,19 @@ describe("planClosedPrBranchDeletions", () => {
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
+  });
+
+  it("never lets pull-request state authorize deletion outside disposable namespaces", () => {
+    const branch = "persistent/release-work";
+    const result = planClosedPrBranchDeletions({
+      pullRequests: [closedPr({ number: 100, headRefName: branch })],
+      branches: [{ name: branch, oid: HEAD_OID }],
+      now: NOW,
+    });
+    assert.deepEqual(deletedBranches(result), []);
+    assert.equal(
+      keepReason(result, branch),
+      KEEP_REASONS.OUTSIDE_DISPOSABLE_NAMESPACE,
+    );
   });
 });
