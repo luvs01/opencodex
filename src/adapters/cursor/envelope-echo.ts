@@ -16,7 +16,7 @@ const ECHO_MARKERS = ["[Tool Result]", "[Tool Error]", "[tool_result]"] as const
 const MAX_SNIFF_BYTES = 40;
 const MAX_ROUTING_COMMENTARY_BYTES = 512;
 /** Aggregate quarantine cap: past this, flush and disarm. */
-const MAX_HOLD_BYTES = 8 * 1024;
+export const CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES = 8 * 1024;
 const encoder = new TextEncoder();
 
 export class CursorToolResultEchoError extends Error {
@@ -70,7 +70,11 @@ export class CursorEnvelopeEchoSniffer {
     const stillPrefix = ECHO_MARKERS.some(marker =>
       probe.length < marker.length && marker.startsWith(probe),
     );
-    if (stillPrefix && this.byteCount <= MAX_SNIFF_BYTES && this.buffered.length < MAX_HOLD_BYTES) {
+    if (
+      stillPrefix
+      && this.byteCount <= MAX_SNIFF_BYTES
+      && this.buffered.length < CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES
+    ) {
       return { kind: "hold" };
     }
     this.done = true;
@@ -129,7 +133,7 @@ export class CursorRoutingCommentarySniffer {
       && lineBreakCount < 2;
     if (
       this.byteCount < MAX_ROUTING_COMMENTARY_BYTES
-      && this.buffered.length < MAX_HOLD_BYTES
+      && this.buffered.length < CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES
       && (lineBreakCount === 0 || pendingFailureClaim)
       && (hasRoutingHint || this.byteCount < 64)
     ) {
