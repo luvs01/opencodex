@@ -113,6 +113,19 @@ describe("#2568 adapter-event OAuth failover", () => {
       expect(body).toContain("alternate answer");
       expect(body).not.toContain("Cursor rate limit exceeded");
     });
+
+    test(`${stream ? "streaming" : "non-streaming"} local side effect prevents 429 replay`, async () => {
+      await seedAccounts(2);
+      attempts = [[
+        { type: "heartbeat", replayUnsafe: true },
+        { type: "error", message: "Cursor rate limit exceeded: resource_exhausted" },
+      ]];
+
+      const body = await (await handleResponses(request(stream), config(), { model: "", provider: "" })).text();
+
+      expect(attemptKeys).toEqual(["cursor-access-1"]);
+      expect(body).toContain("rate_limit_exceeded");
+    });
   }
 
   test("a single account is a strict no-op", async () => {
