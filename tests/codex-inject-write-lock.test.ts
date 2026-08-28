@@ -15,7 +15,11 @@ import {
   resolveCodexCoordinatorDatabasePath,
   resolveEffectiveUserIdentity,
 } from "../src/codex/user-identity";
-import { boundProvenanceEntries, STABLE_ZERO_BYTE_COORDINATOR_AGE_MS } from "../src/codex/inject-coordination";
+import {
+  boundProvenanceEntries,
+  CODEX_PROVENANCE_MAX_BYTES,
+  STABLE_ZERO_BYTE_COORDINATOR_AGE_MS,
+} from "../src/codex/inject-coordination";
 import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const repoRoot = join(import.meta.dir, "..");
@@ -507,5 +511,23 @@ describe("provenance ledger bound", () => {
   test("a ledger within the window is returned unchanged", () => {
     const entries = Array.from({ length: 16 }, (_, i) => transaction(`tx-${i}`)).flat();
     expect(boundProvenanceEntries(entries, 16)).toBe(entries);
+  });
+
+  test("omits oversized transactions whole and bounds serialized entry bytes", () => {
+    const small = transaction("small");
+    const oversized = transaction("oversized").map(item => ({
+      ...item,
+      baseline: {
+        kind: "present" as const,
+        sha256: "0".repeat(64),
+        bytesBase64: "A".repeat(CODEX_PROVENANCE_MAX_BYTES),
+      },
+    }));
+
+    const bounded = boundProvenanceEntries([...small, ...oversized]);
+
+    expect(bounded).toEqual(small);
+    expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThanOrEqual(CODEX_PROVENANCE_MAX_BYTES);
+    expect(bounded.some(item => item.txId === "oversized")).toBe(false);
   });
 });

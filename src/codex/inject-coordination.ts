@@ -196,6 +196,15 @@ export function captureCodexPreImages(): CodexPreImages {
  */
 export const CODEX_PROVENANCE_MAX_TRANSACTIONS = 16;
 
+/**
+ * Hard ceiling for the serialized entry array, including exact pre-images.
+ *
+ * The transaction window alone is not a byte bound: native files are outside OpenCodex's trust
+ * boundary and may be arbitrarily large. Transactions that cannot fit are omitted whole rather
+ * than retaining partial evidence or amplifying those files into the integration record.
+ */
+export const CODEX_PROVENANCE_MAX_BYTES = 1024 * 1024;
+
 function provenanceBaseline(bytes: string | null): CodexProvenanceEntry["baseline"] {
   if (bytes === null) return { kind: "absent" };
   return {
@@ -224,11 +233,25 @@ function provenancePostImage(path: string): string | null {
 export function boundProvenanceEntries(
   entries: readonly CodexProvenanceEntry[],
   maxTransactions = CODEX_PROVENANCE_MAX_TRANSACTIONS,
+  maxBytes = CODEX_PROVENANCE_MAX_BYTES,
 ): readonly CodexProvenanceEntry[] {
   const order: string[] = [];
   for (const entry of entries) if (!order.includes(entry.txId)) order.push(entry.txId);
-  if (order.length <= maxTransactions) return entries;
-  const keep = new Set(order.slice(order.length - maxTransactions));
+  const candidates = order.slice(-maxTransactions);
+  const keep = new Set<string>();
+  let serializedBytes = 2; // JSON array brackets.
+  for (const txId of candidates.reverse()) {
+    const transaction = entries.filter(entry => entry.txId === txId);
+    const transactionBytes = transaction.reduce(
+      (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)) + (total === 0 ? 0 : 1),
+      0,
+    );
+    const separatorBytes = keep.size === 0 ? 0 : 1;
+    if (serializedBytes + separatorBytes + transactionBytes > maxBytes) continue;
+    serializedBytes += separatorBytes + transactionBytes;
+    keep.add(txId);
+  }
+  if (keep.size === order.length) return entries;
   return entries.filter(entry => keep.has(entry.txId));
 }
 
