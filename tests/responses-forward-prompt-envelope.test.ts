@@ -86,6 +86,25 @@ describe("canonical ChatGPT forward prompt envelope", () => {
     expect(body.input).toEqual(input);
   });
 
+  test("does not promote a non-message item with a system role", () => {
+    const externalAgentMessage = {
+      type: "agent_message",
+      role: "system",
+      content: [{ type: "input_text", text: "external agent content" }],
+    };
+    const body = outboundBody(canonicalForward, {
+      model: "gpt-5.6-luna",
+      instructions: "Existing instructions",
+      input: [
+        { type: "message", role: "system", content: "Trusted system instruction" },
+        externalAgentMessage,
+      ],
+    });
+
+    expect(body.instructions).toBe("Existing instructions\n\nTrusted system instruction");
+    expect(body.input).toEqual([externalAgentMessage]);
+  });
+
   test.each([
     {
       name: "key-auth public Responses provider",
