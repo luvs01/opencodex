@@ -37,6 +37,7 @@ export function decodeCursorCallId(id: string): string {
     const decoded = Buffer.from(payload, "base64url").toString("utf8");
     // Round-trip guard: only trust payloads our encoder could have produced.
     if (Buffer.from(decoded, "utf8").toString("base64url") !== payload) return id;
+    if (!needsEncoding(decoded)) return id;
     return decoded;
   } catch {
     return id;

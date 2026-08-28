@@ -17,6 +17,12 @@ describe("cursor call-id codec", () => {
     expect(decodeCursorCallId("call_abc123")).toBe("call_abc123");
   });
 
+  test("plain ids in the reserved namespace pass through unchanged", () => {
+    const id = "ocxc1_Y2FsbF8x";
+    expect(encodeCursorCallId(id)).toBe(id);
+    expect(decodeCursorCallId(id)).toBe(id);
+  });
+
   test("newline composite id round-trips through a single-line form", () => {
     const encoded = encodeCursorCallId(COMPOSITE);
     expect(encoded).not.toContain("\n");
