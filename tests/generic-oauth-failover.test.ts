@@ -218,6 +218,16 @@ describe("sidecar on429 wiring", () => {
     expect(body).not.toContain("apiKey: snapshot.accessToken");
   });
 
+  test("the shared hook rebinds the exact sidecar retry request", () => {
+    const start = coreSource.indexOf("const rotateSidecarProviderOn429 =");
+    expect(start).toBeGreaterThan(-1);
+    const body = coreSource.slice(start, coreSource.indexOf("\n  };", start));
+
+    expect(body).toContain("retryParsed: OcxParsedRequest");
+    expect(body).toContain("retryParsed._kiroAuthContext =");
+    expect(body).toContain("parsed: retryParsed");
+  });
+
   test("every rotation site applies the credential through the one shared helper", () => {
     // The pairing rules (Copilot's account-scoped origin, Antigravity's account-matched project,
     // Kiro's routing metadata) live in exactly one place. A fourth rotation site that swaps the

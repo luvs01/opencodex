@@ -4301,7 +4301,10 @@ async function handleResponsesInner(
   const imgPlan = !routedCompaction ? await planImageBridge(config, parsed, route.provider) : undefined;
   const vidPlan = !routedCompaction ? await planVideoBridge(config, parsed, route.provider) : undefined;
   const canRunWebSearch = !!wsPlan && !adapter.runTurn;
-  const rotateSidecarProviderOn429 = async (retryAfter: string | null): Promise<ProviderAdapter | null> => {
+  const rotateSidecarProviderOn429 = async (
+    retryAfter: string | null,
+    retryParsed: OcxParsedRequest,
+  ): Promise<ProviderAdapter | null> => {
     const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
       retryAfter,
       now: Date.now(),
@@ -4338,6 +4341,18 @@ async function handleResponsesInner(
     );
     bindRouteReasoningReplayScope({
       parsed,
+      providerName: route.providerName,
+      provider: route.provider,
+      adapterName: rotatedAdapter.name,
+    });
+    // Sidecar loops build adapters from an iteration-local shallow copy. Rebind the exact request
+    // used for the retry as well as the outer request, or an OAuth rotation can pair the new
+    // bearer with the previous account's Kiro routing metadata and continuation identity.
+    if (route.providerName === "kiro") {
+      retryParsed._kiroAuthContext = { ...(parsed._kiroAuthContext ?? {}) };
+    }
+    bindRouteReasoningReplayScope({
+      parsed: retryParsed,
       providerName: route.providerName,
       provider: route.provider,
       adapterName: rotatedAdapter.name,
