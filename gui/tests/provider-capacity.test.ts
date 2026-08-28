@@ -61,6 +61,22 @@ test("provider quota reports reject malformed required credits and drop malforme
     creditsUsd: { used: 12.5, limit: 50, remaining: 37.5, percent: 25 },
     updatedAt: 123,
   });
+
+  expect(accountQuotaFromReport({
+    updatedAt: 123,
+    quota: {
+      creditsUsd: {
+        used: 12.5,
+        limit: 50,
+        remaining: 37.5,
+        percent: 25,
+        expiresAt: 1e20,
+      },
+    },
+  })).toEqual({
+    creditsUsd: { used: 12.5, limit: 50, remaining: 37.5, percent: 25 },
+    updatedAt: 123,
+  });
 });
 
 test("capacity metadata preserves estimate, raw current quota, recovery percent, and incomplete coverage", () => {

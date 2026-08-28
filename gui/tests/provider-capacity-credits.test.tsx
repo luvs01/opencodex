@@ -39,3 +39,9 @@ test("credits with an expiry render the localized billing-period end date", () =
   expect(markup).toContain("Credits balance");
   expect(markup).toContain("Billing period ends 26 Aug 2026");
 });
+
+test("credits with an out-of-range expiry render without the billing-period line", () => {
+  const markup = renderCredits(1e20);
+  expect(markup).toContain("Credits balance");
+  expect(markup).not.toContain("Billing period ends");
+});

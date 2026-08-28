@@ -333,13 +333,13 @@ describe("Command Code provider quota", () => {
     expect(result.reports).toEqual([]);
   });
 
-  test("a fully exhausted account still reports a zero-remaining credit window", async () => {
+  test("a fully exhausted account drops an out-of-range subscription expiry", async () => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
       const body = url.includes("/alpha/whoami")
         ? {}
         : url.includes("/alpha/billing/subscriptions")
-          ? { data: { currentPeriodStart: "2026-08-01T00:00:00.000Z", currentPeriodEnd: "2026-09-01T00:00:00.000Z" } }
+          ? { data: { currentPeriodStart: "2026-08-01T00:00:00.000Z", currentPeriodEnd: 1e20 } }
           : url.includes("/alpha/usage/summary")
             ? { totalCost: 12 }
             : {
@@ -358,7 +358,6 @@ describe("Command Code provider quota", () => {
         limit: 12,
         remaining: 0,
         percent: 100,
-        expiresAt: Date.parse("2026-09-01T00:00:00.000Z"),
       },
       updatedAt: expect.any(Number),
     });

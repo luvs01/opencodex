@@ -279,7 +279,8 @@ function normalizeResetAt(value: unknown): number | undefined {
 /** Unix 0 / negative values are sentinels, not reset clocks (Command Code fiveHour.resetAt: 0). */
 function epochMillis(value: number): number | undefined {
   if (!Number.isFinite(value) || value <= 0) return undefined;
-  return value > 10_000_000_000 ? value : value * 1000;
+  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  return Number.isFinite(new Date(milliseconds).getTime()) ? milliseconds : undefined;
 }
 
 function toFiniteNumber(value: unknown): number | undefined {
