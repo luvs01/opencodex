@@ -100,7 +100,7 @@ function resolveCodexBinary(): string | null {
 /** 8 MiB is far above any real prompt and far below anything that hurts the server. */
 const MAX_PROBE_OUTPUT_BYTES = 8 * 1024 * 1024;
 
-function runProbe(binary: string, cwd: string, timeoutMs: number): Promise<string | null> {
+function runProbe(binary: string, cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
   return new Promise(resolve => {
     // A probe must never hang OR balloon the management API: it is bounded in
     // time AND in bytes, and every failure degrades to "unavailable" rather than
@@ -118,11 +118,15 @@ function runProbe(binary: string, cwd: string, timeoutMs: number): Promise<strin
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       child.stdout?.destroy();
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       resolve(value);
     };
+    const abort = () => settle(null);
     const timer = setTimeout(() => settle(null), timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     child.stdout?.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_PROBE_OUTPUT_BYTES) { settle(null); return; }
@@ -182,7 +186,9 @@ export const extractSectionsForTests = extractSections;
  * `cwd` matters: AGENTS.md and environment context are directory-dependent, so a
  * probe from the wrong place would describe a prompt the user never sees.
  */
-export async function probePromptText(timeoutMs = 15_000): Promise<PromptTextProbe> {
+let probeActive = false;
+
+export async function probePromptText(timeoutMs = 15_000, signal?: AbortSignal): Promise<PromptTextProbe> {
   // The probe runs in CODEX_HOME, never in a caller-supplied directory. A `cwd`
   // parameter let an authenticated request read any readable folder's AGENTS.md,
   // and it also described a prompt that depends on where Codex happened to run.
@@ -192,7 +198,21 @@ export async function probePromptText(timeoutMs = 15_000): Promise<PromptTextPro
   if (!binary) {
     return { ok: false, codexHome, layers: {}, detail: "codex binary not found" };
   }
-  const raw = await runProbe(binary, codexHome, timeoutMs);
+  // The management endpoint is authenticated but may still be called in a
+  // burst. Admit only one child process for the whole server instead of letting
+  // parallel requests multiply Codex startups and their buffered output.
+  if (probeActive) {
+    return { ok: false, codexHome, layers: {}, detail: "prompt probe already in progress" };
+  }
+  probeActive = true;
+  let raw: string | null;
+  try {
+    raw = await runProbe(binary, codexHome, timeoutMs, signal);
+  } catch {
+    raw = null;
+  } finally {
+    probeActive = false;
+  }
   if (raw === null) {
     return { ok: false, codexHome, layers: {}, detail: "codex debug prompt-input failed" };
   }

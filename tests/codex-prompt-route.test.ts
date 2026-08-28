@@ -799,6 +799,18 @@ describe("020 coverage completions", () => {
     // Decoding per chunk corrupts UTF-8 that straddles a chunk boundary.
     expect(probe).toContain("Buffer.concat(chunks).toString(\"utf8\")");
   });
+
+  test("27. the probe bounds aggregate subprocesses and follows request cancellation", async () => {
+    const probe = await Bun.file(new URL("../src/codex/prompt-text-probe.ts", import.meta.url)).text();
+    expect(probe).toContain("if (probeActive)");
+    expect(probe).toContain("probeActive = true");
+    expect(probe).toContain("probeActive = false");
+    expect(probe).toContain('signal?.addEventListener("abort", abort');
+
+    const routes = await Bun.file(new URL("../src/server/management/codex-prompt-routes.ts", import.meta.url)).text();
+    const textRoute = routes.slice(routes.indexOf('/api/codex-prompt/text'));
+    expect(textRoute.slice(0, 1_200)).toContain("req.signal");
+  });
   test("24. every ownership state is named, not collapsed into a boolean", async () => {
     // developerInstructionsOwned:false covers an ABSENT key and an EXTERNAL one, and
     // a GUI that cannot tell them apart hides its own create affordance from every
