@@ -152,17 +152,15 @@ describe("GitHub Actions hardening", () => {
     expect(linuxShards).toEqual([1, 2, 3, 4]);
     expect(workflow).toContain(`--shard=\${{ matrix.shard }}/${linuxShards.length}`);
 
-    // Every job that runs tests/ must fetch tags, because one of those tests reads
-    // them. tests/release-version-line.test.ts compares package.json against the
-    // newest release tag, and actions/checkout brings no tags by default: git is
-    // present, `git tag --list` exits 0, and stdout is empty. The check then has an
-    // empty set, cannot fail, and a version regression rides through green. That is
-    // how the first cut of that test shipped, so pin the flag rather than trusting a
-    // comment. Asserted per job so a future edit cannot drop it from one leg while
-    // the other still carries it.
+    // Every job that runs tests/ must fetch full history and tags, because one of
+    // those tests reads release tags. `fetch-tags` alone does not fetch historical
+    // tags outside a shallow checkout, so `git tag --list` can still return an empty
+    // set and let a version regression ride through green. Assert both settings per
+    // job so a future edit cannot silently make the guard vacuous in one leg.
     for (const jobName of ["test", "platform-macos", "platform-windows"]) {
       const steps = (ci.jobs?.[jobName] as { steps?: Array<{ uses?: string; with?: Record<string, unknown> }> })?.steps ?? [];
       const checkout = steps.find(step => typeof step.uses === "string" && step.uses.includes("actions/checkout"));
+      expect(`${jobName}:${String(checkout?.with?.["fetch-depth"])}`).toBe(`${jobName}:0`);
       expect(`${jobName}:${String(checkout?.with?.["fetch-tags"])}`).toBe(`${jobName}:true`);
     }
 

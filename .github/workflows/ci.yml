@@ -272,11 +272,9 @@ jobs:
           # without this the check reads an empty tag set and passes on anything -
           # the exact regression it exists to catch would ride through CI green.
           #
-          # Tags only, not full history: `fetch-depth: 0` would clone every commit to
-          # answer a question about refs. A shallow fetch still brings each tag and its
-          # target commit, which is all the check reads - the tag list, and whether the
-          # newest tag names HEAD. That second read only happens on a release commit,
-          # where the tag points at HEAD and the commit is present by definition.
+          # `fetch-tags` does not fetch historical tags outside a shallow checkout's
+          # history, so the version-line guard needs the complete tag-bearing history.
+          fetch-depth: 0
           fetch-tags: true
 
       - name: Setup project Bun
@@ -470,11 +468,9 @@ jobs:
           # without this the check reads an empty tag set and passes on anything -
           # the exact regression it exists to catch would ride through CI green.
           #
-          # Tags only, not full history: `fetch-depth: 0` would clone every commit to
-          # answer a question about refs. A shallow fetch still brings each tag and its
-          # target commit, which is all the check reads - the tag list, and whether the
-          # newest tag names HEAD. That second read only happens on a release commit,
-          # where the tag points at HEAD and the commit is present by definition.
+          # `fetch-tags` does not fetch historical tags outside a shallow checkout's
+          # history, so the version-line guard needs the complete tag-bearing history.
+          fetch-depth: 0
           fetch-tags: true
 
       - name: Setup project Bun
@@ -612,6 +608,7 @@ jobs:
           # Same reason as the Linux shards and the macOS control: this leg runs the
           # whole suite, and tests/release-version-line.test.ts reads release tags.
           # Without tags the check sees an empty set and cannot fail.
+          fetch-depth: 0
           fetch-tags: true
 
       - name: Setup project Bun
