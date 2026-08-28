@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
 import {
   providerRequestPacingStatus,
@@ -272,6 +272,31 @@ describe("empty-completion core integration", () => {
     await response.text();
 
     expect(runTurnCalls).toBe(1);
+  });
+
+  test("the default empty-completion warning sanitizes caller-controlled route labels", async () => {
+    attemptEvents = [[{ type: "done" }]];
+    const disabled = config("test-run-turn");
+    delete disabled.emptyCompletionRetry;
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const model = "attacker\n[forged]\u001b]0;owned\u0007";
+    const maliciousRequest = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, input: "please answer", stream: true }),
+    });
+
+    try {
+      const response = await handleResponses(maliciousRequest, disabled, { model: "", provider: "" });
+      await response.text();
+
+      expect(warning).toHaveBeenCalledTimes(1);
+      const message = String(warning.mock.calls[0]?.[0]);
+      expect(message).toContain("fixture/attacker[forged]]0;owned completed with no output text");
+      expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   test("buffered reasoning keeps the streaming stall watchdog alive", async () => {

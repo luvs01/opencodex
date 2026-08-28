@@ -4720,8 +4720,10 @@ async function handleResponsesInner(
         // result (#2472). Retrying by default would re-send a turn that may already have had
         // billable side effects, so the honest default is observability, not recovery.
         : observeEmptyCompletion(eventSource, () => {
+          const safeProvider = sanitizeLogMetadataString(route.providerName) ?? "unknown";
+          const safeModel = sanitizeLogMetadataString(route.modelId) ?? "unknown";
           console.warn(
-            `[opencodex] ${route.providerName}/${route.modelId} completed with no output text `
+            `[opencodex] ${safeProvider}/${safeModel} completed with no output text `
             + "and no tool call. Set \"emptyCompletionRetry\": true to retry such turns once.",
           );
         });
