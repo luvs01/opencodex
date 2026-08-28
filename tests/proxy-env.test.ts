@@ -43,6 +43,13 @@ describe("applyProxyEnv", () => {
     expect(process.env.NO_PROXY).toBe("internal.example,10.0.0.0/8,localhost,127.0.0.1,::1,[::1]");
   });
 
+  test("ignores malformed noProxy values at the runtime boundary", () => {
+    const config = configWithProxy("http://proxy.corp:8080") as unknown as Record<string, unknown>;
+    config.noProxy = [1, "internal.example"];
+    applyProxyEnv(config as unknown as OcxConfig);
+    expect(process.env.NO_PROXY).toBe("internal.example,localhost,127.0.0.1,::1,[::1]");
+  });
+
   test("mirrors config.proxy into HTTP(S)_PROXY and excludes loopback (IPv4 + IPv6)", () => {
     applyProxyEnv(configWithProxy("http://proxy.corp:8080"));
     expect(process.env.HTTP_PROXY).toBe("http://proxy.corp:8080");

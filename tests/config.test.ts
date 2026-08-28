@@ -151,6 +151,28 @@ describe("opencodex config defaults", () => {
     });
   });
 
+  test("noProxy accepts only strings and string arrays in live writes", () => {
+    const defaults = getDefaultConfig();
+    expect(validateConfigCandidate({ ...defaults, noProxy: "internal.example" }).ok).toBe(true);
+    expect(validateConfigCandidate({ ...defaults, noProxy: ["internal.example"] }).ok).toBe(true);
+    for (const noProxy of [[1], { host: "internal.example" }, 1, null]) {
+      const result = validateConfigCandidate({ ...defaults, noProxy });
+      expect(result).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("noProxy"),
+      });
+    }
+  });
+
+  test("a malformed persisted noProxy value is ignored without discarding the config", () => {
+    const config = { ...getDefaultConfig(), proxy: "http://proxy.corp:8080", noProxy: [1] };
+    writeFileSync(getConfigPath(), JSON.stringify(config));
+    const loaded = loadConfig();
+    expect(loaded.proxy).toBe("http://proxy.corp:8080");
+    expect(loaded.noProxy).toBeUndefined();
+    expect(loaded.providers.openai).toBeDefined();
+  });
+
   test("usage and MCP config overrides change the effective bound while defaults remain compatible", () => {
     const defaults = getDefaultConfig();
     expect(defaults.managementUsageMaxReadBytes).toBe(64 * 1024 * 1024);

@@ -847,6 +847,11 @@ const agentTaskRecoverySchema = z.object({
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
 
+const noProxySchema = z.union([
+  z.string(),
+  z.array(z.string()),
+]);
+
 const configSchema = z.object({
   port: z.number().int().min(0).max(65535).default(10100),
   managementUsageMaxReadBytes: z.number().int().positive().default(64 * 1024 * 1024),
@@ -879,6 +884,9 @@ const configSchema = z.object({
   providers: z.record(z.string(), providerConfigSchema),
   defaultProvider: z.string().min(1).default("openai"),
   defaultModelAliases: z.boolean().optional(),
+  // A malformed hand edit must not make startup fail before the listener binds.
+  // Live writes remain strict through noProxyError().
+  noProxy: noProxySchema.optional().catch(undefined),
   // Future versions remain opaque through passthrough-compatible whole-config saves.
   // Only version 1 grants deletion authority in the rebase path.
   configRebaseProvenance: z.unknown().optional(),
@@ -2132,6 +2140,13 @@ function oauthOpenBrowserError(value: unknown): string | null {
   return "schema_invalid: oauthOpenBrowser: must be a boolean or omitted";
 }
 
+function noProxyError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "noProxy") || raw.noProxy === undefined) return null;
+  if (noProxySchema.safeParse(raw.noProxy).success) return null;
+  return "schema_invalid: noProxy: must be a string, an array of strings, or omitted";
+}
+
 /** Validate an in-memory config candidate without touching disk. Used by headless CLI import/set. */
 /**
  * Reject a loopback-listener port that collides with the proxy port (#1102).
@@ -2182,6 +2197,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? codexAccountPickerEnabledError(value)
     ?? emptyCompletionRetryError(value)
     ?? oauthOpenBrowserError(value)
+    ?? noProxyError(value)
     ?? loopbackListenerPortError(value);
   if (boundaryError) return { ok: false, error: boundaryError };
   const result = configSchema.safeParse(value);
@@ -3127,7 +3143,9 @@ export function applyProxyEnv(config: OcxConfig): void {
   // Configured entries first, then loopback: loopback is unconditional, so appending it last
   // keeps it present even when the operator lists a loopback host themselves.
   const raw = config.noProxy;
-  const configured = (Array.isArray(raw) ? raw : (resolveEnvValue(raw) ?? "").split(","))
+  const configured = (Array.isArray(raw)
+    ? raw.filter((entry): entry is string => typeof entry === "string")
+    : (typeof raw === "string" ? (resolveEnvValue(raw) ?? "").split(",") : []))
     .map(entry => entry.trim())
     .filter(Boolean);
   for (const host of [...configured, "localhost", "127.0.0.1", "::1", "[::1]"]) {
