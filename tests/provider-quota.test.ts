@@ -191,6 +191,27 @@ describe("fetchProviderQuotaReports", () => {
     expect(result.reports[0]?.quota.customWindows).toHaveLength(1);
   });
 
+  test("Anthropic report strips terminal controls from model-scoped quota labels", async () => {
+    await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
+    globalThis.fetch = (async () => Response.json({
+      limits: [{
+        kind: "weekly_scoped",
+        scope: { model: { display_name: "Other\u001b]52;c;UFdORUQ=\u0007 model\u009b31m" } },
+        percent: 33,
+      }],
+    })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports({
+      defaultProvider: "anthropic",
+      providers: { anthropic: { adapter: "anthropic", authMode: "oauth", baseUrl: "https://api.anthropic.com/v1" } },
+    } as OcxConfig, true);
+
+    expect(result.reports[0]?.quota.customWindows).toEqual([{
+      label: "Other]52;c;UFdORUQ= model31m",
+      percent: 33,
+    }]);
+  });
+
   test("returns active provider quota rows without leaking credentials or raw upstream payloads", async () => {
     await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
     await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
