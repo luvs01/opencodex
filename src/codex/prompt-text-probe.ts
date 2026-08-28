@@ -87,6 +87,13 @@ export interface PromptTextProbe {
   detail?: string;
 }
 
+// The prompt page is URL-addressable, so multiple mounts can ask for the same
+// process-backed snapshot at once. Keep that work single-flight: callers share
+// the current read instead of each consuming another child process and output
+// buffer. The slot is cleared after either success or failure so later operator
+// visits still observe current prompt state.
+let activeProbe: Promise<PromptTextProbe> | null = null;
+
 function resolveCodexBinary(): string | null {
   const candidates = [
     join(homedir(), ".codex/packages/standalone/current/bin/codex"),
@@ -182,7 +189,7 @@ export const extractSectionsForTests = extractSections;
  * `cwd` matters: AGENTS.md and environment context are directory-dependent, so a
  * probe from the wrong place would describe a prompt the user never sees.
  */
-export async function probePromptText(timeoutMs = 15_000): Promise<PromptTextProbe> {
+async function performPromptTextProbe(timeoutMs: number): Promise<PromptTextProbe> {
   // The probe runs in CODEX_HOME, never in a caller-supplied directory. A `cwd`
   // parameter let an authenticated request read any readable folder's AGENTS.md,
   // and it also described a prompt that depends on where Codex happened to run.
@@ -235,4 +242,16 @@ export async function probePromptText(timeoutMs = 15_000): Promise<PromptTextPro
     layers[id] ??= { text: null, reason: "not-exposed", bytes: 0 };
   }
   return { ok: true, codexHome, layers };
+}
+
+export async function probePromptText(timeoutMs = 15_000): Promise<PromptTextProbe> {
+  if (activeProbe) return activeProbe;
+
+  const probe = performPromptTextProbe(timeoutMs);
+  activeProbe = probe;
+  try {
+    return await probe;
+  } finally {
+    if (activeProbe === probe) activeProbe = null;
+  }
 }

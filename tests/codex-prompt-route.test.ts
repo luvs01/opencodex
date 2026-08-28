@@ -799,6 +799,14 @@ describe("020 coverage completions", () => {
     // Decoding per chunk corrupts UTF-8 that straddles a chunk boundary.
     expect(probe).toContain("Buffer.concat(chunks).toString(\"utf8\")");
   });
+  test("27. concurrent prompt reads share one process-backed probe", async () => {
+    // The prompt panel is URL-addressable. Repeated mounts must not turn
+    // concurrent authenticated reads into concurrent Codex child processes.
+    const probe = await Bun.file(new URL("../src/codex/prompt-text-probe.ts", import.meta.url)).text();
+    expect(probe).toContain("let activeProbe: Promise<PromptTextProbe> | null = null;");
+    expect(probe).toContain("if (activeProbe) return activeProbe;");
+    expect(probe).toContain("if (activeProbe === probe) activeProbe = null;");
+  });
   test("24. every ownership state is named, not collapsed into a boolean", async () => {
     // developerInstructionsOwned:false covers an ABSENT key and an EXTERNAL one, and
     // a GUI that cannot tell them apart hides its own create affordance from every
