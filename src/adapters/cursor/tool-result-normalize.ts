@@ -35,23 +35,26 @@ function isNodeReplOrComputerUseTool(toolName?: string, toolNamespace?: string):
  * reads the blank [tool_result], concludes prior results were lost, and spirals into
  * re-orientation retries (devlog 260826_cursor_responses_gap, live subagent transcripts).
  */
+const CODEX_EXEC_BRIDGE_TOOL_NAMES = new Set([
+  "exec",
+  "exec_command",
+  "shell_command",
+  "shell",
+  "local_shell",
+  "container.exec",
+]);
+
 function isCodexExecBridgeTool(toolName?: string, toolNamespace?: string): boolean {
-  if (toolNamespace && toolNamespace.includes("opencodex-responses")) return true;
   if (!toolName) return false;
   const lower = toolName.toLowerCase();
-  return (
-    lower === "exec"
-    || lower === "exec_command"
-    || lower === "shell_command"
-    // Codex CLI/desktop native tool names: the multi-round "이전 출력이 비어 있어 처음부터"
-    // restart loop reproduced via codex exec because `shell` was not in this set
-    // (devlog 260826 gap-8 QA round 2).
-    || lower === "shell"
-    || lower === "local_shell"
-    || lower === "container.exec"
-    || lower.startsWith("mcp_opencodex-responses_")
-    || lower.startsWith("mcp__opencodex-responses__")
-  );
+  if (toolNamespace) {
+    return toolNamespace === "opencodex-responses" && CODEX_EXEC_BRIDGE_TOOL_NAMES.has(lower);
+  }
+  if (CODEX_EXEC_BRIDGE_TOOL_NAMES.has(lower)) return true;
+  return [...CODEX_EXEC_BRIDGE_TOOL_NAMES].some(name => (
+    lower === `mcp_opencodex-responses_${name}`
+    || lower === `mcp__opencodex-responses__${name}`
+  ));
 }
 
 /** Failure states the Computer Use / node_repl runtime reports as PLAIN TEXT inside a non-error result. */
@@ -108,7 +111,7 @@ export function normalizeCursorToolResultText(
   if (isCodexExecBridgeTool(options.toolName, options.toolNamespace) && EMPTY_EXEC_OUTPUT_REGEX.test(text.trim())) {
     return {
       text: "[empty output: the exec cell completed but emitted nothing. This is NOT lost context and NOT a blocked tool — in code mode call text(...) or notify(...) on any value you need to see (a bare await tools.exec_command(...) is not echoed automatically); in shell mode the command simply printed nothing. Do not re-run the same call expecting different output.]",
-      isError: false,
+      isError,
       changed: true,
     };
   }
