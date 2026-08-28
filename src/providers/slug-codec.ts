@@ -139,14 +139,16 @@ export function resolveSlugSelection(
   // `a/b` is a bare NATIVE id that happens to contain a slash. Treating every slash-bearing
   // selection as provider-qualified made `a/b` resolve against provider "a", so the same
   // collision reported ambiguous through the dash spelling and unambiguous through the slash
-  // spelling — the exact asymmetry this resolver exists to remove.
-  const qualified = selection.startsWith(`${provider}/`)
-    ? selection
-    : routedSlug(provider, selection);
+  // spelling — the exact asymmetry this resolver exists to remove. Prefer a known native exact
+  // match before interpreting the same text as a provider-qualified selection.
+  const ids = [...knownIds];
+  const qualified = ids.includes(selection) || !selection.startsWith(`${provider}/`)
+    ? routedSlug(provider, selection)
+    : selection;
   const selectionKey = slugEquivalenceKey(qualified);
   const matched: string[] = [];
   let exact: string | undefined;
-  for (const id of knownIds) {
+  for (const id of ids) {
     if (slugEquivalenceKey(routedSlug(provider, id)) !== selectionKey) continue;
     matched.push(id);
     if (id === selection || `${provider}/${id}` === selection) exact = id;

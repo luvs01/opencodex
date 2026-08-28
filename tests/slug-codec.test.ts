@@ -355,6 +355,24 @@ describe("#2491 one selection resolver reports what it actually matched", () => 
     expect(match.matched.sort()).toEqual(["a-b", "a/b"]);
   });
 
+  test("a self-namespaced native id is preferred over a routed suffix", () => {
+    const match = resolveSlugSelection(
+      "orcarouter",
+      "orcarouter/auto",
+      ["orcarouter/auto", "auto"],
+    );
+    expect(match.matched).toEqual(["orcarouter/auto"]);
+    expect(match.exact).toBe("orcarouter/auto");
+    expect(match.ambiguous).toBe(false);
+  });
+
+  test("a self-namespaced native id resolves when it is the only known id", () => {
+    const match = resolveSlugSelection("orcarouter", "orcarouter/auto", ["orcarouter/auto"]);
+    expect(match.matched).toEqual(["orcarouter/auto"]);
+    expect(match.exact).toBe("orcarouter/auto");
+    expect(match.ambiguous).toBe(false);
+  });
+
   test("an id absent from an incomplete roster still reports no match rather than guessing", () => {
     // Live discovery can omit a published id; the resolver must not invent one.
     const match = resolveSlugSelection("p", "missing", ["a-b"]);
@@ -370,4 +388,3 @@ describe("#2491 one selection resolver reports what it actually matched", () => 
     expect(match.exact).toBeUndefined();
   });
 });
-
