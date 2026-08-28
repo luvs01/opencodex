@@ -154,6 +154,37 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
     expect(text).toBe("[note] leading bracket but not an envelope");
   });
 
+  test("reasoning-only quarantine is capped and disarms before unbounded retention", async () => {
+    let attempt = 0;
+    const factory = () => ({
+      async *run() {
+        attempt += 1;
+        for (let i = 0; i < 100; i += 1) {
+          yield { type: "thinking", thinking: "x".repeat(128) } satisfies CursorServerMessage;
+        }
+        // Once the aggregate hold cap flushes, later marker-like text is ordinary output rather
+        // than evidence for a retry whose preceding reasoning has already reached the client.
+        yield { type: "text", text: ECHO_TEXT } satisfies CursorServerMessage;
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
+      },
+      writeClient() {},
+    });
+    const adapter = createCursorAdapter(
+      { ...provider, apiKey: "cursor-token" },
+      { createTransport: factory as never },
+    );
+    const events: AdapterEvent[] = [];
+    await adapter.runTurn?.(
+      toolResultBody("cursor/kimi-k3"),
+      { headers: new Headers() },
+      event => events.push(event),
+    );
+
+    expect(attempt).toBe(1);
+    expect(events.filter(event => event.type === "thinking_delta")).toHaveLength(100);
+    expect(events.filter(event => event.type === "text_delta")).not.toHaveLength(0);
+  });
+
   test("plain user turns (no trailing toolResult) never arm the sniffer", async () => {
     let attempt = 0;
     const factory = () => ({

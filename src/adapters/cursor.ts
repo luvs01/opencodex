@@ -31,6 +31,7 @@ import { rememberCursorThreadConversation } from "./cursor/thread-continuity";
 import { runCursorTurnWithRetry } from "./cursor/transport-retry";
 import { cursorRequestHasShellAlias, cursorRequestUsesCodeMode } from "./cursor/tool-definitions";
 import {
+  CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES,
   CURSOR_ECHO_RETRY_CONTINUATION_TEXT,
   CURSOR_ROUTING_COMMENTARY_RETRY_TEXT,
   CursorEnvelopeEchoSniffer,
@@ -242,12 +243,26 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             ? new CursorRoutingCommentarySniffer()
             : undefined;
           let guardHeld: AdapterEvent[] = [];
+          let guardHeldBytes = 0;
+          const guardEncoder = new TextEncoder();
           const releaseGuardHeld = () => {
             for (const held of guardHeld) {
               if (held.type !== "heartbeat") emittedOutput = true;
               emit(held);
             }
             guardHeld = [];
+            guardHeldBytes = 0;
+          };
+          const holdGuardEvent = (event: AdapterEvent) => {
+            guardHeld.push(event);
+            // Count the complete retained representation, including per-event overhead, so an
+            // upstream cannot evade the cap with empty or non-text reasoning frames.
+            guardHeldBytes += guardEncoder.encode(JSON.stringify(event)).byteLength;
+            if (guardHeldBytes <= CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES) return true;
+            echoSniffer?.finish();
+            routingCommentarySniffer?.finish();
+            releaseGuardHeld();
+            return false;
           };
           const guardsSettled = () =>
             (!echoSniffer || echoSniffer.settled)
@@ -286,7 +301,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
              for (const event of events) {
                 if (!guardsSettled()) {
                   if (event.type === "text_delta") {
-                    guardHeld.push(event);
+                    if (!holdGuardEvent(event)) continue;
                     if (echoSniffer && !echoSniffer.settled) {
                       const decision = echoSniffer.feed(event.text);
                       if (decision.kind === "echo") {
@@ -306,7 +321,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
                   } else if (event.type === "thinking_delta" || event.type === "heartbeat") {
                     // Reasoning before first text stays ordered; liveness still passes through.
                     if (event.type === "thinking_delta") {
-                      guardHeld.push(event);
+                      holdGuardEvent(event);
                       continue;
                     }
                   } else {
