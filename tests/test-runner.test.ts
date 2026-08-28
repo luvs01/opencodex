@@ -10,6 +10,7 @@ import {
 } from "../scripts/test";
 import {
   acquireTestRunLock,
+  resolveDefaultTestRunLockPath,
   resolveBareTestRunIdentity,
   TEST_RUN_NO_QUEUE_ENV,
 } from "../scripts/test-run-lock";
@@ -208,7 +209,12 @@ describe("bun test argv", () => {
   });
 });
 
-describe("bun test machine lock", () => {
+describe("bun test user lock", () => {
+  test("keeps the default lock out of the shared temporary directory", () => {
+    expect(resolveDefaultTestRunLockPath(join("home", "alice")))
+      .toBe(join("home", "alice", ".opencodex-bun-test.lock"));
+  });
+
   test("independent bare runners do not inherit a shared long-lived parent identity", () => {
     expect(resolveBareTestRunIdentity({ pid: 101, ppid: 50 })).toEqual({
       ownerPid: 101,
