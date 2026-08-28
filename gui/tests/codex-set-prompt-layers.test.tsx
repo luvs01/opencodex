@@ -149,7 +149,7 @@ test("2. every layer Codex cannot suppress renders NO switch element at all", as
   await act(async () => { root.unmount(); });
 });
 
-test("3. a feature-gated row names its governing key and is not called always-on", async () => {
+test("3. a feature-gated row names its governing key and routes to its setting", async () => {
   // These layers ARE disableable - through [features], not from this page.
   // Calling them always-on would tell a user a setting does not exist.
   stubRoutes(() => json(snapshot()));
@@ -160,10 +160,10 @@ test("3. a feature-gated row names its governing key and is not called always-on
     const el = row(container, d.id)!;
     expect(el.textContent, d.id).toContain(d.key!);
     expect(el.querySelector(".codex-set-prompt__note--locked"), d.id).toBeNull();
-    // The destination, not the tag: it is a `link-btn` button that routes through
-    // navigateHash, because nothing in the document carries an
-    // `id="integrations/codex"` for a bare fragment href to find.
-    expect(el.querySelector(".link-btn"), d.id).not.toBeNull();
+    const featuresButton = el.querySelector<HTMLButtonElement>(".codex-set-prompt__note .link-btn");
+    expect(featuresButton, d.id).not.toBeNull();
+    await act(async () => { featuresButton!.click(); });
+    expect(testWindow.location.hash, d.id).toBe("#integrations/codex");
   }
   // And every row that genuinely has no off-switch anywhere does carry the label.
   // `base` is excluded now: after the variant work it has a real off-position, so it
