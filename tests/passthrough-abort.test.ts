@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { consumeForInspection, linkAbortSignal, relaySseWithFailedTail, relaySseWithHeartbeat, relayWithAbort } from "../src/server";
+import { consumeForInspection, linkAbortSignal, relaySseWithFailedTail, relaySseWithHeartbeat, relayWithAbort, relayWithInactivityTimeout } from "../src/server";
 
 const root = new URL("../", import.meta.url);
 
@@ -46,7 +46,7 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     const capsSource = await readSource("src/lib/bun-stream-caps.ts");
     const sseBranch = coreSource.slice(
       coreSource.indexOf("if (isEventStream && upstreamResponse.body)"),
-      coreSource.indexOf("const body = relayWithAbort(upstreamResponse.body, upstream);"),
+      coreSource.indexOf('if (headers.get("content-type")?.toLowerCase().includes("application/json"))'),
     );
     const logWrapper = relaySource.slice(
       relaySource.indexOf("export function responseWithDeferredRequestLog"),
@@ -58,7 +58,9 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
 
     expect(sseBranch).toContain("const terminalRepairPolicy = providerModelResponsesTerminalRepair(");
     expect(sseBranch).toContain("const passthroughSseBody = terminalRepairPolicy");
-    expect(sseBranch).toContain(": upstreamResponse.body;");
+    expect(sseBranch).toContain("const guardedPassthroughBody = relayWithInactivityTimeout(");
+    expect(sseBranch).toContain("resolveStallTimeoutSec(config.stallTimeoutSec) * 1000");
+    expect(sseBranch).toContain(": guardedPassthroughBody;");
     expect(sseBranch).toContain("passthroughSseBody.tee()");
     // Rewrite traffic is derived from the finalized block chain so every
     // provider-specific transform participates in the platform gate.
@@ -92,6 +94,18 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     expect(logWrapper.indexOf("isNativePassthroughSseResponse(response)")).toBeLessThan(logWrapper.indexOf("trackSseForRequestLog("));
   });
 
+  test("unclassified passthrough bodies use the configured inactivity guard", async () => {
+    const coreSource = await readSource("src/server/responses/core.ts");
+    const branch = coreSource.slice(
+      coreSource.indexOf("// An unclassified passthrough body"),
+      coreSource.indexOf("// Image / web-search sidecars"),
+    );
+
+    expect(branch).toContain("relayWithInactivityTimeout(");
+    expect(branch).toContain("resolveStallTimeoutSec(config.stallTimeoutSec) * 1000");
+    expect(branch.indexOf("relayWithInactivityTimeout(")).toBeLessThan(branch.indexOf("relayWithAbort(guardedBody"));
+  });
+
   test("CASE B: relays body bytes verbatim and completes cleanly without aborting", async () => {
     const enc = new TextEncoder();
     const ac = new AbortController();
@@ -123,6 +137,43 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
   test("a null upstream body relays as null", () => {
     const ac = new AbortController();
     expect(relayWithAbort(null, ac)).toBeNull();
+    expect(ac.signal.aborted).toBe(false);
+  });
+
+  test("direct passthrough bodies abort after the configured inactivity window", async () => {
+    const ac = new AbortController();
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull() { return new Promise<void>(() => {}); },
+      cancel() { cancelled = true; },
+    });
+    const reader = relayWithInactivityTimeout(body, ac, 10).getReader();
+
+    await expect(reader.read()).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(ac.signal.aborted).toBe(true);
+    expect(ac.signal.reason).toMatchObject({ name: "TimeoutError" });
+    expect(cancelled).toBe(true);
+  });
+
+  test("direct passthrough body activity resets the inactivity window", async () => {
+    const enc = new TextEncoder();
+    const ac = new AbortController();
+    let emitted = false;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise(resolve => setTimeout(resolve, 8));
+        if (!emitted) {
+          emitted = true;
+          controller.enqueue(enc.encode("chunk"));
+        } else {
+          controller.close();
+        }
+      },
+    });
+    const reader = relayWithInactivityTimeout(body, ac, 30).getReader();
+
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("chunk");
+    expect((await reader.read()).done).toBe(true);
     expect(ac.signal.aborted).toBe(false);
   });
 
