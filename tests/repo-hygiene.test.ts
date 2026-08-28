@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -244,13 +244,19 @@ describe("devlog is tracked, with no submodule left behind", () => {
     // end state, and a `toBeGreaterThan(0)` guard here would fail the suite for doing it.
     const relative = [...readme.matchAll(/src="(?!https?:)([^"]+)"/g)].map((match) => match[1]!);
 
-    const missing = relative.filter((asset) => {
-      if (shipped.includes(asset)) return false;
-      // A directory entry ships everything beneath it. Decided by whether the tarball path is a
-      // prefix, not by whether the name contains a dot: `LICENSE` has no dot and is a file, and
-      // a future `assets` entry would have no dot and be a directory.
-      return !shipped.some((entry) => asset.startsWith(`${entry}/`));
+    const shippedDirectories = shipped.filter((entry) => {
+      const path = new URL(`../${entry}`, import.meta.url);
+      return existsSync(path) && statSync(path).isDirectory();
     });
+    const isShipped = (asset: string): boolean =>
+      shipped.includes(asset) ||
+      shippedDirectories.some((directory) => asset.startsWith(`${directory}/`));
+
+    // Regular-file entries do not ship imaginary descendants.
+    expect(isShipped("assets/banner.png/missing.gif")).toBe(false);
+    expect(isShipped("LICENSE/missing.png")).toBe(false);
+
+    const missing = relative.filter((asset) => !isShipped(asset));
     expect(missing).toEqual([]);
   });
 });
