@@ -431,7 +431,10 @@ function resolveCursorCheckpoint(
   if (cursorCheckpointModelAffinityId(snapshot.modelId) !== cursorCheckpointModelAffinityId(request.modelId)) {
     return { reason: "model_changed" };
   }
-  if (parsed.context.messages.at(-1)?.role !== "toolResult" && cursorState?.checkpointUsable === false) {
+  if (
+    parsed.context.messages.at(-1)?.role !== "toolResult"
+    && (snapshot.toolSuspended === true || cursorState?.checkpointUsable === false)
+  ) {
     return { reason: "trailing_tool_result" };
   }
   const lineage = lineageMismatch(parsed, snapshot);
