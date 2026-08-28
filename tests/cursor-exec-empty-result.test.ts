@@ -16,6 +16,40 @@ describe("codex exec bridge empty-result normalization (devlog 260826 gap-7)", (
     expect(out.text).toContain("empty output");
   });
 
+  test("reserved namespace requires an exact exec bridge name", () => {
+    const out = normalizeCursorToolResultText("", {
+      toolName: "read_file",
+      toolNamespace: "opencodex-responses",
+    });
+    expect(out).toEqual({ text: "", isError: false, changed: false });
+  });
+
+  test("exec names in unrelated namespaces stay byte-identical", () => {
+    const out = normalizeCursorToolResultText("", {
+      toolName: "exec",
+      toolNamespace: "thirdparty",
+      isError: true,
+    });
+    expect(out).toEqual({ text: "", isError: true, changed: false });
+  });
+
+  test("namespace and display aliases must match the reserved identity exactly", () => {
+    for (const options of [
+      { toolName: "read_file", toolNamespace: "evil-opencodex-responses-suffix" },
+      { toolName: "mcp_opencodex-responses_read_file" },
+      { toolName: "mcp__opencodex-responses__read_file" },
+    ]) {
+      expect(normalizeCursorToolResultText("", options).changed).toBe(false);
+    }
+  });
+
+  test("existing exec errors remain errors after empty-output guidance is added", () => {
+    const out = normalizeCursorToolResultText("", { toolName: "exec", isError: true });
+    expect(out.changed).toBe(true);
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("empty output");
+  });
+
   test("shell_command empty output routes too", () => {
     const out = normalizeCursorToolResultText("<empty>", { toolName: "shell_command" });
     expect(out.changed).toBe(true);
