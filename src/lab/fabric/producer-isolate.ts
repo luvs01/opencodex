@@ -114,7 +114,6 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         if (message.type === "result") {
           if (settled) return;
           receivedResult = message.patch;
-          finish(() => resolve({ patch: message.patch, lastActivityAt }));
           return;
         }
         if (message.type === "error") {

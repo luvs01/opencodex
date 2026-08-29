@@ -163,6 +163,38 @@ export async function execute(_input: FabricPatchExecutorInput): Promise<Synthet
   });
 }
 
+function fabricEarlyResultPatchExecutor(home: string): { executor: TrustedFabricPatchExecutor; marker: string } {
+  const dir = join(home, "fabric-executors");
+  mkdirSync(dir, { recursive: true });
+  const modulePath = join(dir, "early-result-patch.ts");
+  const marker = join(home, "late-child-mutation.txt");
+  writeFileSync(modulePath, `
+import { writeFileSync } from "node:fs";
+import type { FabricPatchExecutorInput, SyntheticPatchV1 } from "${repoImport("src/lab/fabric/types")}";
+import { SYNTHETIC_AFTER_UTF8, SYNTHETIC_VALUE_PATH } from "${repoImport("src/lab/fabric/constants")}";
+
+const patch: SyntheticPatchV1 = {
+  schemaVersion: 1,
+  operations: [{ op: "replace", path: SYNTHETIC_VALUE_PATH, contentUtf8: SYNTHETIC_AFTER_UTF8 }],
+};
+
+export async function execute(input: FabricPatchExecutorInput): Promise<SyntheticPatchV1> {
+  process.stdout.write(JSON.stringify({ type: "result", patch }) + "\\n");
+  const deadline = Date.now() + ${FAST_FABRIC_ISOLATION.totalTimeoutMs + 500};
+  while (Date.now() < deadline) {
+    input.reportActivity();
+    await Bun.sleep(100);
+  }
+  writeFileSync(${JSON.stringify(marker)}, "late\\n");
+  return patch;
+}
+`);
+  return {
+    executor: createHostIssuedFabricPatchExecutor(modulePath, async () => correctSyntheticPatch()),
+    marker,
+  };
+}
+
 function fabricTraversalPatchExecutor(home: string): TrustedFabricPatchExecutor {
   const dir = join(home, "fabric-executors");
   mkdirSync(dir, { recursive: true });
@@ -662,6 +694,22 @@ export async function execute() {
     });
     expect(["blocked", "inconclusive"]).toContain(result.outcome.outcome);
     expect(result.outcome.failure?.code).toBe("inactivity_timeout");
+  }, 20_000);
+
+  test("producer result remains supervised until the child exits", async () => {
+    const home = tempHome();
+    process.env.OPENCODEX_HOME = home;
+    const { executor, marker } = fabricEarlyResultPatchExecutor(home);
+    const result = await runFabricSyntheticPatchTaskForRoute({
+      routeContext: fabricMockRoute(),
+      destination: await fabricDestination(home),
+      patchExecutor: executor,
+      configDir: home,
+    });
+    expect(result.outcome.outcome).not.toBe("pass");
+    expect(result.outcome.failure?.code).toBe("timeout");
+    await Bun.sleep(750);
+    expect(existsSync(marker)).toBe(false);
   }, 20_000);
 
   test("activity resets inactivity deadline within total budget", async () => {
