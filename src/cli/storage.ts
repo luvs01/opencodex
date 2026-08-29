@@ -173,7 +173,7 @@ async function policy(argv: string[], deps: RuntimeApiDeps): Promise<void> {
     }
     const body: Record<string, unknown> = {};
     if (enabled !== undefined) body.enabled = enabled === "true";
-    if (percent !== undefined) body.percent = percent;
+    if (percent !== undefined) body.target = { removeOldestPercent: percent };
     if (mode !== undefined) body.mode = mode;
     if (schedule !== undefined) body.schedule = schedule;
     if (Object.keys(body).length === 0) {

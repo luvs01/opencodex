@@ -142,7 +142,7 @@ describe("ocx storage trash and policy", () => {
     expect(calls[0]?.method).toBe("PUT");
     // `enabled` is absent, which the server reads as "keep the stored value". Sending
     // `enabled: false` here would silently disable a policy the operator never mentioned.
-    expect(calls[0]?.body).toEqual({ percent: 40 });
+    expect(calls[0]?.body).toEqual({ target: { removeOldestPercent: 40 } });
   });
 
   test("policy set with no fields is refused rather than sent as an empty write", async () => {
