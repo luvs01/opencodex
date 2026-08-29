@@ -71,6 +71,8 @@ export const CURSOR_ROUTING_LEVEL_PARAMETER_ID = "optimization";
 export const CURSOR_EXTERNAL_ROOT_BLOB_LIMIT = 192;
 /** Approximate prompt-size guard; tool schemas and protocol framing consume context separately. */
 export const CURSOR_EXTERNAL_ROOT_BYTE_LIMIT = 512 * 1024;
+/** Bound synchronous replay construction before the smaller wire-size limits are applied. */
+export const CURSOR_EXTERNAL_REPLAY_MESSAGE_LIMIT = 4096;
 
 /**
  * Action text for external-model tool-result continuations. Native models keep
@@ -224,7 +226,7 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
   // Collapse consecutive duplicates into one entry + a count marker, and count collapses so a
   // strategy-change note can be appended when the pattern is severe.
   let lastReplayText: string | undefined;
-  let lastReplayEntry: RootBlobCandidate | undefined;
+  let lastReplayEntryIndex: number | undefined;
   let collapsedRepeats = 0;
   let maxRunLength = 1;
   let currentRun = 1;
@@ -234,7 +236,7 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
     opts: { messageIndex: number; text?: string },
     normalized: string,
   ): void => {
-    if (externalModel && lastReplayText !== undefined && normalized === lastReplayText && lastReplayEntry) {
+    if (externalModel && lastReplayText !== undefined && normalized === lastReplayText && lastReplayEntryIndex !== undefined) {
       collapsedRepeats++;
       currentRun++;
       if (currentRun > maxRunLength) maxRunLength = currentRun;
@@ -244,19 +246,21 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
         role,
         opts,
       );
-      entries[entries.indexOf(lastReplayEntry)] = replacement;
-      lastReplayEntry = replacement;
+      entries[lastReplayEntryIndex] = replacement;
       return;
     }
     currentRun = 1;
     const entry = rootBlobCandidate(payload, role, opts);
     entries.push(entry);
     lastReplayText = normalized;
-    lastReplayEntry = entry;
+    lastReplayEntryIndex = entries.length - 1;
   };
 
-  for (let i = 0; i < messages.length; i++) {
-    if (i === activeUserIndex) break;
+  const replayEnd = activeUserIndex < 0 ? messages.length : activeUserIndex;
+  const replayStart = externalModel
+    ? Math.max(0, replayEnd - CURSOR_EXTERNAL_REPLAY_MESSAGE_LIMIT)
+    : 0;
+  for (let i = replayStart; i < replayEnd; i++) {
     const message = messages[i];
     if (!message) continue;
     if (message.role === "user" || message.role === "developer") {
@@ -266,7 +270,7 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
       // before tokenization (`usedTokens: 0`, then invalid_argument).
       if (text.length > 0) {
         lastReplayText = undefined;
-        lastReplayEntry = undefined;
+        lastReplayEntryIndex = undefined;
         currentRun = 1;
         entries.push(rootBlobCandidate({
           role: "user",
