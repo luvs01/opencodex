@@ -23,7 +23,7 @@
 export const EMPTY_EXEC_OUTPUT_REGEX = /^(?:(?:Script completed|Command finished|Execution finished)[^\n]*\n+)?(?:Wall time[^\n]*\n+)?(?:Output:\s*)?(?:<empty>)?\s*$/;
 
 /** Wrapper for a cell that FAILED without emitting output: empty, but not a success. */
-export const FAILED_EXEC_OUTPUT_REGEX = /^Script failed[^\n]*\n*(?:Wall time[^\n]*\n*)?(?:Output:\s*)?(?:<empty>)?\s*$/;
+export const FAILED_EXEC_OUTPUT_REGEX = /^Script failed[^\r\n]*(?:\r?\n(?:Wall time[^\r\n]*(?:\r?\nOutput:[ \t]*(?:<empty>)?[ \t]*)?|Output:[ \t]*(?:<empty>)?[ \t]*))?$/;
 
 /** Guidance for a failed cell whose output was empty: the failure must survive normalization. */
 export const FAILED_EXEC_OUTPUT_MESSAGE =

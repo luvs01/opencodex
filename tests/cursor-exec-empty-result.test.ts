@@ -39,6 +39,18 @@ describe("codex exec bridge empty-result normalization (devlog 260826 gap-7)", (
     expect(out.text).not.toContain("Do not re-run");
   });
 
+  test("malformed failed wrappers are rejected without pathological backtracking", () => {
+    const malformed = `Script failed${" ".repeat(30_000)}\nY`;
+    const startedAt = performance.now();
+    const out = normalizeCursorToolResultText(malformed, { toolName: "exec", isError: false });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(out.changed).toBe(false);
+    expect(out.text).toBe(malformed);
+    // The former overlapping `*` groups took well over a second for this small payload.
+    expect(elapsedMs).toBeLessThan(500);
+  });
+
   test("non-empty exec output passes through byte-identical", () => {
     const out = normalizeCursorToolResultText("Output:\nhello", { toolName: "exec" });
     expect(out.changed).toBe(false);
