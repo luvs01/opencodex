@@ -258,6 +258,21 @@ test("9. the dialog names WHY text is missing rather than omitting it silently",
   await act(async () => { root.unmount(); });
 });
 
+test("9b. an unmapped layer does not receive the base-prompt explanation", async () => {
+  stubRoutes(call => call.url.endsWith("/api/codex-prompt/text")
+    ? json({ ok: true, layers: { personality: { text: null, reason: "unmapped", bytes: 0 } } })
+    : json(snapshot()));
+  const { container, root } = await mount();
+  await act(async () => {
+    (row(container, "personality")!.querySelector("button") as HTMLButtonElement).click();
+  });
+  const notice = document.querySelector(".codex-set-layer-dialog__no-text")!;
+  expect(notice.textContent).toContain("no confirmed mapping");
+  expect(notice.textContent).not.toContain("base prompt");
+  expect(notice.textContent).not.toContain("model_instructions_file");
+  await act(async () => { root.unmount(); });
+});
+
 test("4. a runtime-conditional row states the condition that emits it", async () => {
   stubRoutes(() => json(snapshot()));
   const { container, root } = await mount();

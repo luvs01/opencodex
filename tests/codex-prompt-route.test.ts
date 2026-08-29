@@ -799,6 +799,11 @@ describe("020 coverage completions", () => {
     // Decoding per chunk corrupts UTF-8 that straddles a chunk boundary.
     expect(probe).toContain("Buffer.concat(chunks).toString(\"utf8\")");
   });
+  test("27. unmapped layers stay distinct from the unprintable base prompt", async () => {
+    const probe = await Bun.file(new URL("../src/codex/prompt-text-probe.ts", import.meta.url)).text();
+    expect(probe).toContain('layers["base-instructions"] = { text: null, reason: "not-exposed"');
+    expect(probe).toContain('layers[id] ??= { text: null, reason: "unmapped"');
+  });
   test("24. every ownership state is named, not collapsed into a boolean", async () => {
     // developerInstructionsOwned:false covers an ABSENT key and an EXTERNAL one, and
     // a GUI that cannot tell them apart hides its own create affordance from every
