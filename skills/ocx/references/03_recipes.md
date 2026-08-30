@@ -93,20 +93,27 @@ Read `accounts[]`. Two things to respect:
 `providers[]` and `models[]` carry `estimatedCostUsd`. Costs are estimates; `estimateReasons` in the
 log rows tells you why (for example `usage_estimated`, `expected_price_overlay`).
 
-## 5. Rotate an access key and confirm it went quiet
+## 5. Prepare an access-key rotation without exposing the new key
 
 ```bash
 ocx access key list --json
-ocx access key create rotated --json          # the plaintext key is in THIS response only
+```
+
+Creating a key returns its one-time plaintext credential. **Do not run the create command from an
+agent session:** terminal output can enter the model transcript. Ask the user to create the key
+themselves in a separate terminal and report only the new key id, never the key itself.
+
+After the user confirms that the replacement is configured, remove the old key:
+
+```bash
 ocx access key remove <old-id> --yes --json
 ocx access key list --json                    # the old id is gone; check usage on the rest
 ```
 
-Note the argument style: `create <name>` and `remove <id>` are **positionals**, not `--label` and
-`--id`. `remove` also refuses without `--yes`.
+Note the argument style: `remove <id>` is positional, not `--id`, and refuses without `--yes`.
 
 The list carries per-key usage, so a key whose count stops advancing is genuinely unused. The
-plaintext key appears once, in the `create` response, and is never retrievable again.
+replacement key's plaintext is never retrievable after creation.
 
 An `ambiguous` footer on the list means two configured keys share an id, so per-key totals do not
 exist for them — do not attribute usage to either.

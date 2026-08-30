@@ -146,6 +146,14 @@ describe("the consent boundary is stated, not implied", () => {
     }
   });
 
+  test("agent-facing instructions never invoke the plaintext access-key creation command", () => {
+    const skill = readFileSync(SKILL, "utf8");
+    const recipes = read("references/03_recipes.md");
+    expect(skill).toContain("Do not run `ocx access key create`");
+    expect(recipes).not.toMatch(/^\s*ocx access key create\b/m);
+    expect(recipes).toContain("never the key itself");
+  });
+
   test("destructive verbs are documented as requiring --yes", () => {
     const skill = readFileSync(SKILL, "utf8");
     const recipes = read("references/03_recipes.md");

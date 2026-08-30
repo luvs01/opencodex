@@ -90,6 +90,13 @@ starring would be useful, say so and let the user decide.
 The same boundary covers the session-gated `/api/codex-prompt` writes: read them with
 `ocx inspect codex-prompt`, and leave the writes to the dashboard.
 
+## Secret-bearing commands
+
+**Do not run `ocx access key create`.** Its one-time response contains the new plaintext
+data-plane credential, and command output can enter the agent transcript. Ask the user to create
+the key themselves in a terminal outside the agent session and confirm only the new key id before
+continuing with inspection or removal commands. Never ask the user to paste the key into chat.
+
 ## Destructive verbs
 
 `storage trash restore` and `storage policy run` refuse without `--yes` (exit 2, nothing sent).
