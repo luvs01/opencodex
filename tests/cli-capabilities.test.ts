@@ -145,6 +145,12 @@ describe("ocx capabilities output", () => {
     expect(cap?.routes).toEqual([]);
   });
 
+  test("logs follow does not claim to imply JSONL output", () => {
+    const logs = CAPABILITIES.find(c => c.command.length === 1 && c.command[0] === "logs");
+    const follow = logs?.flags.find(flag => flag.name === "--follow");
+    expect(follow?.summary).toBe("Poll for new rows; add --jsonl to emit JSONL.");
+  });
+
   test("--route without a path is usage, not a full table dump", async () => {
     const cap = captureStdout();
     let code: number;
