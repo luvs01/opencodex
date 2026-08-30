@@ -4359,6 +4359,12 @@ async function handleResponsesInner(
       provider: route.provider,
       adapterName: rotatedAdapter.name,
     });
+    sealRequestAttemptIdentity(
+      logCtx.activeAttempt,
+      logCtx.provider,
+      rotatedAdapter.name,
+      logCtx.accountLogLabel,
+    );
     return rotatedAdapter;
   };
   if ((imgPlan || vidPlan) && canRunWebSearch) {
