@@ -148,11 +148,11 @@ describe("logout parses argv before touching the credential store", () => {
    * probing the sandbox rather than by reading the test -- the file genuinely does not exist at
    * `<tmp>/.opencodex/auth.json` when the suite starts.
    *
-   * With a credential present the file exists, so "byte-identical before and after" is a claim
-   * with content: any write, including the destructive `--json`-as-provider-name path, changes it.
+   * Seed the provider that malformed parsing could remove so a destructive store mutation must
+   * change the bytes; rewriting an unrelated credential unchanged would not prove that.
    */
-  const seed = async (): Promise<string> => {
-    await saveCredential("claude", { access: "seed-access", refresh: "seed-refresh", expires: Date.now() + 600_000 });
+  const seed = async (provider = "claude"): Promise<string> => {
+    await saveCredential(provider, { access: "seed-access", refresh: "seed-refresh", expires: Date.now() + 600_000 });
     const contents = snapshot();
     expect(contents, "seeded auth.json must exist or the non-mutation assertions are vacuous").not.toBeNull();
     return contents!;
@@ -180,7 +180,7 @@ describe("logout parses argv before touching the credential store", () => {
   };
 
   test("a flag is never read as a provider name and leaves the store byte-identical", async () => {
-    await seed();
+    await seed("--json");
     const result = await runLogout(["--json"]);
     expect(result.code).toBe(2);
     expect(result.before).not.toBeNull();
