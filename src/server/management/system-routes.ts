@@ -164,6 +164,15 @@ export async function handleSystemRoutes(ctx: ManagementContext): Promise<Respon
     (url.pathname === CODEX_APP_SERVER_STATE_PATH && req.method === "GET")
     || (url.pathname === CODEX_RESTART_PATH && req.method === "POST")
   ) {
+    if (
+      url.pathname === CODEX_RESTART_PATH
+      && ctx.principal !== "gui-session"
+    ) {
+      return jsonResponse({
+        success: false,
+        error: "Restart requires confirmation from the dashboard.",
+      }, 403, req, config);
+    }
     // Resolved inside the path check, not at the top of this function: every
     // /api/system/* request runs through here, and an unconditional import would
     // pull the platform process-enumeration helpers into requests that never

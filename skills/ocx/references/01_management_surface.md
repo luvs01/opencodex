@@ -472,24 +472,6 @@ JSON mode: `payload`.
 - `policy set` never enables implicitly: omitting `--enabled` keeps the stored value.
 - `policy run` forces a run regardless of schedule, so it needs `--yes`.
 
-### `ocx system codex-restart`
-
-Restart the Codex app-server.
-
-| Method | Route |
-|---|---|
-| POST | `/api/system/codex-restart` |
-
-| Flag | Value | Meaning |
-|---|---|---|
-| `--yes` | boolean | Required: restarts the operator's running Codex app-server. |
-| `--json` | boolean | Emit the restart result as JSON. |
-
-JSON mode: `payload`.
-
-- `sync --restart-codex` is not a substitute: it restarts only as a side effect after a catalog or cache write, so it cannot restart a healthy install on request.
-- --yes is mandatory because this interrupts a running editor session, which must never happen because an agent guessed a subcommand.
-
 ### `ocx integration native`
 
 Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations.
@@ -530,6 +512,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 29
-- of those, state-changing: 11
+- declared capabilities: 28
+- of those, state-changing: 10
 - head-resolved invocations: 2

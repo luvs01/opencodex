@@ -39,6 +39,7 @@ function contextFor(
   path: string,
   method: string,
   service: NonNullable<ManagementContext["deps"]["codexRestartService"]>,
+  principal: ManagementContext["principal"] | null = "gui-session",
 ): ManagementContext {
   const url = new URL(`http://127.0.0.1:10100${path}`);
   return {
@@ -46,6 +47,7 @@ function contextFor(
     url,
     config: loadConfig(),
     deps: { codexRestartService: service },
+    ...(principal !== null ? { principal } : {}),
   } as ManagementContext;
 }
 
@@ -93,6 +95,31 @@ describe("GET /api/system/codex-app-server", () => {
 });
 
 describe("POST /api/system/codex-restart", () => {
+  test.each([
+    ["a raw admin token", "admin-token" as const],
+    ["direct dispatch without a principal", null],
+  ])("rejects %s before performing the restart", async (_label, principal) => {
+    let restarted = false;
+    const response = await handleSystemRoutes(contextFor(
+      CODEX_RESTART_PATH,
+      "POST",
+      stubService({
+        performRestart: async () => {
+          restarted = true;
+          return STOPPED;
+        },
+      }),
+      principal,
+    ));
+
+    expect(response?.status).toBe(403);
+    expect(await response?.json()).toEqual({
+      success: false,
+      error: "Restart requires confirmation from the dashboard.",
+    });
+    expect(restarted).toBe(false);
+  });
+
   test("returns the restart result in the contract shape", async () => {
     const response = await handleSystemRoutes(
       contextFor(CODEX_RESTART_PATH, "POST", stubService()),
@@ -161,4 +188,3 @@ describe("POST /api/system/codex-restart", () => {
     expect(response).toBeNull();
   });
 });
-

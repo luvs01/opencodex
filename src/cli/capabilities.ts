@@ -419,21 +419,6 @@ export const CAPABILITIES: readonly Capability[] = [
     ],
   },
   {
-    command: ["system", "codex-restart"],
-    summary: "Restart the Codex app-server.",
-    routes: [{ method: "POST", path: "/api/system/codex-restart" }],
-    flags: [
-      { name: "--yes", value: "boolean", summary: "Required: restarts the operator's running Codex app-server." },
-      { name: "--json", value: "boolean", summary: "Emit the restart result as JSON." },
-    ],
-    mutates: true,
-    json: "payload",
-    details: [
-      "`sync --restart-codex` is not a substitute: it restarts only as a side effect after a catalog or cache write, so it cannot restart a healthy install on request.",
-      "--yes is mandatory because this interrupts a running editor session, which must never happen because an agent guessed a subcommand.",
-    ],
-  },
-  {
     command: ["claude", "desktop", "status"],
     summary: "Applied-vs-desired Claude Desktop state, including staleness, drift, and health.",
     routes: [{ method: "GET", path: "/api/claude-desktop/status" }],
