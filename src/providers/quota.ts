@@ -67,6 +67,13 @@ export type { ProviderQuota, ProviderQuotaCreditsUsd, ProviderQuotaWindow } from
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
+
+/**
+ * A model-scoped window label is upstream text that reaches a terminal and the dashboard
+ * verbatim. Bounded so one row cannot dominate the report; control characters are removed
+ * separately, since those can redraw or split the surrounding output rather than merely be long.
+ */
+const MAX_QUOTA_WINDOW_LABEL_CHARS = 64;
 /** Successful provider quota payloads are small; reject oversized or stalled JSON before parsing. */
 export { QUOTA_RESPONSE_MAX_BYTES } from "./quota-wire";
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
@@ -1245,7 +1252,13 @@ function parseClaudeLimit(value: unknown): { label: string; percent: number; res
   if (percent === undefined) return null;
   const scope = asRecord(rec.scope);
   const model = asRecord(scope?.model);
-  const rawLabel = String(model?.display_name ?? "").trim();
+  // The label is upstream-supplied text that reaches a terminal and the dashboard verbatim.
+  // Control and line-separator code points are removed first, or a display name could redraw
+  // or split the surrounding output; bounded so one row cannot dominate the report.
+  const rawLabel = String(model?.display_name ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, "")
+    .trim()
+    .slice(0, MAX_QUOTA_WINDOW_LABEL_CHARS);
   if (!rawLabel) return null;
   const lowerLabel = rawLabel.toLowerCase();
   const label = lowerLabel.includes("fable") ? "Fable"

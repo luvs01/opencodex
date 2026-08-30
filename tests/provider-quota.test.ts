@@ -191,6 +191,57 @@ describe("fetchProviderQuotaReports", () => {
     expect(result.reports[0]?.quota.customWindows).toHaveLength(1);
   });
 
+  test("a model-scoped window label cannot carry terminal controls or run unbounded", async () => {
+    // `display_name` is upstream text that reaches a terminal and the dashboard verbatim, so a
+    // label carrying escapes or newlines could redraw or split the surrounding output.
+    await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
+    globalThis.fetch = (async () => Response.json({
+      five_hour: { utilization: 11, resets_at: "2026-07-05T12:00:00Z" },
+      limits: [
+        {
+          kind: "weekly_scoped",
+          scope: { model: { display_name: `Custom\u001b[2J\r\nWEEKLY LIMIT REACHED ${"x".repeat(500)}` } },
+          percent: 33,
+          resets_at: "2026-07-12T12:00:00Z",
+        },
+      ],
+    })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports({
+      defaultProvider: "anthropic",
+      providers: { anthropic: { adapter: "anthropic", authMode: "oauth", baseUrl: "https://api.anthropic.com/v1" } },
+    } as OcxConfig, true);
+
+    const label = result.reports[0]?.quota.customWindows?.[0]?.label ?? "";
+
+    expect(label).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u);
+    expect(label.length).toBeLessThanOrEqual(64);
+    // The row itself is still reported; only its rendering hazard is removed.
+    expect(result.reports[0]?.quota.customWindows?.[0]?.percent).toBe(33);
+  });
+
+  test("an upstream label that is only control characters is dropped, not reported blank", async () => {
+    await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
+    globalThis.fetch = (async () => Response.json({
+      five_hour: { utilization: 11, resets_at: "2026-07-05T12:00:00Z" },
+      limits: [
+        {
+          kind: "weekly_scoped",
+          scope: { model: { display_name: "\u001b\u0007\r\n" } },
+          percent: 33,
+          resets_at: "2026-07-12T12:00:00Z",
+        },
+      ],
+    })) as typeof fetch;
+
+    const result = await fetchProviderQuotaReports({
+      defaultProvider: "anthropic",
+      providers: { anthropic: { adapter: "anthropic", authMode: "oauth", baseUrl: "https://api.anthropic.com/v1" } },
+    } as OcxConfig, true);
+
+    expect(result.reports[0]?.quota.customWindows).toBeUndefined();
+  });
+
   test("returns active provider quota rows without leaking credentials or raw upstream payloads", async () => {
     await saveCredential("xai", { access: "xai-access-secret", refresh: "xai-refresh-secret", expires: Date.now() + 3600_000 });
     await saveCredential("anthropic", { access: "claude-access-secret", refresh: "claude-refresh-secret", expires: Date.now() + 3600_000 });
