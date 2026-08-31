@@ -230,6 +230,24 @@ describe("GET|HEAD /v1/catalog least-privilege data-plane route (#809)", () => {
     expect(mgmt?.status).toBe(200);
   });
 
+  test("caches remote serialization and preflights oversized files", async () => {
+    isolatedCodexHome = installIsolatedCodexHome("ocx-v1-catalog-cache-");
+    const path = join(isolatedCodexHome.path, "opencodex-catalog.json");
+    writeFileSync(path, JSON.stringify(catalogFixture));
+
+    const { serializeRemotePersistedCatalog, MAX_REMOTE_CATALOG_BYTES } = await import("../src/server/catalog-download");
+    const first = await serializeRemotePersistedCatalog();
+    const cached = await serializeRemotePersistedCatalog();
+    expect(cached).toBe(first);
+
+    // A sparse over-limit file proves the ceiling is enforced from metadata,
+    // before the synchronous JSON reader can allocate or parse its contents.
+    const { truncateSync } = await import("node:fs");
+    truncateSync(path, MAX_REMOTE_CATALOG_BYTES + 1);
+    const oversized = await serializeRemotePersistedCatalog();
+    expect(oversized).toEqual({ body: null, error: "too_large" });
+  });
+
   test("reports a distinguishable code when no catalog is materialized", async () => {
     isolatedCodexHome = installIsolatedCodexHome("ocx-v1-catalog-missing-");
     saveConfig(dataPlaneConfig());
