@@ -210,6 +210,9 @@ const MODEL_ROSTER_VERSIONS_PER_ACCOUNT_MAX = 4;
  * roster.
  */
 const MODEL_ROSTER_FLIGHTS_PER_ACCOUNT_MAX = 4;
+/** Distinct, caller-selected roster versions admitted per account in one roster TTL. */
+const MODEL_ROSTER_VERSION_MISSES_PER_ACCOUNT_MAX = 4;
+const accountModelsMisses = new Map<string, number[]>();
 const DIRECT_CALLER_ACCOUNT_PREFIX = "__direct_codex__:";
 
 export interface CodexModelEntitlementCredentialSnapshot {
@@ -457,6 +460,7 @@ async function modelsForCredential(
   fetcher: typeof fetch,
   now: number,
   clientVersion: string,
+  trustedClientVersion: string,
 ): Promise<CachedAccountModels> {
   const cached = accountModelsCache.get(cacheKeyFor(credential.accountId, clientVersion));
   if (
@@ -468,6 +472,32 @@ async function modelsForCredential(
   const flightKey = `${credential.accountId}\u0000${credential.credentialIdentity}\u0000${clientVersion}`;
   const existing = accountModelsFlights.get(flightKey);
   if (existing) return existing;
+
+  // The inbound version is useful compatibility evidence, but it is also an untrusted cache-key
+  // dimension. Bound completed misses as well as concurrent flights so cycling versions cannot
+  // turn one data-plane request into renewable authenticated requests under every stored token.
+  // The locally selected runtime (or bundled floor) is exempt: it has one stable cache key and
+  // must remain refreshable even after an untrusted caller spends this account's allowance.
+  if (
+    !credential.accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)
+    && clientVersion !== trustedClientVersion
+  ) {
+    const missKey = `${credential.accountId}\u0000${credential.credentialIdentity}`;
+    const recent = (accountModelsMisses.get(missKey) ?? [])
+      .filter(startedAt => startedAt > now - MODEL_ROSTER_TTL_MS);
+    if (recent.length >= MODEL_ROSTER_VERSION_MISSES_PER_ACCOUNT_MAX) {
+      accountModelsMisses.set(missKey, recent);
+      return {
+        credentialIdentity: credential.credentialIdentity,
+        clientVersion,
+        expiresAt: now,
+        models: new Set(),
+        confirmed: false,
+      };
+    }
+    recent.push(now);
+    accountModelsMisses.set(missKey, recent);
+  }
 
   // Bound concurrency per account before opening another upstream request.
   let liveForAccount = 0;
@@ -529,6 +559,10 @@ export async function resolveCodexModelEntitlements(
 ): Promise<CodexModelEntitlementSnapshot> {
   const now = options.now ?? Date.now();
   const fetcher = options.fetcher ?? fetch;
+  const trustedClientVersion = resolveCodexEntitlementClientVersion(
+    null,
+    options.loadPersistedRuntime ?? loadPersistedCodexRuntime,
+  );
   const clientVersion = resolveCodexEntitlementClientVersion(
     options.clientVersion,
     options.loadPersistedRuntime ?? loadPersistedCodexRuntime,
@@ -542,7 +576,7 @@ export async function resolveCodexModelEntitlements(
       .filter((value): value is CodexModelEntitlementCredentialSnapshot => value !== null);
   const results = await Promise.all(credentials.map(async credential => ({
     credential,
-    result: await modelsForCredential(credential, fetcher, now, clientVersion),
+    result: await modelsForCredential(credential, fetcher, now, clientVersion, trustedClientVersion),
   })));
   return {
     modelsByAccount: new Map(results.map(({ credential, result }) => [credential.accountId, result.models])),
@@ -565,6 +599,7 @@ export async function isDirectCallerEntitledToCodexModel(
     credential,
     options.fetcher ?? fetch,
     options.now ?? Date.now(),
+    clientVersion,
     clientVersion,
   );
   return result.confirmed && result.models.has(modelId);
@@ -634,11 +669,15 @@ export function invalidateCodexModelEntitlementsForAccount(accountId: string | n
   for (const key of [...accountModelsCache.keys()]) {
     if (accountIdOfCacheKey(key) === accountId) accountModelsCache.delete(key);
   }
+  for (const key of [...accountModelsMisses.keys()]) {
+    if (accountIdOfCacheKey(key) === accountId) accountModelsMisses.delete(key);
+  }
 }
 
 export function resetCodexModelEntitlementCacheForTests(): void {
   accountModelsCache.clear();
   accountModelsFlights.clear();
+  accountModelsMisses.clear();
   runtimeVersionMemo = null;
 }
 

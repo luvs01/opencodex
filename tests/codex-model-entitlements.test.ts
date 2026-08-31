@@ -335,6 +335,29 @@ describe("entitlement client version (#2886)", () => {
     expect(results.filter(Boolean).length).toBeLessThanOrEqual(4);
   });
 
+  test("completed caller-selected misses have a renewable-work budget", async () => {
+    let fetches = 0;
+    const backend = (async () => { fetches += 1; return roster(SOL); }) as typeof fetch;
+    const options = (clientVersion: string | null) => ({
+      credentials: [credential("rate-bounded")],
+      fetcher: backend,
+      now: 1_000,
+      clientVersion,
+      loadPersistedRuntime: () => null,
+    });
+
+    for (let i = 0; i < 12; i += 1) {
+      await resolveCodexModelEntitlements({ codexAccounts: [] }, options(`0.${500 + i}.0`));
+    }
+    expect(fetches).toBe(4);
+
+    // An attacker cannot spend the stable local-version path's capacity. It remains available
+    // for catalog refresh and routing even after every caller-selected allowance was consumed.
+    const trusted = await resolveCodexModelEntitlements({ codexAccounts: [] }, options(null));
+    expect(fetches).toBe(5);
+    expect(trusted.confirmedAccountIds.has("rate-bounded")).toBe(true);
+  });
+
   test("the placeholder 0.0.0 is never accepted as a client version", async () => {
     // 0.0.0 is exactly what shipped, and it is a syntactically valid version string, so the
     // guard has to reject it by value rather than by shape.
