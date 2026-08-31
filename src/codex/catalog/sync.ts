@@ -36,9 +36,9 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import {
   availableAccountGatedNativeModels,
   isCodexModelEntitlementSnapshotCurrent,
-  resolveCodexModelEntitlements,
   type CodexModelEntitlementSnapshot,
 } from "../model-entitlements";
+import { resolveAdmittedCodexModelEntitlements } from "../model-entitlement-admission";
 
 
 import { CODEX_CUSTOM_MODEL_CATALOG_KIND, CODEX_PROVIDER_MODEL_CATALOG_KIND, activeCodexModelsCachePath, applyCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, applyRoutedCodexToolMode, catalogBackupPathFor, catalogHasRoutedEntries, catalogModelSlug, ensureStrictCatalogFields, findNativeTemplate, findSupportedNativeTemplate, isDefaultCatalogPath, isRoutedModelCompatibilityExcluded, legacyCatalogBackupPath, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readCodexCatalogPathForHome, readConfiguredAutoReviewModel, readNativeBaseline } from "./parsing";
@@ -1836,7 +1836,7 @@ export async function syncCatalogModels(
       comboOmissions,
       providerModelOutcomes,
     }),
-    resolveCodexModelEntitlements(config),
+    resolveAdmittedCodexModelEntitlements(config),
   ]);
   const committed = withCatalogWriteSerialization(owningCodexHome, permit => {
     // Desired state can flip OFF during the provider await above. The catalog

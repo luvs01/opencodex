@@ -74,9 +74,9 @@ import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
 import {
   availableAccountGatedNativeModels,
   isCodexModelEntitlementSnapshotCurrent,
-  resolveCodexModelEntitlements,
   type CodexModelEntitlementSnapshot,
 } from "./model-entitlements";
+import { resolveAdmittedCodexModelEntitlements } from "./model-entitlement-admission";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
 import { providerCodexAccountMode } from "../providers/registry";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
@@ -412,7 +412,7 @@ export async function gatherCodexCatalogCandidate(
         providerModelOutcomes,
         discoveryPolicySnapshots: discoveryPolicies,
       }),
-      resolveCodexModelEntitlements(snapshot.config),
+      resolveAdmittedCodexModelEntitlements(snapshot.config),
     ]);
     const processLocal = processEvidence(source);
     const sourceEvidence = sealCatalogGatherEvidenceSession(session);
