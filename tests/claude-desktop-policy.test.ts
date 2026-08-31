@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   claudeDesktopPolicyHealth,
+  createCachedClaudeDesktopPolicyProbe,
+  probeClaudeDesktopPolicyAsync,
   probeClaudeDesktopPolicy,
   type ClaudeDesktopPolicyProbeRunner,
 } from "../src/claude/desktop-policy";
@@ -121,4 +123,41 @@ test("non-Windows policy probing is not applicable and never spawns", () => {
   expect(claudeDesktopPolicyHealth(state)).toMatchObject({ ok: true, status: "ok" });
   expect(spawned).toBe(false);
   expect(resolved).toBe(false);
+});
+
+test("the asynchronous policy probe does not synchronously block the caller", async () => {
+  let release!: (value: ReturnType<typeof result>) => void;
+  const pending = new Promise<ReturnType<typeof result>>((resolve) => { release = resolve; });
+  const probe = probeClaudeDesktopPolicyAsync({
+    platform: "win32",
+    resolveSystemDirectory: () => "C:\\trusted\\System32",
+    run: () => pending,
+  });
+
+  let settled = false;
+  void probe.then(() => { settled = true; });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  release(result({ status: 0 }));
+  expect(await probe).toBe("present");
+});
+
+test("status policy probes coalesce concurrent refreshes and cache the result", async () => {
+  let calls = 0;
+  let clock = 0;
+  let release!: (state: "present") => void;
+  const pending = new Promise<"present">((resolve) => { release = resolve; });
+  const cachedProbe = createCachedClaudeDesktopPolicyProbe(async () => {
+    calls += 1;
+    return pending;
+  }, 30_000, () => clock);
+
+  const first = cachedProbe();
+  const concurrent = cachedProbe();
+  expect(calls).toBe(1);
+  release("present");
+  expect(await Promise.all([first, concurrent])).toEqual(["present", "present"]);
+  clock = 29_999;
+  expect(await cachedProbe()).toBe("present");
+  expect(calls).toBe(1);
 });

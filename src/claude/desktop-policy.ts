@@ -1,5 +1,5 @@
 /** Read-only, privacy-safe Windows policy diagnosis for Claude Desktop 3P. */
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { win32 } from "node:path";
 import { resolveTrustedWindowsSystemDirectory } from "../lib/windows-elevation";
 import { decodeWindowsTextBytes } from "../lib/windows-text";
@@ -22,6 +22,11 @@ export type ClaudeDesktopPolicyProbeRunner = (
   file: string,
   args: readonly string[],
 ) => ClaudeDesktopPolicyProbeResult;
+
+export type ClaudeDesktopPolicyAsyncProbeRunner = (
+  file: string,
+  args: readonly string[],
+) => Promise<ClaudeDesktopPolicyProbeResult>;
 
 export interface ClaudeDesktopPolicyProbeOptions {
   readonly platform?: NodeJS.Platform;
@@ -53,6 +58,23 @@ const defaultPolicyProbeRunner: ClaudeDesktopPolicyProbeRunner = (file, args) =>
     spawnFailed: result.error !== undefined && errorCode !== "ETIMEDOUT",
   };
 };
+
+const defaultAsyncPolicyProbeRunner: ClaudeDesktopPolicyAsyncProbeRunner = (file, args) => new Promise((resolve) => {
+  execFile(file, [...args], {
+    encoding: "buffer",
+    maxBuffer: 64 * 1024,
+    timeout: POLICY_PROBE_TIMEOUT_MS,
+    windowsHide: true,
+  }, (error, stdout) => {
+    const errorCode = (error as NodeJS.ErrnoException | null)?.code;
+    resolve({
+      status: error === null ? 0 : typeof errorCode === "number" ? errorCode : null,
+      stdout: stdout ? decodeWindowsTextBytes(stdout) : "",
+      timedOut: errorCode === "ETIMEDOUT" || (error !== null && "killed" in error && error.killed === true),
+      spawnFailed: error !== null && typeof errorCode !== "number" && errorCode !== "ETIMEDOUT",
+    });
+  });
+});
 
 function usable(result: ClaudeDesktopPolicyProbeResult): boolean {
   return !result.timedOut && !result.spawnFailed && result.status !== null;
@@ -106,6 +128,71 @@ export function probeClaudeDesktopPolicy(
   // The child can be listed by a readable parent while its own ACL blocks the
   // query. That is unreadable, not absent.
   return parentListsPolicyKey(parent.stdout) ? "unknown" : "absent";
+}
+
+/** Non-blocking variant for the long-lived server request path. */
+export async function probeClaudeDesktopPolicyAsync(
+  options: Omit<ClaudeDesktopPolicyProbeOptions, "run"> & { readonly run?: ClaudeDesktopPolicyAsyncProbeRunner } = {},
+): Promise<ClaudeDesktopPolicyState> {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return "not_applicable";
+
+  let regExe: string;
+  try {
+    const systemDirectory = (options.resolveSystemDirectory ?? resolveTrustedWindowsSystemDirectory)();
+    regExe = win32.join(systemDirectory, "reg.exe");
+  } catch {
+    return "unknown";
+  }
+
+  const run = options.run ?? defaultAsyncPolicyProbeRunner;
+  try {
+    const policy = await run(regExe, ["query", CLAUDE_POLICY_KEY, "/reg:64"]);
+    if (!usable(policy)) return "unknown";
+    if (policy.status === 0) return "present";
+    if (policy.status !== 1) return "unknown";
+
+    const parent = await run(regExe, ["query", CLAUDE_POLICY_PARENT_KEY, "/reg:64"]);
+    if (!usable(parent) || parent.status !== 0) return "unknown";
+    return parentListsPolicyKey(parent.stdout) ? "unknown" : "absent";
+  } catch {
+    return "unknown";
+  }
+}
+
+const POLICY_CACHE_TTL_MS = 30_000;
+
+export function createCachedClaudeDesktopPolicyProbe(
+  probe: () => Promise<ClaudeDesktopPolicyState>,
+  ttlMs = POLICY_CACHE_TTL_MS,
+  now = Date.now,
+): () => Promise<ClaudeDesktopPolicyState> {
+  let cached: { state: ClaudeDesktopPolicyState; expiresAt: number } | undefined;
+  let refresh: Promise<ClaudeDesktopPolicyState> | undefined;
+  return () => {
+    const currentTime = now();
+    if (cached && cached.expiresAt > currentTime) return Promise.resolve(cached.state);
+    if (refresh) return refresh;
+    refresh = probe().then((state) => {
+      cached = { state, expiresAt: now() + ttlMs };
+      return state;
+    }).finally(() => {
+      refresh = undefined;
+    });
+    return refresh;
+  };
+}
+
+const cachedProductionProbe = createCachedClaudeDesktopPolicyProbe(
+  () => probeClaudeDesktopPolicyAsync(),
+);
+
+/** Coalesces status polling and bounds registry refreshes to one per cache interval. */
+export function getCachedClaudeDesktopPolicy(
+  options: Omit<ClaudeDesktopPolicyProbeOptions, "run"> = {},
+): Promise<ClaudeDesktopPolicyState> {
+  if (options.platform === undefined || options.platform === process.platform) return cachedProductionProbe();
+  return probeClaudeDesktopPolicyAsync(options);
 }
 
 /** State-only health projection shared by CLI, apply, and management status. */
