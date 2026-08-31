@@ -7,9 +7,9 @@
  */
 import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { findLiveProxy, proxyIdentityAt, SERVICE_STOP_LIVENESS } from "./server/proxy-liveness";
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { expandUserPath, getConfigDir, loadConfig } from "./config";
 import { readPid, removePid, removeRuntimePort, verifyPidIdentity } from "./config/process-state";
 import { restoreNativeCodex, restoreNativeCodexAsync } from "./codex/inject";
@@ -66,48 +66,6 @@ function cliEntry(runtime: DurableBunRuntime = durableBunRuntime()): { bun: stri
   return { bun: runtime.path, bunRuntimeSource: runtime.source, cli: join(import.meta.dir, "cli", "index.ts") };
 }
 
-/**
- * The stable `ocx` launcher to bake into a systemd unit, or null to fall back to the
- * Bun + CLI pair.
- *
- * `cliEntry()` resolves both of its paths from `import.meta.dir`, so they point INSIDE
- * the installed package tree. Under a version manager that tree is a versioned directory:
- * `~/.local/share/mise/installs/npm-opencodex/2.35.0/...`. An upgrade installs 2.36.0 and
- * deletes 2.35.0, after which the unit's `exec <old-bun> <old-cli>` cannot resolve, and
- * `Restart=on-failure` turns that into a restart loop (#2898). The shim in
- * `~/.local/share/mise/shims/ocx` survives the upgrade and dispatches to whatever version
- * is current, so it is the durable thing to name.
- *
- * Deliberately LEXICAL. Resolving the symlink would write the versioned target back into
- * the unit and reintroduce the bug — the indirection is the entire point.
- *
- * Only an absolute path is accepted. A bare `ocx` would be re-resolved through `PATH` on
- * every restart, which turns a service definition into a PATH-hijacking surface; naming
- * one validated absolute file keeps the target fixed at install time.
- */
-export function stableLauncherEntry(deps: {
-  env?: NodeJS.ProcessEnv;
-  isExecutableFile?: (path: string) => boolean;
-  pathDelimiter?: string;
-} = {}): string | null {
-  const env = deps.env ?? process.env;
-  const isExecutableFile = deps.isExecutableFile ?? ((path: string): boolean => {
-    try {
-      if (!statSync(path).isFile()) return false;
-      accessSync(path, fsConstants.X_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  const entries = (env.PATH ?? "").split(deps.pathDelimiter ?? delimiter);
-  for (const entry of entries) {
-    if (!entry || !isAbsolute(entry)) continue;
-    const candidate = join(entry, "ocx");
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return null;
-}
 
 function plistPath(): string {
   return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
@@ -197,14 +155,6 @@ export interface ServiceInstallState {
   /** Baked at install; lets status flag paths gone stale after npm prefix/nvm moves. */
   bunPath?: string;
   cliPath?: string;
-  /**
-   * Linux only. The stable `ocx` launcher the unit actually invokes, when one was found.
-   * Present means `bunPath`/`cliPath` are provenance for the install, NOT what systemd
-   * runs — so staleness must be judged against THIS path instead. A version-manager
-   * upgrade replaces the directory those two point into while the launcher survives, and
-   * checking the old pair would report a stale service that is in fact healthy.
-   */
-  launcherPath?: string;
   /** v2: which Windows backend was chosen at install; absent (v1/legacy) means scheduler. */
   backend?: ServiceBackend;
   winswVersion?: string;
@@ -217,7 +167,7 @@ export function parseServiceInstallState(value: unknown): ServiceInstallState | 
   if (state.version !== 1 && state.version !== 2) return null;
   if (typeof state.codexHome !== "string" || state.codexHome.length === 0) return null;
   if (typeof state.opencodexHome !== "string" || state.opencodexHome.length === 0) return null;
-  for (const key of ["bunPath", "cliPath", "launcherPath", "winswVersion", "winswSha256"] as const) {
+  for (const key of ["bunPath", "cliPath", "winswVersion", "winswSha256"] as const) {
     if (state[key] !== undefined && (typeof state[key] !== "string" || state[key].length === 0)) return null;
   }
   if (state.version === 1) {
@@ -228,7 +178,7 @@ export function parseServiceInstallState(value: unknown): ServiceInstallState | 
   return state as unknown as ServiceInstallState;
 }
 
-function writeServiceInstallState(backend: ServiceBackend = "scheduler", launcherPath?: string | null): void {
+function writeServiceInstallState(backend: ServiceBackend = "scheduler"): void {
   const { bun, cli } = cliEntry();
   const state: ServiceInstallState = {
     version: 2,
@@ -236,7 +186,6 @@ function writeServiceInstallState(backend: ServiceBackend = "scheduler", launche
     opencodexHome: currentOpenCodexHome(),
     bunPath: bun,
     cliPath: cli,
-    ...(launcherPath ? { launcherPath } : {}),
     backend,
     ...(backend === "native" ? { winswVersion: WINSW_VERSION, winswSha256: WINSW_SHA256 } : {}),
   };
@@ -550,17 +499,6 @@ export function resolveServiceListenPort(override?: number): number {
 function buildServiceShellCommand(bun: string, cli: string, port = resolveServiceListenPort()): string {
   const tokenFile = serviceApiTokenFilePath();
   return `if [ -f ${shellQuote(tokenFile)} ]; then OPENCODEX_API_AUTH_TOKEN="$(cat ${shellQuote(tokenFile)})"; export OPENCODEX_API_AUTH_TOKEN; fi; exec ${shellQuote(bun)} ${shellQuote(cli)} start --port ${port}`;
-}
-
-/**
- * The same command shape, launched through a stable `ocx` executable instead of an
- * explicit Bun + CLI pair. The token-file preamble is identical and deliberately shared
- * in form: the service still reads the token from disk at start and never carries it in
- * the unit.
- */
-function buildServiceLauncherShellCommand(launcher: string, port = resolveServiceListenPort()): string {
-  const tokenFile = serviceApiTokenFilePath();
-  return `if [ -f ${shellQuote(tokenFile)} ]; then OPENCODEX_API_AUTH_TOKEN="$(cat ${shellQuote(tokenFile)})"; export OPENCODEX_API_AUTH_TOKEN; fi; exec ${shellQuote(launcher)} start --port ${port}`;
 }
 
 /**
@@ -2569,14 +2507,6 @@ function uninstallWindows(): void {
  */
 export function bakedServicePathsDiagnostic(): string | null {
   const state = readServiceInstallState();
-  // A launcher install runs the launcher, not the baked pair, so the pair's existence says
-  // nothing about whether the service can start. Judging the recorded launcher is both
-  // necessary (a deleted launcher IS stale) and sufficient (a replaced version directory
-  // is not, which is exactly what #2898 made routine).
-  if (state?.launcherPath) {
-    if (existsSync(state.launcherPath)) return null;
-    return `STALE baked paths (missing: ${state.launcherPath}) — run 'ocx service repair' to re-bake`;
-  }
   if (!state?.bunPath || !state?.cliPath) return null;
   const missing = [state.bunPath, state.cliPath].filter(path => !existsSync(path));
   if (missing.length === 0) return null;
@@ -2597,16 +2527,8 @@ function unitPath(): string {
   return join(unitDir(), `${TASK}.service`);
 }
 
-export function buildUnit(
-  proxyEnv: { name: string; value: string }[] = resolvedProxyEnv(),
-  deps: { launcher?: string | null; runtime?: DurableBunRuntime } = {},
-): string {
-  const runtime = deps.runtime ?? durableBunRuntime();
-  const { bun, bunRuntimeSource, cli } = cliEntry(runtime);
-  // Discovery belongs to installSystemd(), which resolves once and passes the same value to
-  // both the unit and install state. Keeping this builder explicit makes tests and diagnostics
-  // independent of the host PATH.
-  const launcher = deps.launcher ?? null;
+export function buildUnit(proxyEnv: { name: string; value: string }[] = resolvedProxyEnv()): string {
+  const { bun, bunRuntimeSource, cli } = cliEntry();
   const log = logPath();
   const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const codexHome = systemdEnvironmentAssignment("CODEX_HOME", process.env.CODEX_HOME?.trim());
@@ -2614,23 +2536,15 @@ export function buildUnit(
   const opencodexHome = systemdEnvironmentAssignment("OPENCODEX_HOME", process.env.OPENCODEX_HOME?.trim());
   const envLines = [
     systemdEnvironmentAssignment("OCX_SERVICE", "1"),
-    ...(launcher ? [] : [
-      systemdEnvironmentAssignment(BUN_RUNTIME_SOURCE_ENV, bunRuntimeSource),
-      systemdEnvironmentAssignment(BUN_RUNTIME_PATH_ENV, bun),
-    ]),
-    // A launcher normally resolves the current package's bundled Bun after every upgrade.
-    // Preserve only a proof-bound shell override; otherwise writing a package-local path here
-    // would recreate the version-manager pin that the launcher mode exists to remove.
-    launcher && runtime.source === "override"
-      ? systemdEnvironmentAssignment(runtime.overrideEnv, runtime.path)
-      : null,
+    systemdEnvironmentAssignment(BUN_RUNTIME_SOURCE_ENV, bunRuntimeSource),
+    systemdEnvironmentAssignment(BUN_RUNTIME_PATH_ENV, bun),
     systemdEnvironmentAssignment("PATH", path),
     codexHome,
     codexSqliteHome,
     opencodexHome,
     ...proxyEnv.map(({ name, value }) => systemdEnvironmentAssignment(name, value)),
   ].filter((line): line is string => Boolean(line)).join("\n");
-  const command = `${launcher ? buildServiceLauncherShellCommand(launcher) : buildServiceShellCommand(bun, cli)} >> ${shellQuote(log)} 2>&1`;
+  const command = `${buildServiceShellCommand(bun, cli)} >> ${shellQuote(log)} 2>&1`;
   return `[Unit]
 Description=OpenCodex Proxy Server
 After=network-online.target
@@ -2688,14 +2602,11 @@ function installSystemd(): void {
   recordOwnedConfigPath(getConfigDir(), serviceStatePath());
   if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
   writeServiceApiTokenFile();
-  // Resolve ONCE and reuse: the unit and the install state must agree about what is
-  // launched, or the staleness check would validate a path the unit does not run.
-  const launcher = stableLauncherEntry();
-  writeServiceDefinitionFile(unitPath(), buildUnit(resolvedProxyEnv(), { launcher }), "utf8");
+  writeServiceDefinitionFile(unitPath(), buildUnit(), "utf8");
   sh("systemctl --user daemon-reload");
   sh(`systemctl --user enable ${TASK}`);
   sh(`systemctl --user restart ${TASK}`);
-  writeServiceInstallState("scheduler", launcher);
+  writeServiceInstallState();
 }
 /**
  * Whether systemd's in-memory unit differs from the file on disk.
