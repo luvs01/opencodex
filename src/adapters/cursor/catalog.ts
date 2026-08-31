@@ -441,8 +441,8 @@ function composeWireId(baseId: string, kind: CursorVariantKind, effort: string |
  * Legacy slugs (thinking/fast/-1m variants) keep resolving forever — picker
  * rows shrink, routability does not (alias-retention contract, 003).
  *
- * `liveMaxModeIds` optionally extends the static maxMode evidence with the
- * bases the live GetUsableModels roster flags (union semantics).
+ * `liveMaxModeIds` optionally extends the static maxMode evidence with
+ * route-scoped bases from the selected account's GetUsableModels roster.
  */
 export function resolveCursorSelection(
   pickedId: string,
@@ -465,30 +465,8 @@ export function resolveCursorSelection(
     ? `${capability.wirePrefix}${canonicalId}`
     : canonicalId;
   const ultraRequested = parsed.ultra || reasoning?.toLowerCase() === "ultra";
-  const evidence = liveMaxModeIds ?? liveCursorMaxModeBases;
-  const maxModeArmed = capability.maxModeVerified === true || evidence.has(parsed.baseId);
+  const maxModeArmed = capability.maxModeVerified === true || liveMaxModeIds?.has(parsed.baseId) === true;
   return { wireId, canonicalId, maxMode: ultraRequested && maxModeArmed, known: true };
-}
-
-/**
- * Live Max-Mode evidence (GetUsableModels maxModeModels). Provider discovery
- * records the BASES the live roster flags; the resolver unions this with the
- * static `maxModeVerified` gate so ultra generalizes automatically as evidence
- * arrives — never from window size (devlog 260828 blocker-4 fold).
- */
-let liveCursorMaxModeBases: ReadonlySet<string> = new Set();
-
-export function recordLiveCursorMaxModeModels(liveIds: readonly string[]): void {
-  const bases = new Set<string>();
-  for (const id of liveIds) {
-    const parsed = parseCursorVariantId(id);
-    if (parsed.known) bases.add(parsed.baseId);
-  }
-  liveCursorMaxModeBases = bases;
-}
-
-export function liveCursorMaxModeBasesForTests(): ReadonlySet<string> {
-  return liveCursorMaxModeBases;
 }
 
 export interface CursorUmbrellaRow {

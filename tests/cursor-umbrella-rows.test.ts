@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   cursorUmbrellaRows,
-  recordLiveCursorMaxModeModels,
   resolveCursorSelection,
 } from "../src/adapters/cursor/catalog";
 import { CURSOR_STATIC_MODELS, cursorModelReasoningEfforts } from "../src/adapters/cursor/discovery";
@@ -81,17 +80,10 @@ describe("cursor umbrella picker rows (devlog 260828_cursor_umbrella_catalog)", 
     });
   });
 
-  describe("live Max-Mode evidence generalizes ultra", () => {
-    test("recorded live maxModeModels arm ultra for their bases and reset cleanly", () => {
-      recordLiveCursorMaxModeModels(["claude-opus-4-8-high-fast"]);
-      try {
-        expect(resolveCursorSelection("claude-opus-4-8", "ultra").maxMode).toBe(true);
-        expect(resolveCursorSelection("claude-opus-4-7", "ultra").maxMode).toBe(false);
-      } finally {
-        recordLiveCursorMaxModeModels([]);
-      }
+  describe("Max-Mode evidence stays request-scoped", () => {
+    test("omitted live evidence cannot arm ultra for an unverified base", () => {
       expect(resolveCursorSelection("claude-opus-4-8", "ultra").maxMode).toBe(false);
-      // Static evidence survives the reset.
+      // Static evidence remains available without account-local discovery.
       expect(resolveCursorSelection("kimi-k3", "ultra").maxMode).toBe(true);
     });
   });
