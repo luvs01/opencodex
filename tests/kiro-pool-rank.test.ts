@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   clearGenericFailoverHealth,
+  eligibleFailoverAccounts,
   forgetGenericFailoverRoster,
   preferredInitialAccount,
   rotateGenericOAuthAccountOn429,
@@ -106,6 +107,39 @@ describe("headroom ranking", () => {
 });
 
 describe("exhaustion cooldown", () => {
+  test("rotation uses the reset-aligned cooldown when Retry-After is absent", async () => {
+    const originalHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-kiro-exhaustion-"));
+    process.env.OPENCODEX_HOME = home;
+    clearGenericFailoverHealth();
+    try {
+      for (let i = 0; i < 2; i++) {
+        await saveCredential("kiro", {
+          access: `access-${i}`,
+          refresh: `refresh-${i}`,
+          expires: Date.now() + 3_600_000,
+          accountId: `uuid-${i}`,
+        } as never, { addAccount: true });
+      }
+      const ids = getAccountSet("kiro")?.accounts.map(account => account.id) ?? [];
+      const now = Date.now();
+      seedExhausted(ids[0]!, now + 60 * 60_000);
+      const config = {
+        providers: {
+          kiro: { adapter: "openai-chat", authMode: "oauth" },
+        },
+      } as unknown as OcxConfig;
+
+      expect(rotateGenericOAuthAccountOn429(config, "kiro", ids[0]!, null, now)).toBe(ids[1]);
+      expect(eligibleFailoverAccounts("kiro", now + 60_001)).toEqual([ids[1]!]);
+    } finally {
+      clearGenericFailoverHealth();
+      if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = originalHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("a distant reset is clamped to a day", () => {
     const now = Date.now();
     seedExhausted("a", now + 3 * 24 * 60 * 60_000);
