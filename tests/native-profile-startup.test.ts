@@ -759,12 +759,14 @@ describe("an unknown service-ownership fence is retryable (#2108)", () => {
     const scopes: Array<{
       currentHomes?: { codexHome: string; opencodexHome: string };
       statePaths?: readonly string[];
+      skipWindowsTaskListing?: boolean;
     }> = [];
     const server = startServer(0, {
       inspectNativeCodexOwnership: (scope = {}) => {
         scopes.push({
           currentHomes: scope.currentHomes ? { ...scope.currentHomes } : undefined,
           statePaths: scope.statePaths ? [...scope.statePaths] : undefined,
+          skipWindowsTaskListing: scope.skipWindowsTaskListing,
         });
         return { ownership: answer, reason: "pinned startup test" };
       },
@@ -791,7 +793,12 @@ describe("an unknown service-ownership fence is retryable (#2108)", () => {
         opencodexHome: f.configDir,
       });
       expect(firstScope.statePaths?.[0]).toBe(join(f.configDir, "service-state.json"));
-      for (const scope of scopes.slice(1)) expect(scope).toEqual(firstScope);
+      expect(scopes.slice(0, 2).every(scope => scope.skipWindowsTaskListing === false)).toBe(true);
+      expect(scopes.slice(2).every(scope => scope.skipWindowsTaskListing === true)).toBe(true);
+      for (const scope of scopes.slice(1)) {
+        expect(scope.currentHomes).toEqual(firstScope.currentHomes);
+        expect(scope.statePaths).toEqual(firstScope.statePaths);
+      }
 
       finishRecovery();
       expect(await waitForNativeMainStartupGate()).toEqual({

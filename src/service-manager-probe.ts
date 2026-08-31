@@ -192,6 +192,8 @@ export interface ProbeDeps {
   readonly windowsLocale?: string;
   /** Startup-local full-listing cache; targeted task queries always bypass it. */
   readonly windowsTaskListingCache?: WindowsTaskListingCache;
+  /** Do not enumerate every scheduled task from latency-sensitive callers. */
+  readonly skipWindowsTaskListing?: boolean;
 }
 
 const LABEL = "com.opencodex.proxy";
@@ -633,7 +635,7 @@ const SCHTASKS_TASK_NOT_FOUND_EN = /cannot find the file specified/i;
  */
 function probeWindowsTaskRegistration(
   deps: Required<Pick<ProbeDeps, "runRaw">>
-    & Pick<ProbeDeps, "windowsLocale" | "windowsTaskListingCache">,
+    & Pick<ProbeDeps, "windowsLocale" | "windowsTaskListingCache" | "skipWindowsTaskListing">,
 ): {
   registered: "present" | "absent" | "unknown";
   registeredXml: string;
@@ -658,6 +660,9 @@ function probeWindowsTaskRegistration(
   const queryText = `${decodeWindowsTextBytes(queried.stdout, { locale: deps.windowsLocale })}\n${decodeWindowsTextBytes(queried.stderr, { locale: deps.windowsLocale })}`;
   if (queried.status !== null && SCHTASKS_TASK_NOT_FOUND_EN.test(queryText)) {
     return { registered: "absent", registeredXml: "" };
+  }
+  if (deps.skipWindowsTaskListing) {
+    return { registered: "unknown", registeredXml: "" };
   }
 
   const runListing = () => deps.runRaw(

@@ -501,6 +501,7 @@ function inspectStartupOwnership(
   currentHomes: ReturnType<typeof currentServiceHomes> | null,
   statePaths: readonly string[] | null,
   windowsTaskListingCache?: ReturnType<typeof createWindowsTaskListingCache>,
+  skipWindowsTaskListing = false,
 ): OwnershipInspection {
   try {
     if (currentHomes === null || statePaths === null) {
@@ -510,9 +511,19 @@ function inspectStartupOwnership(
       };
     }
     if (deps.inspectNativeCodexOwnership) {
-      return deps.inspectNativeCodexOwnership({ currentHomes, statePaths, windowsTaskListingCache });
+      return deps.inspectNativeCodexOwnership({
+        currentHomes,
+        statePaths,
+        windowsTaskListingCache,
+        skipWindowsTaskListing,
+      });
     }
-    return inspectNativeCodexOwnership({ currentHomes, statePaths, windowsTaskListingCache });
+    return inspectNativeCodexOwnership({
+      currentHomes,
+      statePaths,
+      windowsTaskListingCache,
+      skipWindowsTaskListing,
+    });
   } catch {
     return {
       ownership: "unknown",
@@ -825,7 +836,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     }
     const homes = retryOwnershipHomes;
     const statePaths = retryOwnershipStatePaths;
-    const answer = inspectStartupOwnership(deps, homes, statePaths).ownership;
+    // Admission checks run on Bun's event loop. Keep their recovery probe to
+    // targeted queries; the potentially 20-second full listing is startup-only.
+    const answer = inspectStartupOwnership(deps, homes, statePaths, undefined, true).ownership;
     if (answer !== "owned") return answer;
     retryPreparedNativeMainLifecycle ??= prepareNativeMainStartupLifecycle(
       deps.nativeMainStartup,
