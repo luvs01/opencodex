@@ -74,6 +74,7 @@ describe("Grok config injection", () => {
     const table = block.slice(block.indexOf("[model.ocx-cursor-grok-4-5]"));
     expect(table).toContain('model = "cursor/grok-4.5"');
     expect(table).toContain('model_provider = "opencodex"');
+    expect(table).toContain('extra_headers = { "x-opencodex-grok" = "1" }');
     expect(table).not.toContain('base_url =');
     expect(table).not.toContain('api_key =');
     expect(table).not.toContain('api_backend =');

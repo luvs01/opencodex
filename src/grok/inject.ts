@@ -454,10 +454,6 @@ function isDisabledProviderModelId(
  *     remote host is left alone.
  *   - `x-opencodex-grok = "1"` in generated inline/child extra_headers, OR the historical
  *     chat_completions + `name = "OCX <model>"` + deterministic generated alias shape.
- *   - PROVIDER-INHERITANCE shape: `model_provider = "opencodex"` with no api_key/base_url of
- *     its own, adopting the verdict of the `[model_providers.opencodex]` table it references
- *     (the current block shape carries no per-model evidence; this mirrors Codex-side
- *     classifyCodexRouting).
  * A loopback base_url ALONE is not enough: aiming your own model at the local proxy is a
  * legitimate thing to do.
  *
@@ -468,10 +464,10 @@ function isDisabledProviderModelId(
  * span) and may interleave user tables between the parent and its children, so each
  * provider's body is FOLDED with all its same-provider descendants before judging, and
  * the removal span covers them by their exact ranges. The fenced provider is excluded
- * from that sweep (the splice owns it) but still counts as ownership evidence, so
- * teardown does not orphan models that inherit from it. The
- * durable marker lives on the provider (never on the inheriting model), so the sweep is
- * what keeps explicit ownership of inherited entries verifiable after a rewrite.
+ * from that sweep because the regular splice owns it. The provider marker grants
+ * ownership only over that provider table. Model tables must
+ * carry their own marker: inheriting a managed provider is supported for user-authored
+ * models and therefore cannot safely grant deletion authority over the model.
  */
 function findOpencodexOrphans(content: string, region: ManagedRegion | null): OrphanTable[] {
   const orphans: OrphanTable[] = [];
@@ -488,20 +484,15 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
   // Collect every table header first: a table body runs to the NEXT header, whatever it is.
   const headers = analyzeTomlStructure(content).headers;
   // [model_providers.<id>] tables outside the fence, folded with their own sub-tables (see
-  // the function doc). A table passing the predicate (our api_key literal + a loopback
-  // base_url + the durable marker inline or in a re-serialized child) contributes to
-  // `ownedProviderIds` for the model scan below; one with OUR id is additionally swept as
-  // an orphan of a previous managed block (a leftover here collides with the regenerated
+  // the function doc). A table with OUR id that passes the predicate (our api_key literal
+  // + a loopback base_url + the durable marker inline or in a re-serialized child) is
+  // swept as an orphan of a previous managed block (a leftover here collides with the regenerated
   // block's provider table — duplicate key — and alias rewriting skips provider orphans
   // because they have no alias and no model id). The dot-terminated prefix keeps a user's
   // `[model_providers.opencodex_backup]` out of scope.
-  const ownedProviderIds = new Set<string>();
   for (const [position, header] of headers.entries()) {
     if (header.array || header.segments.length !== 2 || header.segments[0] !== "model_providers") continue;
-    // Inside the fence the regular splice owns the table, but it is still ownership
-    // evidence: models kept outside the fence after a Grok rewrite (retired ids) inherit
-    // their verdict from the fenced provider, so classification must happen while the
-    // fence still exists or teardown leaves them with a dangling model_provider reference.
+    // Inside the fence the regular splice owns the table, so do not add it as an orphan.
     const insideRegion = region !== null
       && header.index >= region.start && header.index < region.end;
     const end = clampEnd(header.index, headers[position + 1]?.index ?? content.length);
@@ -532,7 +523,6 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
     // shows it as a bare `x-opencodex-grok = "1"` assignment. Both forms decide.
     if (!hasInlineOwnershipMarker(keys.get("extra_headers"))
       && keys.get(OPENCODEX_GROK_MARKER) !== "1") continue;
-    ownedProviderIds.add(header.segments[1]!);
     if (insideRegion) continue;
     if (header.segments[1] === OPENCODEX_PROVIDER_ID) {
       orphans.push({
@@ -553,23 +543,6 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
     const keys = tableBodyKeys(content.slice(header.index + header.length, bodyEnd));
     const modelId = keys.get("model");
     if (!modelId) continue;
-    // Two shapes carry our ownership signal. The current managed block routes every model
-    // through a shared provider table (`model_provider = "opencodex"`), so a re-serialized
-    // unfenced entry has NO api_key/base_url of its own — the evidence lives on the provider
-    // table it references (Codex-side precedent: classifyCodexRouting follows model_provider
-    // for the same reason). Inheritance is accepted only from a provider that itself passed
-    // the strict predicate above, and only for rows whose alias carries the generated
-    // fingerprint: a user is free to reference the managed provider from their own
-    // [model.*] table, and inheritance alone must not grant removal authority over it.
-    const providerId = keys.get("model_provider");
-    const inheritedOwned =
-      providerId === OPENCODEX_PROVIDER_ID
-      && ownedProviderIds.has(OPENCODEX_PROVIDER_ID)
-      && isGeneratedAliasForModel(header.segments[1]!, modelId);
-    if (!inheritedOwned) {
-      if (keys.get("api_key") !== OPENCODEX_API_KEY) continue;
-      if (!isLoopbackBaseUrl(keys.get("base_url"))) continue;
-    }
     let hasOwnershipMarker = hasInlineOwnershipMarker(keys.get("extra_headers"));
     // Swallow the entry's OWN sub-tables (`[model.<alias>.extra_headers]`, and after #1756
     // `[[model.<alias>.reasoning_efforts]]`). Grok may re-serialize them non-contiguously,
@@ -591,13 +564,12 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
       }
     }
     const legacyGenerated = isLegacyGeneratedTable(header.segments[1]!, keys);
-    // An inherited model has no per-model marker; its verdict comes from the provider
-    // table it references, which only lands here when that provider proved durable
-    // ownership. A legacy-fingerprint model keeps dev's conservative classification.
-    const ownership: "explicit" | "legacy" = inheritedOwned || hasOwnershipMarker
+    // A marker is durable deletion authority. A legacy-fingerprint model keeps dev's
+    // conservative classification and is migrated only when this write replaces it.
+    const ownership: "explicit" | "legacy" = hasOwnershipMarker
       ? "explicit"
       : "legacy";
-    if (!hasOwnershipMarker && !legacyGenerated && !inheritedOwned) continue;
+    if (!hasOwnershipMarker && !legacyGenerated) continue;
     orphans.push({
       alias: header.segments[1]!,
       modelId,
@@ -1036,6 +1008,7 @@ export function buildGrokManagedBlock(
       `model = ${tomlString(model.id)}`,
       `model_provider = ${tomlString(OPENCODEX_PROVIDER_ID)}`,
       `name = ${tomlString(model.name ?? `OCX ${model.id}`)}`,
+      'extra_headers = { "x-opencodex-grok" = "1" }',
     );
     if (Number.isFinite(model.contextWindow) && (model.contextWindow ?? 0) > 0) {
       lines.push(`context_window = ${model.contextWindow}`);
