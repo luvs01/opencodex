@@ -12,7 +12,7 @@ afterEach(() => {
   }
 });
 
-test("#2792 snapshots a static asset before server framing can outlive the file", async () => {
+test("#2792 shares a stable static asset snapshot and refreshes it after replacement", async () => {
   const guiDist = mkdtempSync(join(tmpdir(), "ocx-gui-static-"));
   temporaryDirectories.push(guiDist);
   writeFileSync(join(guiDist, "index.html"), "<!doctype html>");
@@ -27,4 +27,8 @@ test("#2792 snapshots a static asset before server framing can outlive the file"
   // body must retain the same byte snapshot the HTTP server uses for Content-Length.
   writeFileSync(assetPath, "truncated");
   expect(await response!.text()).toBe(originalAsset);
+
+  const replacementResponse = serveGuiFile("/index.js", guiDist);
+  expect(replacementResponse).not.toBeNull();
+  expect(await replacementResponse!.text()).toBe("truncated");
 });
