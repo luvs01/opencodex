@@ -300,6 +300,21 @@ async function handleCustomRemove(args: string[]): Promise<void> {
   // Deliberately admit the whole matched set rather than narrowing to `exact`: an encoded
   // selector that spans a real collision must still abort below. Removal stays exact-or-refuse.
   const admitted = new Set(rosterMatched?.matched ?? []);
+  // A complete `<provider>/<modelId>` target can also be the literal native id of a
+  // self-namespaced row. The shared resolver intentionally prefers that literal reading, but
+  // removal is destructive: when the provider also has the qualified sibling, refuse both
+  // interpretations and require the row's UUID instead of silently deleting either one.
+  const qualifiedModelId = selectedProvider === undefined
+    ? undefined
+    : target.slice(selectedProvider.length + 1);
+  if (
+    qualifiedModelId
+    && target !== qualifiedModelId
+    && admitted.has(target)
+    && existing.some(model => model.provider === selectedProvider && model.modelId === qualifiedModelId)
+  ) {
+    admitted.add(qualifiedModelId);
+  }
   const matchingIndexes = existing.flatMap((model, index) => {
     if (selectedProvider === undefined) return model.id === target ? [index] : [];
     if (model.provider !== selectedProvider) return [];

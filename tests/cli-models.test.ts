@@ -517,14 +517,7 @@ describe("#2491 the removal selector uses the shared equivalence relation", () =
     }
   });
 
-  /**
-   * A provider may publish a native id that is itself namespaced under its own name, so
-   * `acme` owning `acme/turbo` makes the selector `acme/turbo` name that row exactly while
-   * ALSO reading as the provider-qualified form of a sibling `turbo`. The resolver was called
-   * once per row with a singleton roster, so each row matched its own reading, the command saw
-   * two matches and aborted — the exact native spelling could never remove its own row.
-   */
-  test("a self-namespaced selector removes the row it names exactly", () => {
+  test("a self-namespaced selector refuses a provider-qualified sibling collision", () => {
     const { dir } = freshConfig({
       customModels: [
         { id: "11111111-1111-4111-8111-111111111111", provider: "acme", modelId: "acme/turbo" },
@@ -533,12 +526,11 @@ describe("#2491 the removal selector uses the shared equivalence relation", () =
     });
     try {
       const result = runCli(["models", "remove", "acme/turbo", "--yes"], { OPENCODEX_HOME: dir });
-      expect(result.status).toBe(0);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("ambiguous");
+      expect(result.stderr).toContain("custom model id");
       const config = JSON.parse(readFileSync(join(dir, "config.json"), "utf8"));
-      // The sibling survives: the selector named the native row, not the qualified reading.
-      expect(config.customModels).toEqual([
-        expect.objectContaining({ provider: "acme", modelId: "turbo" }),
-      ]);
+      expect(config.customModels).toHaveLength(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
