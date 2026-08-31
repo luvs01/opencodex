@@ -77,16 +77,22 @@ export class CursorMidstreamEchoObserver {
   private totalLength = 0;
   private disarmed = false;
   private lineDisarmed = false;
-  private corruptionWatch: { finding: MidstreamEchoFinding; remaining: number; window: string } | undefined;
+  private readonly corruptionWatches: Array<{
+    finding: MidstreamEchoFinding;
+    remaining: number;
+    window: string;
+  }> = [];
   private readonly recorded: MidstreamEchoFinding[] = [];
 
   feed(textDelta: string): void {
-    if (this.disarmed && !this.corruptionWatch) return;
+    if (this.disarmed && this.corruptionWatches.length === 0) return;
     let index = 0;
     while (index < textDelta.length) {
       const newline = textDelta.indexOf("\n", index);
       const segment = newline === -1 ? textDelta.slice(index) : textDelta.slice(index, newline);
-      if (this.corruptionWatch) this.watchCorruption(segment + (newline === -1 ? "" : "\n"));
+      if (this.corruptionWatches.length > 0) {
+        this.watchCorruption(segment + (newline === -1 ? "" : "\n"));
+      }
       if (!this.disarmed && !this.lineDisarmed && segment.length > 0) {
         this.lineBuffer += segment;
         if (this.lineBuffer.length > MAX_MIDSTREAM_LINE_INDENT + 32) {
@@ -107,9 +113,7 @@ export class CursorMidstreamEchoObserver {
   }
 
   findings(): readonly MidstreamEchoFinding[] {
-    if (this.corruptionWatch) {
-      this.settleCorruption();
-    }
+    while (this.corruptionWatches.length > 0) this.settleCorruption(0);
     return this.recorded;
   }
 
@@ -134,12 +138,18 @@ export class CursorMidstreamEchoObserver {
           this.lineDisarmed = true;
           return;
         }
-        const finding: MidstreamEchoFinding = {
-          marker,
-          offset: this.lineStartOffset,
-          callIdCorrupt: false,
-        };
-        this.corruptionWatch = { finding, remaining: MIDSTREAM_CORRUPTION_WINDOW, window: "" };
+        if (this.recorded.length + this.corruptionWatches.length < MAX_MIDSTREAM_FINDINGS) {
+          const finding: MidstreamEchoFinding = {
+            marker,
+            offset: this.lineStartOffset,
+            callIdCorrupt: false,
+          };
+          this.corruptionWatches.push({
+            finding,
+            remaining: MIDSTREAM_CORRUPTION_WINDOW,
+            window: "",
+          });
+        }
         this.lineDisarmed = true;
         return;
       }
@@ -150,24 +160,28 @@ export class CursorMidstreamEchoObserver {
   }
 
   private watchCorruption(text: string): void {
-    const watch = this.corruptionWatch;
-    if (!watch) return;
-    const take = Math.min(watch.remaining, text.length);
-    watch.window += text.slice(0, take);
-    watch.remaining -= take;
-    if (watch.remaining <= 0) this.settleCorruption();
+    for (const watch of this.corruptionWatches) {
+      const take = Math.min(watch.remaining, text.length);
+      watch.window += text.slice(0, take);
+      watch.remaining -= take;
+    }
+    let index = 0;
+    while (index < this.corruptionWatches.length) {
+      if (this.corruptionWatches[index]!.remaining <= 0) this.settleCorruption(index);
+      else index += 1;
+    }
   }
 
-  private settleCorruption(): void {
-    const watch = this.corruptionWatch;
+  private settleCorruption(index: number): void {
+    const watch = this.corruptionWatches[index];
     if (!watch) return;
     const window = watch.window;
     watch.finding.callIdCorrupt =
       /fc_[0-9a-f]+[ \t]+mar-/.test(window)
       || /call_id: \S+[ \t]+\S+_0\b/.test(window);
-    if (this.recorded.length < MAX_MIDSTREAM_FINDINGS) this.recorded.push(watch.finding);
+    this.recorded.push(watch.finding);
     // Window text is discarded here; only booleans/offsets survive.
-    this.corruptionWatch = undefined;
+    this.corruptionWatches.splice(index, 1);
   }
 }
 
