@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { saveConfigPreservingClaudeCode } from "../config";
-import { isCodexAccountGenerationLive, readCodexAccountRecord } from "./account-store";
+import {
+  isCodexAccountGenerationLive,
+  readCodexAccountRecord,
+  registerCodexRefreshGenerationHandoff,
+} from "./account-store";
 import { codexAccountLogLabel } from "./account-label";
 import { isCodexAccountPaused } from "./account-pause";
 import { clearCodexAccountPin, codexAccountPriorityLookup, pinnedCodexAccountId } from "./account-priority";
@@ -1012,6 +1016,10 @@ export function handOffThreadAffinityGeneration(
   }
   return handedOff;
 }
+
+// A shared refresh can outlive the request that opened it. Register the affinity
+// handoff with the flight so a detached G -> G+1 commit cannot strand bindings at G.
+registerCodexRefreshGenerationHandoff(handOffThreadAffinityGeneration);
 
 function pruneExpiredThreadAffinities(now: number): void {
   for (const [threadId, affinities] of threadAccountMap) {

@@ -377,6 +377,15 @@ function withCredentialMutationLockSync<T>(fn: () => T): T {
 }
 
 type CodexTokenResult = { accessToken: string; chatgptAccountId: string; generation: number };
+type CodexRefreshGenerationHandoff = (accountId: string, fromGeneration: number, toGeneration: number) => void;
+const refreshGenerationHandoffs = new Set<CodexRefreshGenerationHandoff>();
+
+/** Register process-local state that must follow a credential refresh generation. */
+export function registerCodexRefreshGenerationHandoff(handoff: CodexRefreshGenerationHandoff): () => void {
+  refreshGenerationHandoffs.add(handoff);
+  return () => refreshGenerationHandoffs.delete(handoff);
+}
+
 type CodexRefreshResult = CodexTokenResult & {
   credential?: CodexAccountCredentials;
   /**
@@ -891,6 +900,15 @@ async function resolveCodexToken(
    * committed result, for every waiter, including none.
    */
   const refreshPromise = fetchPromise.then(async (result): Promise<CodexRefreshResult> => {
+    // Generation-dependent completion belongs to the flight, not to its initiating
+    // request. The owner may stop waiting after a disconnect while this detached work
+    // still commits G+1; advance process-local affinities before any waiter observes
+    // the result (and even when there are no surviving waiters).
+    if (result.selfRefreshed) {
+      for (const handoff of refreshGenerationHandoffs) {
+        handoff(id, result.generation - 1, result.generation);
+      }
+    }
     await notePlanFromRefreshedAccessToken(id, result.accessToken, result.generation);
     // One settlement path for the whole flight: the refreshing account, then any dormant alias that
     // adopted the same rotated JWT. An alias holds the identical access token, so a changed
