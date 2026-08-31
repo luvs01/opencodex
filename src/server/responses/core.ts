@@ -5480,6 +5480,14 @@ async function handleResponsesInner(
           translatorBudget,
           ...(options.forceEmptyResponseId ? { responseId: "" } : {}),
           ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
+          onCompletedResponse: (response: Record<string, unknown>) => {
+            rememberResponseState(
+              parsed._rawBody,
+              response,
+              continuationStateForResponse(),
+              responseStateOptions(adapterNeedsForcedContinuation(activeAdapter.name)),
+            );
+          },
         },
       );
       // Same lifetime tracking as every other streaming return in this function: the turn
@@ -5498,12 +5506,16 @@ async function handleResponsesInner(
         },
       );
     }
-    return new Response(
-      JSON.stringify(buildResponseJSON(terminalEvents, parsed._responseModelId ?? parsed.modelId, {
-        translatorBudget,
-      })),
-      { headers: { "Content-Type": "application/json" } },
+    const json = buildResponseJSON(terminalEvents, parsed._responseModelId ?? parsed.modelId, {
+      translatorBudget,
+    });
+    rememberResponseState(
+      parsed._rawBody,
+      json,
+      continuationStateForResponse(),
+      responseStateOptions(adapterNeedsForcedContinuation(activeAdapter.name)),
     );
+    return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
   }
   // One request-scoped transient-retry budget owner, declared here so BOTH the initial send
   // and the later recovery refetches (429, key/account rotation, OAuth replay) share it. A

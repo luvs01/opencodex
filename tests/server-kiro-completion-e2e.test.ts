@@ -637,3 +637,59 @@ describe("Kiro local terminal accounting", () => {
     });
   }
 });
+
+describe("Kiro local terminal continuation", () => {
+  for (const stream of [true, false]) {
+    test(`a local terminal remains available through previous_response_id (stream=${stream})`, async () => {
+      const upstream = scriptedKiroUpstream([completionFrames("Yes — one JavaScript cell, many tool calls.")]);
+      saveConfig(kiroConfig(upstream.server.url.toString()));
+      const proxy = startServer(0);
+      try {
+        const terminal = await originalFetch(new URL("/v1/responses", proxy.url), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "kiro-test/gpt-5.6-sol",
+            stream,
+            store: false,
+            input: [
+              { type: "message", role: "user", content: [{ type: "input_text", text: "what is code mode" }] },
+              {
+                type: "message",
+                role: "assistant",
+                phase: "final_answer",
+                content: [{ type: "output_text", text: "Code mode runs JavaScript that calls tools." }],
+              },
+            ],
+          }),
+        });
+        expect(terminal.status).toBe(200);
+        const terminalBody = await terminal.text();
+        const responseId = stream
+          ? responseEvents(terminalBody).find(event => event.name === "response.completed")?.data.response.id
+          : (JSON.parse(terminalBody) as { id: string }).id;
+        expect(responseId).toMatch(/^resp_/);
+        expect(upstream.requests).toHaveLength(0);
+
+        const followUp = await originalFetch(new URL("/v1/responses", proxy.url), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "kiro-test/gpt-5.6-sol",
+            stream: false,
+            store: false,
+            previous_response_id: responseId,
+            input: "so it batches calls?",
+          }),
+        });
+
+        expect(followUp.status).toBe(200);
+        await followUp.text();
+        expect(upstream.requests).toHaveLength(1);
+      } finally {
+        await proxy.stop(true);
+        upstream.server.stop(true);
+      }
+    });
+  }
+});
