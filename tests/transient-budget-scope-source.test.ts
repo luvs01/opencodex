@@ -21,6 +21,19 @@ const source = (relative: string): string =>
  * omission is visible.
  */
 describe("transient send budget stays request-scoped", () => {
+  test("native chat recovery legs cannot re-arm the transient budget", () => {
+    const chat = source("server/chat-native.ts");
+
+    expect(chat.match(/let transientSendsUsed = 0;/g)).toHaveLength(1);
+    expect(chat).toContain("transientPolicy.attempts - transientSendsUsed");
+    expect(chat).toContain("onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); }");
+
+    // Both the same-target 429 loop and key-pool failover must stop before dispatching a
+    // new leg once the one request-wide send allowance is exhausted.
+    expect(chat.match(/&& transientSendAvailable\(\)/g)).toHaveLength(2);
+    expect(chat).not.toContain("{ attempts: transientPolicy.attempts }");
+  });
+
   test("every transient-retry call site draws from the shared counter", () => {
     const core = source("server/responses/core.ts");
 

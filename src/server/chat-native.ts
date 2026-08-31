@@ -204,6 +204,15 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
+  // Every recovery leg belongs to the same inbound request. Keep the transient send count
+  // outside `send` so 429 retries and key rotation cannot re-arm the configured total budget.
+  let transientSendsUsed = 0;
+  const remainingTransientSends = (): number | null => {
+    const policy = transientRetryPolicyFor(activeProvider);
+    return policy ? Math.max(0, policy.attempts - transientSendsUsed) : null;
+  };
+  const transientSendAvailable = (): boolean => remainingTransientSends() !== 0;
+
   const send = async (request: AdapterRequest, recovery?: "rate-limit-429" | "key-429"): Promise<Response> => {
     try {
       // #2643: opted-in key-auth openai-chat providers retry pre-stream transient statuses on
@@ -232,7 +241,12 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
         {
           abortSignal: upstream.signal,
           label: safeHostLabel(request.url),
-          ...(transientPolicy ? { attempts: transientPolicy.attempts } : {}),
+          ...(transientPolicy
+            ? {
+              attempts: Math.max(1, transientPolicy.attempts - transientSendsUsed),
+              onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); },
+            }
+            : {}),
         },
       );
     } finally {
@@ -245,7 +259,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     response = await send(activeRequest);
     const retryPolicy = rateLimitRetryPolicyFor(activeProvider);
     let retries = 0;
-    while (response.status === 429 && retryPolicy && retries < retryPolicy.attempts) {
+    while (response.status === 429 && retryPolicy && retries < retryPolicy.attempts && transientSendAvailable()) {
       retries += 1;
       for await (const _ of prepareSameTarget429Wait({
         body: response.body,
@@ -255,7 +269,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       if (upstream.signal.aborted) throw upstream.signal.reason;
       response = await send(activeRequest, "rate-limit-429");
     }
-    while (response.status === 429 && hasKeyPoolFailover(activeProvider)) {
+    while (response.status === 429 && hasKeyPoolFailover(activeProvider) && transientSendAvailable()) {
       const rotated = rotateProviderTransportOn429(config, route.providerName, activeProvider, {
         retryAfter: response.headers.get("retry-after"),
         now: Date.now(),
