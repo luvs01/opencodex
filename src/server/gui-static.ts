@@ -18,6 +18,31 @@ const MIME_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
+interface StaticAssetSnapshot {
+  fingerprint: string;
+  blob: Blob;
+}
+
+const staticAssetSnapshots = new Map<string, StaticAssetSnapshot>();
+
+function staticAssetSnapshot(path: string, contentType: string): Blob | null {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile()) return null;
+    const fingerprint = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    const cached = staticAssetSnapshots.get(path);
+    if (cached?.fingerprint === fingerprint) return cached.blob;
+
+    // Blob owns one immutable copy that every response can share. This keeps a response
+    // stable across package replacement without allocating the asset again per request.
+    const blob = new Blob([readFileSync(path)], { type: contentType });
+    staticAssetSnapshots.set(path, { fingerprint, blob });
+    return blob;
+  } catch {
+    return null;
+  }
+}
+
 function findGuiDist(): string | null {
   const candidates = [
     join(import.meta.dir, "..", "..", "gui", "dist"),
@@ -127,10 +152,9 @@ export function serveGuiFile(
   const ext = extname(filePath);
   const contentType = MIME_TYPES[ext] || "application/octet-stream";
   if (ext === ".html") return htmlResponse(filePath, session);
-  // Snapshot bytes before returning the response. Bun.file is lazy: if gui/dist is replaced
-  // after Bun frames the response but before the stream finishes, its Content-Length can
-  // describe the old file while the body comes from the new one (#2792).
-  return new Response(readFileSync(filePath), {
+  const snapshot = staticAssetSnapshot(filePath, contentType);
+  if (!snapshot) return null;
+  return new Response(snapshot, {
     headers: { "Content-Type": contentType, ...browserSecurityHeaders() },
   });
 }
