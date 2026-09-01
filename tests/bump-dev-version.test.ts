@@ -13,6 +13,7 @@ import { decideDevVersion } from "../scripts/bump-dev-version";
  */
 
 const CLI = new URL("../scripts/bump-dev-version.ts", import.meta.url).pathname;
+const WORKFLOW = new URL("../.github/workflows/dev-version-bump.yml", import.meta.url).pathname;
 
 function tempPackageJson(version: string): string {
   const dir = mkdtempSync(join(tmpdir(), "ocx-bump-"));
@@ -32,6 +33,12 @@ function tempPackageJson(version: string): string {
 }
 
 describe("dev version bump rule", () => {
+  test("the idempotency check ignores same-named pull requests from forks", () => {
+    const workflow = readFileSync(WORKFLOW, "utf8");
+    expect(workflow).toContain("--json number,isCrossRepository");
+    expect(workflow).toContain("select(.isCrossRepository == false)");
+  });
+
   test("a stable release moves dev to the next minor", () => {
     // e4a85d134 (2.33.0 -> 2.34.0) and 076ad3036 (2.34.0 -> 2.35.0).
     expect(decideDevVersion("2.36.0", "2.36.0")).toMatchObject({ changed: true, version: "2.37.0" });
