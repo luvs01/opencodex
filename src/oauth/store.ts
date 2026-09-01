@@ -433,6 +433,7 @@ function backupLegacyOnce(): void {
   const backup = `${path}.pre-multiauth`;
   if (!existsSync(path) || existsSync(backup)) return;
   try {
+    recordOwnedConfigPath(getConfigDir(), backup);
     copyFileSync(path, backup);
     try { chmodSync(backup, 0o600); } catch { /* best-effort */ }
   } catch { /* best-effort */ }

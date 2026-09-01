@@ -3446,6 +3446,7 @@ export function backupInvalidConfig(configPath: string): string | null {
   if (!existsSync(configPath)) return null;
   const backupPath = `${configPath}.invalid-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   try {
+    recordOwnedConfigPath(resolveConfigDir(), backupPath);
     copyFileSync(configPath, backupPath);
     try { chmodSync(backupPath, 0o600); } catch { /* best-effort */ }
     return backupPath;
