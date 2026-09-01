@@ -439,6 +439,51 @@ describe("Kiro completion through public server endpoints", () => {
     }
   });
 
+  test("a proxy-recorded final answer does not suppress a sibling conversation", async () => {
+    const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
+    const upstream = scriptedKiroUpstream([
+      completionFrames(deliveredAnswer, "completion-a"),
+      completionFrames("Sibling work completed.", "completion-b"),
+    ]);
+    saveConfig(kiroConfig(upstream.server.url.toString()));
+    const proxy = startServer(0);
+    const headers = {
+      "content-type": "application/json",
+      "x-codex-parent-thread-id": "shared-parent",
+    };
+    try {
+      const first = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { ...headers, session_id: "child-a" },
+        body: JSON.stringify({ model: "kiro-test/gpt-5.6-sol", stream: false, input: "first task" }),
+      });
+      expect(first.status).toBe(200);
+      await first.text();
+
+      const sibling = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { ...headers, session_id: "child-b" },
+        body: JSON.stringify({
+          model: "kiro-test/gpt-5.6-sol",
+          stream: false,
+          input: [
+            { type: "message", role: "user", content: [{ type: "input_text", text: "different task" }] },
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: deliveredAnswer }] },
+          ],
+        }),
+      });
+
+      expect(sibling.status).toBe(200);
+      await sibling.text();
+      // The shared parent is only a correlation qualifier. A cache hit here would return before
+      // build/send and leave this at one request, silently terminating the sibling's work.
+      expect(upstream.requests).toHaveLength(2);
+    } finally {
+      await proxy.stop(true);
+      upstream.server.stop(true);
+    }
+  });
+
   test("a new user request after a proxy-recorded final answer is not suppressed", async () => {
     const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
     const upstream = scriptedKiroUpstream([
