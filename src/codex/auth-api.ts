@@ -128,6 +128,7 @@ import { NativeProfileError } from "./native-profile-types";
 import { WHAM_REQUEST_TIMEOUT_MS } from "./quota-recovery-timing";
 import {
   claimQuotaRecovery,
+  fencePropagatedQuotaRecovery,
   quotaRecoveryTerminalFor,
   releaseQuotaRecovery,
   settleQuotaRecovery,
@@ -1029,6 +1030,9 @@ async function recoverPoolQuotaFrom401(ctx: {
       onSettled: outcome => {
         if (outcome.kind === "resolved") {
           settleQuotaRecovery(accountId, claim.claimId, outcome);
+          for (const alias of outcome.propagatedAliases ?? []) {
+            fencePropagatedQuotaRecovery(alias.id, alias.generation);
+          }
         } else if (outcome.error instanceof TokenRefreshError && isTerminalRefreshError(outcome.error)) {
           // A revoked or expired grant does not become valid on the next poll. Releasing it
           // into backoff would let the following bare 401 find a non-terminal record and
