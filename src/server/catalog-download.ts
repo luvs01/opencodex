@@ -11,6 +11,7 @@
  * copy is the one nobody looks at in the dashboard.
  */
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 
 /**
  * Upper bound for the REMOTE route only.
@@ -35,6 +36,29 @@ export interface SerializedCatalog {
   etag?: string;
   /** Byte length of `body`, present only when `body` is. */
   bytes?: number;
+  /** Remote-only preflight failure; management serialization never sets this. */
+  error?: "too_large";
+}
+
+interface CatalogFileIdentity {
+  key: string;
+  size: number;
+}
+
+let remoteCache: { path: string; identity: string; serialized: SerializedCatalog } | undefined;
+let remoteSerialization: { path: string; identity: string; result: Promise<SerializedCatalog> } | undefined;
+
+function catalogFileIdentity(path: string): CatalogFileIdentity | null {
+  try {
+    const stat = statSync(path, { bigint: true });
+    if (!stat.isFile()) return null;
+    return {
+      key: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`,
+      size: Number(stat.size),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function catalogEtag(body: string): string {
@@ -59,6 +83,46 @@ export async function serializePersistedCatalog(): Promise<SerializedCatalog> {
   const body = JSON.stringify(catalog);
   const bytes = Buffer.byteLength(body, "utf8");
   return { body, etag: catalogEtag(body), bytes };
+}
+
+/**
+ * Serialize the catalog for the remotely reachable route.
+ *
+ * File size is checked before the synchronous reader can materialize it. A
+ * validated file identity caches the expensive parse/stringify/hash result,
+ * and the shared promise limits cache misses to one serialization at a time.
+ */
+export async function serializeRemotePersistedCatalog(): Promise<SerializedCatalog> {
+  const { readCodexCatalogPath } = await import("../codex/catalog");
+  const path = readCodexCatalogPath();
+  const identity = catalogFileIdentity(path);
+  if (!identity) return { body: null };
+  if (identity.size > MAX_REMOTE_CATALOG_BYTES) return { body: null, error: "too_large" };
+  if (remoteCache?.path === path && remoteCache.identity === identity.key) return remoteCache.serialized;
+  if (remoteSerialization) {
+    if (remoteSerialization.path === path && remoteSerialization.identity === identity.key) {
+      return remoteSerialization.result;
+    }
+    await remoteSerialization.result;
+    return serializeRemotePersistedCatalog();
+  }
+
+  const result = (async () => {
+    const serialized = await serializePersistedCatalog();
+    if (serialized.bytes !== undefined && serialized.bytes > MAX_REMOTE_CATALOG_BYTES) {
+      return { body: null, error: "too_large" } as SerializedCatalog;
+    }
+    const after = catalogFileIdentity(path);
+    if (after?.key !== identity.key) return { body: null };
+    if (serialized.body !== null) remoteCache = { path, identity: identity.key, serialized };
+    return serialized;
+  })();
+  remoteSerialization = { path, identity: identity.key, result };
+  try {
+    return await result;
+  } finally {
+    if (remoteSerialization?.result === result) remoteSerialization = undefined;
+  }
 }
 
 /**

@@ -1256,8 +1256,20 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin data-plane request blocked"), req, policy);
         }
-        const { serializePersistedCatalog, persistedCodexVersion, MAX_REMOTE_CATALOG_BYTES } = await import("./catalog-download");
-        const serialized = await serializePersistedCatalog();
+        const { serializeRemotePersistedCatalog, persistedCodexVersion } = await import("./catalog-download");
+        const serialized = await serializeRemotePersistedCatalog();
+        if (serialized.error === "too_large") {
+          return withCors(
+            new Response(JSON.stringify({
+              error: { type: "server_error", code: "catalog_too_large", message: "catalog exceeds the maximum served size" },
+            }), {
+              status: 507,
+              headers: { "content-type": "application/json" },
+            }),
+            req,
+            policy,
+          );
+        }
         if (serialized.body === null) {
           // Built directly rather than through formatErrorResponse: that helper derives
           // `code` from the status and message via classifyError, and these two need stable,
@@ -1270,20 +1282,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               error: { type: "invalid_request_error", code: "catalog_not_found", message: "no materialized catalog is available" },
             }), {
               status: 404,
-              headers: { "content-type": "application/json" },
-            }),
-            req,
-            policy,
-          );
-        }
-        // Size policy belongs to this route, not the shared serializer: the management route
-        // must keep its existing behavior for a catalog of any supported size.
-        if (serialized.bytes !== undefined && serialized.bytes > MAX_REMOTE_CATALOG_BYTES) {
-          return withCors(
-            new Response(JSON.stringify({
-              error: { type: "server_error", code: "catalog_too_large", message: "catalog exceeds the maximum served size" },
-            }), {
-              status: 507,
               headers: { "content-type": "application/json" },
             }),
             req,
