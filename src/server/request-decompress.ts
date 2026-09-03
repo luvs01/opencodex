@@ -1,4 +1,5 @@
-import { gunzipSync, inflateRawSync, inflateSync, zstdDecompressSync } from "node:zlib";
+import { gunzipSync, inflateRawSync, inflateSync } from "node:zlib";
+import * as zlib from "node:zlib";
 import type { TranslatorBudget } from "../lib/translator-budget";
 
 /**
@@ -166,7 +167,11 @@ export function decodeRequestBody(
   const opts = { maxOutputLength: maxBytes };
   let decoded: Uint8Array;
   try {
-    if (encoding === "zstd") decoded = zstdDecompressSync(compressed, opts);
+    if (encoding === "zstd") {
+      decoded = typeof zlib.zstdDecompressSync === "function"
+        ? zlib.zstdDecompressSync(compressed, opts)
+        : Bun.zstdDecompressSync(compressed);
+    }
     else if (encoding === "gzip" || encoding === "x-gzip") decoded = gunzipSync(compressed, opts);
     else if (encoding === "deflate") decoded = inflateDeflateBody(compressed, opts);
     // Multi-codings ("zstd, gzip") and unknown tokens are rejected rather than guessed.
