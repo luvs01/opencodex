@@ -53,7 +53,7 @@ describe("stopProxyGracefully deferral flag", () => {
       readRuntime: () => ({ port: 10100 }),
       fetchFn: (async (url: string | URL | Request) => {
         urls.push(String(url));
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(JSON.stringify({ success: true, sharedTeardown: "performed" }), { status: 200 });
       }) as typeof fetch,
       waitExit: () => true,
       env: {},
@@ -67,7 +67,7 @@ describe("stopProxyGracefully deferral flag", () => {
       readRuntime: () => ({ port: 10100 }),
       fetchFn: (async (url: string | URL | Request) => {
         urls.push(String(url));
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(JSON.stringify({ success: true, sharedTeardown: "deferred" }), { status: 200 });
       }) as typeof fetch,
       waitExit: () => true,
       env: {},
@@ -86,7 +86,7 @@ describe("stopProxyGracefully deferral flag", () => {
       runtimeEndpoint: { hostname: "127.0.0.1", port: 10100 },
       fetchFn: (async (url: string | URL | Request) => {
         urls.push(String(url));
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
+        return new Response(JSON.stringify({ success: true, sharedTeardown: "performed" }), { status: 200 });
       }) as typeof fetch,
       waitExit: () => true,
       env: {},

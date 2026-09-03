@@ -66,10 +66,10 @@ export function gracefulStopHost(hostname: string | undefined): string {
 }
 
 /**
- * Outcome of a graceful stop attempt. `"refused"` is distinct from failure: the proxy answered
- * that it must NOT be stopped from here, so callers must not escalate to a forced kill.
+ * Outcome of a graceful stop attempt. The string results are distinct from transport failure:
+ * the proxy answered and is stopping, so callers must not escalate to a forced kill.
  */
-export type GracefulStopResult = boolean | "refused";
+export type GracefulStopResult = boolean | "refused" | "teardown-unconfirmed";
 
 /** A proxy declined shutdown because a service under another home owns it (HTTP 409). */
 export class ProxyOwnershipRefusedError extends Error {}
@@ -92,6 +92,7 @@ export async function stopProxyGracefully(pid: number, io: GracefulStopIo = {}):
   const token = configuredAdminToken(env.OPENCODEX_HOME?.trim() || undefined, env as NodeJS.ProcessEnv);
   if (token) headers["x-opencodex-api-key"] = token;
   const fetchFn = io.fetchFn ?? fetch;
+  let sharedTeardownConfirmed = false;
   try {
     // `ocx stop` asks the proxy NOT to restore shared client config: it does that itself,
     // after verifying a stopped Task Scheduler did not respawn the proxy (#3008). Letting
@@ -113,6 +114,14 @@ export async function stopProxyGracefully(pid: number, io: GracefulStopIo = {}):
     // still-running service. Report the refusal instead of forcing.
     if (res.status === 409) return "refused";
     if (!res.ok) return false;
+    const body: unknown = await res.json().catch(() => null);
+    const expectedTeardown = io.deferSharedTeardownNonce ? "deferred" : "performed";
+    sharedTeardownConfirmed = !!body
+      && typeof body === "object"
+      && "success" in body
+      && body.success === true
+      && "sharedTeardown" in body
+      && body.sharedTeardown === expectedTeardown;
   } catch {
     return false;
   }
@@ -120,7 +129,8 @@ export async function stopProxyGracefully(pid: number, io: GracefulStopIo = {}):
   // Honor the server's own drain window: /api/stop answers 200 first, then drains for
   // config.shutdownTimeoutMs. Waiting less than that hard-kills mid-drain.
   const exitTimeoutMs = io.exitTimeoutMs ?? drainDeadlineMs();
-  return waitExit(pid, exitTimeoutMs);
+  if (!waitExit(pid, exitTimeoutMs)) return false;
+  return sharedTeardownConfirmed ? true : "teardown-unconfirmed";
 }
 
 function drainDeadlineMs(): number {
@@ -143,6 +153,13 @@ export async function stopProxy(pid: number, io: GracefulStopIo = {}): Promise<b
       "The running proxy refused to stop: a service installed under a different "
       + "CODEX_HOME/OPENCODEX_HOME owns it. Run the stop from that home.",
     );
+  }
+  if (graceful === "teardown-unconfirmed") {
+    // The proxy accepted the request and exited, but did not explicitly confirm that its
+    // assigned shared teardown succeeded. Do not hard-kill an already stopping process;
+    // return false so the caller conservatively retries and reports restoration failures.
+    await waitForStoppedPort(runtime, pid);
+    return false;
   }
   if (graceful) {
     await waitForStoppedPort(runtime, pid);
