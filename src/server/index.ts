@@ -141,6 +141,7 @@ export {
   relaySseWithFailedTail,
   relaySseWithHeartbeat,
   relayWithAbort,
+  relayWithInactivityTimeout,
   responseWithDeferredRequestLog,
   sanitizePassthroughHeaders,
 } from "./relay";

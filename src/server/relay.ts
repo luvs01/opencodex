@@ -115,6 +115,71 @@ export function relayWithAbort(
   });
 }
 
+/**
+ * Bound the time an upstream body may remain silent after its headers arrive.
+ * Bun's fetch idle timeout is disabled for slow providers, so every direct
+ * passthrough body must carry the configured application-level replacement.
+ */
+export function relayWithInactivityTimeout(
+  body: ReadableStream<Uint8Array>,
+  upstream: AbortController,
+  timeoutMs: number,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+
+  const clearTimer = () => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+  };
+  const armTimer = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    clearTimer();
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const reason = new DOMException("Upstream response body stalled", "TimeoutError");
+      upstream.abort(reason);
+      reader.cancel(reason).catch(() => {});
+      try { controller.error(reason); } catch { /* stream already torn down */ }
+    }, timeoutMs);
+    (timer as { unref?: () => void }).unref?.();
+  };
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      armTimer(controller);
+    },
+    async pull(controller) {
+      if (settled) return;
+      try {
+        const { done, value } = await reader.read();
+        if (settled) return;
+        if (done) {
+          settled = true;
+          clearTimer();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+        armTimer(controller);
+      } catch (error) {
+        if (settled) return;
+        settled = true;
+        clearTimer();
+        try { controller.error(error); } catch { /* stream already torn down */ }
+      }
+    },
+    cancel(reason) {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      upstream.abort(reason);
+      reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
 export function buildFailedTailPayload(err: unknown): string {
   const translatorOverflow = isTranslatorBudgetExceededError(err);
   const message = (translatorOverflow

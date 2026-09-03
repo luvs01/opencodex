@@ -221,6 +221,7 @@ import {
 import { slugsEquivalent } from "../../providers/slug-codec";
 import { applyOpenAiVirtualModel, resolveOpenAiCompactModel } from "../../providers/openai-virtual-models";
 import { isUsageDebugEnabled } from "../../usage/debug";
+import { resolveStallTimeoutSec } from "../../stall-timeout";
 import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "../request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
 import {
@@ -297,6 +298,7 @@ import {
   markNativePassthroughSseResponse,
   relaySseWithFailedTail,
   relayWithAbort,
+  relayWithInactivityTimeout,
   sanitizePassthroughHeaders,
 } from "../relay";
 import {
@@ -4686,15 +4688,20 @@ async function handleResponsesInner(
         route.provider,
         route.modelId,
       );
+      const guardedPassthroughBody = relayWithInactivityTimeout(
+        upstreamResponse.body,
+        upstream,
+        resolveStallTimeoutSec(config.stallTimeoutSec) * 1000,
+      );
       const passthroughSseBody = terminalRepairPolicy
         ? relayResponsesSseWithTerminalRepair(
-          upstreamResponse.body,
+          guardedPassthroughBody,
           upstream,
           terminalRepairPolicy,
           translatorBudget,
           options.responsesTerminalRepairScheduler,
         )
-        : upstreamResponse.body;
+        : guardedPassthroughBody;
       const repairConfig = route.provider.responsesItemIdRepair;
       const snapshotRepairEnabled = hasResponsesSnapshotRepair(route.provider.responsesSnapshotRepair);
       const githubCopilotRepairEnabled = route.providerName === "github-copilot";
@@ -5079,7 +5086,14 @@ async function handleResponsesInner(
     // An unclassified passthrough body is relayed directly and has no bounded completion observer;
     // use the same non-error-status success boundary as SSE instead of retaining per-stream state.
     commitReasoningReplayServingRoute();
-    const body = relayWithAbort(upstreamResponse.body, upstream);
+    const guardedBody = upstreamResponse.body
+      ? relayWithInactivityTimeout(
+        upstreamResponse.body,
+        upstream,
+        resolveStallTimeoutSec(config.stallTimeoutSec) * 1000,
+      )
+      : null;
+    const body = relayWithAbort(guardedBody, upstream);
     const turnAc = new AbortController();
     const tracked = body ? trackStreamLifetime(body, turnAc, undefined, options.turnAdmissionLease) : null;
     return new Response(tracked, {
