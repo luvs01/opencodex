@@ -146,29 +146,18 @@ export function cursorToolChoiceAliases(tool: Pick<OcxTool, "namespace" | "name"
   return [...aliases];
 }
 
-function catalogHasBareCodexShellBridge(
-  catalog: readonly Pick<OcxTool, "namespace" | "name">[],
-): boolean {
-  return catalog.some(isBareCodexShellBridgeTool);
-}
-
 /**
- * Catalog-aware tool_choice matching for Cursor.
- * When a bare Codex shell bridge is in the catalog, raw `shell_command` / `exec_command`
- * choices select only that bridge (never a namespaced remote with the same raw name).
- * When no bare bridge exists, raw bridge names may select a namespaced tool by raw name.
+ * Tool-choice matching for Cursor.
+ * Raw `shell_command` / `exec_command` choices select only a bare Codex shell bridge
+ * (never a namespaced remote with the same raw name), and fail closed when absent.
  * Explicit wire names (`mcp__remote__exec_command`) always match the namespaced tool.
  */
 function cursorToolChoiceMatches(
   tool: Pick<OcxTool, "namespace" | "name">,
   choiceName: string,
-  catalog: readonly Pick<OcxTool, "namespace" | "name">[],
 ): boolean {
   if (isCodexShellBridgeToolName(choiceName)) {
-    if (catalogHasBareCodexShellBridge(catalog)) {
-      return isBareCodexShellBridgeTool(tool);
-    }
-    return tool.name === choiceName || cursorToolWireName(tool) === choiceName;
+    return isBareCodexShellBridgeTool(tool);
   }
   if (tool.name === choiceName) return true;
   if (cursorToolChoiceAliases(tool).includes(choiceName)) return true;
@@ -608,14 +597,14 @@ export function cursorShellBridgeArgsValid(
 export function cursorToolAllowedByChoice(
   tool: Pick<OcxTool, "namespace" | "name">,
   toolChoice: OcxRequestOptions["toolChoice"] | undefined,
-  catalog: readonly Pick<OcxTool, "namespace" | "name">[] = [tool],
+  _catalog: readonly Pick<OcxTool, "namespace" | "name">[] = [tool],
 ): boolean {
   if (!toolChoice || toolChoice === "auto" || toolChoice === "required") return true;
   if (toolChoice === "none") return false;
   if ("allowedTools" in toolChoice) {
-    return toolChoice.allowedTools.some(choiceName => cursorToolChoiceMatches(tool, choiceName, catalog));
+    return toolChoice.allowedTools.some(choiceName => cursorToolChoiceMatches(tool, choiceName));
   }
-  return cursorToolChoiceMatches(tool, toolChoice.name, catalog);
+  return cursorToolChoiceMatches(tool, toolChoice.name);
 }
 
 function quotedNames(names: readonly string[]): string {
