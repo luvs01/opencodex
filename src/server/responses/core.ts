@@ -284,6 +284,7 @@ import {
   conversationIdFromResponsesRequest,
   normalizeLogConversationId,
   reasoningReplayConversationIdFromResponsesRequest,
+  sessionLaneIdFromRequest,
   sessionIdHeaderFromRequest,
 } from "../request-log-conversation";
 import type { AttemptRecoveryKind } from "../../usage/log";
@@ -2858,7 +2859,6 @@ async function handleResponsesInner(
     threadIdHeader: req.headers.get("thread-id"),
     cursorConversationId: parsed._cursorConversationId,
   });
-  bindTurnTerminationScope(parsed, resolvedConversationId);
   const rememberKiroDeliveredFinalAnswer = (adapterName: string, response: unknown): void => {
     if (adapterName === "kiro") rememberDeliveredFinalAnswer(parsed, response);
   };
@@ -3506,6 +3506,26 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
+  if (adapter.name === "kiro") {
+    // A log conversation deliberately coalesces a parent's parallel subagents, but a delivered
+    // final answer may suppress work only for the exact child and serving identity that emitted it.
+    // Hash the composite before binding so no caller, account, or route identifier is retained.
+    const exactConversation = sessionLaneIdFromRequest(req.headers)
+      ?? normalizeLogConversationId(parsed._cursorConversationId);
+    const admissionIdentity = options.admission?.kind === "configured"
+      ? `configured:${options.admission.keyId}`
+      : options.admission?.kind;
+    const servingAccount = replayOAuthCredentialSnapshot?.accountId ?? codexLogAccountId(authCtx);
+    bindTurnTerminationScope(parsed, exactConversation
+      ? normalizeLogConversationId(JSON.stringify([
+        exactConversation,
+        admissionIdentity,
+        route.providerName,
+        route.modelId,
+        servingAccount,
+      ]))
+      : undefined);
+  }
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
