@@ -42,6 +42,7 @@ import type { AdapterFetchContext, AdapterRequest } from "./base";
 import { extractKiroImages, normalizeKiroImages, type KiroImage } from "./kiro-images";
 import { sniffImageDimensions } from "./anthropic-image-guard";
 import { fetchKiroWithRetry, noteKiroTransientThrottle } from "./kiro-retry";
+import { readDisplaySafeErrorPayloadText } from "./upstream-http-error";
 import { convertKiroToolContext } from "./kiro-tools";
 import { normalizeEmptyExecToolResultText } from "./exec-tool-result-normalize";
 import { identifyRoutedModel } from "./identity";
@@ -833,6 +834,7 @@ function createKiroAttemptRetention(budget: TranslatorBudget): KiroAttemptRetent
 
 interface KiroFallbackAttempt {
   response: Response;
+  abortSignal?: AbortSignal;
   inputTokens: number;
   contextInputEstimate: number;
   nameMap: Map<string, string>;
@@ -1799,7 +1801,7 @@ export async function* parseKiroStream(
     firstResult.releaseRetained();
     fallback.releaseRequestBody?.();
     if (!fallback.response.ok) {
-      const payload = await fallback.response.text().catch(() => "");
+      const payload = await readDisplaySafeErrorPayloadText(fallback.response, fallback.abortSignal);
       const failure = classifyKiroHttpError(fallback.response.status, fallback.response.headers, payload);
       yield {
         type: "error",
@@ -2025,6 +2027,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       });
       return {
         response,
+        abortSignal: requestAbortSignal,
         inputTokens: retry.inputTokens,
         contextInputEstimate: retry.contextInputEstimate,
         nameMap: retry.nameMap,
