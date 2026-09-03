@@ -4,11 +4,6 @@
  */
 import { readJsonIfOk } from "../../fetch-json";
 
-export interface CursorSeen {
-  at: number;
-  userAgent: string;
-}
-
 export interface CursorModelExpectation {
   id: string;
   reasoning: string[] | null;
@@ -19,7 +14,6 @@ export interface CursorIntegrationStatus {
   privateInference: { installed: boolean; path: string | null; version: string | null };
   regularCursor: { installed: boolean; path: string | null };
   gateway: { baseUrl: string; apiKeyMode: "credential" | "placeholder"; placeholder: string };
-  lastSeen: CursorSeen | null;
   models: CursorModelExpectation[];
   guideUrl: string;
 }
@@ -36,6 +30,3 @@ export async function loadCursorIntegrationStatus(apiBase: string, signal?: Abor
     return null;
   }
 }
-
-/** 24h is the window inside which a Cursor request counts as "connected". */
-export const CURSOR_SEEN_WINDOW_MS = 24 * 60 * 60 * 1000;

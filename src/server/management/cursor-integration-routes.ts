@@ -5,12 +5,10 @@
  * this proxy: its settings live in a SQLite database the running app rewrites and its API key
  * in the OS keychain, both out of bounds for opencodex. So this route only answers the three
  * questions the dashboard needs — which Cursor builds are installed, what to paste into the
- * gateway form, and whether a Cursor client has actually called `/v1/models` since the proxy
- * started — plus which active models will show Cursor's Reasoning and Context controls.
+ * gateway form, and which active models will show Cursor's Reasoning and Context controls.
  */
 import { readRuntimePort } from "../../config/process-state";
 import { filterCatalogVisibleModels, nativeContextLimits, nativeOpenAiContextTier, uniqueCatalogModelsForRawPublicList, visibleNativeSlugs } from "../../codex/catalog";
-import { cursorLastSeen, type CursorSeen } from "../../integrations/cursor-seen";
 import { detectCursorInstalls, type CursorInstall } from "../../integrations/cursor-detect";
 import { configuredApiAuthToken, isApiAuthRequired, jsonResponse } from "../auth-cors";
 import { fetchAllModels } from "../management-api";
@@ -24,7 +22,6 @@ export interface CursorIntegrationStatus {
   privateInference: { installed: boolean; path: string | null; version: string | null };
   regularCursor: { installed: boolean; path: string | null };
   gateway: { baseUrl: string; apiKeyMode: "credential" | "placeholder"; placeholder: string };
-  lastSeen: CursorSeen | null;
   models: Array<{
     id: string;
     reasoning: string[] | null;
@@ -83,7 +80,6 @@ export async function buildCursorIntegrationStatus(
       apiKeyMode,
       placeholder: CURSOR_GATEWAY_PLACEHOLDER_KEY,
     },
-    lastSeen: cursorLastSeen(),
     models,
     guideUrl: CURSOR_GUIDE_URL,
   };

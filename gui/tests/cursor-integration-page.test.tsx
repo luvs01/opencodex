@@ -32,7 +32,6 @@ function payload(overrides: Partial<CursorIntegrationStatus> = {}): CursorIntegr
     privateInference: { installed: true, path: "/Applications/Cursor Private Inference.app", version: "3.18.25" },
     regularCursor: { installed: true, path: "/Applications/Cursor.app" },
     gateway: { baseUrl: "http://127.0.0.1:10100/v1", apiKeyMode: "placeholder", placeholder: "opencodex" },
-    lastSeen: null,
     models: [
       { id: "gpt-5.6-sol", reasoning: ["low", "medium", "high", "xhigh"], context: { defaultWindow: 272_000, longWindow: 922_000 } },
       { id: "kimi/k3", reasoning: null, context: null },
@@ -111,29 +110,6 @@ test("reads its own status route and renders the gateway values with copy button
   expect(text).toContain("/Applications/Cursor Private Inference.app");
   const copies = Array.from(container.querySelectorAll("button")).filter(button => (button.textContent ?? "").trim() === "Copy");
   expect(copies.length).toBe(2);
-});
-
-test("a never-seen install tells the user to press Refresh model list", async () => {
-  await mount();
-  expect(textOf()).toContain("Refresh model list in Cursor");
-  expect(container.querySelector("[data-seen='false']")).not.toBeNull();
-});
-
-test("a recent request renders the relative time and the user agent", async () => {
-  statusResponse = () => json(payload({ lastSeen: { at: Date.now() - 3 * 60_000, userAgent: "Cursor/3.18.25" } }));
-  await mount();
-  const text = textOf();
-  expect(text).toContain("Cursor/3.18.25");
-  expect(text).toContain("3m ago");
-  expect(container.querySelector("[data-seen='true'] .badge-green")).not.toBeNull();
-});
-
-test("a stale request keeps the timestamp but drops the green badge", async () => {
-  statusResponse = () => json(payload({ lastSeen: { at: Date.now() - 3 * 86_400_000, userAgent: "Cursor/3.18.25" } }));
-  await mount();
-  expect(textOf()).toContain("3d ago");
-  expect(container.querySelector("[data-seen='true'] .badge-green")).toBeNull();
-  expect(container.querySelector("[data-seen='true'] .badge-muted")).not.toBeNull();
 });
 
 test("regular Cursor alone gets the tunnel explanation, not a gateway promise", async () => {
@@ -273,17 +249,12 @@ test("overview: an unreadable source is unknown, not 'not installed'", () => {
   expect(row.toggle).toBeNull();
 });
 
-test("overview: installed but never seen is absent; a recent request is current and applied", () => {
+test("overview: an installed Cursor remains unapplied because its configuration cannot be verified", () => {
   const idle = cursorRow(payload());
   expect(idle.state).toBe("absent");
   expect(idle.installed).toBe(true);
   expect(idle.applied).toBe(false);
-  expect(idle.detailKey).toBe("integrations.detail.cursorNeverSeen");
-
-  const seen = cursorRow(payload({ lastSeen: { at: Date.now() - 60_000, userAgent: "Cursor/3.18.25" } }));
-  expect(seen.state).toBe("current");
-  expect(seen.applied).toBe(true);
-  expect(seen.detailKey).toBe("integrations.detail.cursorSeen");
+  expect(idle.detailKey).toBeNull();
 
   const missing = cursorRow(payload({ privateInference: { installed: false, path: null, version: null } }));
   expect(missing.state).toBe("not-installed");
