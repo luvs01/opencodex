@@ -280,6 +280,18 @@ describe("ocx integration native", () => {
     });
   });
 
+  test("cursor reads its dedicated status route", async () => {
+    const { calls, deps } = harness(() => ({ json: { privateInference: { installed: true } } }));
+    const cap = capture();
+    try { await handleIntegrationCommand(["native", "cursor", "--json"], deps); } finally { cap.restore(); }
+    expect(calls).toEqual([{
+      method: "GET",
+      path: "/api/native-integrations/cursor",
+      body: undefined,
+    }]);
+    expect(cap.out.join("\n")).toContain('"privateInference"');
+  });
+
   test("an unknown client and a missing on/off are both refused locally", async () => {
     for (const argv of [["native", "emacs", "on"], ["native", "codex"], ["native", "codex", "maybe"]]) {
       const { calls, deps } = harness(() => ({ json: { ok: true } }));
