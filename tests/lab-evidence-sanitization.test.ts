@@ -232,14 +232,13 @@ describe("SEC-02 sanitizer boundary", () => {
   });
 
   test("marker confidence decides how much context is trusted", () => {
-    // STRONG markers — resolver and socket errors, `host=`, `connect to` —
-    // name a destination by construction, so even a bare word is a host.
+    // STRONG resolver and socket markers name a destination by construction,
+    // so even a bare word is a host.
     expect(sanitizeDiagnostic("dial tcp localhost:11434: connect: refused"))
       .toBe("dial tcp [host]:11434: connect: refused");
     expect(sanitizeDiagnostic("getaddrinfo ENOTFOUND redis")).toBe("getaddrinfo ENOTFOUND [host]");
-    // `connect to` was demoted to a weak marker: it reads as English too often
-    // (`Unable to connect to your account`). Without a port it no longer
-    // licenses a bare name — a documented limit, asserted below.
+    // `connect to` reads as English too often to license a bare word on its own
+    // (`Unable to connect to your account`); a failure term disambiguates it.
     // WEAK markers appear in prose, so a dotted namespace after one survives.
     expect(sanitizeDiagnostic("upstream provider.metric.p95 exceeded"))
       .toBe("upstream provider.metric.p95 exceeded");
@@ -292,16 +291,16 @@ describe("SEC-02 sanitizer boundary", () => {
       .toBe("connect to [host] port 8080 failed");
   });
 
-  test("natural-language connect-to prose is left alone", () => {
-    // `connect to` reads as English far more often than as a destination, so
-    // it no longer licenses a bare word. The cost is that `connect to gateway`
-    // is not redacted; that limit is documented and asserted here so it cannot
-    // change silently.
+  test("connect-to failures redact destinations without consuming prose", () => {
+    // `connect to` reads as English far more often than as a destination. A
+    // following failure term supplies network context for a bare destination,
+    // while connective prose remains intact.
     expect(sanitizeDiagnostic("Unable to connect to your account. Please retry."))
       .toBe("Unable to connect to your account. Please retry.");
     expect(sanitizeDiagnostic("failed to connect to the upstream service"))
       .toBe("failed to connect to the upstream service");
-    expect(sanitizeDiagnostic("connect to gateway failed")).toBe("connect to gateway failed");
+    expect(sanitizeDiagnostic("connect to gateway failed")).toBe("connect to [host] failed");
+    expect(sanitizeDiagnostic("connecting to redis timed out")).toBe("connecting to [host] timed out");
   });
 
   test("an internationalized domain does not preserve the address", () => {
