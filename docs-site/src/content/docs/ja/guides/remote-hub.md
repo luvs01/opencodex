@@ -17,7 +17,7 @@ ocx sync
 
 発行されたキーは所有者だけが読める `service-api-token` に保存され、`config.json` には入りません。接続中の使用量は hub 側で同じ `apiKeyId` に絞り込まれ、切断後はローカル保存分を表示します。両者はミラーリングされません。
 
-管理トークンは通常の管理だけに使え、同意セッションを作ることは永久にできません。同意操作にはサーバー発行の `gui-session`、一致する Origin、CSRF が必要です。`Tailscale-User-Login` は専用管理リスナーでのみ信頼し、許可する ID を `remoteGui.allowedTailscaleUsers` に正確に設定します。
+管理トークンは通常の管理だけに使え、同意セッションを作ることは永久にできません。同意操作にはサーバー発行の `gui-session`、一致する Origin、CSRF が必要です。Loopback TCP 管理入口は `Tailscale-User-Login` を信頼せず、リモートブラウザーセッションには一度限りのペアリングを使います。
 
 ## サービスと Tailscale Serve
 
@@ -27,7 +27,6 @@ ocx config set hostname 100.64.0.10
 ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 ocx config set corsAllowOrigins '["http://localhost:10100"]'
 ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
-ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
 export OPENCODEX_API_AUTH_TOKEN="$(openssl rand -hex 32)"
 ocx service install
 ```

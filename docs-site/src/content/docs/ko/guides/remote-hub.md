@@ -28,7 +28,7 @@ ocx sync
 - 프로바이더/OAuth 인증 정보는 허브 밖으로 복사하지 마세요.
 - 데이터 키는 `service-api-token` 또는 `OCX_API_TOKEN_FILE`로 전달하며 관리 권한이 없습니다.
 - 관리자 토큰은 일반 관리 작업만 할 수 있습니다. 브라우저 동의 세션을 만들거나 저장소 Star 같은 동의 작업을 승인할 수는 없습니다. 그런 작업에는 서버가 발급한 `gui-session`, 일치하는 Origin, CSRF 토큰이 필요합니다.
-- `Tailscale-User-Login`은 별도 관리 리스너에서만 신뢰합니다. 공개 리스너의 같은 헤더는 무시합니다. `remoteGui.allowedTailscaleUsers`에는 허용할 로그인 ID를 정확히 적으세요.
+- 루프백 TCP 관리 리스너는 `Tailscale-User-Login`을 신뢰하지 않습니다. 원격 브라우저 세션은 일회용 pairing으로 생성합니다.
 
 ## systemd 또는 launchd
 
@@ -38,7 +38,6 @@ ocx config set hostname 100.64.0.10
 ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 ocx config set corsAllowOrigins '["http://localhost:10100"]'
 ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
-ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
 export OPENCODEX_API_AUTH_TOKEN="$(openssl rand -hex 32)"
 ocx service install
 ocx service status
