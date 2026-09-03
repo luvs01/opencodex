@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { gracefulStopHost, stopProxyGracefully } from "../src/lib/process-control";
 
 function okResponse(): Response {
-  return new Response(JSON.stringify({ success: true }), { status: 200 });
+  return new Response(JSON.stringify({ success: true, sharedTeardown: "performed" }), { status: 200 });
 }
 
 describe("gracefulStopHost", () => {
@@ -105,5 +105,34 @@ describe("stopProxyGracefully", () => {
       env: {},
     });
     expect(noExit).toBe(false);
+  });
+
+  test("does not treat process exit as proof that shared teardown succeeded", async () => {
+    for (const body of [
+      { success: false, sharedTeardown: "performed" },
+      { success: true },
+    ]) {
+      const result = await stopProxyGracefully(7, {
+        readRuntime: () => ({ port: 10100 }),
+        fetchFn: (async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch,
+        waitExit: () => true,
+        env: {},
+      });
+      expect(result).toBe("teardown-unconfirmed");
+    }
+  });
+
+  test("accepts an explicitly confirmed deferred teardown", async () => {
+    const result = await stopProxyGracefully(7, {
+      readRuntime: () => ({ port: 10100 }),
+      fetchFn: (async () => new Response(JSON.stringify({
+        success: true,
+        sharedTeardown: "deferred",
+      }), { status: 200 })) as typeof fetch,
+      waitExit: () => true,
+      env: {},
+      deferSharedTeardownNonce: "owned-receipt",
+    });
+    expect(result).toBe(true);
   });
 });
