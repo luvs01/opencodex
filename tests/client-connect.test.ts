@@ -12,7 +12,13 @@ import {
   issueClientKey,
   normalizeHubOrigin,
 } from "../src/client/hub-client";
+import { commitClientConnection } from "../src/client/state";
 import { handleConnectCommand } from "../src/cli/connect";
+import {
+  getDefaultConfig,
+  saveConfig,
+  setPersistedConfigMutationBeforeLockForTests,
+} from "../src/config";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -285,6 +291,51 @@ function runTransactionScenario(stage: "success" | "catalog" | "preflight" | "co
 }
 
 describe("connect transaction and offline disconnect", () => {
+  test("fresh connect rebases onto a config created before bootstrap lock acquisition", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-client-bootstrap-race-"));
+    const previous = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = home;
+    try {
+      const winner = getDefaultConfig();
+      winner.port = 24444;
+      winner.hostname = "127.0.0.2";
+      const admissionKey = `ocx_data_${"a".repeat(40)}`;
+      winner.apiKeys = [{
+        id: "preserved-key",
+        name: "Preserved admission key",
+        key: admissionKey,
+        createdAt: "2026-08-28T00:00:00.000Z",
+      }];
+      setPersistedConfigMutationBeforeLockForTests(() => saveConfig(winner));
+
+      expect(commitClientConnection({
+        serverUrl: "https://hub.example.test",
+        managementUrl: "https://hub.example.test",
+        managementTransport: "direct",
+        selectedClients: ["claude"],
+        tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+        apiKeyId: "client-key-1",
+        tokenFingerprint: "fingerprint",
+        protocolVersion: 1,
+        connectedAt: "2026-08-28T00:00:00.000Z",
+      })).toBe("committed");
+
+      const persisted = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+      expect(persisted).toMatchObject({
+        port: 24444,
+        hostname: "127.0.0.2",
+        apiKeys: [{ id: "preserved-key", key: admissionKey }],
+        runtimeRole: "client",
+        client: { apiKeyId: "client-key-1" },
+      });
+    } finally {
+      setPersistedConfigMutationBeforeLockForTests(null);
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
+      removeTreeWithRetry(home);
+    }
+  });
+
   test("commits key id/state last, zeroes authority, and disconnects with the hub offline", () => {
     const run = runTransactionScenario("success");
     try {

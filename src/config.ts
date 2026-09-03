@@ -3000,8 +3000,19 @@ export type PersistedConfigMutationOutcome<T> =
   | { status: "committed" | "unchanged"; value: T }
   | { status: "unavailable"; reason: "missing" | "invalid" | "conflict" };
 
+export type PersistedConfigMutationOptions = {
+  /** Seed a genuinely absent config while holding the shared mutation lock. */
+  createIfMissing?: () => OcxConfig;
+};
+
 const CONFIG_MUTATION_MAX_REBASE_ATTEMPTS = 3;
 let persistedConfigMutationBeforeCommitForTests: (() => void) | null = null;
+let persistedConfigMutationBeforeLockForTests: (() => void) | null = null;
+
+/** Test-only one-shot seam: inject a competing creation after observation, before lock acquisition. */
+export function setPersistedConfigMutationBeforeLockForTests(hook: (() => void) | null): void {
+  persistedConfigMutationBeforeLockForTests = hook;
+}
 
 /** Test-only one-shot seam: inject a competing mutation after the first decision, before freshness revalidation. */
 export function setPersistedConfigMutationBeforeCommitForTests(hook: (() => void) | null): void {
@@ -3017,22 +3028,35 @@ function unavailableConfigMutationReason(snapshot: ConfigFileSnapshot): "missing
  * serialized; the callback is rerun on the newest snapshot so observed direct byte changes rebase
  * and credential predicates are re-evaluated immediately before the atomic commit. A writer that
  * ignores the coordinator can still change bytes after the final check because the filesystem has
- * no portable conditional rename. Missing or malformed config always fails closed and is never
- * recreated from a prior snapshot.
+ * no portable conditional rename. Malformed config always fails closed. Callers may explicitly
+ * seed a missing config; the factory and mutation then run under this same transaction.
  */
 export function mutatePersistedConfig<T>(
   mutate: (config: OcxConfig) => PersistedConfigMutation<T>,
+  options?: PersistedConfigMutationOptions,
 ): PersistedConfigMutationOutcome<T> {
   // Avoid creating/opening the coordinator database for a read-path update that already knows
   // there is no valid config. The same check runs again under the transaction for authority.
   const observed = readConfigFileSnapshot();
   if (observed.diagnostics.source !== "file" || observed.raw === undefined) {
-    return { status: "unavailable", reason: unavailableConfigMutationReason(observed) };
+    const reason = unavailableConfigMutationReason(observed);
+    if (reason !== "missing" || !options?.createIfMissing) {
+      return { status: "unavailable", reason };
+    }
   }
+  const beforeLockHook = persistedConfigMutationBeforeLockForTests;
+  persistedConfigMutationBeforeLockForTests = null;
+  beforeLockHook?.();
   return withConfigMutationLockSync(() => {
     let base = readConfigFileSnapshot();
     for (let attempt = 0; attempt < CONFIG_MUTATION_MAX_REBASE_ATTEMPTS; attempt += 1) {
       if (base.diagnostics.source !== "file" || base.raw === undefined) {
+        if (unavailableConfigMutationReason(base) === "missing" && options?.createIfMissing) {
+          const seeded = options.createIfMissing();
+          const result = mutate(seeded);
+          if (persistConfigUnlocked(seeded)) bumpGenerationForCooperatingConfigWrite();
+          return { status: "committed", value: result.value };
+        }
         return { status: "unavailable", reason: unavailableConfigMutationReason(base) };
       }
 
