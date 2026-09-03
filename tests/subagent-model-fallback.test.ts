@@ -187,6 +187,15 @@ describe("subagent model fallback chain", () => {
     const selected = selectAvailableSubagentModel(
       "gpt-5.6-sol",
       cfg({
+        providers: {
+          ...cfg().providers,
+          "missing-provider": {
+            adapter: "openai-chat",
+            apiKey: "test",
+            baseUrl: "https://example.invalid",
+            disabled: true,
+          },
+        },
         subagentModelFallback: [
           "missing-provider/does-not-exist",
           "kimi/k3",
@@ -1008,24 +1017,42 @@ describe("subagent model fallback chain", () => {
     });
   });
 
-  test("selectAvailableSubagentModel allows raw slash model ids without provider namespaces", () => {
+  test("selectAvailableSubagentModel routes raw vendor model ids through the default provider", () => {
     resetSubagentModelFallbackStateForTests();
-    // Health-block the primary model only. A raw vendor/model id still routes through the
-    // default provider; it must remain selectable (not rejected as an unknown namespace).
-    noteSubagentModelFailure("gpt-5.6-sol", "429", cfg());
+    const config = cfg({
+      providers: {
+        ...cfg().providers,
+        openrouter: {
+          adapter: "openai-chat",
+          apiKey: "test",
+          baseUrl: "https://openrouter.ai/api/v1",
+        },
+      },
+      defaultProvider: "openrouter",
+      subagentModelFallback: [
+        "meta-llama/llama-3.1-70b-instruct",
+        "mistralai/mistral-large-latest",
+      ],
+    });
+
+    // Health-block the primary model only. Raw vendor/model ids still route through the
+    // default provider; they must not be mistaken for unconfigured provider namespaces.
+    noteSubagentModelFailure("gpt-5.6-sol", "429", config);
     const selected = selectAvailableSubagentModel(
       "gpt-5.6-sol",
-      cfg({
-        subagentModelFallback: [
-          "anthropic/claude-sonnet-4-6",
-          "kimi/k3",
-        ],
-      }),
+      config,
     );
     expect(selected).toEqual({
-      model: "anthropic/claude-sonnet-4-6",
+      model: "meta-llama/llama-3.1-70b-instruct",
       rewritten: true,
       skipped: ["gpt-5.6-sol"],
+    });
+
+    noteSubagentModelFailure("meta-llama/llama-3.1-70b-instruct", "429", config);
+    expect(selectAvailableSubagentModel("gpt-5.6-sol", config)).toEqual({
+      model: "mistralai/mistral-large-latest",
+      rewritten: true,
+      skipped: ["gpt-5.6-sol", "meta-llama/llama-3.1-70b-instruct"],
     });
   });
 
