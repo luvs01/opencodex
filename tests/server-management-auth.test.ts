@@ -977,7 +977,7 @@ describe("management and data-plane credential separation", () => {
     }), httpConfig, state, { trustedTailscaleIngress: true, now })).toBeNull();
   });
 
-  test("the live listener trusts Tailscale identity only on hub management ingress", async () => {
+  test("the live management listener does not trust caller-supplied Tailscale identity", async () => {
     const managementPort = await findAvailablePort(0, "127.0.0.1");
     const publicPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: managementPort });
     const config = hubConfig();
@@ -994,44 +994,9 @@ describe("management and data-plane credential separation", () => {
       const spoofedPublic = await fetch(new URL("/opencodex-session", server.url), { headers });
       expect(spoofedPublic.status).toBe(401);
 
-      const wrongUser = await fetch(`http://127.0.0.1:${managementPort}/opencodex-session`, {
-        headers: { ...headers, "Tailscale-User-Login": "mallory@example.test" },
-      });
-      expect(wrongUser.status).toBe(401);
-
-      const issued = await fetch(`http://127.0.0.1:${managementPort}/opencodex-session`, { headers });
-      expect(issued.status).toBe(200);
-      const html = await issued.text();
-      const token = /name="opencodex-session-token" content="([^"]+)"/.exec(html)?.[1];
-      expect(token).toBeDefined();
-      const sessionHeaders = {
-        Host: "hub.example.test",
-        Origin: "https://hub.example.test",
-        "x-opencodex-api-key": token!,
-        "x-opencodex-gui-origin": "https://hub.example.test",
-      };
-      const management = await fetch(`http://127.0.0.1:${managementPort}/api/config`, {
-        headers: sessionHeaders,
-      });
-      expect(management.status).toBe(200);
-
-      // Connected GUI status/restart polling stays authenticated without widening the ingress:
-      // raw liveness remains absent, while its bounded management counterpart is available.
-      const rawHealth = await fetch(`http://127.0.0.1:${managementPort}/healthz`, {
-        headers: sessionHeaders,
-      });
-      expect(rawHealth.status).toBe(404);
-      const managementHealth = await fetch(`http://127.0.0.1:${managementPort}/api/system/health`, {
-        headers: sessionHeaders,
-      });
-      expect(managementHealth.status).toBe(200);
-      expect(await managementHealth.json()).toMatchObject({
-        status: "ok",
-        service: "opencodex",
-        version: expect.any(String),
-        uptime: expect.any(Number),
-        pid: process.pid,
-      });
+      const forgedIdentity = await fetch(`http://127.0.0.1:${managementPort}/opencodex-session`, { headers });
+      expect(forgedIdentity.status).toBe(401);
+      expect(state.sessions.size).toBe(0);
 
       const adminConsent = await fetch(`http://127.0.0.1:${managementPort}/api/github/star`, {
         method: "POST",

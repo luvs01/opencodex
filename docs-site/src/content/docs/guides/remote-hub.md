@@ -21,9 +21,9 @@ public-internet surface and is outside this deployment model.
 - A raw management admin token can perform ordinary administration, but it cannot mint a browser
   session or authorize consent-bearing actions such as starring the repository. Those actions
   require a server-issued `gui-session`, matching browser origin, and CSRF token.
-- `Tailscale-User-Login` is trusted only on the separately bound management ingress. The same header
-  on the public listener is ignored. `remoteGui.allowedTailscaleUsers` controls session issuance; it
-  does not create a new general-purpose principal.
+- `Tailscale-User-Login` is not trusted on the loopback TCP management ingress. Any local process can
+  connect to that socket and forge proxy headers, so remote browser sessions use the one-use pairing
+  flow instead.
 
 ## Roles and direct data flow
 
@@ -77,7 +77,6 @@ ocx config set hostname 100.64.0.10
 ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 ocx config set corsAllowOrigins '["http://localhost:10100"]'
 ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
-ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
 
 # Generate/read this in a protected operator shell or secret manager.
 # It is a data-admission token, not a provider credential.
@@ -113,9 +112,9 @@ tailscale serve --bg --https=443 http://127.0.0.1:10101
 tailscale serve status
 ```
 
-Set `hub.managementPublicOrigin` to the exact HTTPS origin shown by Serve. Add the operator's exact
-Tailscale login to `remoteGui.allowedTailscaleUsers`; an empty list means no remote identity can mint
-a session. Verify both directions:
+Set `hub.managementPublicOrigin` to the exact HTTPS origin shown by Serve. The loopback backend does
+not accept Tailscale identity headers as authentication; establish the browser session with the
+single-use pairing flow. Verify both directions:
 
 ```bash
 # Negative: the loopback-only port must not be reachable through the node's tailnet address.
@@ -125,9 +124,8 @@ curl --fail --connect-timeout 3 http://100.64.0.10:10101/ && echo "unexpected ex
 curl --fail --silent --show-error https://hub-name.tailnet-name.ts.net/ >/dev/null
 ```
 
-The positive browser test must use a real signed-in Tailscale session; a bare `curl` may not carry the
-identity headers needed for automatic session issuance. Pairing remains the fallback when the HTTPS
-frontend cannot provide trustworthy Tailscale identity.
+The positive browser test verifies transport reachability only. Complete the one-use pairing flow to
+create a remote browser session.
 
 ### Operator-owned ts.net certificate proxy
 
@@ -231,7 +229,6 @@ docker compose run --rm hub bun run src/cli/index.ts config set runtimeRole hub
 docker compose run --rm hub bun run src/cli/index.ts config set hostname 0.0.0.0
 docker compose run --rm hub bun run src/cli/index.ts config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 docker compose run --rm hub bun run src/cli/index.ts config set hub.managementIngress '{"enabled":true,"port":10101}'
-docker compose run --rm hub bun run src/cli/index.ts config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
 docker compose up -d
 ```
 

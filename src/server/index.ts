@@ -763,7 +763,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const loopbackListener = config.unauthenticatedLoopbackListener;
   const loopbackListenerPort = loopbackListener?.enabled ? loopbackListener.port : null;
   // Hub management ingress is a third, management-only listener. Its address is intentionally
-  // fixed: the kernel loopback bind is the trust boundary that permits Tailscale identity headers.
+  // fixed, but the loopback bind is only an exposure boundary: local processes can connect to it,
+  // so requests on this ordinary TCP socket must not be treated as authenticated proxy traffic.
   const managementIngress = config.runtimeRole === "hub" ? config.hub?.managementIngress : undefined;
   const managementIngressPort = managementIngress?.enabled ? managementIngress.port : null;
 
@@ -1952,7 +1953,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       if (url.pathname === "/opencodex-session") {
         if (req.method === "GET") {
           const session = issueGuiSession(req, config, managementAuth, {
-            trustedTailscaleIngress: ingress === "hub-management",
+            trustedTailscaleIngress: false,
           });
           return session
             ? withManagementCors(serveSessionBootstrap(session), req, config)
@@ -2011,7 +2012,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
       const guiSessionCandidate = req.method === "GET" && (url.pathname === "/" || !url.pathname.includes("."))
         ? issueGuiSession(req, config, managementAuth, {
-          trustedTailscaleIngress: ingress === "hub-management",
+          trustedTailscaleIngress: false,
         })
         : null;
       const guiFile = serveGuiFile(
