@@ -284,6 +284,16 @@ test("rotation start, one-time secret, commit, and abort stay explicit", async (
   expect(calls).toContain("abort:k1:rotation-1");
 });
 
+test("rotation controls stay hidden when the runtime supplies no rotation handlers", async () => {
+  const container = await mount({});
+  await openKey(container);
+
+  expect(container.textContent).not.toContain("Key rotation");
+  expect(container.textContent).not.toContain("Start rotation");
+  expect(container.textContent).not.toContain("Commit rotation");
+  expect(container.textContent).not.toContain("Abort rotation");
+});
+
 test("a protocol result belongs to its own chip", async () => {
   const container = await mount({
     filteredModels: [{ id: "gpt-5.4", displayName: "gpt-5.4", provider: "openai", native: true }],
