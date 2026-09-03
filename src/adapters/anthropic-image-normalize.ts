@@ -56,13 +56,13 @@ const TIER1_COUNT = 14;
 export const MAX_INPUT_BASE64_LENGTH = 64 * MiB;
 
 /**
- * First-pass worker-pool width. Memory-bound, not CPU-bound: each in-flight item can
- * hold a decoded bitmap, so this bounds peak memory to ~4 decoded images while still
- * overlapping I/O and native-encode threadpool work. Fixed on purpose — a config knob
- * would widen the adapter contract with no demonstrated need.
+ * First-pass worker-pool width. The pixel budget below additionally limits decoded
+ * bitmap pressure while retaining parallelism for ordinary images.
  */
 export const IMAGE_NORMALIZE_CONCURRENCY = 4;
 export const MAX_INPUT_PIXELS = 100_000_000;
+/** Aggregate decoded-pixel allowance across first-pass workers (roughly 400 MiB RGBA). */
+export const MAX_IN_FLIGHT_PIXELS = MAX_INPUT_PIXELS;
 
 const UNDECODABLE_TEXT = "[image omitted: undecodable or corrupt image data]";
 const BOMB_TEXT = "[image omitted: image too large to process safely]";
@@ -394,14 +394,28 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
   const entries: (Entry | null)[] = new Array(n).fill(null);
 
   // Bounded parallel first pass: a shared index queue with a small fixed worker pool.
-  // Unbounded Promise.all across up to `processLimit` (anthropic passes 100) large
-  // images would hold that many decoded bitmaps in flight at once — the limit bounds
-  // peak memory, not throughput (native encode parallelism lives below this layer).
+  // Worker count bounds ordinary-image parallelism; the weighted gate bounds aggregate
+  // decoded bitmap pressure when several individually-valid large images arrive.
   // entries[] stays index-addressed, so completion order never affects output order
   // or the sequential demotion loop below.
   let nextIndex = 0;
   let firstError: unknown;
   let failed = false;
+  let inFlightPixels = 0;
+  const pixelWaiters: Array<() => void> = [];
+  const acquirePixels = async (pixels: number): Promise<boolean> => {
+    while (inFlightPixels + pixels > MAX_IN_FLIGHT_PIXELS) {
+      await new Promise<void>(resolve => pixelWaiters.push(resolve));
+      if (failed) return false;
+    }
+    inFlightPixels += pixels;
+    return true;
+  };
+  const releasePixels = (pixels: number): void => {
+    inFlightPixels -= pixels;
+    // Wake every waiter: each re-checks the shared allowance before reserving it.
+    for (const resolve of pixelWaiters.splice(0)) resolve();
+  };
   const workerCount = Math.min(IMAGE_NORMALIZE_CONCURRENCY, n);
   const worker = async (): Promise<void> => {
     // A fatal error stops workers from pulling NEW indices; in-flight items settle.
@@ -426,7 +440,16 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
       }
       const sourceMedia = target.mediaType.toLowerCase();
       const pos = initialPosition(newestFirstIndex, bias);
-      const result = await processAt(b64, pos, sourceMedia, encode, validate);
+      // Unknown dimensions receive the full allowance: decoding malformed or an
+      // unsupported-but-valid format must not bypass the aggregate memory bound.
+      const pixels = dims ? dims.width * dims.height : MAX_IN_FLIGHT_PIXELS;
+      if (!await acquirePixels(pixels)) return;
+      let result: Awaited<ReturnType<typeof processAt>>;
+      try {
+        result = await processAt(b64, pos, sourceMedia, encode, validate);
+      } finally {
+        releasePixels(pixels);
+      }
       if (result.kind === "failed") {
         target.drop(UNDECODABLE_TEXT);
         continue;
