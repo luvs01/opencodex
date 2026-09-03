@@ -34,6 +34,7 @@ const USAGE = `Usage:
   ocx inspect star [--json]
   ocx inspect windows-tray [--json]
   ocx integration native [list] [--json]
+  ocx integration native cursor [--json]
   ocx integration native <claude|claude-desktop|codex|grok> <on|off> [--json]
   ocx agent request-user-input [on|off] [--json]`;
 
@@ -93,6 +94,11 @@ async function nativeIntegration(argv: string[], deps: RuntimeApiDeps): Promise<
     rejectArgs(args, USAGE);
     const result = await runtimeRequest("/api/native-integrations", {}, deps);
     printData(result, wantsJson, nativeLines(result));
+    return;
+  }
+
+  if (action === "cursor") {
+    await read("/api/native-integrations/cursor", rest, deps);
     return;
   }
 
