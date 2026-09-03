@@ -1,14 +1,8 @@
 import { MAX_REMOTE_CATALOG_BYTES } from "../server/catalog-download";
 import { readBoundedResponseBytes } from "../lib/bounded-body";
 
-/**
- * A pairing grant may cross loopback or authenticated HTTPS, and nothing else.
- *
- * Mirrors the hub-side rule in src/server/gui-session.ts. Checking here too is not
- * redundant: it keeps the client from spending a single-use code on a request the hub is
- * certain to refuse.
- */
-function isPairingTransportPermitted(origin: string): boolean {
+/** Hub traffic may cross loopback or authenticated HTTPS, and nothing else. */
+function isHubTransportPermitted(origin: string): boolean {
   let url: URL;
   try {
     url = new URL(origin);
@@ -171,6 +165,12 @@ export function normalizeHubOrigin(input: string): string {
       "Hub URL must be an HTTP(S) origin without credentials, query, fragment, or non-/v1 path",
     );
   }
+  if (!isHubTransportPermitted(parsed.origin)) {
+    throw new HubClientError(
+      "insecure_http_refused",
+      "Hub URLs require loopback or HTTPS; plaintext remote HTTP is not permitted",
+    );
+  }
   return parsed.origin;
 }
 
@@ -230,7 +230,7 @@ export async function exchangeConnectPairingGrant(
   // Deliberateness is not the control that matters: the grant is readable by anything on the
   // path and the session it mints is reusable. The hub refuses this exchange outright now, so
   // sending it would only burn a single-use code against a certain rejection.
-  if (!isPairingTransportPermitted(origin)) {
+  if (!isHubTransportPermitted(origin)) {
     throw new HubClientError("insecure_http_refused", "Pairing requires loopback or HTTPS; plaintext HTTP cannot carry a grant");
   }
   const response = await fetchBounded(options.fetchImpl ?? fetch, `${origin}/opencodex-session`, {
