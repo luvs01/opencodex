@@ -496,6 +496,31 @@ test("a second concurrent PUT gets 409 config_busy and writes nothing", async ()
   expect(third.status).toBe(200);
 });
 
+test("an incomplete request body does not hold the Grok mutation flight", async () => {
+  writeConfig("# user only\n");
+  let finishUpload!: () => void;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"enabled":'));
+      finishUpload = () => controller.close();
+    },
+  });
+  const stalled = dispatch(baseConfig(), "/api/native-integrations/grok", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  const complete = await put(baseConfig(), true);
+  expect(complete.status).toBe(200);
+  expect(complete.body.state).toBe("current");
+
+  finishUpload();
+  const stalledResponse = await stalled;
+  expect(stalledResponse!.status).toBe(400);
+});
+
 test("no journal row and no snapshot exist for this toggle", () => {
   // The module must not touch the file-client bookkeeping at all — a static
   // check that the imports were never widened (012 §OUT).

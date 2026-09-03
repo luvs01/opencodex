@@ -387,28 +387,29 @@ async function handleCodexToggle(ctx: ManagementContext): Promise<Response> {
 
 async function handleGrokToggle(ctx: ManagementContext): Promise<Response> {
   const { req, config, deps } = ctx;
+  let body: { enabled?: unknown };
+  try {
+    body = await readManagementJsonBody(req);
+  } catch (error) {
+    rethrowManagementBodyTooLarge(error);
+    return jsonResponse({ error: "invalid JSON body" }, 400);
+  }
+  if (typeof body.enabled !== "boolean") {
+    return jsonResponse({ error: "enabled must be a boolean" }, 400);
+  }
+  const enabled = body.enabled;
+
   /*
-   * The guard stands BEFORE the first await, or two concurrent PUTs could both
-   * pass it while their bodies are still parsing — the race the guard exists
-   * to close.
+   * Parse the request before taking the mutation flight. A client that stalls
+   * its upload must not prevent a complete request from changing Grok config.
+   * The check and assignment remain synchronous, so parsed requests cannot
+   * race into the mutation section.
    */
   if (grokToggleFlight) {
     return refusal(409, "grok", "config_busy",
       "Another Grok change is already in flight. Nothing was written — try again in a moment.");
   }
   grokToggleFlight = (async (): Promise<Response> => {
-    let body: { enabled?: unknown };
-    try {
-      body = await readManagementJsonBody(req);
-    } catch (error) {
-      rethrowManagementBodyTooLarge(error);
-      return jsonResponse({ error: "invalid JSON body" }, 400);
-    }
-    if (typeof body.enabled !== "boolean") {
-      return jsonResponse({ error: "enabled must be a boolean" }, 400);
-    }
-    const enabled = body.enabled;
-
     /*
      * The inspector runs BEFORE either delegate, in BOTH directions (012 §In
      * PUT it is the authoritative preflight): an ambiguous fence never reaches
