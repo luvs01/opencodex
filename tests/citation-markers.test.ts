@@ -87,4 +87,20 @@ describe("streaming citation marker filter (#3150)", () => {
     const filter = createCitationMarkerFilter();
     expect(filter.push(`visible now ${S}cite`)).toBe("visible now ");
   });
+
+  test("a long unterminated span is released incrementally as malformed text", () => {
+    const filter = createCitationMarkerFilter();
+    let out = filter.push(S);
+    for (let i = 0; i < 5_000; i += 1) out += filter.push("x");
+
+    // The bounded parser must release malformed input before close rather than retaining
+    // and repeatedly scanning an attacker-controlled, ever-growing span.
+    expect(out.length).toBeGreaterThan(0);
+    expect(out + filter.flush()).toBe(`${S}${"x".repeat(5_000)}`);
+  });
+
+  test("a valid span after an oversized malformed span is still removed", () => {
+    const malformed = `${S}${"x".repeat(5_000)}`;
+    expect(drain([malformed, `before${span}after`])).toBe(`${malformed}beforeafter`);
+  });
 });
