@@ -54,6 +54,25 @@ function completed(): Response {
   });
 }
 
+function completedStream(): Response {
+  const frames = [
+    ["response.created", { type: "response.created", response: { id: "resp_attrib", status: "in_progress" } }],
+    ["response.output_text.delta", { type: "response.output_text.delta", delta: "done" }],
+    ["response.completed", {
+      type: "response.completed",
+      response: {
+        id: "resp_attrib",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      },
+    }],
+  ];
+  const body = frames.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("")
+    + "data: [DONE]\n\n";
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 async function withHome<T>(run: (home: string) => Promise<T>): Promise<T> {
   const home = mkdtempSync(join(tmpdir(), "ocx-oauth-attribution-"));
   const prevOpencodex = process.env.OPENCODEX_HOME;
@@ -246,6 +265,61 @@ describe("Responses per-account attribution for non-Codex OAuth", () => {
       expect(servedId).not.toBe(failedId);
       expect(logCtx.accountLogLabel).toBe(oauthAccountLogLabel(servedId!, "xai"));
       expect(logCtx.accountLogLabel).not.toBe(oauthAccountLogLabel(failedId!, "xai"));
+      clearGenericFailoverHealth();
+    });
+  });
+
+  test("a web-search sidecar retry reseals the attempt with the serving account", async () => {
+    await withHome(async () => {
+      clearGenericFailoverHealth();
+      for (const i of [1, 2]) {
+        await saveCredential("xai", {
+          access: `xai-sidecar-access-${i}`,
+          refresh: `xai-sidecar-refresh-${i}`,
+          expires: Date.now() + 3_600_000,
+          accountId: `xai-sidecar-acct-${i}`,
+          source: "local-cli",
+        }, { addAccount: true } as never);
+      }
+
+      const bearers: string[] = [];
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bearers.push(new Headers(init?.headers).get("authorization") ?? "");
+        if (bearers.length === 1) {
+          return Response.json(
+            { error: { message: "rate limited" } },
+            { status: 429, headers: { "retry-after": "42" } },
+          );
+        }
+        return completedStream();
+      }) as typeof fetch;
+
+      const config = oauthConfig();
+      config.webSearchSidecar = { backend: "xai" };
+      const sidecarRequest = new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "grok-4.6",
+          input: "search",
+          stream: true,
+          tools: [{ type: "web_search" }],
+        }),
+      });
+      const logCtx: RequestLogContext = { model: "", provider: "" };
+      const response = await handleResponses(sidecarRequest, config, logCtx, {});
+      await response.text();
+
+      expect(response.status).toBe(200);
+      expect(bearers).toHaveLength(2);
+      const accounts = getAccountSet("xai")?.accounts ?? [];
+      const servedId = accounts.find(a => bearers[1]!.includes(a.credential.access))?.id;
+      const failedId = accounts.find(a => bearers[0]!.includes(a.credential.access))?.id;
+      expect(servedId).toBeDefined();
+      expect(failedId).toBeDefined();
+      expect(logCtx.accountLogLabel).toBe(oauthAccountLogLabel(servedId!, "xai"));
+      expect(logCtx.activeAttempt?.accountLogLabel).toBe(logCtx.accountLogLabel);
+      expect(logCtx.activeAttempt?.accountLogLabel).not.toBe(oauthAccountLogLabel(failedId!, "xai"));
       clearGenericFailoverHealth();
     });
   });
