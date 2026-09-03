@@ -20,33 +20,11 @@ const CODEX_RESPONSES_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const WS_BETA = "responses_websockets=2026-02-06";
 
 /**
- * Dial URL for a request URL. The canonical ChatGPT backend keeps its constant;
- * an operator-opted OpenAI-compatible upstream swaps https for wss on the same
- * path so gateways that serve the Responses WebSocket protocol on their
- * /v1/responses path get the same fast lane. Plain HTTP remains on SSE because
- * a provider WS handshake would otherwise send credentials and request data
- * without transport encryption.
+ * Dial URL for the canonical ChatGPT backend.
  */
 function wsUpstreamUrlFor(httpUrl: string): string {
   if (httpUrl === CODEX_RESPONSES_HTTP_URL) return CODEX_RESPONSES_WS_URL;
-  return httpUrl.replace(/^http(s?):/, "ws$1:");
-}
-
-/**
- * An operator-opted OpenAI-compatible upstream only joins the WS lane for
- * Responses endpoints: the WebSocket path speaks the Responses event protocol,
- * and every downstream consumer (adapter parsers, usage sniffing, SSE relay)
- * assumes that wire. Other paths (chat completions, images, search) stay HTTP.
- */
-function isResponsesWebsocketEligibleUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  return parsed.protocol === "https:"
-    && parsed.pathname.endsWith("/responses");
+  throw new Error("unsupported Codex WebSocket upstream");
 }
 // If the 101 never arrives (network black hole), give SSE a chance well before
 // the caller's connect timeout (default 200s) would fire.
@@ -132,11 +110,14 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  upstreamWebsocketConfigured = false,
+  _upstreamWebsocketConfigured = false,
 ): boolean {
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
-  if (url !== CODEX_RESPONSES_HTTP_URL && !upstreamWebsocketConfigured) return false;
-  if (upstreamWebsocketConfigured && !isResponsesWebsocketEligibleUrl(url)) return false;
+  // Bun's client WebSocket API delivers only fully assembled messages and has
+  // no enforceable inbound payload limit. Keep arbitrary provider endpoints on
+  // bounded HTTP/SSE until the client can reject fragmented text and binary
+  // messages during ingestion rather than after allocation.
+  if (url !== CODEX_RESPONSES_HTTP_URL) return false;
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
   const body = init?.body;
   if (typeof body !== "string") return false;
@@ -249,7 +230,7 @@ export function codexWsUpstreamFetch(
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
 ): Promise<Response> {
-  if (!bunSupportsBoundedCodexWsRelay(runtime)) {
+  if (url !== CODEX_RESPONSES_HTTP_URL || !bunSupportsBoundedCodexWsRelay(runtime)) {
     return sseFallback(url, init);
   }
   const signal = init.signal ?? undefined;
