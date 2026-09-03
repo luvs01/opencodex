@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync} from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   createResetCreditAutoRedeemer,
   planAutoRedeem,
@@ -139,6 +140,49 @@ describe("reset-credit auto-redeemer runtime (#822)", () => {
     // Settled: a third tick with the credit still listed does not spend again.
     expect(await resumed.redeemer.tick()).toEqual({ kind: "skipped", reason: "credit-gone" });
     expect(resumed.consumed).toEqual([id]);
+  });
+
+  test("sibling processes share one idempotency key for the same credit", async () => {
+    const workers = 8;
+    const journalFile = join(dir, "j.json");
+    const consumeLog = join(dir, "consume.log");
+    const moduleUrl = pathToFileURL(join(import.meta.dir, "../src/codex/reset-credit-auto-redeem.ts")).href;
+    const script = `
+      import { appendFileSync, readdirSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      import { createResetCreditAutoRedeemer } from ${JSON.stringify(moduleUrl)};
+      const [dir, journalFile, consumeLog, worker, count] = process.argv.slice(1);
+      const now = ${T0 + 20 * MIN};
+      const redeemer = createResetCreditAutoRedeemer({
+        accountId: "acct-main",
+        settings: () => ({ enabled: true, leadTimeMinutes: 10 }),
+        inspect: async () => ({ credits: [{ granted_at: "2026-09-01T00:00:00Z", expires_at: "2026-09-02T10:30:00.000Z" }] }),
+        consume: async id => { appendFileSync(consumeLog, id + "\\n"); await Bun.sleep(25); return { code: "reset" }; },
+        now: () => now,
+        setTimer: () => 1,
+        clearTimer: () => {},
+        journalFile,
+        log: () => {},
+        beforeDispatchForTest: async () => {
+          writeFileSync(join(dir, "ready-" + worker), "");
+          while (readdirSync(dir).filter(name => name.startsWith("ready-")).length < Number(count)) await Bun.sleep(1);
+        },
+      });
+      for (;;) {
+        const outcome = await redeemer.tick();
+        if (outcome.kind !== "error") break;
+        await Bun.sleep(2);
+      }
+    `;
+    const children = Array.from({ length: workers }, (_, worker) => Bun.spawn(
+      [process.execPath, "--eval", script, dir, journalFile, consumeLog, String(worker), String(workers)],
+      { env: { ...process.env, OPENCODEX_HOME: dir }, stdout: "pipe", stderr: "pipe" },
+    ));
+    const exits = await Promise.all(children.map(child => child.exited));
+    expect(exits).toEqual(Array(workers).fill(0));
+    const ids = readFileSync(consumeLog, "utf8").trim().split("\n");
+    expect(ids.length).toBeGreaterThan(0);
+    expect(new Set(ids).size).toBe(1);
   });
 
   test("a manual redeem racing between the planning read and the pre-dispatch read is caught", async () => {
