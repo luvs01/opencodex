@@ -1257,6 +1257,18 @@ describe("subagent model fallback chain", () => {
     expect(readCodexAgentModelFallback("empty_fallback", dir)).toEqual([]);
   });
 
+  test("scanCodexAgentRolesWithTomlModelFallback tolerates a malformed agents path", () => {
+    const dir = codexHomeFixture();
+    rmSync(join(dir, "agents"), { recursive: true });
+    writeFileSync(join(dir, "agents"), "not a directory", "utf8");
+    let scanError: unknown;
+
+    expect(scanCodexAgentRolesWithTomlModelFallback(dir, cause => {
+      scanError = cause;
+    })).toEqual([]);
+    expect(scanError).toBeInstanceOf(Error);
+  });
+
   test("scanCodexAgentRolesWithTomlModelFallback recognizes quoted model_fallback keys", () => {
     const dir = codexHomeFixture();
     writeFileSync(join(dir, "agents", "quoted_key.toml"), [
