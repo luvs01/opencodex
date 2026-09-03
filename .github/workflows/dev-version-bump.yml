@@ -62,17 +62,27 @@ jobs:
       # Open the pull request.
       pull-requests: write
     steps:
-      - name: Checkout dev
+      # Keep every executable file in the privileged job pinned to the audited
+      # release revision. The later dev checkout is input data only: none of its
+      # actions, dependencies, scripts, or tests run with this job's token.
+      - name: Checkout trusted automation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: dev
+          ref: ${{ github.sha }}
           # Tags are load-bearing, not decoration: the freeness gate below is a bun
           # test that reads the local tag set, and release-version-line.test.ts
           # returns EARLY on an empty set. A shallow checkout would make that gate
           # silently vacuous instead of failing loudly.
           fetch-depth: 0
-          # Do NOT set persist-credentials: false here as the read-only workflows do.
-          # This job has to push its bump branch.
+          persist-credentials: false
+
+      - name: Checkout dev as data
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: dev
+          path: dev-tree
+          fetch-depth: 0
+          persist-credentials: false
 
       # The repository-owned composite action, not a hand-pinned setup-bun SHA: it
       # resolves the Bun version from package.json so the runtime SOT stays in one
@@ -89,7 +99,7 @@ jobs:
           RELEASED_VERSION: ${{ inputs.released-version }}
         run: |
           set -euo pipefail
-          bun scripts/bump-dev-version.ts "${RELEASED_VERSION}" package.json
+          bun scripts/bump-dev-version.ts "${RELEASED_VERSION}" dev-tree/package.json
 
       - name: Prove the chosen version is unused
         if: ${{ steps.decide.outputs.changed == 'true' }}
@@ -98,10 +108,14 @@ jobs:
         # of the tag set, so it is settled here by the detector that already owns the
         # question. If this fails, no pull request is opened and the job goes red asking
         # for a human decision - which is the correct outcome, not a fallback.
-        run: bun test tests/release-version-line.test.ts
+        run: |
+          # Exercise the trusted detector against the candidate package metadata.
+          cp dev-tree/package.json package.json
+          bun test tests/release-version-line.test.ts
 
       - name: Open the bump pull request
         if: ${{ steps.decide.outputs.changed == 'true' }}
+        working-directory: dev-tree
         env:
           GH_TOKEN: ${{ github.token }}
           NEXT_VERSION: ${{ steps.decide.outputs.version }}
@@ -153,7 +167,12 @@ jobs:
             git checkout -b "${branch}"
             git add package.json
             git commit -m "fix(release): move dev to ${NEXT_VERSION} after ${RELEASED_VERSION}"
-            git push origin "${branch}"
+            # Supply the write credential only to this trusted push invocation. In
+            # particular, never persist it in the dev checkout while dev-controlled
+            # files could execute.
+            auth_header="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+              push origin "${branch}"
           fi
 
           gh pr create \
