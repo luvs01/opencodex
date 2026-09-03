@@ -77,7 +77,7 @@ ocx config set hostname 100.64.0.10
 ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 ocx config set corsAllowOrigins '["http://localhost:10100"]'
 ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
-ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+ocx config set remoteGui.allowedTailscaleUsers '[]'
 
 # Generate/read this in a protected operator shell or secret manager.
 # It is a data-admission token, not a provider credential.
@@ -115,7 +115,14 @@ tailscale serve status
 
 Set `hub.managementPublicOrigin` to the exact HTTPS origin shown by Serve. Add the operator's exact
 Tailscale login to `remoteGui.allowedTailscaleUsers`; an empty list means no remote identity can mint
-a session. Verify both directions:
+a session. Enable that allowlist only when Tailscale Serve is the process forwarding to the
+management ingress:
+
+```bash
+ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+```
+
+Verify both directions:
 
 ```bash
 # Negative: the loopback-only port must not be reachable through the node's tailnet address.
@@ -138,8 +145,10 @@ tailscale cert hub-name.tailnet-name.ts.net
 ```
 
 Protect the private key, renew it through Tailscale's supported mechanism, and proxy only to
-`127.0.0.1:10101`. A generic TLS proxy does not supply trustworthy Tailscale identity. Do not
-fabricate `Tailscale-User-*` headers; use the single-use, origin-bound pairing flow instead.
+`127.0.0.1:10101`. A generic TLS proxy does not supply trustworthy Tailscale identity. Keep
+`remoteGui.allowedTailscaleUsers` empty, and configure the proxy to remove or reject every incoming
+`Tailscale-User-*` header before forwarding. Preserving client-supplied identity headers is unsafe;
+do not merely avoid adding new ones. Use the single-use, origin-bound pairing flow instead.
 
 ## Headless OAuth
 
@@ -231,14 +240,16 @@ docker compose run --rm hub bun run src/cli/index.ts config set runtimeRole hub
 docker compose run --rm hub bun run src/cli/index.ts config set hostname 0.0.0.0
 docker compose run --rm hub bun run src/cli/index.ts config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 docker compose run --rm hub bun run src/cli/index.ts config set hub.managementIngress '{"enabled":true,"port":10101}'
-docker compose run --rm hub bun run src/cli/index.ts config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+docker compose run --rm hub bun run src/cli/index.ts config set remoteGui.allowedTailscaleUsers '[]'
 docker compose up -d
 ```
 
 Do not put a token in `ARG`, `ENV`, `COPY`, Compose YAML, image history, or the command line. Do not
 mount the Docker socket, host home, Codex home, SSH agent, or provider-key files. Publish only port
 `10100`. A management ingress bound to `127.0.0.1:10101` inside the container is reachable only by a
-TLS/tailnet frontend in the same network namespace; never publish `10101` as a shortcut.
+TLS/tailnet frontend in the same network namespace; never publish `10101` as a shortcut. Keep the
+allowlist empty and use pairing for a generic frontend. If a Tailscale Serve sidecar is the process
+forwarding to `10101`, set the exact operator allowlist only after that topology is in place.
 
 After the container is healthy, run a separate readiness promotion check:
 
