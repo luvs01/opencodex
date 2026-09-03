@@ -68,6 +68,10 @@ export interface CitationMarkerFilter {
   flush(): string;
 }
 
+// Citation references are short opaque identifiers. Bounding malformed spans keeps the
+// streaming parser's retained state small while still preserving their text verbatim.
+const MAX_STREAMING_MARKER_SPAN_LENGTH = 4_096;
+
 /**
  * Streaming filter.
  *
@@ -77,25 +81,74 @@ export interface CitationMarkerFilter {
  * (removed) or the stream ends (verbatim, so nothing the model actually said is lost).
  */
 export function createCitationMarkerFilter(): CitationMarkerFilter {
-  // Text from an open START that has not been terminated yet.
-  let held = "";
+  // Keep chunks separately so one-character deltas do not repeatedly copy the complete
+  // unterminated span. They are joined at most once, when emitted or flushed.
+  let held: string[] = [];
+  let heldLength = 0;
+
+  const takeHeld = (): string => {
+    const text = held.join("");
+    held = [];
+    heldLength = 0;
+    return text;
+  };
+
   return {
     push(delta: string): string {
-      const combined = held + delta;
-      held = "";
-      const start = combined.lastIndexOf(CITATION_MARKER_START);
-      if (start === -1) return stripCitationMarkers(combined);
-      const endAfterStart = combined.indexOf(CITATION_MARKER_END, start + 1);
-      if (endAfterStart !== -1) return stripCitationMarkers(combined);
-      // The trailing span is still open: emit everything before it, hold the rest.
-      held = combined.slice(start);
-      return stripCitationMarkers(combined.slice(0, start));
+      const out: string[] = [];
+      let index = 0;
+
+      while (index < delta.length) {
+        if (heldLength === 0) {
+          const start = delta.indexOf(CITATION_MARKER_START, index);
+          if (start === -1) {
+            out.push(delta.slice(index));
+            break;
+          }
+          out.push(delta.slice(index, start));
+          held.push(CITATION_MARKER_START);
+          heldLength = 1;
+          index = start + 1;
+        }
+
+        const end = delta.indexOf(CITATION_MARKER_END, index);
+        const nextStart = delta.indexOf(CITATION_MARKER_START, index);
+        if (nextStart !== -1 && (end === -1 || nextStart < end)) {
+          // As in the whole-string filter, a newer unmatched START makes the older one
+          // malformed. Release the older text and begin withholding at the newer START.
+          const between = delta.slice(index, nextStart);
+          out.push(takeHeld(), between);
+          held.push(CITATION_MARKER_START);
+          heldLength = 1;
+          index = nextStart + 1;
+          continue;
+        }
+
+        if (end !== -1) {
+          // A complete citation span is discarded without ever joining its chunks.
+          held = [];
+          heldLength = 0;
+          index = end + 1;
+          continue;
+        }
+
+        const rest = delta.slice(index);
+        if (heldLength + rest.length <= MAX_STREAMING_MARKER_SPAN_LENGTH) {
+          if (rest) held.push(rest);
+          heldLength += rest.length;
+          break;
+        }
+
+        // An implausibly large unterminated span is malformed ordinary text. Releasing
+        // it bounds both retained memory and work per delta; subsequent STARTs can still
+        // begin valid citation spans.
+        out.push(takeHeld());
+      }
+
+      return out.join("");
     },
     flush(): string {
-      const rest = held;
-      held = "";
-      return rest;
+      return takeHeld();
     },
   };
 }
-
