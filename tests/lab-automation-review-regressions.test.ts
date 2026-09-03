@@ -31,6 +31,10 @@ import type {
 import { LabAutomationError } from "../src/lab/automation/types";
 import { LAB_AUTOMATION_HARD_MAX } from "../src/lab/automation/constants";
 import { createHostIssuedLabRouteExecutor } from "../src/lib/lab-live-host";
+import {
+  resetOptionalShutdownHooksForTests,
+  runOptionalShutdownHooks,
+} from "../src/lib/optional-shutdown-hooks";
 import { readInstallationSalt } from "../src/lab/subject/installation-salt";
 import type { NormalizedObservation } from "../src/lab/conformance/types";
 import {
@@ -150,6 +154,7 @@ afterEach(() => {
   requestLabAutomationShutdown();
   stopLabAutomationScheduler();
   resetLabAutomationSchedulerStateForTests();
+  resetOptionalShutdownHooksForTests();
   setLabAutomationDispatchDeps({});
   resetCompatibilityVersionCacheForTests();
   delete process.env.OPENCODEX_HOME;
@@ -238,6 +243,43 @@ describe("CL-08 independent review regressions", () => {
     expect(result).not.toBeNull();
     expect(result?.state).not.toBe("queued");
     expect(result?.state).not.toBe("running");
+  });
+
+  test("manual run remains cancellable by shutdown after its activation lease is released", async () => {
+    const home = tempHome();
+    prepareHome(home);
+    const config = providerConfig();
+    const plan = planManualLabRun({
+      evidenceLayer: "live_route_compatibility",
+      scenarioId: "responses-core.live.basic-turn",
+      providerName: "fixture-provider",
+      modelId: "fixture-model",
+      config,
+      configDir: home,
+    });
+    let startedResolve!: () => void;
+    const started = new Promise<void>((resolve) => { startedResolve = resolve; });
+    const release = setLabAutomationDispatchDeps({
+      configDir: home,
+      loadConfig: () => config,
+      resolve: fixtureDnsResolve(),
+      routeExecutor: createHostIssuedLabRouteExecutor(async (input) => {
+        startedResolve();
+        if (!input.signal.aborted) {
+          await new Promise<void>((resolve) => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+        }
+        return passObservation();
+      }),
+    });
+
+    const manualRun = enqueueManualLabRun(plan, home);
+    await started;
+    release();
+    runOptionalShutdownHooks();
+
+    const result = await manualRun;
+    expect(result?.state).toBe("cancelled");
+    expect(result?.terminalCode).toBe("cancelled");
   });
 
   test("disabling the live layer cancels previously queued scheduled live work", async () => {
