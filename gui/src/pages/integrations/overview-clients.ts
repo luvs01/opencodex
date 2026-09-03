@@ -21,7 +21,7 @@ import {
   type IntegrationStatus,
 } from "./integration-api";
 import type { NativeIntegrationClientId, NativeStatus } from "./native-api";
-import { CURSOR_SEEN_WINDOW_MS, type CursorIntegrationStatus } from "./cursor-api";
+import type { CursorIntegrationStatus } from "./cursor-api";
 
 export type OverviewClientId =
   | "codex"
@@ -438,10 +438,10 @@ function grokRow(
 
 
 /**
- * Cursor has no switch: its gateway is configured inside Cursor, and this proxy never
- * writes there. "Applied" therefore means a Cursor client actually called us recently.
+ * Cursor has no switch: its gateway is configured inside Cursor, and this proxy cannot
+ * verify that configuration. Installation detection must not be reported as "applied".
  */
-function cursorRow(payload: CursorIntegrationStatus | null, now = Date.now()): OverviewRow {
+function cursorRow(payload: CursorIntegrationStatus | null): OverviewRow {
   const base = {
     id: "cursor" as const,
     hash: "integrations/cursor",
@@ -457,13 +457,12 @@ function cursorRow(payload: CursorIntegrationStatus | null, now = Date.now()): O
   if (!payload.privateInference.installed) {
     return { ...base, state: "not-installed", installed: false, applied: false, detailKey: "integrations.detail.cursorAbsent" };
   }
-  const seenRecently = payload.lastSeen !== null && now - payload.lastSeen.at < CURSOR_SEEN_WINDOW_MS;
   return {
     ...base,
-    state: seenRecently ? "current" : "absent",
+    state: "absent",
     installed: true,
-    applied: seenRecently,
-    detailKey: seenRecently ? "integrations.detail.cursorSeen" : "integrations.detail.cursorNeverSeen",
+    applied: false,
+    detailKey: null,
   };
 }
 

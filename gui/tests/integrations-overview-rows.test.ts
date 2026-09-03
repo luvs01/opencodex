@@ -217,15 +217,14 @@ test("every client counts toward the summary, not just the file clients", () => 
       privateInference: { installed: true, path: "/Applications/Cursor Private Inference.app", version: "3.18.25" },
       regularCursor: { installed: false, path: null },
       gateway: { baseUrl: "http://127.0.0.1:10100/v1", apiKeyMode: "placeholder", placeholder: "opencodex-loopback" },
-      lastSeen: { at: Date.now() - 60_000, userAgent: "Cursor/3.18.25" },
       models: [],
       guideUrl: "https://example.invalid/guide",
     },
   }));
   const counts = countOverviewRows(rows.rows);
-  // codex + claude + desktop + grok + cursor + opencode. Keys are deliberately absent:
+  // codex + claude + desktop + grok + opencode. Keys and Cursor are deliberately absent:
   // an issued credential is not an applied client.
-  expect(counts.applied).toBe(6);
+  expect(counts.applied).toBe(5);
   expect(counts.stale).toBe(1);
   expect(counts.unknown).toBe(0);
 });

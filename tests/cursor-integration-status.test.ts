@@ -8,7 +8,6 @@ import {
   seedCodexModelEntitlementsForTests,
 } from "../src/codex/model-entitlements";
 import { cursorProductJsonCandidates, detectCursorInstalls, type CursorDetectDeps } from "../src/integrations/cursor-detect";
-import { cursorLastSeen, recordCursorSeen, resetCursorSeenForTests } from "../src/integrations/cursor-seen";
 import { cursorEffortFamily } from "../src/server/models-capabilities";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
@@ -64,22 +63,6 @@ describe("detectCursorInstalls", () => {
   });
 });
 
-describe("cursor last-seen recorder", () => {
-  beforeEach(() => resetCursorSeenForTests());
-  afterEach(() => resetCursorSeenForTests());
-
-  test("records only a Cursor user agent, bounded and validated", () => {
-    recordCursorSeen(new Headers({ "user-agent": "curl/8.7.1" }), 1000);
-    expect(cursorLastSeen()).toBeNull();
-    recordCursorSeen(new Headers({ "user-agent": "Cursor/3.18.25" }), 2000);
-    expect(cursorLastSeen()).toEqual({ at: 2000, userAgent: "Cursor/3.18.25" });
-    // A padded or oversized value is not the shape Cursor sends and is ignored.
-    recordCursorSeen(new Headers({ "user-agent": `Cursor/${"x".repeat(60)}` }), 3000);
-    recordCursorSeen(new Headers({ "user-agent": "Cursor/3.18.25 <script>" }), 4000);
-    expect(cursorLastSeen()?.at).toBe(2000);
-  });
-});
-
 describe("cursorEffortFamily", () => {
   test("mirrors Cursor's local picker table and strips provider prefixes", () => {
     expect(cursorEffortFamily("gpt-5.6-sol")).toEqual(["low", "medium", "high", "xhigh"]);
@@ -119,19 +102,17 @@ describe("GET /api/native-integrations/cursor", () => {
   beforeEach(() => {
     testHome = mkdtempSync(join(tmpdir(), "ocx-cursor-status-"));
     process.env.OPENCODEX_HOME = testHome;
-    resetCursorSeenForTests();
   });
 
   afterEach(() => {
     resetCodexModelEntitlementCacheForTests();
-    resetCursorSeenForTests();
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
     if (testHome) removeTreeWithRetry(testHome);
     testHome = "";
   });
 
-  test("reports gateway values, model expectations, and a last-seen Cursor request", async () => {
+  test("reports gateway values and model expectations without trusting Cursor user agents", async () => {
     seedCodexModelEntitlementsForTests("main", ["gpt-5.6-sol"]);
     saveConfig(statusConfig());
     const server = startServer(0);
@@ -143,7 +124,6 @@ describe("GET /api/native-integrations/cursor", () => {
       expect(before.status).toBe(200);
       const first = await before.json() as {
         gateway: { baseUrl: string; apiKeyMode: string; placeholder: string };
-        lastSeen: unknown;
         models: Array<{ id: string; reasoning: string[] | null; context: { defaultWindow: number; longWindow: number } | null }>;
         privateInference: { installed: boolean };
         guideUrl: string;
@@ -151,7 +131,7 @@ describe("GET /api/native-integrations/cursor", () => {
       expect(first.gateway.baseUrl).toBe(`http://127.0.0.1:${server.port}/v1`);
       expect(first.gateway.apiKeyMode).toBe("placeholder");
       expect(first.gateway.placeholder).toBe("opencodex-loopback");
-      expect(first.lastSeen).toBeNull();
+      expect("lastSeen" in first).toBe(false);
       expect(typeof first.privateInference.installed).toBe("boolean");
       expect(first.guideUrl).toContain("cursor-private-inference");
       const k3 = first.models.find(model => model.id === "kimi/k3");
@@ -166,9 +146,8 @@ describe("GET /api/native-integrations/cursor", () => {
       const discovery = await fetch(new URL("/v1/models", server.url), { headers: { "user-agent": "Cursor/3.18.25" } });
       expect(discovery.status).toBe(200);
       const after = await fetch(new URL("/api/native-integrations/cursor", server.url), { headers });
-      const second = await after.json() as { lastSeen: { at: number; userAgent: string } | null };
-      expect(second.lastSeen?.userAgent).toBe("Cursor/3.18.25");
-      expect(typeof second.lastSeen?.at).toBe("number");
+      const second = await after.json() as Record<string, unknown>;
+      expect("lastSeen" in second).toBe(false);
     } finally {
       await server.stop(true);
     }

@@ -5,8 +5,7 @@ import { formatTokens } from "../../format-tokens";
 import { navigateHash } from "../../hash-routing";
 import { useI18n, useT, type TKey } from "../../i18n/shared";
 import { Notice } from "../../ui";
-import { formatRelativeTime, relativeTimeLabelsFromT } from "../../provider-workspace/usage";
-import { CURSOR_SEEN_WINDOW_MS, loadCursorIntegrationStatus, type CursorIntegrationStatus } from "./cursor-api";
+import { loadCursorIntegrationStatus, type CursorIntegrationStatus } from "./cursor-api";
 
 /**
  * The Cursor tab is a read-only companion, not a switch.
@@ -14,8 +13,8 @@ import { CURSOR_SEEN_WINDOW_MS, loadCursorIntegrationStatus, type CursorIntegrat
  * Cursor Private Inference keeps its gateway settings in a SQLite database the running app
  * rewrites and its API key in the OS keychain, both out of bounds for this proxy. So the page
  * does the three things it can do honestly: say which Cursor builds are installed, hand the
- * user the two values Cursor's own form wants, and report whether a Cursor client has called
- * us since the proxy started. Everything shown is a GET of one status route.
+ * user the two values Cursor's own form wants, and predict the model controls it will render.
+ * Everything shown is a GET of one status route.
  */
 
 function CopyValue({ value, label }: { value: string; label: string }) {
@@ -61,20 +60,16 @@ function DetectionRow({ labelKey, installed, path, version }: { labelKey: TKey; 
 
 export default function CursorIntegrationPage({ apiBase, active }: { apiBase: string; active: boolean }) {
   const { t, locale } = useI18n();
-  // The clock is sampled when a payload arrives, never during render: the "seen within 24h"
-  // badge and the relative time must agree with each other and stay stable across re-renders.
-  const [sampledAt, setSampledAt] = useState(() => Date.now());
   const fetchStatus = useCallback(
     async (signal: AbortSignal) => {
       const payload = await loadCursorIntegrationStatus(apiBase, signal);
       // The overview paints a null read as "unknown"; the page has room to say why.
       if (!payload) throw new Error("cursor status unavailable");
-      setSampledAt(Date.now());
       return payload;
     },
     [apiBase],
   );
-  // Polls while the tab is open so "Refresh model list" in Cursor shows up here within seconds.
+  // Poll while the tab is open so install and catalog changes show up without a reload.
   const resource = useDataSurface<CursorIntegrationStatus>(
     `integration-cursor-page:${apiBase}`,
     [apiBase],
@@ -82,8 +77,6 @@ export default function CursorIntegrationPage({ apiBase, active }: { apiBase: st
     { isEmpty: () => false, enabled: active, pollMs: 15_000, pauseWhenHidden: true },
   );
   const status = resource.state.data ?? null;
-  const labels = relativeTimeLabelsFromT(t);
-
   return (
     <section className="integration-native-page cursor-page" aria-labelledby="cursor-integration-title">
       <h3 id="cursor-integration-title">{t("integrations.cursor.title")}</h3>
@@ -122,19 +115,6 @@ export default function CursorIntegrationPage({ apiBase, active }: { apiBase: st
                   </button>
                 </div>
               )}
-          </div>
-
-          <div className="cursor-card" data-seen={status.lastSeen ? "true" : "false"}>
-            <h4>{t("integrations.cursor.connection")}</h4>
-            {status.lastSeen
-              ? (
-                <p>
-                  <span className={`badge ${sampledAt - status.lastSeen.at < CURSOR_SEEN_WINDOW_MS ? "badge-green" : "badge-muted"}`}>
-                    {t("integrations.cursor.seen", { time: formatRelativeTime(status.lastSeen.at, labels, sampledAt), ua: status.lastSeen.userAgent })}
-                  </span>
-                </p>
-              )
-              : <p className="muted">{t("integrations.cursor.neverSeen")}</p>}
           </div>
 
           <div className="cursor-card">
