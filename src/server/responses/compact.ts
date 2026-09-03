@@ -178,8 +178,22 @@ function pruneCompactHandoffRoutes(now: number): void {
   }
 }
 
-function rememberCompactHandoffRoute(req: Request, model: string, now = Date.now()): void {
-  const key = sessionLaneIdFromRequest(req.headers);
+function compactHandoffRouteKey(req: Request, admission?: DataPlaneAdmission): string | null {
+  const lane = sessionLaneIdFromRequest(req.headers);
+  // A loopback request has no authenticated principal to bind this cross-request
+  // state to. Fail closed rather than treating a caller-controlled lane as identity.
+  if (!lane || !admission || admission.kind === "loopback") return null;
+  const principal = admission.kind === "configured" ? `configured:${admission.keyId}` : "environment";
+  return `${principal}\u0000${lane}`;
+}
+
+function rememberCompactHandoffRoute(
+  req: Request,
+  admission: DataPlaneAdmission | undefined,
+  model: string,
+  now = Date.now(),
+): void {
+  const key = compactHandoffRouteKey(req, admission);
   if (!key || model.length > COMPACT_HANDOFF_MODEL_MAX_LENGTH) return;
   pruneCompactHandoffRoutes(now);
   compactHandoffRoutes.delete(key);
@@ -187,13 +201,18 @@ function rememberCompactHandoffRoute(req: Request, model: string, now = Date.now
   pruneCompactHandoffRoutes(now);
 }
 
-function forgetCompactHandoffRoute(req: Request): void {
-  const key = sessionLaneIdFromRequest(req.headers);
+function forgetCompactHandoffRoute(req: Request, admission?: DataPlaneAdmission): void {
+  const key = compactHandoffRouteKey(req, admission);
   if (key) compactHandoffRoutes.delete(key);
 }
 
-function compactHandoffRoute(req: Request, previousModel: string, now = Date.now()): string | null {
-  const key = sessionLaneIdFromRequest(req.headers);
+function compactHandoffRoute(
+  req: Request,
+  admission: DataPlaneAdmission | undefined,
+  previousModel: string,
+  now = Date.now(),
+): string | null {
+  const key = compactHandoffRouteKey(req, admission);
   if (!key) return null;
   pruneCompactHandoffRoutes(now);
   const entry = compactHandoffRoutes.get(key);
@@ -968,9 +987,9 @@ export async function handleResponsesCompact(
     // synthetic buffer errors are not upstream bodies and stay uninspected.
     if (buffered.ok) {
       inspectResponseLogJson(logCtx, await buffered.clone().text());
-      forgetCompactHandoffRoute(req);
+      forgetCompactHandoffRoute(req, admission);
     } else if (quotaFailure && !storedPool401ReplayAttempted) {
-      const fallbackModel = compactHandoffRoute(req, raw.model);
+      const fallbackModel = compactHandoffRoute(req, admission, raw.model);
       if (fallbackModel && !req.signal.aborted) {
         const fallbackReq = new Request(req.url, {
           method: "POST",
@@ -1095,7 +1114,7 @@ export async function handleResponsesCompact(
     const result = new Response(JSON.stringify({ output: compactionItems }), {
       headers: { "Content-Type": "application/json" },
     });
-    rememberCompactHandoffRoute(req, raw.model);
+    rememberCompactHandoffRoute(req, admission, raw.model);
     return result;
   }
   const encrypted = compactionItems[0]!.encrypted_content;
@@ -1106,6 +1125,6 @@ export async function handleResponsesCompact(
   }
   const summary = decoded;
   const output = buildCompactV1Output(extractCompactUserMessages(inputItems), summary);
-  rememberCompactHandoffRoute(req, raw.model);
+  rememberCompactHandoffRoute(req, admission, raw.model);
   return new Response(JSON.stringify({ output }), { headers: { "Content-Type": "application/json" } });
 }

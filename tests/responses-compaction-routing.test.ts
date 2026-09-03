@@ -1160,6 +1160,7 @@ describe("compact alternate-account attempt (#913)", () => {
         models: ["gpt-5.6-sol"],
       };
       const headers = { "x-codex-parent-thread-id": "compact-routed-handoff-thread" };
+      const admission = { kind: "configured", keyId: "compact-client", source: "dedicated" } as const;
       const calls: Array<{ model: string; nativeCompact: boolean }> = [];
       globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = typeof input === "string"
@@ -1186,6 +1187,8 @@ describe("compact alternate-account attempt (#913)", () => {
         ),
         config,
         { model: "", provider: "" },
+        undefined,
+        admission,
       );
       expect(manual.status).toBe(200);
       expect(calls).toEqual([{ model: "deepseek-v4-flash", nativeCompact: false }]);
@@ -1199,6 +1202,8 @@ describe("compact alternate-account attempt (#913)", () => {
         ),
         config,
         { model: "", provider: "" },
+        undefined,
+        admission,
       );
       expect(unrelated.status).toBe(502);
       expect(calls.length).toBeGreaterThan(0);
@@ -1214,6 +1219,8 @@ describe("compact alternate-account attempt (#913)", () => {
         ),
         config,
         logCtx,
+        undefined,
+        admission,
       );
 
       expect(automatic.status).toBe(200);
@@ -1225,6 +1232,36 @@ describe("compact alternate-account attempt (#913)", () => {
       expect(calls.slice(0, -1).every(call => (
         call.model === "gpt-5.6-sol" && call.nativeCompact
       ))).toBe(true);
+
+      calls.length = 0;
+      const otherPrincipal = await handleResponsesCompact(
+        compactionRequest(
+          baseCompactionBody({ model: "openai-apikey/gpt-5.6-sol" }),
+          undefined,
+          headers,
+        ),
+        config,
+        { model: "", provider: "" },
+        undefined,
+        { kind: "configured", keyId: "different-client", source: "dedicated" },
+      );
+      expect(otherPrincipal.status).toBe(502);
+      expect(calls.every(call => call.model === "gpt-5.6-sol" && call.nativeCompact)).toBe(true);
+
+      calls.length = 0;
+      const unauthenticatedLoopback = await handleResponsesCompact(
+        compactionRequest(
+          baseCompactionBody({ model: "openai-apikey/gpt-5.6-sol" }),
+          undefined,
+          headers,
+        ),
+        config,
+        { model: "", provider: "" },
+        undefined,
+        { kind: "loopback", source: "loopback" },
+      );
+      expect(unauthenticatedLoopback.status).toBe(502);
+      expect(calls.every(call => call.model === "gpt-5.6-sol" && call.nativeCompact)).toBe(true);
     });
   });
 
