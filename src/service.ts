@@ -321,6 +321,17 @@ export function serviceHomeMatches(a: string, b: string): boolean {
   return normalizePathForCompare(a) === normalizePathForCompare(b);
 }
 
+/** Accept the Linux default written by service versions predating WSL home discovery. */
+export function serviceCodexHomeMatchesInstall(recordedHome: string, deps: CodexHomeDeps = {}): boolean {
+  const actualHome = currentCodexHome(deps);
+  if (serviceHomeMatches(recordedHome, actualHome)) return true;
+
+  const env = deps.env ?? process.env;
+  if (env.CODEX_HOME?.trim() || !isWslRuntime(deps)) return false;
+  const legacyDefault = join((deps.homedir ?? homedir)(), ".codex");
+  return serviceHomeMatches(recordedHome, legacyDefault);
+}
+
 /** Single accessor for backend-sensitive service code — v1/legacy state maps to scheduler. */
 export function readServiceBackend(): ServiceBackend {
   return readServiceInstallState()?.backend === "native" ? "native" : "scheduler";
@@ -378,9 +389,7 @@ export function assertServiceEnvironmentMatchesInstall(): void {
   const state = readServiceInstallState();
   if (!state) return;
   const actualCodexHome = currentCodexHome();
-  const expected = normalizePathForCompare(state.codexHome);
-  const actual = normalizePathForCompare(actualCodexHome);
-  if (expected !== actual) {
+  if (!serviceCodexHomeMatchesInstall(state.codexHome)) {
     throw new ServiceOwnershipError(
       `Service was installed with CODEX_HOME=${state.codexHome}, but current CODEX_HOME=${actualCodexHome}. ` +
         "Run the service command from the same Codex home so native Codex restore updates the correct config.",
