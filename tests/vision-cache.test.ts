@@ -298,6 +298,22 @@ describe("vision description cache and per-turn cap", () => {
     expect(textParts(request).join("\n")).toContain(expected);
   });
 
+  test("bounds invalid media types and sidecar errors before inserting prompt text", async () => {
+    const invalidMime = parsed([{ type: "input_image", image_url: `data:${"x".repeat(10_000)},payload` }]);
+    await describeImagesInPlace(invalidMime, plan(), new Headers({ authorization: "Bearer test" }));
+    const invalidMarker = textParts(invalidMime).join("\n");
+    expect(invalidMarker).toContain("invalid image media type");
+    expect(invalidMarker).not.toContain("x".repeat(128));
+
+    globalThis.fetch = (async () => { throw new Error(`bad\u0000\n${"y".repeat(2_100)}`); }) as typeof fetch;
+    const failed = parsed([{ type: "input_image", image_url: DATA_A }]);
+    await describeImagesInPlace(failed, plan(), new Headers({ authorization: "Bearer test" }));
+    const failedMarker = textParts(failed).join("\n");
+    expect(failedMarker).not.toContain("\u0000");
+    expect(failedMarker).toContain("…[description truncated]");
+    expect(failedMarker.length).toBeLessThan(2_100);
+  });
+
   test("cache hit returns the same clamped description without a sidecar call", async () => {
     let calls = 0;
     globalThis.fetch = (async () => { calls++; return openaiSse("y".repeat(2_100)); }) as typeof fetch;

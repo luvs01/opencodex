@@ -198,6 +198,10 @@ function clamp(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max)}\n…[description truncated]`;
 }
 
+function boundedError(error: string): string {
+  return clamp(error.replace(/[\u0000-\u001f\u007f]/g, " ").trim(), DESC_MAX_CHARS);
+}
+
 export interface AnthropicVisionProvider {
   providerName: string;
   provider: OcxProviderConfig;
@@ -380,7 +384,7 @@ function renderDescription(out: { text: string; error?: string }): OcxTextConten
   return {
     type: "text",
     text: out.error
-      ? `[An image was attached but could not be processed: ${out.error}]`
+      ? `[An image was attached but could not be processed: ${boundedError(out.error)}]`
       : `[Image content — described by a vision model because you cannot see images directly:\n${clamp(out.text.trim(), DESC_MAX_CHARS)}]`,
   };
 }
