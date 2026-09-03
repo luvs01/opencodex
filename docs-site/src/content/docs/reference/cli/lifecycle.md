@@ -430,10 +430,15 @@ What does carry the token into a Codex process:
 
 - the shim installed by `ocx codex-shim install` (reads the token file at launch; the supported path
   for Codex started from shells, Desktop, cron, or another service);
-- exporting `OPENCODEX_API_AUTH_TOKEN` yourself in the process that starts Codex — a shell profile,
-  the cron line, or an `Environment=`/`EnvironmentFile=` on the systemd unit that launches
-  **Codex** (not the proxy). Point it at the existing token file; do not copy the value into
-  `config.toml`.
+- a dedicated launcher that reads the protected file, exports `OPENCODEX_API_AUTH_TOKEN`, and
+  immediately executes Codex. Keep that export command-scoped (for example, in the cron command or
+  an `ExecStart=` wrapper for the systemd unit that launches **Codex**, not the proxy).
+
+Never export this token from a shell profile: every unrelated process launched from that shell would
+inherit a reusable data-plane credential. The token file contains only the raw value, not the
+`NAME=value` syntax required by systemd's `EnvironmentFile=`, so do not point `EnvironmentFile=` at
+it. Prefer the shim; if you build a dedicated launcher, preserve the file's owner-only access and do
+not copy the value into `config.toml` or a service definition.
 
 What does not: an `EnvironmentFile=` or `OCX_API_TOKEN_FILE` on `opencodex-proxy.service`. Those
 configure the proxy process only and never flow into an independently launched `codex exec`.
