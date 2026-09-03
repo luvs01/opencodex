@@ -35,9 +35,9 @@ export function findXaiProvider(config: OcxConfig): { name: string; provider: Oc
  * OAuth / Grok CLI proxy transport is not used here (that path is chat-oriented and not a
  * supported Images transport), so oauth-only configs deliberately do not arm the bridge.
  */
-export function resolveXaiImageApiKey(provider: OcxProviderConfig): string | undefined {
+export function resolveXaiImageApiKey(provider: OcxProviderConfig, providerName = "xai"): string | undefined {
   if (provider.authMode === "oauth") return undefined;
-  const apiKey = resolveProviderApiKey(provider.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(provider.apiKey, providerName)?.trim();
   return apiKey || undefined;
 }
 
@@ -73,7 +73,7 @@ export async function planImageBridge(
   if (host === "api.openai.com") return undefined;
   const found = findXaiProvider(config);
   if (!found) return undefined;
-  const token = resolveXaiImageApiKey(found.provider);
+  const token = resolveXaiImageApiKey(found.provider, found.name);
   if (!token) return undefined;
   // Pin the baseUrl to the registry entry, ignoring any config-level baseUrl override.
   const registryEntry = getProviderRegistryEntry("xai");
@@ -138,7 +138,7 @@ export async function planVideoBridge(
   if (host === "api.openai.com") return undefined;
   const found = findXaiProvider(config);
   if (!found) return undefined;
-  const token = resolveXaiImageApiKey(found.provider);
+  const token = resolveXaiImageApiKey(found.provider, found.name);
   if (!token) return undefined;
   // Pin the baseUrl to the registry entry, ignoring any config-level baseUrl override.
   const registryEntry = getProviderRegistryEntry("xai");

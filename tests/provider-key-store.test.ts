@@ -74,9 +74,9 @@ describe("provider key resolver (#1221)", () => {
   test("plain and env values resolve exactly as before", () => {
     process.env.OCX_TEST_KEY_REF = "from-env";
     try {
-      expect(resolveProviderApiKey(SECRET)).toBe(SECRET);
-      expect(resolveProviderApiKey("${OCX_TEST_KEY_REF}")).toBe("from-env");
-      expect(resolveProviderApiKey(undefined)).toBeUndefined();
+      expect(resolveProviderApiKey(SECRET, "relay")).toBe(SECRET);
+      expect(resolveProviderApiKey("${OCX_TEST_KEY_REF}", "relay")).toBe("from-env");
+      expect(resolveProviderApiKey(undefined, "relay")).toBeUndefined();
     } finally {
       delete process.env.OCX_TEST_KEY_REF;
     }
@@ -86,7 +86,9 @@ describe("provider key resolver (#1221)", () => {
     const { store, factory } = fakeKeychain();
     store.set(`${PROVIDER_KEYCHAIN_SERVICE}\u0000relay`, SECRET);
     setProviderKeychainEntryFactoryForTests(factory);
-    expect(resolveProviderApiKey("keychain:relay")).toBe(SECRET);
+    expect(resolveProviderApiKey("keychain:relay", "relay")).toBe(SECRET);
+    expect(resolveProviderApiKey("keychain:relay", "attacker")).toBeUndefined();
+    expect(routedProviderConfig("attacker", { adapter: "openai-chat", baseUrl: "https://attacker.example/v1", apiKey: "keychain:relay" }).apiKey).toBeUndefined();
     // routing clone carries the resolved secret so adapters keep working unchanged
     expect(routedProviderConfig("relay", { adapter: "openai-chat", baseUrl: "https://relay.example/v1", apiKey: "keychain:relay" }).apiKey).toBe(SECRET);
 
@@ -95,8 +97,8 @@ describe("provider key resolver (#1221)", () => {
     console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
     try {
       setProviderKeychainEntryFactoryForTests(fakeKeychain({ unavailable: true }).factory);
-      expect(resolveProviderApiKey("keychain:relay")).toBeUndefined();
-      expect(resolveProviderApiKey("keychain:relay")).toBeUndefined();
+      expect(resolveProviderApiKey("keychain:relay", "relay")).toBeUndefined();
+      expect(resolveProviderApiKey("keychain:relay", "relay")).toBeUndefined();
     } finally {
       console.warn = original;
     }
@@ -133,7 +135,7 @@ describe("store / restore", () => {
     expect(onDisk).toContain("keychain:relay/a1");
     expect(store.size).toBe(2);
     // resolves back to the plaintext at request time
-    expect(resolveProviderApiKey(config.providers.relay!.apiKey)).toBe(SECRET);
+    expect(resolveProviderApiKey(config.providers.relay!.apiKey, "relay")).toBe(SECRET);
 
     const restored = restoreProviderKeyFromKeychain(config, "relay");
     expect(restored).toEqual({ ok: true, restored: 2 });
@@ -154,6 +156,22 @@ describe("store / restore", () => {
       expect(faulty.store.size).toBe(0);
     }
     expect(probeProviderKeychain().available).toBe(false);
+  });
+
+  test("restore refuses keychain references owned by another provider", () => {
+    const { store, factory } = fakeKeychain();
+    store.set(`${PROVIDER_KEYCHAIN_SERVICE}\u0000victim`, SECRET);
+    setProviderKeychainEntryFactoryForTests(factory);
+    const config = loadConfig();
+    config.providers.relay!.apiKey = "keychain:victim";
+
+    expect(restoreProviderKeyFromKeychain(config, "relay")).toEqual({
+      ok: false,
+      error: "provider contains a keychain reference owned by another provider",
+      status: 400,
+    });
+    expect(config.providers.relay!.apiKey).toBe("keychain:victim");
+    expect(store.get(`${PROVIDER_KEYCHAIN_SERVICE}\u0000victim`)).toBe(SECRET);
   });
 
   test("management route: GET reports store kind, POST store/restore round-trips", async () => {
@@ -192,4 +210,3 @@ describe("store / restore", () => {
     }
   });
 });
-

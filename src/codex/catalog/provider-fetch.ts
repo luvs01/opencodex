@@ -1283,7 +1283,7 @@ function observedModelsAuthResolver(
     resolve(name, provider) {
       if (provider.authMode === "forward") return { apiKey: undefined, observed: true };
       if (provider.authMode !== "oauth") {
-        return { apiKey: resolveProviderApiKey(provider.apiKey), observed: true };
+        return { apiKey: resolveProviderApiKey(provider.apiKey, name), observed: true };
       }
 
       const observation = observeActiveOAuthAccessToken(name, authStoreBuffer);

@@ -76,7 +76,7 @@ async function buildLabProviderAuthHeaders(
       throw new TransportError("harness_failure", "oauth refresh unavailable");
     }
   } else {
-    const apiKey = resolveProviderApiKey(provider.apiKey)?.trim();
+    const apiKey = resolveProviderApiKey(provider.apiKey, routeContext.providerId)?.trim();
     if (!apiKey) throw new TransportError("auth_blocked", "missing api key");
     if (provider.adapter === "anthropic" && provider.apiKeyTransport === "x-api-key") {
       headers["x-api-key"] = apiKey;
