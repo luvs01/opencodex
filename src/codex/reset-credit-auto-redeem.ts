@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { withConfigMutationLockSync } from "../config";
 import { atomicWriteFile } from "../config/atomic-write";
 import { getConfigDir } from "../config/paths";
 import { registerOptionalShutdownHook } from "../lib/optional-shutdown-hooks";
@@ -118,6 +119,8 @@ export interface AutoRedeemDeps {
   maxSleepMs?: number;
   /** Interval to re-inspect when no credit is due yet (default 30 min). */
   idleRecheckMs?: number;
+  /** @internal Test seam used to synchronize peer processes immediately before journal reservation. */
+  beforeDispatchForTest?: () => Promise<void>;
 }
 
 export type AutoRedeemOutcome =
@@ -156,15 +159,25 @@ export function createResetCreditAutoRedeemer(deps: AutoRedeemDeps): ResetCredit
   };
 
   const dispatch = async (plan: AutoRedeemPlan): Promise<AutoRedeemOutcome> => {
-    const journal = readJournal(path);
-    let entry = journal.entries.find(e => e.accountKey === accountKey && e.grantedAt === plan.grantedAt && e.expiresAt === plan.expiresAt);
-    if (entry?.state === "settled") return { kind: "skipped", reason: "credit-gone" };
-    if (!entry) {
-      entry = { accountKey, grantedAt: plan.grantedAt, expiresAt: plan.expiresAt, redeemRequestId: randomUUID(), state: "dispatched", updatedAt: now() };
-      journal.entries.push(entry);
-      // Journal BEFORE the network call: a crash after this line replays the same request id.
-      writeJournal(path, journal);
+    let entry: JournalEntry;
+    try {
+      entry = withConfigMutationLockSync(() => {
+        const journal = readJournal(path);
+        let reserved = journal.entries.find(e => e.accountKey === accountKey && e.grantedAt === plan.grantedAt && e.expiresAt === plan.expiresAt);
+        if (!reserved) {
+          reserved = { accountKey, grantedAt: plan.grantedAt, expiresAt: plan.expiresAt, redeemRequestId: randomUUID(), state: "dispatched", updatedAt: now() };
+          journal.entries.push(reserved);
+          // Reserve BEFORE the network call. The shared transaction makes minting the
+          // idempotency key atomic across sibling server processes.
+          writeJournal(path, journal);
+        }
+        return reserved;
+      });
+    } catch (error) {
+      schedule(1_000);
+      return { kind: "error", message: error instanceof Error ? error.message : "journal reservation failed" };
     }
+    if (entry.state === "settled") return { kind: "skipped", reason: "credit-gone" };
     log(`[opencodex] reset-credit auto-redeem: dispatching for account ${accountKey} (credit expires ${plan.expiresAt})`);
     let result: { code: string };
     try {
@@ -174,9 +187,22 @@ export function createResetCreditAutoRedeemer(deps: AutoRedeemDeps): ResetCredit
       schedule(60_000);
       return { kind: "ambiguous", redeemRequestId: entry.redeemRequestId };
     }
-    entry.state = "settled";
-    entry.updatedAt = now();
-    writeJournal(path, journal);
+    try {
+      withConfigMutationLockSync(() => {
+        const journal = readJournal(path);
+        const current = journal.entries.find(e => e.accountKey === accountKey && e.grantedAt === plan.grantedAt && e.expiresAt === plan.expiresAt);
+        if (current) {
+          current.state = "settled";
+          current.updatedAt = now();
+          writeJournal(path, journal);
+        }
+      });
+    } catch (error) {
+      // The consume succeeded, so retain the same operation id and retry settlement rather
+      // than allowing a peer to mint a replacement reservation.
+      schedule(1_000);
+      return { kind: "error", message: error instanceof Error ? error.message : "journal settlement failed" };
+    }
     log(`[opencodex] reset-credit auto-redeem: upstream answered ${result.code} for account ${accountKey}`);
     schedule(idleRecheckMs);
     return { kind: "dispatched", code: result.code, redeemRequestId: entry.redeemRequestId };
@@ -206,6 +232,7 @@ export function createResetCreditAutoRedeemer(deps: AutoRedeemDeps): ResetCredit
         return { kind: "error", message: error instanceof Error ? error.message : "inspect failed" } as AutoRedeemOutcome;
       }
       if (!creditStillPresent(fresh, plan)) { schedule(idleRecheckMs); return { kind: "skipped", reason: "credit-gone" } as AutoRedeemOutcome; }
+      await deps.beforeDispatchForTest?.();
       return dispatch(plan);
     })().finally(() => { inFlight = null; });
     return inFlight;
