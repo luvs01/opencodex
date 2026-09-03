@@ -213,6 +213,29 @@ describe("Windows ownership probe hardening regressions", () => {
     expect(result.kind).toBe("unknown");
   });
 
+  test("a latency-sensitive ownership probe does not enumerate scheduled tasks", () => {
+    let fullListings = 0;
+    const result = inspectServiceManagerInstallation({
+      platform: "win32",
+      home,
+      configDir,
+      windowsLocale: "zh-CN",
+      skipWindowsTaskListing: true,
+      runRaw: (file, args) => {
+        if (file.toLowerCase().endsWith("sc.exe")) return raw(1, "", "1060");
+        if (args.includes("/xml")) {
+          return { status: 1, stdout: Buffer.alloc(0), stderr: GBK_TASK_NOT_FOUND, timedOut: false, spawnFailed: false };
+        }
+        if (args.includes("/fo")) fullListings += 1;
+        return raw(0, "");
+      },
+      winswStatus: () => "nonexistent",
+    });
+
+    expect(result.kind).toBe("unknown");
+    expect(fullListings).toBe(0);
+  });
+
   test("one startup keeps two targeted queries but shares one unchanged full listing (#2923)", async () => {
     const codexHome = join(home, "codex");
     mkdirSync(codexHome, { recursive: true });
