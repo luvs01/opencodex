@@ -89,6 +89,22 @@ describe("responses parser — malformed content blocks", () => {
       .toEqual([{ type: "image", imageUrl: "data:image/png;base64,aGVsbG8=", detail: "high" }]);
   });
 
+  test("remote and non-image URLs are not forwarded as provider-native image sources", () => {
+    for (const image_url of [
+      "http://127.0.0.1/private.png",
+      "https://example.test/remote.png",
+      "file:///etc/passwd",
+      "data:text/plain;base64,aGVsbG8=",
+    ]) {
+      expect(userContent([{ type: "input_image", image_url }])).toEqual([]);
+    }
+    expect(userContent([{
+      type: "input_image",
+      image_url: "http://169.254.169.254/latest/meta-data/",
+      file_id: "file_1",
+    }])).toBe("[image: file_1]");
+  });
+
   test("an assistant content array containing null is dropped without throwing", () => {
     expect(() => parseRequest(inputOf("assistant", [null]))).not.toThrow();
     const parsed = parseRequest(inputOf("assistant", [null]));
