@@ -983,10 +983,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // a stale apply the operator should refresh.
       const stale = desiredEnabled && observed.kind === "gateway_drifted";
       const { getDesktopHealth } = await import("../../claude/desktop-health");
-      const { claudeDesktopPolicyHealth, probeClaudeDesktopPolicy } = await import("../../claude/desktop-policy");
-      const policyState = (deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)({
-        platform: deps.platform ?? process.platform,
-      });
+      const { claudeDesktopPolicyHealth, getCachedClaudeDesktopPolicy } = await import("../../claude/desktop-policy");
+      const policyState = deps.probeClaudeDesktopPolicy
+        ? deps.probeClaudeDesktopPolicy({ platform: deps.platform ?? process.platform })
+        : await getCachedClaudeDesktopPolicy({ platform: deps.platform ?? process.platform });
       const policy = claudeDesktopPolicyHealth(policyState);
       const health = {
         ...getDesktopHealth(),
