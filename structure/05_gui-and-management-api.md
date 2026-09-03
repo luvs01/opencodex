@@ -70,9 +70,10 @@ Tailscale identity headers authorize session issuance only when the request arri
 listener and the exact login appears in `remoteGui.allowedTailscaleUsers`. The public listener and
 the unauthenticated data-loopback listener always pass `trustedTailscaleIngress: false`, regardless
 of `Host`, `Origin`, `Forwarded`, `X-Forwarded-*`, or `Tailscale-User-*` values. A generic TLS proxy
-cannot establish that identity and uses the existing single-use, digest-only, origin-bound pairing
-exchange. Pairing accepts no admin/data credential substitute and consumes a grant only after the
-full origin predicate succeeds.
+cannot establish that identity: its deployment must keep the Tailscale allowlist empty, remove or
+reject every client-supplied `Tailscale-User-*` header, and use the existing single-use, digest-only,
+origin-bound pairing exchange. Pairing accepts no admin/data credential substitute and consumes a
+grant only after the full origin predicate succeeds.
 
 The server issues a local in-memory session for five minutes or a remote session for twelve hours,
 with 128 live sessions maximum. Every session is bound to the exact server and browser origins;
