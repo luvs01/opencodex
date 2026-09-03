@@ -84,7 +84,8 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
       observer.feed("Leading text about progress.\n");
       observer.feed(RUN03_SPECIMEN);
       const findings = observer.findings();
-      expect(findings).toHaveLength(1);
+      expect(findings).toHaveLength(2);
+      expect(findings[0]!.marker).toBe("[Tool Result]");
       expect(findings[0]!.callIdCorrupt).toBe(true);
     });
 
@@ -93,8 +94,8 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
       observer.feed("Leading text.\n");
       observer.feed("[Tool Result]\n[tool_result]\ncall_id: call-1\nfc_63367283-2aec-9a25_1\noutput:\nok\n");
       const findings = observer.findings();
-      expect(findings).toHaveLength(1);
-      expect(findings[0]!.callIdCorrupt).toBe(false);
+      expect(findings).toHaveLength(2);
+      expect(findings.every(finding => !finding.callIdCorrupt)).toBe(true);
     });
 
     test("a marker fragmented across delta boundaries still fires", () => {
@@ -105,6 +106,15 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
       expect(findings).toHaveLength(1);
       expect(findings[0]!.marker).toBe("[Tool Result]");
       expect(findings[0]!.callIdCorrupt).toBe(true);
+    });
+
+    test("closely spaced markers retain independent corruption findings", () => {
+      const observer = new CursorMidstreamEchoObserver();
+      observer.feed("lead\n[Tool Result]\nfc_63367283 mar-broken_0\n[Tool Error]\nclean\n");
+      expect(observer.findings()).toEqual([
+        { marker: "[Tool Result]", offset: 5, callIdCorrupt: true },
+        { marker: "[Tool Error]", offset: 44, callIdCorrupt: false },
+      ]);
     });
 
     test("a mid-line marker mention does not fire", () => {
