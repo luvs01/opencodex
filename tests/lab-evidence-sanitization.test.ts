@@ -121,8 +121,8 @@ describe("SEC-02 sanitizer boundary", () => {
     // documentation cannot quietly stop matching the code.
     expect(sanitizeDiagnostic("provider.timeout")).toBe("[host]");
     expect(sanitizeDiagnostic("provider.request.duration")).toBe("[host]");
-    // The moment any label carries a digit it reads as a namespace and lives.
-    expect(sanitizeDiagnostic("provider.metric.p95")).toBe("provider.metric.p95");
+    // Numeric labels remain ambiguous and therefore fail closed too.
+    expect(sanitizeDiagnostic("provider.metric.p95")).toBe("[host]");
   });
 
   test("identifiers survive neither punctuation, word boundaries, nor a URL path", () => {
@@ -207,16 +207,17 @@ describe("SEC-02 sanitizer boundary", () => {
     expect(sanitizeDiagnostic("acct_abcdef-prod")).toBe("[account]");
   });
 
-  test("hostnames with numeric or hyphenated labels redact in a network context", () => {
+  test("hostnames with numeric or hyphenated labels redact with or without context", () => {
     // `db.prod-1` is a valid internal hostname AND a valid metric namespace;
-    // shape cannot separate them, so an explicit network marker decides.
+    // shape cannot separate them, so durable evidence fails closed.
     expect(sanitizeDiagnostic("dial tcp db.prod-1:443: connect: refused"))
       .toBe("dial tcp [host]:443: connect: refused");
     expect(sanitizeDiagnostic("upstream api.us-east-1 unavailable"))
       .toBe("upstream [host] unavailable");
-    // Without such a marker they survive — a recorded limit, asserted so it
-    // cannot drift silently in either direction.
-    expect(sanitizeDiagnostic("db.prod-1")).toBe("db.prod-1");
+    // Provider-controlled text is persisted, so ambiguous standalone values
+    // fail closed rather than exposing an internal hostname.
+    expect(sanitizeDiagnostic("db.prod-1")).toBe("[host]");
+    expect(sanitizeDiagnostic("api.internal2")).toBe("[host]");
   });
 
   test("the network-context grammar covers real syntax without eating prose", () => {
@@ -240,9 +241,9 @@ describe("SEC-02 sanitizer boundary", () => {
     // `connect to` was demoted to a weak marker: it reads as English too often
     // (`Unable to connect to your account`). Without a port it no longer
     // licenses a bare name — a documented limit, asserted below.
-    // WEAK markers appear in prose, so a dotted namespace after one survives.
+    // A multi-label token still fails closed independently of marker strength.
     expect(sanitizeDiagnostic("upstream provider.metric.p95 exceeded"))
-      .toBe("upstream provider.metric.p95 exceeded");
+      .toBe("upstream [host] exceeded");
   });
 
   test("full-word account labels and both MAC notations are covered", () => {
@@ -332,20 +333,16 @@ describe("SEC-02 sanitizer boundary", () => {
     // provider.metric.p95 regressed to [host].p95.
     expect(sanitizeDiagnostic("api.example.com.")).toBe("[host]");
     expect(sanitizeDiagnostic("connect to api.example.com.")).toBe("connect to [host]");
-    expect(sanitizeDiagnostic("provider.metric.p95")).toBe("provider.metric.p95");
+    expect(sanitizeDiagnostic("provider.metric.p95")).toBe("[host]");
   });
 
-  test("hostname redaction does not eat ordinary dotted diagnostics", () => {
-    // Widening the final label for punycode initially swallowed these. A
-    // sanitizer that destroys evidence fails the Lab's purpose as surely as
-    // one that leaks it.
+  test("ambiguous dotted diagnostics fail closed as hostnames", () => {
     for (const value of ["foo.bar-baz", "lib.v2-rc1", "release.v2", "metric.p95"]) {
-      expect(sanitizeDiagnostic(value), value).toBe(value);
+      expect(sanitizeDiagnostic(value), value).toBe("[host]");
     }
-    // Three-label forms too: the rule must refuse the whole token rather than
-    // backtracking to a later label and leaving `[host].p95`.
+    // Three-label forms are consumed whole rather than partially redacted.
     for (const value of ["provider.metric.p95", "client.api.v2-rc1"]) {
-      expect(sanitizeDiagnostic(value), value).toBe(value);
+      expect(sanitizeDiagnostic(value), value).toBe("[host]");
     }
     // Real hosts, including punycode, still go.
     expect(sanitizeDiagnostic("internal.corp.example")).toBe("[host]");

@@ -120,15 +120,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 // must be consistent within one address.
 const MAC_RE = /(?<![0-9A-Za-z:-])(?:(?:[0-9A-Fa-f]{2}:){5}|(?:[0-9A-Fa-f]{2}-){5})[0-9A-Fa-f]{2}(?![0-9A-Za-z:-])/g;
 const IPV4_RE = /(?<![0-9A-Za-z.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9A-Za-z.])/g;
-// The final label is either an ordinary alphabetic TLD or a punycode one.
-// Allowing hyphens and digits in every final label was too broad: it ate
-// ordinary diagnostic tokens such as `foo.bar-baz` and `metric.p95`, which
-// costs exactly the evidence quality the Lab exists to capture.
-// A trailing `-` or word character after the TLD means this was never a
-// hostname (`foo.bar-baz`), so the lookahead refuses the match. A trailing
-// `.` is allowed and consumed: it is FQDN root notation and equally ordinary
-// sentence punctuation, and forbidding it let `api.example.com.` through
-// untouched.
+// Match the complete DNS label grammar, including private suffixes containing
+// digits or hyphens. Provider-controlled diagnostics are durable evidence, so
+// an ambiguous dotted token must be treated as a hostname rather than risk
+// persisting an internal network identifier. A trailing `.` is allowed and
+// consumed for FQDN root notation.
 //
 // The leading `(?<![\w.-])` matters just as much: without it the engine
 // backtracks to a later starting label and redacts a prefix, turning
@@ -139,16 +135,13 @@ const IPV4_RE = /(?<![0-9A-Za-z.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9A-Za-z.])/g;
 // `[host].p95`. The terminator is therefore mandatory and expressed as a
 // single alternation — either the token ends cleanly, or it ends with an FQDN
 // root dot that is itself followed by nothing label-shaped.
-const HOSTNAME_RE = /(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}(?:xn--[a-z0-9-]{1,55}|[a-z]{2,24})(?:\.(?![\w-])|(?![\w.-]))/gi;
+const HOSTNAME_RE = /(?<![\w.-])(?!v?[0-9.]+(?:\.|$))(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.(?![\w-])|(?![\w.-]))/gi;
 // The value is scanned to its delimiter, not to a word boundary: `\b` stops at
 // the first `.` in `db_prod.internal`, which left `[host].internal` — a partial
 // redaction that still names the host.
-// `db.prod-1` and `api.us-east-1` are indistinguishable from ordinary dotted
-// diagnostics by shape alone — a numeric or hyphenated final label is both a
-// legitimate internal hostname and a legitimate metric or version namespace.
-// Shape cannot decide it, so context does: these forms are redacted only when
-// an unambiguous network marker introduces them. Outside such a marker they
-// survive, and that is a recorded limit rather than an oversight.
+// Context rules additionally cover single-label names. Multi-label names are
+// already handled above, including ambiguous metric or version namespaces,
+// because durable provider-controlled evidence must fail closed.
 //
 // The marker grammar accepts the separators these messages actually use —
 // whitespace, `=`, `:`, and JSON quoting — and the CANDIDATE IS VALIDATED
