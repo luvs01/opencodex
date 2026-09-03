@@ -292,6 +292,13 @@ describe("SEC-02 sanitizer boundary", () => {
       .toBe("connect to [host] port 8080 failed");
   });
 
+  test("socket errors redact bare single-label destinations", () => {
+    expect(sanitizeDiagnostic("ECONNREFUSED redis")).toBe("ECONNREFUSED [host]");
+    expect(sanitizeDiagnostic("ETIMEDOUT gateway")).toBe("ETIMEDOUT [host]");
+    expect(sanitizeDiagnostic("EHOSTUNREACH backend")).toBe("EHOSTUNREACH [host]");
+    expect(sanitizeDiagnostic("dial tcp redis")).toBe("dial tcp [host]");
+  });
+
   test("natural-language connect-to prose is left alone", () => {
     // `connect to` reads as English far more often than as a destination, so
     // it no longer licenses a bare word. The cost is that `connect to gateway`

@@ -184,8 +184,9 @@ const DOTTED_NAMESPACE_RE = /^[a-z]+(?:\.[a-z]+)*\.[a-z]+[0-9]*$/i;
  * A stopword list would repeat the delimiter-enumeration mistake, so the
  * candidate is validated instead. A token qualifies when it carries host
  * punctuation (dot, hyphen, underscore, digit) or is a reserved name; a bare
- * English word does not — EXCEPT directly after a resolver marker, where the
- * argument is a name by construction and `ENOTFOUND redis` must still redact.
+ * English word does not — EXCEPT after a resolver or socket-state marker,
+ * where the argument is a name by construction and `ENOTFOUND redis` and
+ * `ECONNREFUSED redis` must still redact.
  */
 const RESERVED_HOST_NAMES = new Set(["localhost", "broadcasthost"]);
 const PROSE_AFTER_MARKER = new Set([
@@ -198,8 +199,8 @@ function isHostCandidate(value: string, bareWordAllowed = false): boolean {
   if (/[.\-_0-9]/.test(value)) {
     return AMBIGUOUS_HOST_RE.test(value) || CONTEXTUAL_HOST_TOKEN_RE.test(value);
   }
-  // A bare word: only a resolver marker makes it a host, and only when it is
-  // not one of the connective words those messages actually use.
+  // A bare word: only a destination-bearing marker makes it a host, and only
+  // when it is not one of the connective words those messages actually use.
   return bareWordAllowed && !PROSE_AFTER_MARKER.has(lower);
 }
 
@@ -499,8 +500,8 @@ function scrubString(value: string): string {
   s = s.replace(STRONG_HOST_CONTEXT_RE, (m, tail: string) => {
     // Scan the few tokens after the marker for the first host-shaped one:
     // Go writes `dial tcp: lookup <host>: no such host`, so the destination
-    // is not always adjacent to the marker. A resolver marker also licenses a
-    // bare name (`ENOTFOUND redis`), which a socket-state marker does not.
+    // is not always adjacent to the marker. Resolver and socket-state markers
+    // also license bare destination names such as `ENOTFOUND redis`.
     // A name paired with a port is a destination whatever else is true:
     // `dial tcp redis:6379` needs no other evidence. Both notations count —
     // adjacent `host:443` and spelled-out `gateway on port 443` — because the
@@ -511,11 +512,17 @@ function scrubString(value: string): string {
     if (ported?.[1] && !PROSE_AFTER_MARKER.has(ported[1].toLowerCase())) {
       return m.replace(ported[1], "[host]");
     }
-    // Otherwise only a resolver marker licenses a bare name. Natural-language
-    // `connect to` does not: `Unable to connect to your account` is prose.
-    const resolver = /ENOTFOUND|EAI_AGAIN|lookup|host/i.test(m);
+    // Resolver and socket-state markers license a bare destination name.
+    // Natural-language `connect to` does not: `Unable to connect to your
+    // account` is prose.
+    const destinationContext =
+      /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|dial\s+(?:tcp|udp)|lookup|\bhost\b/i.test(m);
+    let bareNamePossible = destinationContext;
     for (const token of tail.split(/[\s:]+/)) {
-      if (token && isHostCandidate(token, resolver)) return m.replace(token, "[host]");
+      if (!token) continue;
+      if (isHostCandidate(token)) return m.replace(token, "[host]");
+      if (bareNamePossible && isHostCandidate(token, true)) return m.replace(token, "[host]");
+      if (!PROSE_AFTER_MARKER.has(token.toLowerCase())) bareNamePossible = false;
     }
     return m;
   });
