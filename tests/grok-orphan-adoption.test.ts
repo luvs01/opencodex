@@ -1406,6 +1406,7 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
       'model = "gpt-5.6-sol"',
       'model_provider = "opencodex"',
       'name = "OCX gpt-5.6-sol"',
+      OWNERSHIP_MARKER,
       "",
       "[models]",
       'default = "ocx-gpt-5-6-sol"',
@@ -1450,11 +1451,9 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
     expect(() => Bun.TOML.parse(content)).not.toThrow();
   });
 
-  // The migration's real regression: model tables in the provider-inheritance shape carry
-  // NO api_key/base_url of their own, so the legacy predicate missed them and every sync
-  // after a Grok rewrite allocated a -2 duplicate beside the stale original. Adoption
-  // must follow the model_provider reference to the owned provider table.
-  test("adopts model_provider-referencing entries left unfenced by a Grok rewrite", () => {
+  // Modern model tables carry their own marker so a Grok rewrite can move them outside
+  // the fence without making ownership ambiguous.
+  test("adopts marked model_provider-referencing entries left unfenced by a Grok rewrite", () => {
     writeFileSync(configPath, [
       "[ui]",
       'fork_secondary_model = "grok-build"',
@@ -1470,11 +1469,13 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
       'model = "gpt-5.6-sol"',
       'model_provider = "opencodex"',
       'name = "OCX gpt-5.6-sol"',
+      OWNERSHIP_MARKER,
       "",
       "[model.ocx-gpt-5-6-terra]",
       'model = "gpt-5.6-terra"',
       'model_provider = "opencodex"',
       'name = "OCX gpt-5.6-terra"',
+      OWNERSHIP_MARKER,
       "",
       "[models]",
       'default = "ocx-gpt-5-6-sol"',
@@ -1545,6 +1546,7 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
       'model = "gpt-5.6-sol"',
       'model_provider = "opencodex"',
       'name = "OCX gpt-5.6-sol"',
+      OWNERSHIP_MARKER,
       "",
       "[models]",
       'default = "ocx-gpt-5-6-sol"',
@@ -1562,10 +1564,9 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
     expect(() => Bun.TOML.parse(content)).not.toThrow();
   });
 
-  test("teardown resolves inherited ownership through the fenced provider", () => {
-    // A retired model kept outside the fence inherits its verdict from the provider table
-    // INSIDE it. Classification must see the fenced provider, or strip removes the fence
-    // but leaves the model with a dangling `model_provider = "opencodex"` reference.
+  test("teardown removes a marked inherited model outside the fence", () => {
+    // A retired generated model remains removable after Grok moves it outside the fence
+    // because the model retains its own durable ownership marker.
     writeFileSync(configPath, [
       "[ui]",
       'fork_secondary_model = "grok-build"',
@@ -1587,6 +1588,7 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
       'model = "gpt-5.6-terra"',
       'model_provider = "opencodex"',
       'name = "OCX gpt-5.6-terra"',
+      OWNERSHIP_MARKER,
       "",
       "[models]",
       'default = "ocx-gpt-5-6-terra"',
@@ -1603,12 +1605,14 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
     expect(() => Bun.TOML.parse(content)).not.toThrow();
   });
 
-  test("does not adopt a user-written model that references the managed provider", () => {
-    // Inheritance must not grant removal authority over every model that references
-    // opencodex: a user is free to write their own [model.*] table that inherits the
-    // managed provider, and adoption without a generated alias deletes it.
+  test("preserves generated-looking user models that inherit the managed provider", () => {
+    // Neither the inherited provider nor a predictable alias proves that this model was
+    // generated. In particular, an upstream catalog id must not grant deletion authority.
     for (const operation of ["inject", "teardown"] as const) {
       writeFileSync(configPath, [
+        "[models]",
+        'default = "ocx-evil-foo"',
+        "",
         BEGIN_MARKER,
         "[model_providers.opencodex]",
         'base_url = "http://127.0.0.1:10100/v1"',
@@ -1616,30 +1620,36 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
         'api_key = "opencodex-loopback"',
         OWNERSHIP_MARKER,
         "",
-        "[model.ocx-gpt-5-6-sol]",
-        'model = "gpt-5.6-sol"',
-        'model_provider = "opencodex"',
-        'name = "OCX gpt-5.6-sol"',
         END_MARKER,
         "",
-        "[model.custom-variant]",
-        'model = "gpt-5.6-sol"',
+        "[model.ocx-evil-foo]",
+        'model = "evil/foo"',
         'model_provider = "opencodex"',
         'name = "my fast variant"',
         "context_window = 128000",
+        "custom_user_setting = true",
+        "",
+        "[model.ocx-evil-foo.extra_headers]",
+        'x-user-custom = "keep-me"',
         "",
       ].join("\n"));
 
       if (operation === "inject") {
-        expect(injectGrokConfig(10100, MODELS, { grokHome }))
+        expect(injectGrokConfig(10100, MODELS, {
+          grokHome,
+          catalogModelIds: new Set(["gpt-5.6-sol", "evil/foo"]),
+        }))
           .toMatchObject({ ok: true, changed: true });
       } else {
         expect(stripGrokConfig({ grokHome })).toMatchObject({ ok: true, changed: true });
       }
       const content = readFileSync(configPath, "utf8");
-      expect(content).toContain("[model.custom-variant]");
+      expect(content).toContain("[model.ocx-evil-foo]");
       expect(content).toContain('name = "my fast variant"');
       expect(content).toContain("context_window = 128000");
+      expect(content).toContain("custom_user_setting = true");
+      expect(content).toContain('x-user-custom = "keep-me"');
+      expect(content).toContain('default = "ocx-evil-foo"');
       expect(() => Bun.TOML.parse(content)).not.toThrow();
     }
   });

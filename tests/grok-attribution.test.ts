@@ -17,10 +17,12 @@ import { removeTreeWithRetry } from "./helpers/remove-tree";
 test("the managed fence stamps the grok attribution header on every model", () => {
   const block = buildGrokManagedBlock(10100, [{ id: "kimi/k3", contextWindow: 262_144 }]);
   expect(block).toContain('extra_headers = { "x-opencodex-grok" = "1" }');
-  // The header lives in the shared [model_providers.opencodex] block, inherited by every
-  // [model.*] table that references it via model_provider.
+  // The provider carries the request header, and each model repeats it as durable
+  // per-table ownership evidence in case Grok moves the table outside the fence.
   const providerBlock = block.slice(block.indexOf("[model_providers.opencodex]"), block.indexOf("[model."));
   expect(providerBlock).toContain("x-opencodex-grok");
+  const modelBlock = block.slice(block.indexOf("[model."));
+  expect(modelBlock).toContain("x-opencodex-grok");
 });
 
 test("the fence survives a write and keeps the header line parseable", () => {
