@@ -3,6 +3,7 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCredential } from "../src/oauth/store";
+import { readPersistedAccountQuotas } from "../src/providers/account-quota-disk";
 import type { OcxConfig } from "../src/types";
 import {
   clearAccountQuotaCache,
@@ -77,6 +78,10 @@ describe("fetchProviderAccountQuotas", () => {
     expect(seenTokens.sort()).toEqual(["Bearer token-first", "Bearer token-second"]);
     // The 5-hour window lands in the canonical fields, not in customWindows.
     for (const row of rows) expect(row.quota?.customWindows).toBeUndefined();
+
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const persisted = readPersistedAccountQuotas();
+    expect(rows.map(row => persisted.get(`anthropic\u0000${row.accountId}`)?.fiveHourPercent).sort()).toEqual([3, 70]);
   });
 
   test("a cached row is reused instead of re-probing upstream", async () => {

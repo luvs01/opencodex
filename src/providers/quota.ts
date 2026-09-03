@@ -1378,6 +1378,7 @@ async function fetchAnthropicQuota(provider: string): Promise<ProviderQuotaRepor
     const stillOwnsToken = getAccountCredential("anthropic", probedAccountId)?.access === accessToken;
     if (stillOwnsToken && mayCommitAccountQuotaKey(probedAccountKey, writerGeneration)) {
       accountQuotaCache.set(probedAccountKey, { ts: Date.now(), quota });
+      persistAccountQuotaCache();
     }
   }
   return report(provider, "anthropic:oauth-usage", quota);
@@ -1405,6 +1406,7 @@ async function fetchKiroQuota(provider: string): Promise<ProviderQuotaReport | n
   if (mayCommitAccountQuotaKey(probedAccountKey, writerGeneration)) {
     accountQuotaCache.set(probedAccountKey, { ts: Date.now(), quota: snapshot.quota });
     commitKiroAccountUsageState(probedAccountKey, snapshot);
+    persistAccountQuotaCache();
   }
   return report(provider, "kiro:usage-limits", snapshot.quota);
 }
@@ -1487,6 +1489,7 @@ function accountCacheKey(provider: string, accountId: string): string {
  * Returns null when nothing is cached (or the cached row has no bars).
  */
 export function getCachedProviderAccountQuota(provider: string, accountId: string): ProviderQuota | null {
+  hydrateAccountQuotaCache();
   const entry = accountQuotaCache.get(accountCacheKey(provider, accountId));
   return entry?.quota ?? null;
 }
@@ -1517,6 +1520,7 @@ export function sweepExpiredProviderAccountQuotaRows(now = Date.now()): number {
 
 export function reconcileProviderAccountQuotaRows(context: GenerationContext): number {
   if (context.generation <= lastReconciledGeneration) return 0;
+  hydrateAccountQuotaCache();
   let removed = 0;
   for (const key of accountQuotaCache.keys()) {
     if (context.oauthAccountKeys.has(key)) continue;
@@ -1545,6 +1549,13 @@ export function resetProviderQuotaReconcileStateForTests(): void {
   liveProviderQuotaKeys = new Set();
 }
 
+/** Test-only reset that models a fresh process loading the disk snapshot. */
+export function resetProviderAccountQuotaDiskStateForTests(): void {
+  accountQuotaCache.clear();
+  diskHydrated = false;
+  cancelPendingAccountQuotaPersist();
+}
+
 /** Drop cached per-account rows (all, or just one provider's). */
 export function clearAccountQuotaCache(provider?: string): void {
   if (!provider) {
@@ -1553,7 +1564,7 @@ export function clearAccountQuotaCache(provider?: string): void {
     clearKiroAccountUsageState();
     // A cleared cache must not be re-seeded from the file it was just cleared of, and any
     // pending write of the old rows is abandoned.
-    diskHydrated = false;
+    diskHydrated = true;
     cancelPendingAccountQuotaPersist();
     return;
   }
@@ -1596,6 +1607,7 @@ async function fetchAccountQuota(
   accountId: string,
   forceRefresh: boolean,
 ): Promise<AccountQuotaCacheEntry> {
+  hydrateAccountQuotaCache();
   const key = accountCacheKey(provider, accountId);
   const writerGeneration = captureConfigGeneration();
   const cached = accountQuotaCache.get(key);
@@ -1651,6 +1663,7 @@ async function fetchAccountQuota(
         // superseded config generation must not publish either half.
         if (provider === "kiro") commitKiroAccountUsageState(key, kiroSnapshot);
         sweepExpiredOnWrite(entry.ts);
+        persistAccountQuotaCache();
       }
       return entry;
     } catch {

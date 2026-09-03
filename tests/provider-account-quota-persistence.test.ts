@@ -7,6 +7,10 @@ import {
   readPersistedAccountQuotas,
   schedulePersistAccountQuotas,
 } from "../src/providers/account-quota-disk";
+import {
+  getCachedProviderAccountQuota,
+  resetProviderAccountQuotaDiskStateForTests,
+} from "../src/providers/quota";
 import type { ProviderQuota } from "../src/providers/quota-types";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
@@ -23,6 +27,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetProviderAccountQuotaDiskStateForTests();
   cancelPendingAccountQuotaPersist();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
@@ -39,6 +44,14 @@ describe("provider account quota persistence", () => {
     schedulePersistAccountQuotas(() => [[KEY, quota(15)]]);
     await settle();
     expect(readPersistedAccountQuotas().get(KEY)?.monthlyPercent).toBe(15);
+  });
+
+  test("routing hydrates the runtime cache from a persisted snapshot", async () => {
+    schedulePersistAccountQuotas(() => [[KEY, quota(95)]]);
+    await settle();
+
+    resetProviderAccountQuotaDiskStateForTests();
+    expect(getCachedProviderAccountQuota("kiro", "acct-a")?.monthlyPercent).toBe(95);
   });
 
   test("a stale snapshot is discarded rather than ordering the pool on old data", async () => {
