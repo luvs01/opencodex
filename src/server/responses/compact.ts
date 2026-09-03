@@ -371,7 +371,7 @@ async function refreshPoolCompactContext(args: {
 async function resolveAlternateCompactContext(args: {
   req: Request;
   config: OcxConfig;
-  route: { provider: OcxProviderConfig; codexAccountMode?: CodexAccountMode };
+  route: { providerName: string; provider: OcxProviderConfig; codexAccountMode?: CodexAccountMode };
   selectedModelId: string | undefined;
   excludeAccountId: string | null;
   turnAdmissionLease?: AdmissionLease;
@@ -401,7 +401,7 @@ async function resolveAlternateCompactContext(args: {
       headers.set("authorization", `Bearer ${override.accessToken}`);
       headers.set("chatgpt-account-id", override.chatgptAccountId);
     }
-    if (provider.apiKey) headers.set("authorization", `Bearer ${resolveProviderApiKey(provider.apiKey)}`);
+    if (provider.apiKey) headers.set("authorization", `Bearer ${resolveProviderApiKey(provider.apiKey, route.providerName)}`);
     return { authCtx, provider, headers };
   } catch (err) {
     if (err instanceof CodexMainProfileDrainingError) {
@@ -640,7 +640,7 @@ export async function handleResponsesCompact(
       ? CODEX_FORWARD_BASE_URL
       : (compactProvider.baseUrl ?? "").replace(/\/+$/, "");
     if (compactProvider.authMode !== "forward" && compactProvider.apiKey) {
-      headers.set("authorization", `Bearer ${resolveProviderApiKey(compactProvider.apiKey)}`);
+      headers.set("authorization", `Bearer ${resolveProviderApiKey(compactProvider.apiKey, route.providerName)}`);
     }
     const { reasoning: _reasoning, ...compactBodyRaw } = raw as typeof raw & { reasoning?: unknown };
     // The regular /v1/responses path applies sanitizeReasoningInputContent via the adapter's

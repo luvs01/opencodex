@@ -53,6 +53,11 @@ function keychainAccount(reference: string): string {
   return reference.slice(KEYCHAIN_REFERENCE_PREFIX.length);
 }
 
+function keychainReferenceBelongsToProvider(reference: string, providerName: string): boolean {
+  const account = keychainAccount(reference);
+  return account === providerName || account.startsWith(`${providerName}/`);
+}
+
 function readKeychain(account: string): string | undefined {
   const cached = resolvedCache.get(account);
   if (cached !== undefined) return cached;
@@ -76,9 +81,12 @@ function readKeychain(account: string): string | undefined {
  * Single resolver for provider key material: env references, keychain references, or the
  * literal value. Every request-time read of `apiKey` goes through here.
  */
-export function resolveProviderApiKey(value: string | undefined): string | undefined {
+export function resolveProviderApiKey(value: string | undefined, providerName: string): string | undefined {
   if (!value) return undefined;
-  if (isKeychainReference(value)) return readKeychain(keychainAccount(value));
+  if (isKeychainReference(value)) {
+    if (!keychainReferenceBelongsToProvider(value, providerName)) return undefined;
+    return readKeychain(keychainAccount(value));
+  }
   return resolveEnvValue(value);
 }
 
@@ -174,6 +182,9 @@ export function restoreProviderKeyFromKeychain(config: OcxConfig, name: string):
   const pool = provider.apiKeyPool ?? [];
   const resolved = new Map<string, string>();
   const refs = [provider.apiKey, ...pool.map(e => e.key)].filter(isKeychainReference);
+  if (refs.some(ref => !keychainReferenceBelongsToProvider(ref, name))) {
+    return { ok: false, error: "provider contains a keychain reference owned by another provider", status: 400 };
+  }
   for (const ref of refs) {
     const account = keychainAccount(ref);
     if (resolved.has(account)) continue;
@@ -194,4 +205,3 @@ export function restoreProviderKeyFromKeychain(config: OcxConfig, name: string):
   saveConfigPreservingClaudeCode(config);
   return { ok: true, restored: resolved.size };
 }
-

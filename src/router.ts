@@ -284,8 +284,8 @@ export function resetCompactionFallbackWarningsForTests(): void {
   compactionFallbackWarnings.clear();
 }
 
-function usableResolvedApiKey(apiKey: string | undefined): string | undefined {
-  const resolved = resolveProviderApiKey(apiKey);
+function usableResolvedApiKey(apiKey: string | undefined, providerName: string): string | undefined {
+  const resolved = resolveProviderApiKey(apiKey, providerName);
   return typeof resolved === "string" && resolved.trim().length > 0 ? resolved : undefined;
 }
 
@@ -293,9 +293,9 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
   const registryEntry = PROVIDER_REGISTRY.find(entry => entry.id === providerName);
   if (!registryEntry || !providerMatchesRegistryTransportWithStaticGuards(providerName, provider)) {
     assertProviderDestinationAllowed(providerName, provider);
-    return { ...provider, apiKey: usableResolvedApiKey(provider.apiKey) };
+    return { ...provider, apiKey: usableResolvedApiKey(provider.apiKey, providerName) };
   }
-  const resolvedApiKey = usableResolvedApiKey(provider.apiKey);
+  const resolvedApiKey = usableResolvedApiKey(provider.apiKey, providerName);
   const staticModelCatalog = !providerSupportsLiveModelDiscovery(providerName, provider);
   const repairLegacyMimoFreeAuth = providerName === "mimo-free"
     && staticModelCatalog

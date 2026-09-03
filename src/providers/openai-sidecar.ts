@@ -198,7 +198,7 @@ export function selectOpenAiImagesProvider(config: OcxConfig): OpenAiImagesProvi
     && provider.authMode !== "forward"
     && provider.baseUrl.replace(/\/+$/, "") === "https://api.openai.com/v1"
   ) {
-    const apiKey = resolveProviderApiKey(provider.apiKey)?.trim();
+    const apiKey = resolveProviderApiKey(provider.apiKey, OPENAI_API_PROVIDER_ID)?.trim();
     if (apiKey) selection.keyed = { providerName: OPENAI_API_PROVIDER_ID, provider, apiKey };
   }
   return selection;
@@ -236,7 +236,7 @@ export function selectImagesProvider(config: OcxConfig): OpenAiImagesProviderSel
     };
   }
 
-  const apiKey = resolveProviderApiKey(provider.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(provider.apiKey, providerName)?.trim();
   if (!apiKey) {
     return { forwardCandidates: [], error: `images.provider "${providerName}" has no usable API key` };
   }

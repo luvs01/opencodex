@@ -1055,7 +1055,7 @@ export async function resolveModelsAuthToken(name: string, prov: OcxProviderConf
       return undefined;
     }
   }
-  return resolveProviderApiKey(prov.apiKey);
+  return resolveProviderApiKey(prov.apiKey, name);
 }
 
 function modelDiscoveryTransportSeed(providerName: string, prov: OcxProviderConfig): OcxProviderConfig {
