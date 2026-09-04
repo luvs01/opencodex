@@ -583,7 +583,7 @@ export function parseRequest(
 
         // Native/non-ocxr1 encrypted-only reasoning is opaque here. Do not create a detached
         // assistant turn or invent replayable plaintext/signatures from the encrypted payload.
-        if (thinkingText.length > 0) {
+        if (thinkingText.length > 0 || envelope?.red) {
           const part: OcxThinkingContent = {
             type: "thinking",
             thinking: thinkingText,
@@ -591,7 +591,9 @@ export function parseRequest(
             ...(envelope?.red ? { redacted: envelope.red } : {}),
             ...(reasoning.id ? { itemId: reasoning.id } : {}),
           };
-          const envelopeSigned = typeof envelope?.sig === "string";
+          // Keep envelopes carrying redacted blocks as distinct siblings: they are opaque replay
+          // state and must not be folded into an unrelated unsigned reasoning summary.
+          const envelopeSigned = typeof envelope?.sig === "string" || envelope?.red !== undefined;
           const previous = pendingReasoning[pendingReasoning.length - 1];
 
           if (!envelopeSigned && previous && !previous.envelopeSigned) {
