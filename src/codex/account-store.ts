@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, readFileSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, readFileSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ConfigMutationLockError,
@@ -471,7 +471,13 @@ function isRefreshLockStale(path: string): boolean {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as { acquiredAt?: unknown };
     return typeof parsed.acquiredAt !== "number" || Date.now() - parsed.acquiredAt > REFRESH_LOCK_STALE_MS;
   } catch {
-    return true;
+    // A newly-created lock is briefly empty while its owner writes metadata.
+    // Do not let a waiter steal it during that acquisition window.
+    try {
+      return Date.now() - statSync(path).mtimeMs > REFRESH_LOCK_STALE_MS;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -507,9 +513,17 @@ export async function withCodexRefreshFileLock<T>(lockKey: string, signal: Abort
   try {
     return await fn();
   } finally {
+    const ownedIdentity = fd == null ? null : fstatSync(fd);
     if (fd != null) closeSync(fd);
     try {
-      unlinkSync(path);
+      const currentIdentity = statSync(path);
+      if (
+        ownedIdentity
+        && currentIdentity.dev === ownedIdentity.dev
+        && currentIdentity.ino === ownedIdentity.ino
+      ) {
+        unlinkSync(path);
+      }
     } catch (err) {
       if (errCode(err) !== "ENOENT") throw err;
     }

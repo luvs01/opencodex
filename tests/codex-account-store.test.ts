@@ -434,6 +434,56 @@ describe("codex-account-store CRUD", () => {
     }
   });
 
+  test("refresh does not steal a newly-created empty file lock", async () => {
+    const {
+      getValidCodexToken,
+      readCodexAccountRecord,
+      saveCodexAccountCredential,
+      saveCodexAccountCredentialIfGeneration,
+    } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("refresh-empty-lock", { accessToken: "old", refreshToken: "old-r", expiresAt: 0, chatgptAccountId: "acc" });
+    const generation = readCodexAccountRecord("refresh-empty-lock")!.generation;
+    const lockPath = refreshLockPathForToken("old-r");
+    writeFileSync(lockPath, "");
+    const refreshed = { accessToken: "other-process", refreshToken: "other-r", expiresAt: Date.now() + 3600_000, chatgptAccountId: "acc" };
+    const release = setTimeout(() => {
+      saveCodexAccountCredentialIfGeneration("refresh-empty-lock", generation, refreshed);
+      unlinkSync(lockPath);
+    }, 20);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("fetch should not be called while an empty lock is being initialized");
+    }) as typeof fetch;
+
+    try {
+      expect((await getValidCodexToken("refresh-empty-lock")).accessToken).toBe("other-process");
+    } finally {
+      clearTimeout(release);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("refresh owner does not remove a replacement file lock", async () => {
+    const { getValidCodexToken, saveCodexAccountCredential } = await import("../src/codex/account-store");
+    saveCodexAccountCredential("refresh-replaced-lock", { accessToken: "old", refreshToken: "old-r", expiresAt: 0, chatgptAccountId: "acc" });
+    const lockPath = refreshLockPathForToken("old-r");
+    const replacement = JSON.stringify({ acquiredAt: Date.now(), pid: 54321 }) + "\n";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      unlinkSync(lockPath);
+      writeFileSync(lockPath, replacement);
+      return new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      expect((await getValidCodexToken("refresh-replaced-lock")).accessToken).toBe("new");
+      expect(readFileSync(lockPath, "utf8")).toBe(replacement);
+    } finally {
+      if (existsSync(lockPath)) unlinkSync(lockPath);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("stale refresh lock is reclaimed", async () => {
     const { getValidCodexToken, saveCodexAccountCredential } = await import("../src/codex/account-store");
     saveCodexAccountCredential("refresh-stale-lock", { accessToken: "old", refreshToken: "old-r", expiresAt: 0, chatgptAccountId: "acc" });
