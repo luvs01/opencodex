@@ -17,7 +17,7 @@ ocx sync
 
 Ключ клиента записывается в защищённый `service-api-token`, а не в `config.json`. При подключении статистика читается с hub и фильтруется по `apiKeyId`; после отключения используется локальное хранилище. Зеркалирования нет.
 
-Admin token разрешает обычное управление, но никогда не создаёт consent session. Для действий с согласием нужны `gui-session`, совпадающий Origin и CSRF. Заголовок `Tailscale-User-Login` доверен только отдельному management ingress; точные логины задаются в `remoteGui.allowedTailscaleUsers`.
+Admin token разрешает обычное управление, но никогда не создаёт consent session. Для действий с согласием нужны `gui-session`, совпадающий Origin и CSRF. Loopback TCP ingress не доверяет `Tailscale-User-Login`; удалённая browser session создаётся через одноразовое pairing.
 
 ## Сервис и Tailscale Serve
 
@@ -27,7 +27,6 @@ ocx config set hostname 100.64.0.10
 ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 ocx config set corsAllowOrigins '["http://localhost:10100"]'
 ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
-ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
 export OPENCODEX_API_AUTH_TOKEN="$(openssl rand -hex 32)"
 ocx service install
 ```

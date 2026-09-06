@@ -17,7 +17,7 @@ ocx sync
 
 İstemci anahtarı yalnızca sahibinin okuyabildiği `service-api-token` dosyasına yazılır, `config.json` içine yazılmaz. Bağlı kullanım hub deposundan aynı `apiKeyId` ile filtrelenir; bağlantı kesilince yerel depo kullanılır. İki depo birbirini yansıtmaz.
 
-Admin token sıradan yönetim yapabilir ancak hiçbir zaman onay oturumu oluşturamaz. Onay işlemleri sunucu tarafından verilen `gui-session`, eşleşen Origin ve CSRF ister. `Tailscale-User-Login` yalnızca ayrı yönetim girişinde güvenilirdir; tam kimlikleri `remoteGui.allowedTailscaleUsers` içinde belirtin.
+Admin token sıradan yönetim yapabilir ancak hiçbir zaman onay oturumu oluşturamaz. Onay işlemleri sunucu tarafından verilen `gui-session`, eşleşen Origin ve CSRF ister. Loopback TCP girişi `Tailscale-User-Login` başlığına güvenmez; uzak tarayıcı oturumları tek kullanımlık eşleştirme ile oluşturulur.
 
 ## Servis ve Tailscale Serve
 
@@ -27,7 +27,6 @@ ocx config set hostname 100.64.0.10
 ocx config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
 ocx config set corsAllowOrigins '["http://localhost:10100"]'
 ocx config set hub.managementIngress '{"enabled":true,"port":10101}'
-ocx config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
 export OPENCODEX_API_AUTH_TOKEN="$(openssl rand -hex 32)"
 ocx service install
 ```

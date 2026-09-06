@@ -66,13 +66,12 @@ surface bound exactly to `127.0.0.1` for a local Tailscale Serve or operator TLS
 listener serves only packaged GUI/SPA routes, `GET`/`POST /opencodex-session`, and `/api/*`; all data,
 health, readiness, WebSocket, and unknown-static routes receive a JSON 404 before dispatch.
 
-Tailscale identity headers authorize session issuance only when the request arrived on that specific
-listener and the exact login appears in `remoteGui.allowedTailscaleUsers`. The public listener and
-the unauthenticated data-loopback listener always pass `trustedTailscaleIngress: false`, regardless
-of `Host`, `Origin`, `Forwarded`, `X-Forwarded-*`, or `Tailscale-User-*` values. A generic TLS proxy
-cannot establish that identity and uses the existing single-use, digest-only, origin-bound pairing
-exchange. Pairing accepts no admin/data credential substitute and consumes a grant only after the
-full origin predicate succeeds.
+The loopback TCP listener is not a proxy-authentication boundary: any local process can connect to
+it and supply `Tailscale-User-*` headers. Runtime listener call sites therefore always pass
+`trustedTailscaleIngress: false`, regardless of listener, `Host`, `Origin`, `Forwarded`, or
+`X-Forwarded-*` values. Remote dashboards use the existing single-use, digest-only, origin-bound
+pairing exchange. Pairing accepts no admin/data credential substitute and consumes a grant only
+after the full origin predicate succeeds.
 
 The server issues a local in-memory session for five minutes or a remote session for twelve hours,
 with 128 live sessions maximum. Every session is bound to the exact server and browser origins;
