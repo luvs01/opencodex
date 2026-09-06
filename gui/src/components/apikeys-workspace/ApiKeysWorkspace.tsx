@@ -140,6 +140,7 @@ export default function ApiKeysWorkspace({
   const selectedRotationId = selected
     ? (rotationSecret?.id === selected.id ? rotationSecret.rotationId : selected.pendingRotation?.id)
     : undefined;
+  const rotationEnabled = Boolean(onRotationStart || onRotationCommit || onRotationAbort);
   const mutationPending = deleting || renamePending || rotationPending;
 
   const runRotation = async (operation: "start" | "commit" | "abort") => {
@@ -356,7 +357,7 @@ export default function ApiKeysWorkspace({
                     </div>
                   </dl>
                 </div>
-                <div className="awi-section" aria-live="polite">
+                {rotationEnabled && <div className="awi-section" aria-live="polite">
                   <h3 className="awi-section-title">{t("api.rotation.title")}</h3>
                   {selectedRotationId ? (
                     <>
@@ -394,7 +395,7 @@ export default function ApiKeysWorkspace({
                     </>
                   )}
                   {rotationFailed && <p className="awi-delete-error" role="alert">{t("api.rotation.failed")}</p>}
-                </div>
+                </div>}
                 <div className="awi-section">
                   <h3 className="awi-section-title">{t("api.attribution.title")}</h3>
                   {/* Branch on the DATASET field, not on `usage`: a key with zero
