@@ -38,6 +38,7 @@ import {
   isTranslatorBudgetExceededError,
   retainTranslatedEventBatch,
   TRANSLATOR_MAX_SSE_EVENT_BYTES,
+  TranslatorBudgetExceededError,
   type TranslatorBudget,
 } from "../lib/translator-budget";
 
@@ -328,6 +329,9 @@ interface ReasoningDetailSegment {
   text: string;
 }
 
+const MAX_REASONING_DETAIL_ID_BYTES = 1024;
+const MAX_REASONING_DETAIL_SEGMENTS = 1024;
+
 /**
  * Structured `reasoning_details` array (MiniMax M-series with `reasoning_split`).
  * Each segment's key scopes cumulative-snapshot tracking: upstream repeats the
@@ -341,11 +345,17 @@ function reasoningDetailSegmentsFrom(record: Record<string, unknown>): Reasoning
     const item: unknown = raw[i];
     if (!isRecord(item)) continue;
     if (typeof item.text !== "string" || item.text.length === 0) continue;
-    const key = typeof item.id === "string" && item.id.length > 0
-      ? `id:${item.id}`
-      : typeof item.index === "number"
-        ? `i:${item.index}`
-        : `n:${i}`;
+    let key: string;
+    if (typeof item.id === "string" && item.id.length > 0) {
+      if (new TextEncoder().encode(item.id).byteLength > MAX_REASONING_DETAIL_ID_BYTES) {
+        throw new TranslatorBudgetExceededError("reasoning", MAX_REASONING_DETAIL_ID_BYTES);
+      }
+      key = `id:${item.id}`;
+    } else if (typeof item.index === "number") {
+      key = `i:${item.index}`;
+    } else {
+      key = `n:${i}`;
+    }
     segments.push({ key, text: item.text });
   }
   return segments;
@@ -1727,6 +1737,7 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
       // A piece that does not extend the previous snapshot is appended whole, which
       // keeps incremental senders parseable on the same path.
       const reasoningDetailSnapshots = new Map<string, string>();
+      let reasoningDetailSnapshotBytes = 0;
       // Gate on the routed model, not list length: a mixed openai-chat provider
       // can list MiniMax ids without putting every sibling on MiniMax semantics.
       const reasoningDetailsOptIn = modelInList(provider.reasoningDetailsModels, lastRequestedModelId ?? "");
@@ -1789,15 +1800,31 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
           const detailSegments = reasoningDetailsOptIn ? reasoningDetailSegmentsFrom(delta) : [];
           if (detailSegments.length > 0) {
             for (const segment of detailSegments) {
-              const prev = reasoningDetailSnapshots.get(segment.key) ?? "";
-              if (segment.text === prev) continue;
-              if (segment.text.startsWith(prev)) {
-                reasoningDetailSnapshots.set(segment.key, segment.text);
-                yield { type: "reasoning_raw_delta", text: segment.text.slice(prev.length) };
-              } else {
-                reasoningDetailSnapshots.set(segment.key, prev + segment.text);
-                yield { type: "reasoning_raw_delta", text: segment.text };
+              const existing = reasoningDetailSnapshots.get(segment.key);
+              if (existing === undefined && reasoningDetailSnapshots.size >= MAX_REASONING_DETAIL_SEGMENTS) {
+                throw new TranslatorBudgetExceededError("reasoning", MAX_REASONING_DETAIL_SEGMENTS);
               }
+              const prev = existing ?? "";
+              if (segment.text === prev) continue;
+              const next = segment.text.startsWith(prev) ? segment.text : prev + segment.text;
+              const previousBytes = existing === undefined
+                ? 0
+                : budgetEncoder.encode(segment.key).byteLength + budgetEncoder.encode(prev).byteLength;
+              const nextBytes = budgetEncoder.encode(segment.key).byteLength + budgetEncoder.encode(next).byteLength;
+              const reservation = budget.reserveTransient(nextBytes, { kind: "reasoning" });
+              try {
+                reasoningDetailSnapshots.set(segment.key, next);
+                reservation.commitRetained();
+                budget.releaseRetained(previousBytes, { kind: "reasoning" });
+                reasoningDetailSnapshotBytes += nextBytes - previousBytes;
+              } catch (error) {
+                reservation.release();
+                throw error;
+              }
+              yield {
+                type: "reasoning_raw_delta",
+                text: segment.text.startsWith(prev) ? segment.text.slice(prev.length) : segment.text,
+              };
             }
           } else {
             const reasoningText = reasoningTextFrom(delta);
@@ -2017,6 +2044,8 @@ export function createOpenAIChatAdapter(provider: OcxProviderConfig): ProviderAd
         throw error;
       } finally {
         budget.releaseRetained(bufferBytes, { kind: "live_transient" });
+        budget.releaseRetained(reasoningDetailSnapshotBytes, { kind: "reasoning" });
+        reasoningDetailSnapshots.clear();
         closeToolCalls();
         reader.releaseLock();
       }
