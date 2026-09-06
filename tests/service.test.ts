@@ -574,6 +574,21 @@ describe("Windows service task", () => {
       expect(healthy("C:\\Users\\Admin\\.opencodex\\service-launcher.vbs")).toBe(false);
     });
 
+    test("rejects a lossy foreign action even when its triggers name the current account", () => {
+      const victimSid = "S-1-5-21-111-222-333-1001";
+      const attackerSid = "S-1-5-21-111-222-333-1002";
+      const foreign = buildWindowsTaskXml(
+        "ignored.cmd",
+        "C:\\Users\\???\\.opencodex\\service-launcher.vbs",
+        undefined,
+        victimSid,
+      )
+        .replace(/<Command>.*?<\/Command>/, `<Command>${wscript}</Command>`)
+        .replace(`<UserId>${victimSid}</UserId>\n      <LogonType>`, `<UserId>${attackerSid}</UserId>\n      <LogonType>`);
+
+      expect(windowsTaskRegistrationHealthy(foreign, wscript, launcher, victimSid)).toBe(false);
+    });
+
     test("rejects a path whose ASCII structure differs", () => {
       expect(healthy("C:\\Users\\???\\.opencodex\\other-launcher.vbs")).toBe(false);
       expect(healthy("D:\\Users\\???\\.opencodex\\service-launcher.vbs")).toBe(false);

@@ -1871,7 +1871,7 @@ export function buildWindowsTaskXml(
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
+      ${sessionTriggerUserId ? `<UserId>${taskXmlString(sessionTriggerUserId)}</UserId>\n      ` : ""}<LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -2136,6 +2136,18 @@ function windowsTaskTriggerScopeAcceptable(
   return expectedValues.some(value => taskXmlDecodedValueEquals(element, "UserId", value));
 }
 
+/** The account whose interactive token executes the action must be the current account. */
+function windowsTaskPrincipalScopeAcceptable(
+  principal: string,
+  expectedUserId: ExpectedWindowsTaskUserId | undefined,
+): boolean {
+  if (taskXmlHasPrefixedTag(principal, "UserId")) return false;
+  if (taskXmlElementCount(principal, "UserId") !== 1) return false;
+  if (expectedUserId === undefined) return false;
+  const expectedValues = typeof expectedUserId === "string" ? [expectedUserId] : expectedUserId;
+  return expectedValues.some(value => taskXmlDecodedValueEquals(principal, "UserId", value));
+}
+
 /** Validate the stable OpenCodex action, principal, settings, and logon trigger. */
 function windowsTaskRegistrationBaseHealthy(
   xml: string,
@@ -2187,7 +2199,12 @@ export function windowsTaskRegistrationHealthy(
 ): boolean {
   const scrubbed = taskXmlWithoutCommentsAndCdata(xml);
   const triggers = taskXmlSection(scrubbed, "Triggers");
+  const principal = taskXmlSection(scrubbed, "Principal");
   return windowsTaskRegistrationBaseHealthy(xml, wscript, launcher)
+    // The trigger scope says whose session event fires the task; Principal/UserId
+    // independently says whose interactive token executes its action. Both are
+    // identity boundaries and must match exactly, even when action paths are lossy.
+    && windowsTaskPrincipalScopeAcceptable(principal, expectedUserId ?? undefined)
     // Without these the task can only recover at the next logon, so a disconnected session
     // leaves the proxy down indefinitely. Treating their absence as unhealthy is what lets
     // an already-registered task from an older install get repaired instead of staying broken.
