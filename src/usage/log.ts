@@ -7,7 +7,7 @@ import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { sanitizeLogMetadataString } from "../lib/redact";
 import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
-import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
+import { MAX_TRACE_STRING, normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
 
@@ -536,7 +536,9 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }
       : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
-    ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(typeof entry.requestedModel === "string" && entry.requestedModel
+      ? { requestedModel: entry.requestedModel.slice(0, MAX_TRACE_STRING) }
+      : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
       ? { requestedEffort: capMetadataString(entry.requestedEffort) }
