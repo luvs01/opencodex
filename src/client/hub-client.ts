@@ -116,7 +116,7 @@ async function fetchBounded(
 async function boundedText(
   response: Response,
   maxBytes: number,
-  options: { inactivityTimeoutMs?: number } = {},
+  options: { signal?: AbortSignal; inactivityTimeoutMs?: number } = {},
 ): Promise<string> {
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > maxBytes) {
@@ -125,6 +125,7 @@ async function boundedText(
   }
   const result = await readBoundedResponseBytes(response, {
     maxBytes,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.inactivityTimeoutMs === undefined ? {} : { inactivityTimeoutMs: options.inactivityTimeoutMs }),
   });
   if (result.oversized) {
@@ -444,9 +445,11 @@ export async function downloadClientCatalog(
     headers,
   }, options.timeoutMs, "headers");
   if (response.status === 304) {
+    try { await response.body?.cancel(); } catch { /* best effort */ }
     throw new HubClientError("catalog_unexpected_304", "Hub answered 304 to an unconditional catalog request", 304);
   }
   if (!response.ok) {
+    try { await response.body?.cancel(); } catch { /* best effort */ }
     const code = response.status === 401 ? "catalog_unauthorized" : `catalog_http_${response.status}`;
     throw new HubClientError(code, `Hub catalog request failed (${response.status})`, response.status);
   }
@@ -456,8 +459,12 @@ export async function downloadClientCatalog(
   }
   let body: string;
   try {
+    const inactivityTimeoutMs = safeTimeout(options.timeoutMs);
     body = await boundedText(response, options.maxBytes ?? MAX_REMOTE_CATALOG_BYTES, {
-      inactivityTimeoutMs: safeTimeout(options.timeoutMs),
+      // Permit active catalog transfers to span multiple inactivity windows,
+      // while retaining the client's established maximum request lifetime.
+      signal: AbortSignal.timeout(Math.min(inactivityTimeoutMs * 24, 120_000)),
+      inactivityTimeoutMs,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "TimeoutError") {
