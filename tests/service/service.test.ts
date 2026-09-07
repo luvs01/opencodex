@@ -1184,65 +1184,24 @@ describe("launchd service plist", () => {
   });
 
 
-  // #3464. The macOS counterpart of the systemd launcher test above: a mise/asdf upgrade replaces
-  // the versioned package directory, and a plist that named the old Bun + CLI pair keeps launchd
-  // on the stale build until someone restarts it. Naming the shim lets the next start follow it.
-  test("a stable launcher install names the launcher in the plist and bakes no versioned path (#3464)", () => {
-    const launcher = "/home/u/.local/share/mise/shims/ocx";
+  test("launchd stays bound to the package runtime instead of a mutable PATH launcher", async () => {
     const plist = buildPlist(resolvedProxyEnv({}), {
-      launcher,
       runtime: { path: "/opt/opencodex/versioned/bun", source: "bundled", overrideEnv: "OPENCODEX_BUN_PATH" },
     });
 
-    expect(plist).toContain(launcher);
-    expect(plist).toContain("start --port");
-    for (const forbidden of [
-      "OCX_BUN_RUNTIME_PATH",
-      "OCX_BUN_RUNTIME_SOURCE",
-      "OPENCODEX_BUN_PATH",
-      "/opt/opencodex/versioned/bun",
-      "cli/index.ts",
-    ]) expect(plist).not.toContain(forbidden);
-    // The token still comes from the file at start, never from the plist.
-    expectTextToContainPath(plist, serviceApiTokenFilePath());
-    expect(plist).toContain("OPENCODEX_API_AUTH_TOKEN");
-    // launchdListenPort reads the same "start --port N" tail from either command shape.
-    expect(launchdListenPort({ readPlist: () => plist })).toBe(resolveServiceListenPort());
+    expectTextToContainPath(plist, "/opt/opencodex/versioned/bun");
+    expectTextToContainPath(plist, join("cli", "index.ts"));
+    expect(plist).toContain("OCX_BUN_RUNTIME_PATH");
+    expect(plist).toContain("OCX_BUN_RUNTIME_SOURCE");
 
-    // Without a launcher the plist keeps the previous shape, so source checkouts are unaffected.
-    const direct = buildPlist(resolvedProxyEnv({}), { launcher: null });
-    expectTextToContainPath(direct, join("cli", "index.ts"));
-    expect(direct).toContain("OCX_BUN_RUNTIME_PATH");
-    expect(direct).toContain("OCX_BUN_RUNTIME_SOURCE");
-  });
-
-  test("launcher mode preserves only a proof-bound Bun override, never an ambient one (#3464)", () => {
-    const launcher = "/home/u/.local/share/mise/shims/ocx";
-    const trusted = buildPlist(resolvedProxyEnv({}), {
-      launcher,
-      runtime: { path: "/custom/bun", source: "override", overrideEnv: "OPENCODEX_BUN_PATH" },
-    });
-    expect(trusted).toContain("<key>OPENCODEX_BUN_PATH</key><string>/custom/bun</string>");
-    expect(trusted).not.toContain("OCX_BUN_RUNTIME_PATH");
-
-    const bundled = buildPlist(resolvedProxyEnv({}), {
-      launcher,
-      runtime: { path: "/custom/bun", source: "bundled", overrideEnv: "OPENCODEX_BUN_PATH" },
-    });
-    expect(bundled).not.toContain("OPENCODEX_BUN_PATH");
-    expect(bundled).not.toContain("/custom/bun");
-  });
-
-  test("launcher paths with shell and XML metacharacters stay quoted in the plist (#3464)", () => {
-    const launcher = "/home/u/My Tools & Shims/it's/ocx";
-    const plist = buildPlist(resolvedProxyEnv({}), {
-      launcher,
-      runtime: { path: "/opt/bun", source: "bundled", overrideEnv: "OPENCODEX_BUN_PATH" },
-    });
-    // XML-escaped ampersand inside the ProgramArguments string; the shell quoting survives.
-    expect(plist).toContain("&amp;");
-    expect(plist).not.toContain("Shims/it's/ocx start");
-    expect(launchdListenPort({ readPlist: () => plist })).toBe(resolveServiceListenPort());
+    const service = await readText("src/service.ts");
+    const installLaunchd = service.slice(
+      service.indexOf("function installLaunchd()"),
+      service.indexOf("export function startLaunchd"),
+    );
+    expect(installLaunchd).not.toContain("stableLauncherEntry");
+    expect(installLaunchd).toContain("buildPlist(resolvedProxyEnv())");
+    expect(installLaunchd).toContain('writeServiceInstallState("scheduler")');
   });
 
   // The scenario itself, executed rather than asserted: retarget the shim the way an upgrade
