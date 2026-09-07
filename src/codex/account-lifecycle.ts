@@ -7,12 +7,18 @@ import {
 } from "../config";
 import { removeCodexAccountCredential } from "./account-store";
 import { clearAccountNeedsReauth } from "./account-runtime-state";
-import { getMainChatgptAccountId } from "./auth-collision";
+import { getMainChatgptAccountId, readCodexTokensResult } from "./auth-collision";
 import { MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan } from "./main-account";
 import { clearAccountQuota } from "./quota";
 import { clearCodexUpstreamHealthForAccount, clearThreadAccountMapForAccount } from "./routing";
 import { invalidateCodexWebSocketsForAccount } from "./websocket-registry";
-import { clearMainAccountCredentialPresence, clearMainAccountInfoCache, observeMainQuotaIdentity } from "./main-account-cache";
+import {
+  clearMainAccountCredentialPresence,
+  clearMainAccountInfoCache,
+  observeMainQuotaCredential,
+  observeMainQuotaIdentity,
+} from "./main-account-cache";
+import { extractAccountId } from "../oauth/chatgpt";
 import { forgetCodexAccountPause } from "./account-pause";
 import { clearCodexAccountPin, forgetCodexAccountPriority } from "./account-priority";
 import { forgetCodexQuotaAutoRefreshAccount } from "./quota-auto-refresh-state";
@@ -73,6 +79,27 @@ export function reconcileMainCodexAccountRuntimeState(): boolean {
   purgeMainCodexAccountRuntimeState();
   observeMainQuotaIdentity(currentAccountId);
   return true;
+}
+
+/**
+ * Restore the process-local policy binding before the server admits traffic.
+ * The credential itself remains memory-only; startup re-derives its HMAC from
+ * the owned native credential that supplied the persisted identity evidence.
+ */
+export function initializeMainAccountPolicyBinding(): boolean {
+  const result = readCodexTokensResult();
+  if (result.status !== "ok") return false;
+  const { tokens } = result;
+  const physicalAccountId = extractAccountId(tokens.id_token, tokens.access_token)
+    ?? (tokens.account_id || null);
+  if (!physicalAccountId || physicalAccountId !== tokens.account_id) return false;
+  const previousAccountId = observedMainChatgptAccountId;
+  observedMainChatgptAccountId = physicalAccountId;
+  if (previousAccountId !== undefined && previousAccountId !== physicalAccountId) {
+    purgeMainCodexAccountRuntimeState();
+  }
+  observeMainQuotaIdentity(physicalAccountId);
+  return observeMainQuotaCredential(tokens.access_token, physicalAccountId) !== undefined;
 }
 
 /**

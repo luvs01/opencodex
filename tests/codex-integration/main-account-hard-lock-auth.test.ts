@@ -15,11 +15,16 @@ import {
 import { isCodexAccountUsable } from "../../src/codex/account-usability";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountNeedsReauth, isAccountNeedsReauth } from "../../src/codex/account-runtime-state";
-import { reconcileMainCodexAccountRuntimeState, resetMainCodexAccountIdentityTrackingForTests } from "../../src/codex/account-lifecycle";
+import {
+  initializeMainAccountPolicyBinding,
+  reconcileMainCodexAccountRuntimeState,
+  resetMainCodexAccountIdentityTrackingForTests,
+} from "../../src/codex/account-lifecycle";
 import * as mainAccount from "../../src/codex/main-account";
 import * as authCollision from "../../src/codex/auth-collision";
 import {
   captureMainQuotaWriter,
+  clearMainAccountInfoCache,
   matchesMainQuotaCredential,
   observeMainQuotaCredential,
   observeMainQuotaIdentity,
@@ -261,6 +266,17 @@ describe("main quota policy at native admission", () => {
     quota(99);
     forbidPhysicalReads();
     await expect(resolveFirstUsableOpenAiSidecar(listOpenAiForwardSidecarCandidates(cfg), caller(), cfg))
+      .rejects.toBeInstanceOf(CodexMainAccountHardLockError);
+  });
+
+  test("startup restores the Direct main policy binding after process-local state is lost", async () => {
+    quota(99);
+    resetMainCodexAccountIdentityTrackingForTests();
+    clearMainAccountInfoCache();
+    expect(matchesMainQuotaCredential(bearer(), accountId)).toBe(false);
+
+    expect(initializeMainAccountPolicyBinding()).toBe(true);
+    await expect(resolveCodexAuthContext(caller(), config(), "direct"))
       .rejects.toBeInstanceOf(CodexMainAccountHardLockError);
   });
 

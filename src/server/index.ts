@@ -71,6 +71,7 @@ import {
 import { codexAccountNamespaceForModel } from "../codex/account-namespace-match";
 import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "../codex/account-namespaces";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
+import { initializeMainAccountPolicyBinding } from "../codex/account-lifecycle";
 import {
   availableAccountGatedNativeModels,
   codexModelEntitlementStateForAccount,
@@ -2379,6 +2380,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     },
     } as const;
 
+    // Persisted hard-lock evidence survives a restart, while its credential HMAC intentionally
+    // does not. Re-establish that process-local binding only after startup ownership checks, but
+    // before any Direct listener can admit the stored main credential.
+    if (config.codexMainAccountHardLock === true) initializeMainAccountPolicyBinding();
     server = Bun.serve<WsData>({ ...serveOptions, port: listenPort, hostname: bindHost });
 
     // Both binds are one startup transaction (#1102). If the loopback bind fails after the
