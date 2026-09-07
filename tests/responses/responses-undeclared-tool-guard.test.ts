@@ -420,7 +420,7 @@ describe("undeclared tool call guard", () => {
     expect(await relay(upstream, collectDeclaredWireToolNames(outbound))).toBe(upstream);
   });
 
-  test("accepts an explicit-namespace call when only the dotted spelling was declared", async () => {
+  test("rejects an explicit-namespace call when only the dotted spelling was declared", async () => {
     const upstream = sse("response.output_item.added", {
       output_index: 0,
       item: {
@@ -433,7 +433,22 @@ describe("undeclared tool call guard", () => {
       },
     });
 
-    expect(await relay(upstream, ["linear.create_issue"])).toBe(upstream);
+    expect(await relay(upstream, ["linear.create_issue"])).toContain(
+      UNDECLARED_TOOL_CALL_ERROR_CODE,
+    );
+  });
+
+  test("rejects an undeclared identity that shares a declared tool's dotted spelling", () => {
+    const declared = collectDeclaredWireToolNames({
+      tools: [{ type: "namespace", name: "a", tools: [{ type: "function", name: "b.c" }] }],
+    });
+
+    expect(declared.has("a.b.c")).toBe(true);
+    expect(
+      undeclaredToolCallNameInResponse({
+        output: [{ type: "function_call", namespace: "a.b", name: "c", call_id: "c1" }],
+      }, declared),
+    ).toBe("c");
   });
 
   test("never blocks apply_patch when the request really declared it", async () => {

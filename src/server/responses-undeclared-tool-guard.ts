@@ -310,15 +310,11 @@ function undeclaredNameInItem(
   if (typeof item.namespace === "string") {
     // Namespaced calls are matched by their full wire name only — never legacy-normalize
     // them, or an undeclared namespaced `exec_command` could slip through as bare `exec`.
-    // Both flattened spellings (`ns__name` and the dotted `ns.name` some providers echo,
-    // #3402) name the same tool identity.
+    // Dotted aliases are deliberately not reconstructed here: dots are legal in either
+    // component, so `{a, b.c}` and `{a.b, c}` have the same lossy dotted spelling. Providers
+    // that echo `ns.name` put that complete spelling in `name` without an explicit namespace;
+    // that compatibility path is handled by normalizeDeclaredToolName below.
     if (declared.has(namespacedToolName(item.namespace, name))) return undefined;
-    // Only consult the dotted spelling when it cannot double as another identity's canonical
-    // name; otherwise a stranger's `ns__name` would authorize this call.
-    if (
-      dottedAliasIsUnambiguous(item.namespace, name)
-      && declared.has(dottedToolName(item.namespace, name))
-    ) return undefined;
     return name;
   }
   const effectiveName = normalizeDeclaredToolName(name, declared);
