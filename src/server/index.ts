@@ -813,6 +813,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
    * `catalogPath: null`; Codex then builds an ONLINE model manager and `model/list` refreshes
    * through `GET {base_url}/models`. Returning 404 there would leave the picker on its bundled
    * fallback — fixing the direct-spawn host while breaking its model list.
+   *
+   * Exported Raycast and other OpenAI-compatible clients use Chat Completions. When this
+   * listener is selected as their loopback destination, that route must be admitted here too;
+   * the normal handler below still applies the same loopback policy and origin checks.
    */
   function loopbackRouteAllowed(url: URL, req: Request): boolean {
     const path = url.pathname;
@@ -824,6 +828,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (path === "/v1/images/generations" || path === "/v1/images/edits") {
       return req.method === "POST";
     }
+    if (path === "/v1/chat/completions") return req.method === "POST";
     if (path === "/v1/models") return req.method === "GET";
     // Realtime voice — a directly-spawned `codex app-server` needs these for desktop voice
     // the same way it needs /v1/responses. Two shapes, same trust model as /v1/responses:

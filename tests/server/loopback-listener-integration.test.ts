@@ -290,7 +290,6 @@ describe("unauthenticated loopback listener", () => {
         { method: "GET", path: "/" },
         { method: "GET", path: "/healthz" },
         { method: "GET", path: "/readyz" },
-        { method: "POST", path: "/v1/chat/completions", body: '{"model":"x","messages":[]}' },
         { method: "POST", path: "/v1/messages", body: '{"model":"x","messages":[]}' },
         { method: "GET", path: "/v1/opencodex/artifacts/x" },
         // Voice call-create is admitted only as POST; the keyed sideband join only as an upgrade.
@@ -316,6 +315,16 @@ describe("unauthenticated loopback listener", () => {
       // And an allowlisted route is genuinely reachable, so the rejections above are not
       // passing merely because nothing works on this listener.
       expect((await fetch(`${base}/v1/models`)).status).toBe(200);
+
+      // Exported Raycast and other OpenAI-compatible clients target this listener and append
+      // /chat/completions to its /v1 base URL. The request must reach the normal handler rather
+      // than being rejected by the listener gate; the synthetic model can then fail normally.
+      const chatResponse = await fetch(`${base}/v1/chat/completions`, {
+        method: "POST",
+        body: '{"model":"x","messages":[]}',
+        headers: { "content-type": "application/json" },
+      });
+      expect(chatResponse.status).not.toBe(404);
     } finally {
       await server.stop(true);
     }
