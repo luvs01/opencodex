@@ -567,6 +567,25 @@ describe("provider registry parity", () => {
     expect(apiKey.modelReasoningEfforts).toEqual(anthropicOauth?.modelReasoningEfforts);
   });
 
+  test("case-varied Anthropic effort overrides replace registry defaults", () => {
+    const provider: OcxProviderConfig = {
+      adapter: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      authMode: "oauth",
+      modelReasoningEfforts: { "Claude-Opus-5": [] },
+    };
+
+    const enriched = structuredClone(provider);
+    enrichProviderFromRegistry("anthropic", enriched);
+    expect(enriched.modelReasoningEfforts).not.toHaveProperty("claude-opus-5");
+    expect(enriched.modelReasoningEfforts?.["Claude-Opus-5"]).toEqual([]);
+
+    const config: OcxConfig = { port: 10100, defaultProvider: "anthropic", providers: { anthropic: provider } };
+    const routed = routeModel(config, "anthropic/claude-opus-5");
+    expect(routed.provider.modelReasoningEfforts).not.toHaveProperty("claude-opus-5");
+    expect(routed.provider.modelReasoningEfforts?.["Claude-Opus-5"]).toEqual([]);
+  });
+
   test("the Anthropic ladder omits rungs the adapter cannot honor distinctly", () => {
     const anthropicOauth = PROVIDER_REGISTRY.find(entry => entry.id === "anthropic");
     for (const efforts of Object.values(anthropicOauth?.modelReasoningEfforts ?? {})) {

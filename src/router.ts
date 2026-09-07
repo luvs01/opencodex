@@ -191,8 +191,11 @@ function mergeStringArrayRecord(
   user: Record<string, string[]> | undefined,
 ): Record<string, string[]> | undefined {
   if (!seed && !user) return undefined;
+  const userKeys = new Set(Object.keys(user ?? {}).map(key => key.toLowerCase()));
   const out: Record<string, string[]> = {};
-  for (const [key, value] of Object.entries(seed ?? {})) out[key] = [...value];
+  for (const [key, value] of Object.entries(seed ?? {})) {
+    if (!userKeys.has(key.toLowerCase())) out[key] = [...value];
+  }
   for (const [key, value] of Object.entries(user ?? {})) out[key] = [...value];
   return out;
 }
