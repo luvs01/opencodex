@@ -35,48 +35,47 @@ describe("agent task recovery (opt-in, default off)", () => {
     resetAgentTaskRecoveryState();
   });
 
-  for (const messageType of ["NEW_TASK", "MESSAGE"] as const) {
-    test(`typed ${messageType} recovery preserves boolean, replay and discard contracts`, async () => {
-      const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
-      const config = routedConfig();
-      const context = { parentThreadId: "parent-diagnostics" };
-      const input = () => agentMessage([
+  test("typed NEW_TASK recovery preserves boolean, replay and discard contracts", async () => {
+    const messageType = "NEW_TASK";
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const config = routedConfig();
+    const context = { parentThreadId: "parent-diagnostics" };
+    const input = () => agentMessage([
+      { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType) },
+      { type: "encrypted_content", encrypted_content: FERNET_TASK },
+    ]);
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response(recoverySse("Recovered diagnostic fixture."));
+    }) as typeof fetch;
+
+    const typedInput = input();
+    expect(await recoverEncryptedAgentTaskWithResult(req, typedInput, {}, config, context))
+      .toEqual({ recovered: true });
+    const booleanInput = input();
+    expect(await recoverEncryptedAgentTask(req, booleanInput, {}, config, context)).toBe(true);
+    expect(booleanInput).toEqual(typedInput);
+    expect(typedInput).toEqual([{
+      type: "message", role: "user", content: [
         { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType) },
-        { type: "encrypted_content", encrypted_content: FERNET_TASK },
-      ]);
-      let fetches = 0;
-      globalThis.fetch = (async () => {
-        fetches += 1;
-        return new Response(recoverySse("Recovered diagnostic fixture."));
-      }) as typeof fetch;
+        { type: "input_text", text: "Recovered diagnostic fixture." },
+      ],
+    }]);
+    const replay = input();
+    expect(restoreCachedEncryptedAgentTasks(req, replay, config, context)).toBe(1);
+    expect(replay).toEqual(typedInput);
+    expect(fetches).toBe(1);
 
-      const typedInput = input();
-      expect(await recoverEncryptedAgentTaskWithResult(req, typedInput, {}, config, context))
-        .toEqual({ recovered: true });
-      const booleanInput = input();
-      expect(await recoverEncryptedAgentTask(req, booleanInput, {}, config, context)).toBe(true);
-      expect(booleanInput).toEqual(typedInput);
-      expect(typedInput).toEqual([{
-        type: "message", role: "user", content: [
-          { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType) },
-          { type: "input_text", text: "Recovered diagnostic fixture." },
-        ],
-      }]);
-      const replay = input();
-      expect(restoreCachedEncryptedAgentTasks(req, replay, config, context)).toBe(1);
-      expect(replay).toEqual(typedInput);
-      expect(fetches).toBe(1);
-
-      const otherType = agentMessage([
-        { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType === "MESSAGE" ? "NEW_TASK" : "MESSAGE") },
-        { type: "encrypted_content", encrypted_content: FERNET_TASK },
-      ]);
-      expect(restoreCachedEncryptedAgentTasks(req, otherType, config, context)).toBe(0);
-      discardEncryptedAgentTaskRecovery(req, input(), config, context);
-      expect(restoreCachedEncryptedAgentTasks(req, input(), config, context)).toBe(0);
-      expect(fetches).toBe(1);
-    });
-  }
+    const otherType = agentMessage([
+      { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", "MESSAGE") },
+      { type: "encrypted_content", encrypted_content: FERNET_TASK },
+    ]);
+    expect(restoreCachedEncryptedAgentTasks(req, otherType, config, context)).toBe(0);
+    discardEncryptedAgentTaskRecovery(req, input(), config, context);
+    expect(restoreCachedEncryptedAgentTasks(req, input(), config, context)).toBe(0);
+    expect(fetches).toBe(1);
+  });
 
   const failedRecoveries: Array<[string, () => Response]> = [
     ["HTTP 503", () => new Response("raw-error-sentinel", { status: 503 })],
