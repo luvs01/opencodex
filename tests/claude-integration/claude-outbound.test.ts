@@ -13,6 +13,7 @@ import {
   TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
   type TranslatorBudget,
 } from "../../src/lib/translator-budget";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
 
 const streamBudgets = new WeakMap<ReadableStream<Uint8Array>, TranslatorBudget>();
 
@@ -274,6 +275,7 @@ describe("claude outbound SSE", () => {
       "**A**\n\nOne.\n\n**B**\n\nTwo.",
       "Three.",
     ]);
+    expect(decodeReasoningEnvelope(thinkingBlocks[0].signature)).toEqual({ txt: "" });
 
     // Parity: the non-streaming translator joins the same summary parts identically.
     const json = responsesJsonToAnthropicMessage({
@@ -284,6 +286,55 @@ describe("claude outbound SSE", () => {
     }, "m") as Record<string, any>;
     const jsonThinking = json.content.find((b: Record<string, unknown>) => b.type === "thinking");
     expect(jsonThinking.thinking).toBe("**A**\n\nOne.\n\n**B**\n\nTwo.");
+  });
+
+  test("streamed reasoning does not accumulate retained fallback text", async () => {
+    const budget = createTestTranslatorBudget({ maxTurnBytes: 8 * 1024 });
+    let reasoningCommitted = 0;
+    const trackedBudget: TranslatorBudget = {
+      openCall: id => budget.openCall(id),
+      closeCall: id => budget.closeCall(id),
+      reserveTransient(bytes, scope) {
+        const reservation = budget.reserveTransient(bytes, scope);
+        return {
+          commitRetained() {
+            reservation.commitRetained();
+            if (scope.kind === "reasoning") reasoningCommitted += bytes;
+          },
+          release: () => reservation.release(),
+        };
+      },
+      chargeRetained(bytes, scope) {
+        budget.chargeRetained(bytes, scope);
+        if (scope.kind === "reasoning") reasoningCommitted += bytes;
+      },
+      releaseRetained: (bytes, scope) => budget.releaseRetained(bytes, scope),
+      observeAcceptedRequestCopy: bytes => budget.observeAcceptedRequestCopy(bytes),
+      observeExternallyCapped: (kind, bytes) => budget.observeExternallyCapped(kind, bytes),
+      snapshot: () => budget.snapshot(),
+      dispose: () => budget.dispose(),
+    };
+    const frames = [
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      ...Array.from({ length: 32 }, (_, index) => sse("response.reasoning_text.delta", {
+        item_id: "rs_1",
+        content_index: 0,
+        delta: `${index}:` + "x".repeat(512),
+      })),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ];
+    const events = await collectEvents(responsesSseToAnthropicSse(
+      streamFromChunks(frames),
+      "m",
+      { translatorBudget: trackedBudget, pingIntervalMs: 0 },
+    ));
+
+    expect(events.at(-1)?.name).toBe("message_stop");
+    expect(budget.snapshot().overflows).toBe(0);
+    expect(reasoningCommitted).toBe(0);
+    const signature = events.find(event => event.data.delta?.type === "signature_delta")?.data.delta.signature;
+    expect(signature.length).toBeLessThan(256);
+    expect(decodeReasoningEnvelope(signature)).toEqual({ txt: "" });
   });
 
   test("same-part deltas and index-free reasoning frames never get a separator", async () => {
@@ -1109,4 +1160,49 @@ describe("sanitizeWebSearchInput (#381)", () => {
       data: { error: { type: "request_too_large", code: "translation_buffer_limit" } },
     });
   }, 60_000);
+
+  test("redacted-only reasoning emits a standalone redacted_thinking block", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_red", encrypted_content: encodeReasoningEnvelope({ red: ["opaque"] }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.map(event => event.name)).toEqual([
+      "message_start", "ping", "content_block_start", "content_block_stop", "message_delta", "message_stop",
+    ]);
+    expect(events[2].data.content_block).toEqual({ type: "redacted_thinking", data: "opaque" });
+  });
+
+  test("redacted reasoning closes an open text block before opening its opaque block", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_text.delta", { delta: "text" }),
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_red", encrypted_content: encodeReasoningEnvelope({ red: ["opaque"] }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.filter(event => event.name === "content_block_start" || event.name === "content_block_stop")
+      .map(event => ({ name: event.name, index: event.data.index }))).toEqual([
+      { name: "content_block_start", index: 0 },
+      { name: "content_block_stop", index: 0 },
+      { name: "content_block_start", index: 1 },
+      { name: "content_block_stop", index: 1 },
+    ]);
+  });
+
+  test("signature-only reasoning emits an empty thinking block with the genuine signature", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_sig", encrypted_content: encodeReasoningEnvelope({ sig: "sig-only" }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.map(event => event.name)).toEqual([
+      "message_start", "ping", "content_block_start", "content_block_delta", "content_block_stop",
+      "message_delta", "message_stop",
+    ]);
+    expect(events[2].data.content_block).toEqual({ type: "thinking", thinking: "", signature: "" });
+    expect(events[3].data.delta).toEqual({ type: "signature_delta", signature: "sig-only" });
+  });
 });
