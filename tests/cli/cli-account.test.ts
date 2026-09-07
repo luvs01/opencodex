@@ -2139,10 +2139,6 @@ describe("ocx account CLI (issue #180 matrix)", () => {
           provider: "openai", afterLogin: false, requiresRunningProxy: true,
           commands: {
             list: "ocx models live --provider openai",
-            enable: 'ocx models enable "<model-id-from-list>"',
-            disable: 'ocx models disable "<model-id-from-list>"',
-            enableNative: 'ocx models enable "<model-id-from-list>" --native',
-            disableNative: 'ocx models disable "<model-id-from-list>" --native',
             enableAll: "ocx models provider openai on",
             disableAll: "ocx models provider openai off",
           },
