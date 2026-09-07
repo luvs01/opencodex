@@ -47,6 +47,11 @@ contains no provider object, API key, OAuth value, custom header, reusable manag
 credential, or config digest. Both the proof and reload request use the direct local
 transport so environment HTTP proxies cannot observe or fabricate the exchange.
 
+Aside refresh from `ocx sync` also uses a one-shot process-bound capability for its
+exact POST route. It never sends the reusable management credential to a listener
+selected through public liveness discovery, and configured-port-only legacy proxies
+must be restarted before they can own this mutation.
+
 [Decision Log]
 - 목적과 의도: Keep a lower-privileged local process from collecting the management bearer by impersonating `/healthz` on an unused port.
 - 기존 구현 및 제약 조건: Liveness must remain public and backward-compatible, but its service string and reported PID are assertions made by the listener itself.

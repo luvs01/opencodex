@@ -22,6 +22,7 @@ export interface HealthzIdentity {
   port?: unknown;
   restartCapability?: unknown;
   providerReloadCapability?: unknown;
+  asideSyncCapability?: unknown;
   guiPairCapability?: unknown;
 }
 
