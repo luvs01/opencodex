@@ -10,6 +10,7 @@
 import type { CatalogModel } from "./catalog";
 import type { GenerationContext } from "../lib/state-store-sweeper";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
+import { clearLiveCursorRosterState } from "../adapters/cursor/catalog";
 
 /** Default freshness window. Matches Codex's own 5-min models cache so the two stay in step. */
 export const DEFAULT_MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -201,6 +202,7 @@ export function clearModelCache(
   provider?: string,
   reason: ModelCacheClearReason = "authority",
 ): void {
+  clearLiveCursorRosterState(provider);
   const revokesInFlightDiscovery = reason === "authority";
   if (provider) {
     if (revokesInFlightDiscovery) {
