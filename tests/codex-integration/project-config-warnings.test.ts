@@ -129,6 +129,25 @@ describe("parseTomlDocument", () => {
       const valid = parseTomlDocument('model_provider = "provider\\\\name"');
       expect(valid.root.model_provider).toBe("provider\\name");
     }, 2_000);
+
+    test("recognizes a multiline terminator overlapping an escaped quote", () => {
+      const text = [
+        'developer_instructions = """',
+        `foo\\${'"'.repeat(4)}`,
+        'model_provider = "custom"',
+        '[model_providers.custom]',
+        'name = "Custom"',
+      ].join("\n");
+
+      const parsed = parseTomlDocument(text);
+      expect(parsed.root.model_provider).toBe("custom");
+      expect(parsed.sections.get("model_providers.custom")?.name).toBe("Custom");
+      expect(resolveEffectiveProjectModelProvider(text)).toEqual({
+        provider: "custom",
+        profileName: null,
+        via: "root",
+      });
+    });
   });
 
   describe("parseTrustedProjectPathsFromCodexConfig", () => {
