@@ -437,10 +437,11 @@ export function exportContextOf(input: {
      * `http://::1:10100/v1` and `::` produced `http://:::10100/v1`, neither of
      * which is a URL, and a `0.0.0.0` bind wrote a wildcard address no client
      * can dial. `opencodeProxyBaseUrl` brackets IPv6 and maps wildcards to
-     * loopback, and every client we write into deserves the same answer the
-     * export command already gives.
+     * loopback. Managed integrations must stay on the public listener, though:
+     * the optional unauthenticated listener only exposes Codex's Responses
+     * routes, while these clients can use Chat Completions or Messages.
      */
-    baseUrl: opencodeProxyBaseUrl(input.port, input.config.hostname, input.config),
+    baseUrl: opencodeProxyBaseUrl(input.port, input.config.hostname),
     models: input.models,
     config: input.config,
   };
