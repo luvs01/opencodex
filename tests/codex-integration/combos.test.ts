@@ -722,7 +722,7 @@ describe("combo target cooldowns", () => {
     expect(slept).toBe(true);
   });
 
-  test("does not wait for cooling targets with exhausted provider quota", async () => {
+  test("provider quota summaries do not suppress a bounded cooldown wait", async () => {
     const now = 50_000;
     const config = baseConfig({
       combos: {
@@ -739,12 +739,12 @@ describe("combo target cooldowns", () => {
     });
     coolComboTarget("free", target, { now, cooldownMs: 1_000 });
     const sleeps: number[] = [];
-    expect(await pickComboTargetWithWait(config, "free", {
+    expect((await pickComboTargetWithWait(config, "free", {
       now,
       waitForCooldownMs: 5_000,
       sleep: async ms => { sleeps.push(ms); },
-    })).toBeNull();
-    expect(sleeps).toEqual([]);
+    }))?.target.provider).toBe("a");
+    expect(sleeps).toEqual([1_000]);
   });
 
   test("fails closed without sleeping when cooldown expiry exceeds the wait budget", async () => {
@@ -846,7 +846,7 @@ describe("combo failure policy and advancement", () => {
     })).toBe(true);
   });
 
-  test("failover skips providers with fresh exhausted quota evidence before dispatch", () => {
+  test("account-scoped provider quota summaries do not suppress combo targets", () => {
     const now = 50_000;
     const config = baseConfig();
     setCachedProviderQuotaForTests("a", {
@@ -855,7 +855,7 @@ describe("combo failure policy and advancement", () => {
       updatedAt: now,
     });
     const pick = pickComboTarget(config, "free", { now });
-    expect(pick?.target.provider).toBe("b");
+    expect(pick?.target.provider).toBe("a");
   });
 
   test.each(["pool", "direct"] as const)("defers native %s quota decisions to account and model scoped authentication", mode => {
@@ -910,7 +910,7 @@ describe("combo failure policy and advancement", () => {
     expect(sleeps).toEqual([1_000]);
   });
 
-  test("still filters exhausted quota on a noncanonical forward destination", () => {
+  test("does not treat a noncanonical forward destination's summary as target-scoped", () => {
     const now = 50_000;
     const config = baseConfig({
       providers: {
@@ -927,7 +927,7 @@ describe("combo failure policy and advancement", () => {
 
     const pick = pickComboTarget(config, "free", { now });
 
-    expect(pick?.target.provider).toBe("b");
+    expect(pick?.target.provider).toBe("a");
   });
 
   test("retains caller eligibility restrictions for native targets", () => {
@@ -965,14 +965,25 @@ describe("combo failure policy and advancement", () => {
     expect(pick?.target.provider).toBe("a");
   });
 
-  test("exhausted credits without an unlimited flag skip the provider", () => {
+  test("account-scoped exhausted credits do not skip the provider", () => {
     const now = 50_000;
     const config = baseConfig();
     setCachedProviderQuotaForTests("a", {
       creditsUsd: { used: 10, limit: 10, remaining: 0, percent: 100 },
       updatedAt: now,
     });
-    expect(pickComboTarget(config, "free", { now })?.target.provider).toBe("b");
+    expect(pickComboTarget(config, "free", { now })?.target.provider).toBe("a");
+  });
+
+  test("model-scoped custom quota windows do not skip unrelated combo models", () => {
+    const now = 50_000;
+    const config = baseConfig();
+    setCachedProviderQuotaForTests("a", {
+      customWindows: [{ label: "Search hourly", percent: 100, resetAt: now + 60_000 }],
+      updatedAt: now,
+    });
+
+    expect(pickComboTarget(config, "free", { now })?.target.provider).toBe("a");
   });
 
   test("provider-scoped cooldown skips sibling models but leaves other providers eligible", () => {
