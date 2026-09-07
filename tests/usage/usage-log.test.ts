@@ -23,6 +23,7 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { MAX_TRACE_STRING } from "../../src/routing/trace";
 
 let testDir = "";
 let previousHome: string | undefined;
@@ -115,6 +116,25 @@ describe("usage log", () => {
     });
 
     expect(normalized.attempts).toEqual([]);
+  });
+
+  test("bounds requested model selectors before appending usage rows", () => {
+    const requestedModel = `policy/${"x".repeat(1024 * 1024)}`;
+    appendUsageEntry({
+      requestId: "ocx-bounded-selector",
+      timestamp: 1,
+      provider: "unknown",
+      model: "unknown",
+      requestedModel,
+      status: 404,
+      durationMs: 1,
+      usageStatus: "unreported",
+    });
+
+    const raw = readFileSync(usageLogPath(), "utf8");
+    const persisted = JSON.parse(raw) as PersistedUsageEntry;
+    expect(persisted.requestedModel).toBe(requestedModel.slice(0, MAX_TRACE_STRING));
+    expect(raw.length).toBeLessThan(1024);
   });
 
   test("preserves only valid non-PII Codex account log labels", () => {
