@@ -217,6 +217,42 @@ describe("provider and model aliases", () => {
       routeReason: "explicit-provider-namespace",
     });
   });
+  test("canonical provider name ownership suppresses a colliding built-in alias", async () => {
+    const c = {
+      port: 10100,
+      defaultProvider: "google-antigravity",
+      providers: {
+        agy: {
+          adapter: "openai-chat",
+          baseUrl: "https://custom.test/v1",
+          models: ["gemini-3.8-flash"],
+          liveModels: false,
+        },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          models: ["gemini-3.8-flash"],
+          liveModels: false,
+        },
+      },
+    } as unknown as OcxConfig;
+
+    const models = await gatherRoutedModels(c);
+    const googleModel = models.find(m => m.provider === "google-antigravity" && m.id === "gemini-3.8-flash")!;
+    expect(googleModel.providerAlias).toBeNull();
+
+    const [googleEntry] = buildCatalogEntries(null, [], [googleModel]);
+    expect(googleEntry!.display_name).toBe("google-antigravity/gemini-3.8-flash");
+    expect(routeModel(c, googleEntry!.display_name)).toMatchObject({
+      providerName: "google-antigravity",
+      modelId: "gemini-3.8-flash",
+    });
+    expect(routeModel(c, "agy/gemini-3.8-flash")).toMatchObject({
+      providerName: "agy",
+      modelId: "gemini-3.8-flash",
+    });
+  });
   test("static gather (liveModels: false) suppresses agy when other provider explicitly owns it", async () => {
     const c = {
       port: 10100,
