@@ -94,26 +94,15 @@ export function catalogFastRowEligible(
  * therefore absent from it, and requiring membership would publish `gpt-5.6-sol--fast` and
  * then refuse to parse it.
  *
- * Being too permissive costs nothing here: routing still rejects a base it cannot serve, and
- * the exact-id guard in `parseFastRowId` still protects real models. Being too strict breaks
- * the feature.
+ * Membership must be conservative here: routing can serve arbitrary qualified ids, but
+ * accepting that entire namespace would let the parser change an unknown real model id.
  *
- * Membership must not depend on the live-model cache. An earlier version seeded this set
- * from `knownEffortRowIds` alone, which reads `getStaleCached` (router.ts:125), so a
- * live-only model leaving the cache silently stopped its `--fast` selector from parsing.
- * The argument that its base row leaves the listing at the same time is true but
- * irrelevant: `/v1/models` is discovery, not a routing allowlist, and `routeModel` still
- * serves the bare base through the default provider (router.ts:791) and the qualified base
- * through its configured provider (router.ts:680). So the base kept working while only the
- * fast selector broke — the asymmetry this set exists to prevent.
- *
- * A pure Set cannot express this. Listings also publish LIVE-discovered and retained models
- * that appear in no config (`provider-fetch.ts` publishes `goModels` and `retainModels`), and
- * enumerating them means reading the very cache whose churn caused the original defect. So
- * this returns a PREDICATE: an id is a routable base when it is a known static/config id, or
- * when it is namespaced under an enabled configured provider. The second clause is
- * structural, so it holds for a live-discovered model without consulting the cache, and it
- * is exactly the shape `routeModel` uses to accept a qualified id (router.ts:680).
+ * Live-discovered bases are proved separately by `knownIds` in `parseFastRowId`. Keeping
+ * structural provider-namespace acceptance here would make a stale real
+ * `provider/model--fast` indistinguishable from a synthetic selector after its catalog entry
+ * disappears: stripping the marker would silently select a different model. Static/config
+ * membership remains stable across cache churn; a live-only selector is accepted while its
+ * base is discoverable and otherwise fails honestly rather than being reinterpreted.
  *
  * A base is RECOGNIZED here and then judged by routing, which is the component that actually
  * knows whether it can serve it.
@@ -156,11 +145,9 @@ export function fastRowBases(config: OcxConfig): (id: string) => boolean {
       for (const slug of slugs) bases.add(`${selector}/${slug}`);
     }
   }
-  // Namespaces whose qualified ids route, whatever the cache currently holds.
-  const namespaces = new Set<string>();
   // Virtual rows. A combo or routing profile is published under its canonical
   // `<namespace>/<id>` AND under an operator alias, which may be an arbitrary bare string
-  // with no namespace to vouch for it, so the structural clause below cannot reach it. A
+  // that no configured-provider model declaration can contribute. A
   // combo also cannot be covered by config.providers: declaring a provider named `combo`
   // is rejected outright (combos/types.ts:191).
   for (const [id, combo] of Object.entries(config.combos ?? {})) {
@@ -171,29 +158,7 @@ export function fastRowBases(config: OcxConfig): (id: string) => boolean {
     bases.add(policyModelId(id));
     bases.add(policyPublicModelId(id, profile));
   }
-  for (const [providerName, providerConfig] of Object.entries(config.providers)) {
-    if (providerConfig.disabled === true) continue;
-    namespaces.add(providerName.toLowerCase());
-    if (typeof providerConfig.alias === "string" && providerConfig.alias.length > 0) {
-      namespaces.add(providerConfig.alias.toLowerCase());
-    }
-  }
-  return (id: string): boolean => {
-    if (bases.has(id)) return true;
-    const slash = id.indexOf("/");
-    if (slash <= 0 || slash === id.length - 1) return false;
-    // A live-discovered or retained model is published as `<provider>/<model>` and appears in
-    // no config, so structural recognition is the only cache-free way to accept it.
-    //
-    // But NOT when the remainder itself ends in the marker. A real live model may legitimately
-    // be named `foo--fast`; its exact id is protected by the known-id guard only while the
-    // discovery cache still holds it, and after eviction that guard goes quiet while this
-    // clause would still accept `provider/foo` structurally - silently routing a DIFFERENT
-    // model than the client selected. Refusing the strip is the safe side: the caller then
-    // sends the id verbatim and routing resolves the real model, or fails honestly.
-    if (id.slice(slash + 1).endsWith(FAST_ROW_SUFFIX)) return false;
-    return namespaces.has(id.slice(0, slash).toLowerCase());
-  };
+  return (id: string): boolean => bases.has(id);
 }
 
 export function parseFastRowId(
@@ -209,7 +174,7 @@ export function parseFastRowId(
   if (isKnownId(knownIds, id)) return null;
   const baseId = id.slice(0, -FAST_ROW_SUFFIX.length);
   if (baseId.length === 0) return null;
-  return isKnownId(routableBases, baseId) ? { baseId } : null;
+  return isKnownId(knownIds, baseId) || isKnownId(routableBases, baseId) ? { baseId } : null;
 }
 
 /**
