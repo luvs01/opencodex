@@ -249,24 +249,22 @@ describe("publication and parsing agree", () => {
   });
 });
 
-describe("routable bases do not depend on the live-model cache", () => {
-  test("a cached-only model leaving the cache does not break its fast selector", () => {
-    // The review blocker. An earlier version seeded the set from knownEffortRowIds, whose
-    // getStaleCached half made membership time-dependent: the selector stopped parsing after
-    // cache churn while routeModel still served the base through the default provider. The
-    // asymmetry is the defect, so this drives the real cache rather than swapping config.
+describe("routable bases distinguish durable and live model evidence", () => {
+  test("a cached-only model requires current discovery evidence", () => {
     const config = configWith({ fixture: provider({ models: ["declared"] }) });
     setCached("fixture", [{ provider: "fixture", id: "live-only" } as never]);
     const withCache = fastRowBases(config);
+    const knownWithCache = knownEffortRowIds(config);
     clearModelCache("fixture");
     const withoutCache = fastRowBases(config);
-    // A declared model is recognized either way, and cache churn changes nothing at all.
+    const knownWithoutCache = knownEffortRowIds(config);
+    // Declared membership is durable, while a live-only base needs current catalog evidence.
     expect(withCache("declared")).toBe(true);
     expect(withoutCache("declared")).toBe(true);
-    // And the live-only model is recognized both before and after churn: it is namespaced
-    // under an enabled provider, which is structural rather than cache-derived.
-    expect(withCache("fixture/live-only")).toBe(true);
-    expect(withoutCache("fixture/live-only")).toBe(true);
+    expect(parseFastRowId("fixture/live-only--fast", config, knownWithCache, withCache))
+      .toEqual({ baseId: "fixture/live-only" });
+    expect(parseFastRowId("fixture/live-only--fast", config, knownWithoutCache, withoutCache))
+      .toBeNull();
   });
 
   test("a bare native is recognized regardless of cache state", () => {
@@ -310,23 +308,23 @@ describe("delegation is the shipped function, not a lookalike", () => {
 describe("live-discovered publication is recognized", () => {
   test("a live-only model published under its provider namespace parses back", () => {
     // The review blocker: listings publish goModels and retainModels, which appear in NO
-    // config. A config-only Set missed them, so wp2 would have published
-    // `fixture/live-only--fast` that no ingress could resolve. Structural namespace
-    // recognition covers it without reading the cache.
+    // config. Current discovery evidence lets ingress resolve the published selector without
+    // treating every qualified id under an enabled provider as synthetic.
     const config = configWith({ fixture: provider({ models: ["declared"], supportsServiceTier: true }) });
+    setCached("fixture", [{ provider: "fixture", id: "live-only" } as never]);
+    const knownIds = knownEffortRowIds(config);
     const bases = fastRowBases(config);
     const published = expandFastRow({ id: "fixture/live-only" }, true, config)
       .map(row => row.id)
       .filter(id => id.endsWith("--fast"));
     expect(published).toEqual(["fixture/live-only--fast"]);
     for (const id of published) {
-      expect(parseFastRowId(id, config, new Set(), bases)).toEqual({ baseId: "fixture/live-only" });
+      expect(parseFastRowId(id, config, knownIds, bases)).toEqual({ baseId: "fixture/live-only" });
     }
   });
 
   test("an unknown namespace is still refused", () => {
-    // Structural recognition is scoped to enabled configured providers, so it does not
-    // degrade into accepting anything containing a slash.
+    // Neither durable configuration nor current discovery recognizes this namespace.
     const config = configWith({ fixture: provider() });
     const bases = fastRowBases(config);
     expect(bases("nosuchprovider/m")).toBe(false);
@@ -353,9 +351,13 @@ describe("review findings from PR #3457", () => {
     // than the client selected. Refusing the strip is the safe side.
     const config = configWith({ fixture: provider({ models: ["declared"] }) });
     const bases = fastRowBases(config);
-    expect(bases("fixture/anything")).toBe(true);
+    expect(bases("fixture/anything")).toBe(false);
     expect(bases("fixture/foo--fast")).toBe(false);
     expect(parseFastRowId("fixture/foo--fast--fast", config, new Set(), bases)).toBeNull();
+    setCached("fixture", [{ provider: "fixture", id: "foo--fast" } as never]);
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    setCached("fixture", []);
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
   });
 
   test("an ordinary Claude alias builds no inventory when only fast rows are on", () => {
