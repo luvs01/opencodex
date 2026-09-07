@@ -2,6 +2,7 @@ import { loadConfig, saveConfig } from "../config";
 import {
   CODEX_REASONING_LEVELS,
   configuredReasoningEfforts,
+  isCodexReasoningEffort,
   isDeclaredReasoningEffort,
   mapReasoningEffort,
   reasoningEffortMapFor,
@@ -21,8 +22,8 @@ import {
 
 export const EFFORT_USAGE = `Usage:
   ocx effort [status] [--json]
-  ocx effort <low|medium|high|xhigh|max|ultra|none|minimal|-> [--json]
-  ocx effort set [--main <level|->] [--subagent <level|->] [--injection <level|->] [--json]
+  ocx effort <low|medium|high|xhigh|max|ultra|-> [--json]
+  ocx effort set [--main <level|->] [--subagent <level|->] [--injection <level|none|minimal|->] [--json]
   ocx effort clear [--json]
   ocx effort model <provider/model|model> [--json]
 
@@ -44,6 +45,17 @@ function validateEffortLevel(level: string | null | undefined, label: string): s
     );
   }
   return trimmed;
+}
+
+function validateEffortCap(level: string | null | undefined, label: string): string | null | undefined {
+  const validated = validateEffortLevel(level, label);
+  if (typeof validated === "string" && !isCodexReasoningEffort(validated)) {
+    throw new CliUsageError(
+      `unknown reasoning effort "${validated}" for ${label} (allowed: ${CODEX_REASONING_LEVELS.map(l => l.effort).join(", ")}, -)`,
+      EFFORT_USAGE,
+    );
+  }
+  return validated;
 }
 
 interface EffortCapsResponse {
@@ -136,8 +148,8 @@ async function setEffort(
   wantsJson: boolean,
   deps: RuntimeApiDeps,
 ): Promise<void> {
-  const validatedMain = validateEffortLevel(options.main, "--main");
-  const validatedSubagent = validateEffortLevel(options.subagent, "--subagent");
+  const validatedMain = validateEffortCap(options.main, "--main");
+  const validatedSubagent = validateEffortCap(options.subagent, "--subagent");
   const validatedInjection = validateEffortLevel(options.injection, "--injection");
 
   if (validatedMain === undefined && validatedSubagent === undefined && validatedInjection === undefined) {

@@ -142,6 +142,27 @@ describe("ocx effort offline config operations", () => {
     expect(updated.subagentEffortCap).toBe("medium");
   });
 
+  test("ocx effort rejects sentinel values for enforceable caps", async () => {
+    for (const args of [["minimal"], ["none"], ["set", "--subagent", "minimal"], ["set", "--main", "none"]]) {
+      const configBefore = readTestConfig();
+      const { deps, errors } = fakeDeps(args);
+
+      expect(await handleEffortCommand(args, deps)).toBe(2);
+      expect(errors.join("\n")).toContain("unknown reasoning effort");
+      expect(readTestConfig()).toEqual(configBefore);
+    }
+  });
+
+  test("ocx effort continues to accept sentinel values for injection effort", async () => {
+    for (const injection of ["minimal", "none"]) {
+      const args = ["set", "--injection", injection];
+      const { deps } = fakeDeps(args);
+
+      expect(await handleEffortCommand(args, deps)).toBe(0);
+      expect(readTestConfig().injectionEffort).toBe(injection);
+    }
+  });
+
   test("ocx effort clear unsets both caps but preserves injection effort", async () => {
     const conf = readTestConfig();
     conf.effortCap = "high";
