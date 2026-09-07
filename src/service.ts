@@ -487,20 +487,17 @@ function writeServiceApiTokenFile(): string | null {
 }
 
 /**
- * Render the launchd plist. Mirrors `buildUnit`: when `deps.launcher` names a stable `ocx`
- * executable, the job execs that launcher instead of the package-local Bun + CLI pair, so a
- * version-manager upgrade (mise, asdf, nvm) that replaces the package directory is picked up
- * on the next launchd start instead of leaving the old build serving (#3464 — the macOS
- * counterpart of #2898). Discovery belongs to `installLaunchd()`; the default here is the
- * legacy pair so callers and tests stay hermetic.
+ * Render the launchd plist from the package-local Bun + CLI pair. Unlike systemd, launchd
+ * must not hand the service token and proxy environment to a PATH-discovered launcher: a
+ * mutable version-manager shim could be replaced after installation and run with those secrets.
+ * The legacy `launcher` dependency remains accepted for API compatibility but is ignored.
  */
 export function buildPlist(
   proxyEnv: { name: string; value: string }[] = resolvedProxyEnv(),
-  deps: { launcher?: string | null; runtime?: DurableBunRuntime } = {},
+  deps: { runtime?: DurableBunRuntime; launcher?: string | null } = {},
 ): string {
   const runtime = deps.runtime ?? durableBunRuntime();
   const { bun, bunRuntimeSource, cli } = cliEntry(runtime);
-  const launcher = deps.launcher ?? null;
   const log = logPath();
   const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const codexHome = process.env.CODEX_HOME?.trim();
@@ -508,16 +505,8 @@ export function buildPlist(
   const opencodexHome = process.env.OPENCODEX_HOME?.trim();
   const envLines = [
     `    <key>OCX_SERVICE</key><string>1</string>`,
-    ...(launcher ? [] : [
-      `    <key>${BUN_RUNTIME_SOURCE_ENV}</key><string>${bunRuntimeSource}</string>`,
-      `    <key>${BUN_RUNTIME_PATH_ENV}</key><string>${plistString(bun)}</string>`,
-    ]),
-    // A launcher resolves the current package's bundled Bun after every upgrade. Preserve
-    // only a proof-bound shell override; baking a package-local path here would recreate
-    // the version-manager pin that launcher mode exists to remove (same rule as buildUnit).
-    launcher && runtime.source === "override"
-      ? `    <key>${runtime.overrideEnv}</key><string>${plistString(runtime.path)}</string>`
-      : null,
+    `    <key>${BUN_RUNTIME_SOURCE_ENV}</key><string>${bunRuntimeSource}</string>`,
+    `    <key>${BUN_RUNTIME_PATH_ENV}</key><string>${plistString(bun)}</string>`,
     `    <key>PATH</key><string>${plistString(path)}</string>`,
     codexHome ? `    <key>CODEX_HOME</key><string>${plistString(codexHome)}</string>` : null,
     codexSqliteHome ? `    <key>CODEX_SQLITE_HOME</key><string>${plistString(codexSqliteHome)}</string>` : null,
@@ -525,9 +514,7 @@ export function buildPlist(
     ...proxyEnv.map(({ name, value }) =>
       `    <key>${name}</key><string>${plistString(value)}</string>`),
   ].filter((line): line is string => Boolean(line)).join("\n");
-  const command = launcher
-    ? buildServiceLauncherShellCommand(launcher)
-    : buildServiceShellCommand(bun, cli);
+  const command = buildServiceShellCommand(bun, cli);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -2291,10 +2278,9 @@ function installLaunchd(): void {
   // Capture this BEFORE writing: the write below makes the plist exist unconditionally,
   // so a post-write existsSync would call every fresh install an "installed" service.
   const wasInstalled = existsSync(p);
-  // Resolve the launcher ONCE and hand the same value to the plist and to install state,
-  // so the staleness diagnostic judges exactly what launchd runs.
-  const launcher = stableLauncherEntry();
-  writeServiceDefinitionFile(p, buildPlist(resolvedProxyEnv(), { launcher }), "utf8");
+  // Keep launchd bound to the package paths selected by this trusted invocation. A PATH
+  // launcher can be replaced later and would inherit the service token and proxy environment.
+  writeServiceDefinitionFile(p, buildPlist(resolvedProxyEnv()), "utf8");
   // Best-effort: an absent job is fine here, and a failed unload is caught by the
   // load verification below with a better message than a raw unload error.
   runLaunchctl(["unload", p]);
@@ -2311,7 +2297,7 @@ function installLaunchd(): void {
       + `then re-run '${wasInstalled ? "ocx service repair" : "ocx service install"}'.`,
     );
   }
-  writeServiceInstallState("scheduler", launcher);
+  writeServiceInstallState("scheduler");
 }
 /**
  * Deps are named for the layer they replace, not for the process API: `launchctl`
@@ -3288,6 +3274,9 @@ export function bakedServicePathsDiagnostic(): string | null {
   // necessary (a deleted launcher IS stale) and sufficient (a replaced version directory
   // is not, which is exactly what #2898 made routine).
   if (state?.launcherPath) {
+    if (process.platform === "darwin") {
+      return "STALE mutable launchd launcher — run 'ocx service repair' to re-bake trusted package paths";
+    }
     if (existsSync(state.launcherPath)) return null;
     return `STALE baked paths (missing: ${state.launcherPath}) — run 'ocx service repair' to re-bake`;
   }
