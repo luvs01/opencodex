@@ -286,7 +286,7 @@ describe("retained usage aggregate cache", () => {
     }
   });
 
-  test("an oversized append result never publishes its partially-fed candidate", async () => {
+  test("an oversized append row is skipped without discarding valid usage", async () => {
     writeFileSync(join(testDir, "usage.jsonl"), line("one"));
     const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;
     let forceOversizedAppend = false;
@@ -306,18 +306,14 @@ describe("retained usage aggregate cache", () => {
 
       appendFileSync(join(testDir, "usage.jsonl"), line("two"));
       forceOversizedAppend = true;
-      await expect(getUsageAggregate({ now: NOW })).rejects.toThrow("oversized row");
+      const updated = await getUsageAggregate({ now: NOW });
+      expect(updated.update).toBe("append");
+      expect(requests(updated)).toBe(2);
       expect(requests(original)).toBe(1);
-      expect(usageAggregateRetainedStats().count).toBe(0);
-
-      forceOversizedAppend = false;
-      const rebuilt = await getUsageAggregate({ now: NOW });
-      expect(rebuilt.update).toBe("rebuild");
-      expect(requests(rebuilt)).toBe(2);
-      expect(scanStarts).toHaveLength(3);
+      expect(usageAggregateRetainedStats().count).toBe(1);
+      expect(scanStarts).toHaveLength(2);
       expect(scanStarts[0]).toBe(0);
       expect(scanStarts[1]).toBeGreaterThan(0);
-      expect(scanStarts[2]).toBe(0);
     } finally {
       scanSpy.mockRestore();
     }

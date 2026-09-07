@@ -223,7 +223,6 @@ export async function readApiKeyUsageRollup(configuredIds: string[], maxReadByte
     const flight = (async (): Promise<ApiKeyUsageSnapshot> => {
       const accumulator = createApiKeyUsageAccumulator(configuredIds, now);
       const scan = await scanUsageLedgerCooperatively({ onEntry: entry => accumulator.add(entry) });
-      if (scan.oversizedRows > 0) throw new Error("usage ledger contains an oversized row");
       return cacheApiKeyUsageFromRollup(
         accumulator.snapshot(),
         configuredIds,

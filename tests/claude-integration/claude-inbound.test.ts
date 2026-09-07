@@ -5,6 +5,7 @@ import { repoPath } from "../helpers/repo-root";
 import { AnthropicRequestError, anthropicToResponsesBody, anthropicToResponsesTranslation, effortForThinkingBudget, extractOcxEffortDirective, resolveInboundModel } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
 import { responsesRequestSchema } from "../../src/responses/schema";
+import { MAX_USAGE_MODEL_ID_LENGTH } from "../../src/usage/limits";
 
 // Full Claude Code-shaped request: system array, tool cycle, image, thinking, options.
 function claudeCodeRequest(): Record<string, unknown> {
@@ -50,6 +51,11 @@ function claudeCodeRequest(): Record<string, unknown> {
 }
 
 describe("claude inbound translation", () => {
+  test("responses schema rejects model identifiers that cannot be safely persisted", () => {
+    expect(() => responsesRequestSchema.parse({ model: "m".repeat(MAX_USAGE_MODEL_ID_LENGTH) })).not.toThrow();
+    expect(() => responsesRequestSchema.parse({ model: "m".repeat(MAX_USAGE_MODEL_ID_LENGTH + 1) })).toThrow();
+  });
+
   test("full Claude Code request passes the real responses schema AND parseRequest", () => {
     const body = anthropicToResponsesBody(claudeCodeRequest());
     // The hard gate: the translated body must be accepted by the real request pipeline.

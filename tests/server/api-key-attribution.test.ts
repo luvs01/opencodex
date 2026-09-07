@@ -399,7 +399,7 @@ describe("attribution reaches usage.jsonl", () => {
     }
   });
 
-  test("an oversized usage row cannot seed a partial key rollup", async () => {
+  test("an oversized usage row is skipped while valid key usage remains available", async () => {
     saveConfig(remoteConfig());
     const now = Date.now();
     const oversized = {
@@ -431,8 +431,8 @@ describe("attribution reaches usage.jsonl", () => {
       const payload = await keysGet(server);
       const keys = payload.keys as Array<Record<string, unknown>>;
       expect((keys.find(key => key.id === "key-one")!.usage as Record<string, number>).totalRequests).toBe(0);
-      expect((keys.find(key => key.id === "key-two")!.usage as Record<string, number>).totalRequests).toBe(0);
-      expect(payload.attributionSince).toBeUndefined();
+      expect((keys.find(key => key.id === "key-two")!.usage as Record<string, number>).totalRequests).toBe(1);
+      expect(payload.attributionSince).toBeDefined();
     } finally {
       await server.stop(true);
     }

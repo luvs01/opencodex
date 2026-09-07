@@ -763,7 +763,7 @@ describe("GET /api/usage", () => {
     }
   });
 
-  test("an oversized row fails closed instead of caching a partial aggregate", async () => {
+  test("an oversized row is skipped without hiding valid usage", async () => {
     const now = Date.now();
     const oversized = {
       requestId: "ocx-oversized",
@@ -792,10 +792,11 @@ describe("GET /api/usage", () => {
     const server = startServer(0);
     try {
       const body = await fetch(new URL("/api/usage?range=all", server.url)).then(res => res.json());
-      expect(body.error).toBe("read_failed");
-      expect(body.summary.requests).toBe(0);
+      expect(body.error).toBeUndefined();
+      expect(body.summary.requests).toBe(1);
+      expect(body.summary.totalTokens).toBe(2);
       expect(body.historyTruncated).toBe(false);
-      expect(getUsageSummaryCacheEntry("all:all")).toBeUndefined();
+      expect(getUsageSummaryCacheEntry("all:all")).toBeDefined();
     } finally {
       await server.stop(true);
     }

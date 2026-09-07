@@ -10,6 +10,7 @@ import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
+import { MAX_USAGE_MODEL_ID_LENGTH } from "./limits";
 
 export interface PersistedClaudeCompatibilityLog {
   decision: "shadow";
@@ -429,7 +430,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       && (attempt.credentialSource === "grok-oauth" || attempt.credentialSource === "xai-api-key")
       ? { credentialSource: attempt.credentialSource }
       : {}),
-    model: attempt.model,
+    model: capModelId(attempt.model),
     adapter: attempt.adapter,
     status: attempt.status,
     durationMs: attempt.durationMs,
@@ -499,6 +500,10 @@ function capMetadataString(s: string): string {
   return s.length > MAX_METADATA_STRING_LEN ? s.slice(0, MAX_METADATA_STRING_LEN) : s;
 }
 
+function capModelId(s: string): string {
+  return s.length > MAX_USAGE_MODEL_ID_LENGTH ? s.slice(0, MAX_USAGE_MODEL_ID_LENGTH) : s;
+}
+
 /** Test seam: the normalization branch old rows take is worth asserting directly. */
 export function normalizeUsageEntryForTest(entry: PersistedUsageEntry): PersistedUsageEntry {
   return normalizeUsageEntry(entry);
@@ -518,7 +523,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
     provider: entry.provider,
-    model: entry.model,
+    model: capModelId(entry.model),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(typeof entry.apiKeyId === "string" && entry.apiKeyId.trim()
       // Deliberately NOT capped. `capMetadataString` protects free-form metadata
@@ -535,8 +540,8 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }
       : {}),
-    ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
-    ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(entry.resolvedModel ? { resolvedModel: capModelId(entry.resolvedModel) } : {}),
+    ...(entry.requestedModel ? { requestedModel: capModelId(entry.requestedModel) } : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
       ? { requestedEffort: capMetadataString(entry.requestedEffort) }

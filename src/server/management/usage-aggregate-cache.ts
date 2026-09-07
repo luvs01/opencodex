@@ -125,9 +125,6 @@ async function rebuildAggregate(options: UsageAggregateOptions): Promise<UsageAg
           apiKeyAccumulator?.add(entry);
         },
       });
-      if (scan.oversizedRows > 0) {
-        throw new Error("usage ledger contains an oversized row");
-      }
       if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone) {
         lastError = new Error("usage aggregation inputs changed during rebuild");
         continue;
@@ -179,7 +176,7 @@ async function appendAggregate(
   let rebuildAfterUnpin = false;
   try {
     // Clone first and publish only after the scanner verifies the captured
-    // suffix. A callback error, mutation, or oversized row leaves retained
+    // suffix. A callback error or mutation leaves retained
     // state byte-for-byte untouched.
     const candidate = state.accumulator.clone();
     const scan = await scanUsageLedgerCooperatively({
@@ -188,10 +185,6 @@ async function appendAggregate(
       expectedProcessedThroughDigest: state.processedThroughDigest,
       onEntry: entry => candidate.add(entry),
     });
-    if (scan.oversizedRows > 0) {
-      if (retainedAggregate === state) retainedAggregate = null;
-      throw new Error("usage ledger contains an oversized row");
-    }
     if (userCostOverlayVersion() !== state.overlayVersion || currentTimeZone() !== state.timeZone) {
       if (retainedAggregate === state) retainedAggregate = null;
       rebuildAfterUnpin = true;
@@ -324,7 +317,6 @@ async function rebuildFilteredAggregate(
     const accumulator = createUsageSummaryAccumulator({ filter, mode: "row-unique" });
     try {
       const scan = await scanUsageLedgerCooperatively({ onEntry: entry => accumulator.add(entry) });
-      if (scan.oversizedRows > 0) throw new Error("usage ledger contains an oversized row");
       if (userCostOverlayVersion() !== overlayVersion || currentTimeZone() !== timeZone) {
         lastError = new Error("usage aggregation inputs changed during filtered scan");
         continue;
@@ -356,10 +348,6 @@ async function appendFilteredAggregate(
       expectedProcessedThroughDigest: state.processedThroughDigest,
       onEntry: entry => candidate.add(entry),
     });
-    if (scan.oversizedRows > 0) {
-      if (retainedFilteredAggregates.get(key) === state) retainedFilteredAggregates.delete(key);
-      throw new Error("usage ledger contains an oversized row");
-    }
     if (userCostOverlayVersion() !== state.overlayVersion || currentTimeZone() !== state.timeZone) {
       if (retainedFilteredAggregates.get(key) === state) retainedFilteredAggregates.delete(key);
       rebuildAfterUnpin = true;

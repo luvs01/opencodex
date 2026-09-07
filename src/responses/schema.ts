@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { MAX_USAGE_MODEL_ID_LENGTH } from "../usage/limits";
 
 const inputTextSchema = z.object({ type: z.literal("input_text"), text: z.string() });
 const plainTextSchema = z.object({ type: z.literal("text"), text: z.string() });
@@ -141,7 +142,7 @@ export const reasoningConfigSchema = z.object({
 export const stopSchema = z.union([z.string(), z.array(z.string()), z.null()]);
 
 export const responsesRequestSchema = z.object({
-  model: z.string().min(1),
+  model: z.string().min(1).max(MAX_USAGE_MODEL_ID_LENGTH),
   input: z.union([z.string(), z.array(inputItemSchema)]).optional(),
   instructions: z.union([z.string(), z.null()]).optional(),
   tools: z.array(z.union([toolSchema, builtinToolSchema])).optional(),

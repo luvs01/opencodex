@@ -22,6 +22,7 @@ import {
   usageLogRevisionKey,
   type PersistedUsageEntry,
 } from "../../src/usage/log";
+import { MAX_USAGE_MODEL_ID_LENGTH } from "../../src/usage/limits";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let testDir = "";
@@ -115,6 +116,37 @@ describe("usage log", () => {
     });
 
     expect(normalized.attempts).toEqual([]);
+  });
+
+  test("bounds every persisted copy of a model identifier", () => {
+    const oversizedModel = "m".repeat(2_000);
+    const normalized = normalizeUsageEntryForTest({
+      requestId: "bounded-models",
+      timestamp: 1,
+      provider: "openai",
+      model: oversizedModel,
+      requestedModel: oversizedModel,
+      resolvedModel: oversizedModel,
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported",
+      attempts: [{
+        ordinal: 1,
+        provider: "openai",
+        model: oversizedModel,
+        adapter: "openai-responses",
+        status: 200,
+        durationMs: 1,
+        sendCount: 1,
+        recoveryKinds: [],
+        usageStatus: "unreported",
+      }],
+    });
+
+    expect(normalized.model).toHaveLength(MAX_USAGE_MODEL_ID_LENGTH);
+    expect(normalized.requestedModel).toHaveLength(MAX_USAGE_MODEL_ID_LENGTH);
+    expect(normalized.resolvedModel).toHaveLength(MAX_USAGE_MODEL_ID_LENGTH);
+    expect(normalized.attempts?.[0]?.model).toHaveLength(MAX_USAGE_MODEL_ID_LENGTH);
   });
 
   test("preserves only valid non-PII Codex account log labels", () => {
