@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INTERNAL_DEADLINE_MS, SERVER_BUDGET_MS } from "../helpers/test-budget";
@@ -366,12 +366,8 @@ describe("config integration", () => {
 });
 
 describe("webhookUrl is treated as a credential", () => {
-  test("ocx config show does not print it", async () => {
-    // For Slack and Discord the URL IS the authorization: anyone holding it can post to the
-    // channel. It matches none of the pre-existing secret-key patterns, so it had to be named
-    // explicitly — before that, `config show` printed it and `config export` wrote it to disk.
+  function configureWebhook(secret: string): { home: string; restore: () => void } {
     const home = mkdtempSync(join(tmpdir(), "ocx-redact-"));
-    const secret = "https://hooks.slack.com/services/T00000/B00000/zzTOKENzz";
     writeFileSync(join(home, "config.json"), JSON.stringify({
       port: 10100,
       defaultProvider: "openai",
@@ -380,9 +376,23 @@ describe("webhookUrl is treated as a credential", () => {
       },
       quotaResetNotify: { enabled: true, webhookUrl: secret },
     }));
-
     const previousHome = process.env["OPENCODEX_HOME"];
     process.env["OPENCODEX_HOME"] = home;
+    return {
+      home,
+      restore: () => {
+        if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
+        else process.env["OPENCODEX_HOME"] = previousHome;
+      },
+    };
+  }
+
+  test("ocx config show does not print it", async () => {
+    // For Slack and Discord the URL IS the authorization: anyone holding it can post to the
+    // channel. It matches none of the pre-existing secret-key patterns, so it had to be named
+    // explicitly — before that, `config show` printed it and `config export` wrote it to disk.
+    const secret = "https://hooks.slack.com/services/T00000/B00000/zzTOKENzz";
+    const configured = configureWebhook(secret);
     const written: string[] = [];
     const originalLog = console.log;
     console.log = (...args: unknown[]) => { written.push(args.map(String).join(" ")); };
@@ -395,8 +405,44 @@ describe("webhookUrl is treated as a credential", () => {
       expect(output).toContain("********");
     } finally {
       console.log = originalLog;
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
+      configured.restore();
+    }
+  });
+
+  test("ocx config export omits it from stdout", async () => {
+    const secret = "https://hooks.slack.com/services/T00000/B00000/stdoutTOKEN";
+    const configured = configureWebhook(secret);
+    const written: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      expect(await handleConfigCommand(["export", "-"])).toBe(0);
+      const exported = JSON.parse(written.join("")) as Record<string, unknown>;
+      expect(JSON.stringify(exported)).not.toContain(secret);
+      expect(exported["quotaResetNotify"]).toEqual({ enabled: true });
+    } finally {
+      process.stdout.write = originalWrite;
+      configured.restore();
+    }
+  });
+
+  test("ocx config export omits it from a file", async () => {
+    const secret = "https://hooks.discord.com/api/webhooks/fileTOKEN";
+    const configured = configureWebhook(secret);
+    const outputPath = join(configured.home, "export.json");
+    const originalLog = console.log;
+    console.log = () => {};
+    try {
+      expect(await handleConfigCommand(["export", outputPath])).toBe(0);
+      const exported = JSON.parse(readFileSync(outputPath, "utf8")) as Record<string, unknown>;
+      expect(JSON.stringify(exported)).not.toContain(secret);
+      expect(exported["quotaResetNotify"]).toEqual({ enabled: true });
+    } finally {
+      console.log = originalLog;
+      configured.restore();
     }
   });
 });

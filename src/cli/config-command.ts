@@ -38,6 +38,16 @@ function redact(value: unknown, key = ""): unknown {
   return value;
 }
 
+function omitWebhookCredentials(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitWebhookCredentials);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key.toLowerCase() !== "webhookurl")
+      .map(([key, child]) => [key, omitWebhookCredentials(child)]),
+  );
+}
+
 function pathSegments(path: string): string[] {
   const segments = path.split(".").map(part => part.trim()).filter(Boolean);
   if (segments.length === 0 || segments.some(part => BLOCKED_SEGMENTS.has(part))) throw new CliUsageError("invalid config path", USAGE);
@@ -195,7 +205,7 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
       const path = args.shift();
       if (!path) throw new CliUsageError("export path is required", USAGE);
       rejectArgs(args, USAGE);
-      const content = `${JSON.stringify(readConfigDiagnostics().config, null, 2)}\n`;
+      const content = `${JSON.stringify(omitWebhookCredentials(readConfigDiagnostics().config), null, 2)}\n`;
       if (path === "-") process.stdout.write(content);
       else { writeFileSync(path, content, { encoding: "utf8", mode: 0o600 }); console.log(`Exported config to ${path}.`); }
       return;
