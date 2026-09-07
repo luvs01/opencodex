@@ -51,7 +51,7 @@ import { routedSlug, slugEquals, slugEquivalenceKey, slugsEquivalent } from "../
 import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
-import { recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
+import { cursorLiveRosterScope, recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import {
   COMBO_NAMESPACE,
@@ -1622,10 +1622,11 @@ async function fetchProviderModelsWithAuth(
       // Publish roster-derived state only for a discovery the cache accepted: a stale
       // in-flight capture (generation revoked by a credential/config change) must not
       // overwrite the spelling or Max-Mode evidence of the newer one.
-      recordLiveCursorClaudeModels(liveResult.models);
+      const liveRosterScope = { provider: name, key: cursorLiveRosterScope(prov.baseUrl, apiKey) };
+      recordLiveCursorClaudeModels(liveResult.models, liveRosterScope);
       // Live Max-Mode evidence feeds the umbrella resolver's ultra gate
       // (devlog 260828_cursor_umbrella_catalog; union with static evidence).
-      recordLiveCursorMaxModeModels(liveResult.maxModeModels ?? []);
+      recordLiveCursorMaxModeModels(liveResult.maxModeModels ?? [], liveRosterScope);
       markProviderDiscoveryOk(name, liveResult.models.length);
       return observed(withConfiguredRetention(forCache, { warnDrops: true }), "authoritative");
     }
