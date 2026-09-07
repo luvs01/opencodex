@@ -5570,7 +5570,7 @@ async function handleResponsesInner(
           ? createGrokResponsesControlFrameBlockRewrite()
           : undefined,
         grokClientCompatibilityEnabled
-          ? createGrokResponsesSparseTerminalBlockRewrite(translatorBudget)
+          ? createGrokResponsesSparseTerminalBlockRewrite(translatorBudget, outboundRequestBody)
           : undefined,
         snapshotRepairEnabled
           ? createResponsesSnapshotBlockRewrite(outboundRequestBody, translatorBudget)
