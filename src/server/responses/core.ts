@@ -3790,8 +3790,9 @@ async function handleResponsesInner(
    * lines, and the divergence that produced was the bug: `apiKey` was swapped while the routing
    * metadata paired with it stayed behind.
    *
-   * Returns false when the snapshot cannot be used safely, and the caller must then abandon the
-   * rotation rather than send a half-applied identity:
+   * Returns the admitted snapshot, which can differ when a newer manual selection wins the
+   * proposal race. Returns null when the snapshot cannot be used safely, and the caller must then
+   * abandon the rotation rather than send a half-applied identity:
    *
    * - Copilot pins its bearer to an account-scoped regional origin, so transport is re-resolved
    *   with the new account's `apiBaseUrl` instead of inheriting the previous account's host. The
@@ -3807,10 +3808,10 @@ async function handleResponsesInner(
   const applyFailoverSnapshot = async (
     snapshot: OAuthAccessSnapshot,
     retryParsed: OcxParsedRequest = parsed,
-  ): Promise<boolean> => {
-    if (route.provider.googleMode === "cloud-code-assist" && !snapshot.projectId) return false;
+  ): Promise<OAuthAccessSnapshot | null> => {
+    if (route.provider.googleMode === "cloud-code-assist" && !snapshot.projectId) return null;
     const committed = await commitResolvedOAuthSelection(snapshot);
-    if (!committed) return false;
+    if (!committed) return null;
     snapshot = committed;
     let rotatedProvider: OcxProviderConfig = { ...route.provider, apiKey: snapshot.accessToken };
     if (route.providerName === "github-copilot") {
@@ -3843,7 +3844,7 @@ async function handleResponsesInner(
     }
     sentOAuthSnapshot = snapshot;
     replayOAuthCredentialSnapshot = { accountId: snapshot.accountId, generation: snapshot.generation };
-    return true;
+    return snapshot;
   };
   const selectionIsCurrent = (binding: DispatchBinding | undefined): boolean => {
     if (route.provider.authMode === "forward") return true;
@@ -6349,7 +6350,8 @@ async function handleResponsesInner(
       try {
         const snapshot = await failoverAccountSnapshot(route.providerName, nextAccountId);
         genericFailovers += 1;
-        if (!await applyFailoverSnapshot(snapshot)) return false;
+        const admittedSnapshot = await applyFailoverSnapshot(snapshot);
+        if (!admittedSnapshot) return false;
         // A Cursor conversation/checkpoint is credential-scoped. The failed attempt emitted no
         // client-visible bytes, so replay is safe, but carrying its account identity into the next
         // account would not be. Let the rotated adapter derive a fresh identity and conversation.
@@ -6373,7 +6375,10 @@ async function handleResponsesInner(
           providerName: route.providerName,
           provider: rotatedProvider,
           adapterName: rotatedAdapter.name,
-          oauthCredentialSnapshot: { accountId: snapshot.accountId, generation: snapshot.generation },
+          oauthCredentialSnapshot: {
+            accountId: admittedSnapshot.accountId,
+            generation: admittedSnapshot.generation,
+          },
           codexAuthContext: authCtx,
           forwardHeaders: selectedForwardHeaders,
         });
