@@ -33,29 +33,29 @@ enumeration twice made a measured 12.3-second fallback cost roughly 25 seconds b
 - 다른 대안 대신 이 방식을 선택한 이유: Removing or weakening revalidation widens the install race, while a global/TTL cache can outlive startup and stale absence can authorize the wrong home. Exact targeted-result identity lets the ordinary no-task locale fallback coalesce without hiding changed evidence.
 - 장점, 단점 및 영향: The reported stable zh-CN absence path performs two cheap targeted queries and one full listing. A task that appears is detected by the second targeted query; changed or failed evidence triggers a fresh fail-closed decision, so unusual churn may still pay for two listings rather than guess.
 
-## Stable service launcher (launchd and systemd)
+## Stable service launcher (systemd)
 
-Launchd and systemd installation resolve the first absolute `ocx` PATH candidate that is both a regular file
+Systemd installation resolves the first absolute `ocx` PATH candidate that is both a regular file
 and executable, keeps that path lexical so a version-manager shim remains an indirection, and
 records the same single resolution in the service definition and service state. Definition
-construction (`buildPlist`, `buildUnit`) never performs PATH discovery itself: callers provide either the resolved launcher or an explicit direct Bun/CLI
-fallback, keeping diagnostics and tests independent of the host PATH.
+construction (`buildUnit`) never performs PATH discovery itself: callers provide either the resolved launcher or an explicit direct Bun/CLI
+fallback, keeping diagnostics and tests independent of the host PATH. Launchd always uses the
+package-local Bun and CLI pair selected by the trusted install or repair invocation; it never hands
+credential-bearing service state to a mutable PATH launcher.
 
 Launcher mode omits the package-local Bun provenance pair because an upgrade may delete that
 versioned tree. The only runtime path carried through the launcher is a pre-Bun, proof-bound
 `OPENCODEX_BUN_PATH` whose durable runtime source is `override`; bundled and process fallbacks are
 rediscovered by the current launcher. The API-auth token remains file-backed and is loaded only by
-the service shell at start. On macOS, `start` and detailed `status` compare the live launchd job
-against `expectedLaunchdCommand`, which follows the recorded `launcherPath` rather than re-walking
-PATH, so a launcher-backed job is never misreported as an older plist (#3464).
+the service shell at start.
 
 [Decision Log]
 - 목적과 의도: Keep systemd services upgrade-stable without losing an explicitly trusted Bun override or accepting a non-executable PATH placeholder.
 - 기존 구현 및 제약 조건: Version managers replace package trees but retain lexical shims; Bun dotenv makes ambient override values untrustworthy unless the Node launcher already stamped matching runtime provenance.
 - 검토한 주요 대안: Bake the package Bun and CLI forever; resolve the shim target; accept the first existing PATH entry; drop every runtime override in launcher mode; or preserve only a proof-bound override.
-- 선택한 방식: Require a regular executable lexical launcher, resolve it once during installation, preserve only `durableBunRuntime().source === "override"`, and keep token loading in the existing file-backed shell preamble.
+- 선택한 방식: Require a regular executable lexical launcher for systemd, resolve it once during installation, preserve only `durableBunRuntime().source === "override"`, and keep token loading in the existing file-backed shell preamble. Keep launchd pinned to the directly selected package runtime.
 - 다른 대안 대신 이 방식을 선택한 이유: Resolving or pinning package paths recreates upgrade restart loops, existence-only selection can name a directory or non-executable file, and dropping a trusted override silently changes an operator's runtime.
-- 장점, 단점 및 영향: Mise/asdf-style upgrades keep working and explicit Bun selection survives; source installs still use the direct pair, while a removed or non-executable launcher requires `ocx service repair`.
+- 장점, 단점 및 영향: Mise/asdf-style systemd upgrades keep working and explicit Bun selection survives; source installs still use the direct pair, while a removed or non-executable launcher requires `ocx service repair`. Launchd users must repair after an upgrade changes package paths, in exchange for not trusting a replaceable shim with service credentials.
 
 ## Provider diagnostic outbound safety
 
@@ -1719,7 +1719,17 @@ response is not cacheable. Post-commit and 5xx errors keep the no-resend path.
 
 When encrypted agent-task recovery refuses a routed task, its existing 400 error
 can include a bounded `recovery_reason`: `unsupported_envelope`,
-`admission_denied`, `recovery_unavailable`, `caller_cancelled`, or `input_changed`.
-The field is omitted when no classified recovery result exists.
+`admission_denied`, `recovery_unavailable`, `caller_cancelled`, `input_changed`,
+`recovery_http_rejected`, `recovery_timeout`, `recovery_aborted`,
+`recovery_transport_error`, or `recovery_invalid_output`.
+HTTP rejection requires an observed non-success response. Invalid output includes
+invalid UTF-8, oversized bodies, malformed or incomplete recovery streams, and
+invalid or conflicting assignments. A caller's cancellation takes precedence over
+an owned deadline, which takes precedence over decode/transport failures.
+`recovery_aborted` describes a shared recovery cancelled independently of that caller.
+Shared-flight waiters receive the same underlying failure unless individually cancelled;
+only successful plaintext is cached. Diagnostics contain no upstream error or payload text.
+The field is omitted when no classified recovery result exists, and existing combo
+branches that return the original target failure keep that response.
 `recovery_unavailable` includes cache/singleflight capacity and does not prove an
 upstream request was attempted. No retry or broader envelope acceptance is enabled.
