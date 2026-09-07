@@ -76,6 +76,32 @@ function isValidCodeInterpreterOutput(value: unknown): boolean {
       || (value.type === "image" && typeof value.url === "string"));
 }
 
+function selectorMatchesClientCall(
+  selector: unknown,
+  item: Record<string, unknown>,
+): boolean {
+  if (!isPlainObject(selector) || typeof selector.type !== "string") return false;
+  const expectedType = item.type === "function_call" ? "function" : "custom";
+  if (selector.type !== expectedType || selector.name !== item.name) return false;
+  const selectorNamespace = typeof selector.namespace === "string" ? selector.namespace : undefined;
+  const itemNamespace = typeof item.namespace === "string" ? item.namespace : undefined;
+  return selectorNamespace === itemNamespace;
+}
+
+/** Keep reconstructed client calls inside this request's effective Responses selector. */
+function clientToolCallAllowed(item: Record<string, unknown>, requestBody: unknown): boolean {
+  if (!isPlainObject(requestBody)) return true;
+  const choice = requestBody.tool_choice;
+  if (choice === undefined || choice === "auto" || choice === "required") return true;
+  if (choice === "none") return false;
+  if (!isPlainObject(choice)) return false;
+  if (choice.type === "allowed_tools") {
+    return Array.isArray(choice.tools)
+      && choice.tools.some(selector => selectorMatchesClientCall(selector, item));
+  }
+  return selectorMatchesClientCall(choice, item);
+}
+
 /**
  * Validate the pre-field-backfill item carried by a real output_item.done.
  * Missing ids, message status, and output-text annotations are allowed because
@@ -179,6 +205,7 @@ function plausibleGrokOpenItem(
  */
 export function createGrokResponsesSparseTerminalBlockRewrite(
   budget?: TranslatorBudget,
+  requestBody?: unknown,
 ): SseBlockRewrite {
   const openItems = new Map<number, SparseTerminalOpenItem>();
   const completedItems = new Map<number, SparseTerminalCompletedItem>();
@@ -284,7 +311,10 @@ export function createGrokResponsesSparseTerminalBlockRewrite(
     if (type === "response.output_item.done") {
       const item = isPlainObject(parsed.item) ? parsed.item : null;
       const proof = item ? trustedGrokCompletedItem(item) : null;
-      if (outputIndex === undefined || !proof || completedItems.has(outputIndex)) {
+      const clientCallForbidden = item !== null
+        && (item.type === "function_call" || item.type === "custom_tool_call")
+        && !clientToolCallAllowed(item, requestBody);
+      if (outputIndex === undefined || !proof || clientCallForbidden || completedItems.has(outputIndex)) {
         taintAndRelease();
         return [block];
       }
@@ -330,4 +360,3 @@ export function createGrokResponsesSparseTerminalBlockRewrite(
   rewrite.dispose = reset;
   return rewrite;
 }
-
