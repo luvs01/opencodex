@@ -2,15 +2,11 @@
  * Sets up the git hooks for local development.
  * Run once after cloning: bun run setup:hooks
  *
- * - `pre-push` runs `bun run prepush` (typecheck + tests + privacy scan + GUI
+ * The `pre-push` hook runs `bun run prepush` (typecheck + tests + privacy scan + GUI
  *   eslint and React Doctor when `gui/` changed) — the local portion of the CI
  *   gate.
- * - `post-merge` runs `bun run postmerge`, which rebuilds the packaged GUI when
- *   a merge or pull brought `gui/` changes. `gui/dist` is generated and
- *   gitignored, so a fast-forward advances the source while the dashboard keeps
- *   serving the previously built bundle.
  *
- * To skip in an emergency: git push --no-verify / git pull --no-verify
+ * To skip in an emergency: git push --no-verify
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, copyFileSync, mkdirSync, chmodSync, readFileSync, renameSync } from "node:fs";
@@ -77,10 +73,4 @@ installHook(
   "pre-push.sh",
   "Runs typecheck + tests + privacy scan (+ GUI eslint and React Doctor when gui/ changed) before every push.",
 );
-installHook(
-  "post-merge",
-  "post-merge.sh",
-  "Rebuilds the packaged GUI when a merge or pull brought gui/ changes.",
-);
-
-console.log("Skip in an emergency with: git push --no-verify / git pull --no-verify");
+console.log("Skip in an emergency with: git push --no-verify");
