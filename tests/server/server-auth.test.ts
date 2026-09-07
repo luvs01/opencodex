@@ -781,6 +781,16 @@ describe("server local API auth", () => {
     expect(isApiAuthRequired(config("127.0.0.1"))).toBe(false);
   });
 
+  test("fully-qualified localhost binds to the same IPv4 target generated for clients", async () => {
+    saveConfig(config("localhost."));
+    const server = startServer(0);
+    try {
+      expect(server.hostname).toBe("127.0.0.1");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("non-loopback binding requires env token before startup", () => {
     delete process.env.OPENCODEX_API_AUTH_TOKEN;
     expect(isApiAuthRequired(config("0.0.0.0"))).toBe(true);
