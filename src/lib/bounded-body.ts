@@ -15,6 +15,8 @@ export interface BoundedBodyOptions {
 	 * Reader cancellation and lock release still run. Defaults to false.
 	 */
 	fatalUtf8?: boolean;
+	/** Report UTF-8 validity without rejecting malformed bodies. */
+	reportUtf8Validity?: boolean;
 	/**
 	 * Byte ceiling for retained body data. Defaults to BOUNDED_BODY_MAX_BYTES (64 KiB),
 	 * which suits error bodies; callers materializing whole success payloads (e.g. a
@@ -44,6 +46,8 @@ export interface BoundedBodyResult {
 	oversized: boolean;
 	/** False means callers should use a status-only fallback, not `text`. */
 	displaySafe: boolean;
+	/** Present when reportUtf8Validity was requested and the retained body reached EOF. */
+	utf8Valid?: boolean;
 }
 
 export interface BoundedBytesOptions {
@@ -212,13 +216,36 @@ export async function readBoundedResponseBytes(
 	}
 }
 
-function decodeUtf8(chunks: readonly Uint8Array[], fatal: boolean): string {
+// Mark only exceptions thrown by our decoder, preserving their identity and TypeError contract.
+// Timeout-path flushing may fail too; retain that origin so callers do not lose the deadline.
+const decodeFailures = new WeakMap<object, "invalid_utf8" | "timeout">();
+
+export function boundedBodyDecodeFailure(error: unknown): "invalid_utf8" | "timeout" | undefined {
+	return error !== null && typeof error === "object" ? decodeFailures.get(error) : undefined;
+}
+
+function decodeUtf8(chunks: readonly Uint8Array[], fatal: boolean, timedOut = false): string {
 	const decoder = new TextDecoder("utf-8", { fatal });
-	let text = "";
-	for (const chunk of chunks) text += decoder.decode(chunk, { stream: true });
-	// Flush an incomplete trailing UTF-8 sequence deterministically.
-	text += decoder.decode();
-	return text;
+	try {
+		let text = "";
+		for (const chunk of chunks) text += decoder.decode(chunk, { stream: true });
+		// Flush an incomplete trailing UTF-8 sequence deterministically.
+		text += decoder.decode();
+		return text;
+	} catch (error) {
+		if (error !== null && typeof error === "object") {
+			decodeFailures.set(error, timedOut ? "timeout" : "invalid_utf8");
+		}
+		throw error;
+	}
+}
+
+function decodeUtf8WithValidity(bytes: Uint8Array): { text: string; utf8Valid: boolean } {
+	try {
+		return { text: decodeUtf8([bytes], true), utf8Valid: true };
+	} catch {
+		return { text: decodeUtf8([bytes], false), utf8Valid: false };
+	}
 }
 
 /**
@@ -297,7 +324,7 @@ export async function readBoundedResponseBody(
 					"TimeoutError",
 				);
 				return {
-					text: decodeUtf8([retained.subarray(0, retainedBytes)], options.fatalUtf8 === true),
+					text: decodeUtf8([retained.subarray(0, retainedBytes)], options.fatalUtf8 === true, true),
 					truncated: true,
 					timedOut: true,
 					totalTimedOut: outcome === TOTAL_TIMEOUT,
@@ -309,6 +336,19 @@ export async function readBoundedResponseBody(
 
 			const { value, done } = outcome as ReadableStreamReadResult<Uint8Array>;
 			if (done) {
+				if (options.reportUtf8Validity && options.fatalUtf8 !== true) {
+					const decoded = decodeUtf8WithValidity(retained.subarray(0, retainedBytes));
+					return {
+						text: decoded.text,
+						truncated: false,
+						timedOut: false,
+						totalTimedOut: false,
+						inactivityTimedOut: false,
+						oversized: false,
+						displaySafe: true,
+						utf8Valid: decoded.utf8Valid,
+					};
+				}
 				return {
 					text: decodeUtf8([retained.subarray(0, retainedBytes)], options.fatalUtf8 === true),
 					truncated: false,
