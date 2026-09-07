@@ -7527,13 +7527,29 @@ async function handleResponsesInner(
             // metadata, so a token-only swap would mix one account's credential with another's
             // routing data.
             const snapshot = await failoverAccountSnapshot(route.providerName, nextAccountId);
-                genericFailovers += 1;
+            genericFailovers += 1;
             if (await applyFailoverSnapshot(snapshot, nextParsed)) {
               invalidateSameTargetRequest();
               activeAdapter = resolveSelectionAdapter(
                 resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
                 config.cacheRetention,
               );
+              bindRouteReasoningReplayScope({
+                parsed: nextParsed,
+                providerName: route.providerName,
+                provider: route.provider,
+                adapterName: activeAdapter.name,
+                oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
+              });
+              // Response persistence closes over the outer request rather than the terminal-guard
+              // clone. Rebind both owners before B's request can read or persist account state.
+              bindRouteReasoningReplayScope({
+                parsed,
+                providerName: route.providerName,
+                provider: route.provider,
+                adapterName: activeAdapter.name,
+                oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
+              });
               sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
               recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, activeAdapter.name);
               nextContinuationRecoveryKind = "oauth-account-429";
