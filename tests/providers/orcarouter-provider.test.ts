@@ -242,6 +242,19 @@ describe("OrcaRouter dual authentication", () => {
     expect(message).not.toContain(verifier);
   });
 
+  test("rejects oversized and malformed UTF-8 key exchange responses before parsing", async () => {
+    const flow = new OrcaRouterOAuthFlow({});
+    await flow.generateAuthUrl("state", "http://127.0.0.1:51733/callback");
+
+    globalThis.fetch = (async () => new Response(new Uint8Array(65_537).fill(0x20))) as typeof fetch;
+    await expect(flow.exchangeToken("code", "state", "ignored"))
+      .rejects.toThrow("OrcaRouter key exchange response exceeded the 65536-byte limit");
+
+    globalThis.fetch = (async () => new Response(new Uint8Array([0x7b, 0xff, 0x7d]))) as typeof fetch;
+    await expect(flow.exchangeToken("code", "state", "ignored"))
+      .rejects.toThrow("OrcaRouter key exchange returned invalid JSON");
+  });
+
   test("completes the real callback with documented key/user_id and no response scope", async () => {
     expect(await exchangeThroughCallback({ key: "sk-orca-callback-test", user_id: 123 })).toEqual({
       access: "sk-orca-callback-test",
