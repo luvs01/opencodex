@@ -2509,11 +2509,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       );
       if (isCanonicalOpenAiForwardProvider(provider)) {
         // Spark closes Responses Lite streams before a terminal completion. Select compatibility
-        // from the final wire model so aliases cannot leave the caller or a static header enabled.
+        // from the final wire model so aliases cannot leave the caller, a static header, or native
+        // WebSocket metadata enabled. An explicit false also overwrites stale metadata in WS frames.
         if (isPlainObject(finalBody) && finalBody.model === "gpt-5.3-codex-spark") {
           for (const name of Object.keys(headers)) {
             if (name.toLowerCase() === CODEX_RESPONSES_LITE_HEADER) delete headers[name];
           }
+          headers[CODEX_RESPONSES_LITE_HEADER] = "false";
         }
         const routingHeaders = new Headers(headers);
         applyCodexRoutingHint(routingHeaders, finalBody);
