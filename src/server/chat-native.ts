@@ -106,16 +106,21 @@ function normalizePinnedChatEffort(options: HandleNativeChatOptions): void {
   const pinned = chatBody.compaction_trigger === undefined
     ? resolvePinnedEffort(route, selector, config)
     : undefined;
+  let normalizeForWire = false;
   if (pinned !== undefined) {
     logCtx.requestedEffort = from ? `${from}->${pinned}` : pinned;
     if (pinned === "none") delete chatBody.reasoning_effort;
     else chatBody.reasoning_effort = pinned;
-    // The native lane historically passes caller effort through, including with caps set.
-    // Only a newly operator-pinned value enters the cap and provider-mapping pipeline.
-    if (effortCapAppliesTo(chatCollabSurface(chatBody), req.headers, config)) {
-      const capped = applyChatEffortCap(chatBody, req.headers, config, supportedLadderFor(route));
-      if (capped) logCtx.requestedEffort = `${logCtx.requestedEffort}->${capped.to}`;
+    normalizeForWire = true;
+  }
+  if (effortCapAppliesTo(chatCollabSurface(chatBody), req.headers, config)) {
+    const capped = applyChatEffortCap(chatBody, req.headers, config, supportedLadderFor(route));
+    if (capped) {
+      logCtx.requestedEffort = `${logCtx.requestedEffort ?? capped.from}->${capped.to}`;
+      normalizeForWire = true;
     }
+  }
+  if (normalizeForWire) {
     const effort = typeof chatBody.reasoning_effort === "string" ? chatBody.reasoning_effort : undefined;
     const wireEffort = mapReasoningEffort(route.provider, route.modelId, effort);
     if (wireEffort === undefined) delete chatBody.reasoning_effort;

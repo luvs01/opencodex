@@ -428,9 +428,10 @@ describe("operator pins on the actual request wire", () => {
     expect(wire.reasoning).toEqual({ effort: "max", summary: "auto" });
   });
 
-  test("native Chat without pins preserves caller wire spelling and existing cap behavior", async () => {
+  test("native Chat without pins enforces applicable caps and preserves unqualified caller spelling", async () => {
     const c = config({ reasoningEfforts: ["low"], reasoningEffortMap: { max: "enabled" } }, { effortCap: "low", subagentEffortCap: "low" });
-    expect((await request(c, "chat", { reasoning_effort: "ultra" }, { "x-openai-subagent": "collab_spawn" })).reasoning_effort).toBe("ultra");
+    expect((await request(c, "chat", { reasoning_effort: "ultra" }, { "x-openai-subagent": "collab_spawn" })).reasoning_effort).toBe("low");
+    expect((await request(c, "chat", { reasoning_effort: "ultra" })).reasoning_effort).toBe("ultra");
     expect(Object.hasOwn(await request(c, "chat", { reasoning_effort: undefined }), "reasoning_effort")).toBe(false);
   });
 
