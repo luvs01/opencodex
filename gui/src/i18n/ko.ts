@@ -4,6 +4,9 @@ import type { TKey } from "./en";
  * Korean i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ko: Record<TKey, string> = {
+  "usage.incomplete": "일부 사용량 기록을 집계하지 못했습니다. 횟수, 날짜, 순위는 읽을 수 있는 기록만 반영합니다.",
+  "models.pickerOrder.usageIncomplete": "사용량 이력이 불완전해 많이 사용한 순서를 저장할 수 없습니다. 다른 순서를 선택하거나 이력을 복구하세요.",
+  "api.attribution.noRecordedUse": "읽을 수 있는 기록에 사용 내역 없음",
   "models.pickerOrder.label": "모델 선택 순서",
   "models.pickerOrder.default": "기본값",
   "models.pickerOrder.alphabetical": "모델 이름순",
