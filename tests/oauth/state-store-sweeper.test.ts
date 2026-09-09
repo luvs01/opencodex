@@ -188,6 +188,39 @@ describe("state-store sweeper", () => {
     expect(reconcileLiveStateStores()).toEqual({ storesVisited: 1, rowsRemoved: 2 });
   });
 
+  test("registered combo recall sweep removes dormant expired lanes", () => {
+    registerStateStore(STATE_STORE_REGISTRATIONS.find(row => row.name === "combo-session-recall")!);
+    const config: OcxConfig = {
+      port: 0, defaultProvider: "a",
+      providers: { a: { adapter: "openai-chat", baseUrl: "https://a.example/v1" } },
+      combos: { first: { targets: [{ provider: "a", model: "m1" }] } },
+    };
+    rememberComboForLane("lane", "first", { provider: "a", model: "m1" }, "visible", captureConfigGeneration());
+
+    expect(sweepExpired(Date.now() + 30 * 60 * 1_000)).toEqual({ storesVisited: 1, rowsRemoved: 1 });
+    expect(recallComboForLane(config, "lane", "visible")).toBeUndefined();
+  });
+
+  test("combo recall bounds individual and aggregate upstream model bytes", () => {
+    const config: OcxConfig = {
+      port: 0, defaultProvider: "a",
+      providers: { a: { adapter: "openai-chat", baseUrl: "https://a.example/v1" } },
+      combos: { first: { targets: [{ provider: "a", model: "m1" }] } },
+    };
+    const target = { provider: "a", model: "m1" };
+    rememberComboForLane("oversized-ascii", "first", target, "x".repeat(1025), captureConfigGeneration());
+    rememberComboForLane("oversized-utf8", "first", target, "é".repeat(513), captureConfigGeneration());
+    expect(recallComboForLane(config, "oversized-ascii", "x".repeat(1025))).toBeUndefined();
+    expect(recallComboForLane(config, "oversized-utf8", "é".repeat(513))).toBeUndefined();
+
+    for (let index = 0; index < 65; index += 1) {
+      rememberComboForLane(`lane-${index}`, "first", target, `${index}`.padEnd(1024, "x"), captureConfigGeneration());
+    }
+    expect(recallComboForLane(config, "lane-0", "0".padEnd(1024, "x"))).toBeUndefined();
+    expect(recallComboForLane(config, "lane-1", "1".padEnd(1024, "x"))).toBe("first");
+    expect(recallComboForLane(config, "lane-64", "64".padEnd(1024, "x"))).toBe("first");
+  });
+
   test("combo recall watermark rejects writers after a partially failed generation", () => {
     registerStateStore(STATE_STORE_REGISTRATIONS.find(row => row.name === "combo-session-recall")!);
     const warning = spyOn(console, "warn").mockImplementation(() => {});
