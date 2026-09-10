@@ -237,6 +237,7 @@
   "codex-catalog.test.ts": "codex-integration",
   "codex-cli-install-provenance.test.ts": "codex-integration",
   "codex-cli-update-launcher-policy.test.ts": "codex-integration",
+  "codex-cli-update-plan.test.ts": "codex-integration",
   "codex-cli-update-zero-effect.test.ts": "codex-integration",
   "codex-composed-acceptance.test.ts": "codex-integration",
   "codex-config-generation.test.ts": "codex-integration",

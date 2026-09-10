@@ -21,6 +21,8 @@ const USAGE = `Usage:
   ocx system codex-app-server [--json]
   ocx system codex-restart --yes [--json]
   ocx system codex-cli-update check [--json]
+  ocx system codex-cli-update plan [--channel latest] [--json]
+  ocx system codex-cli-update apply --plan <id> [--json]
   ocx system update check [--channel <latest|preview>] [--json]
   ocx system update run [--channel <latest|preview>] [--restart <on|off>] --yes [--json]
   ocx system update status <job-id> [--json]

@@ -3,18 +3,34 @@ import {
   type CodexCliInstallProvenanceDeps,
   type CodexCliInstallReport,
 } from "../codex/cli-install-provenance";
+import {
+  applyCodexCliUpdatePlan,
+  createCodexCliUpdatePlan,
+  type CodexCliUpdateApplyDeps,
+  type CodexCliUpdateApplyResult,
+  type CodexCliUpdateChannel,
+  type CodexCliUpdatePlan,
+  type CodexCliUpdatePlanDeps,
+} from "../codex/cli-update-plan";
 import { CliUsageError, isJsonOption, printData, runCliAction } from "./runtime-api";
 import { trustedNodeLauncherContext } from "./launcher-context";
 
 export const CODEX_CLI_UPDATE_USAGE = `Usage:
-  ocx system codex-cli-update check [--json]`;
+  ocx system codex-cli-update check [--json]
+  ocx system codex-cli-update plan [--channel latest] [--json]
+  ocx system codex-cli-update apply --plan <id> [--json]`;
 
-export type ParsedCodexCliUpdateArgs = Readonly<{
-  json: boolean;
-}>;
+const PLAN_ID_RE = /^[0-9a-f]{32}$/;
+
+export type ParsedCodexCliUpdateArgs =
+  | Readonly<{ action: "check"; json: boolean }>
+  | Readonly<{ action: "plan"; json: boolean; channel: CodexCliUpdateChannel }>
+  | Readonly<{ action: "apply"; json: boolean; planId: string }>;
 
 export interface CodexCliUpdateCommandDeps {
   readonly inspectInstall?: (deps: CodexCliInstallProvenanceDeps) => Promise<CodexCliInstallReport>;
+  readonly createPlan?: (deps: CodexCliUpdatePlanDeps) => Promise<CodexCliUpdatePlan>;
+  readonly applyPlan?: (planId: string, deps: CodexCliUpdateApplyDeps) => Promise<CodexCliUpdateApplyResult>;
 }
 
 function installSummary(report: CodexCliInstallReport): string[] {
@@ -33,27 +49,142 @@ function installSummary(report: CodexCliInstallReport): string[] {
   ];
 }
 
+function planSummary(plan: CodexCliUpdatePlan): string[] {
+  const lines = [
+    `applicable: ${plan.applicable ? "yes" : "no"}`,
+    `reason: ${plan.refusal ?? "none"}`,
+    `provenance: ${plan.provenance}`,
+    `installed-version: ${plan.installedVersion ?? "unavailable"}`,
+    `version-evidence: ${plan.versionEvidence}`,
+    `channel: ${plan.channel}`,
+    `target-version: ${plan.targetVersion ?? "unresolved"}`,
+    `target-integrity: ${plan.targetIntegrity ?? "unresolved"}`,
+    `shim-eligible: ${plan.shimEligible ? "yes" : "no"}`,
+    `session: ${plan.session.state}${plan.session.matches === null ? "" : ` (${plan.session.matches})`}`,
+  ];
+  if (plan.planId) lines.push(`plan: ${plan.planId}`);
+  if (plan.command) lines.push(`command: ${plan.command.join(" ")}`);
+  return lines;
+}
+
+function applySummary(result: CodexCliUpdateApplyResult): string[] {
+  const shim = result.shim.attempted
+    ? (result.shim.restored ? "restored" : `repair-required (${result.shim.status ?? "unknown"})`)
+    : "untouched";
+  return [
+    `status: ${result.status}`,
+    `reason: ${result.refusal ?? "none"}`,
+    `plan: ${result.planId ?? "unavailable"}`,
+    `target-version: ${result.targetVersion ?? "unavailable"}`,
+    `installed-before: ${result.installedVersionBefore ?? "unavailable"}`,
+    `installed-after: ${result.installedVersionAfter ?? "unavailable"}`,
+    `installer-exit: ${result.installerExitCode ?? "unavailable"}`,
+    `shim: ${shim}`,
+  ];
+}
+
+/** Read `--name value` and `--name=value` alike; both spellings reach this CLI. */
+function optionValue(tokens: readonly string[], index: number, name: string): { value: string; next: number } {
+  const token = tokens[index]!;
+  const inline = `--${name}=`;
+  if (token.startsWith(inline)) {
+    const value = token.slice(inline.length);
+    if (!value) throw new CliUsageError(`--${name} requires a value`, CODEX_CLI_UPDATE_USAGE);
+    return { value, next: index + 1 };
+  }
+  const value = tokens[index + 1];
+  if (value === undefined) throw new CliUsageError(`--${name} requires a value`, CODEX_CLI_UPDATE_USAGE);
+  return { value, next: index + 2 };
+}
+
+function isOption(token: string, name: string): boolean {
+  return token === `--${name}` || token.startsWith(`--${name}=`);
+}
+
 export function parseCodexCliUpdateArgs(argv: readonly string[]): ParsedCodexCliUpdateArgs {
   // `--json` is accepted in any argv position CLI-wide, so remove it before positional
-  // validation. Requiring `check` at index 0 first would reject `--json check`, which
+  // validation. Requiring the action at index 0 first would reject `--json check`, which
   // automation that puts output flags ahead of the subcommand legitimately produces.
   let json = false;
-  const positional: string[] = [];
+  const rest: string[] = [];
   for (const token of argv) {
     if (isJsonOption(token)) {
       if (json) throw new CliUsageError("--json may be specified only once", CODEX_CLI_UPDATE_USAGE);
       json = true;
       continue;
     }
-    positional.push(token);
+    rest.push(token);
   }
-  if (positional[0] !== "check") {
-    throw new CliUsageError("codex-cli-update action must be check", CODEX_CLI_UPDATE_USAGE);
+  const action = rest[0];
+  if (action !== "check" && action !== "plan" && action !== "apply") {
+    throw new CliUsageError("codex-cli-update action must be check, plan or apply", CODEX_CLI_UPDATE_USAGE);
   }
-  if (positional.length > 1) {
-    throw new CliUsageError("unsupported codex-cli-update argument", CODEX_CLI_UPDATE_USAGE);
+
+  if (action === "check") {
+    if (rest.length > 1) throw new CliUsageError("unsupported codex-cli-update argument", CODEX_CLI_UPDATE_USAGE);
+    return Object.freeze({ action, json });
   }
-  return Object.freeze({ json });
+
+  if (action === "plan") {
+    let channel: CodexCliUpdateChannel = "latest";
+    let seen = false;
+    let index = 1;
+    while (index < rest.length) {
+      const token = rest[index]!;
+      if (!isOption(token, "channel")) {
+        throw new CliUsageError("unsupported codex-cli-update argument", CODEX_CLI_UPDATE_USAGE);
+      }
+      if (seen) throw new CliUsageError("--channel may be specified only once", CODEX_CLI_UPDATE_USAGE);
+      const read = optionValue(rest, index, "channel");
+      // Only the stable channel is offered. A preview channel would need its own
+      // provenance story before it may install anything on the operator's behalf.
+      if (read.value !== "latest") throw new CliUsageError("--channel must be latest", CODEX_CLI_UPDATE_USAGE);
+      channel = read.value;
+      seen = true;
+      index = read.next;
+    }
+    return Object.freeze({ action, json, channel });
+  }
+
+  let planId: string | null = null;
+  let index = 1;
+  while (index < rest.length) {
+    const token = rest[index]!;
+    if (!isOption(token, "plan")) {
+      throw new CliUsageError("unsupported codex-cli-update argument", CODEX_CLI_UPDATE_USAGE);
+    }
+    if (planId !== null) throw new CliUsageError("--plan may be specified only once", CODEX_CLI_UPDATE_USAGE);
+    const read = optionValue(rest, index, "plan");
+    if (!PLAN_ID_RE.test(read.value)) {
+      throw new CliUsageError("--plan must be a plan id from a dry-run", CODEX_CLI_UPDATE_USAGE);
+    }
+    planId = read.value;
+    index = read.next;
+  }
+  // Apply is never implicit: the operator quotes a plan id they read in a dry-run.
+  if (planId === null) throw new CliUsageError("apply requires --plan <id>", CODEX_CLI_UPDATE_USAGE);
+  return Object.freeze({ action, json, planId });
+}
+
+/**
+ * Inspection inputs for this one-shot CLI process.
+ *
+ * The published Node launcher supplies a proof-bound snapshot of configured candidate
+ * evidence, not selected-runtime admission. A direct Bun or source launch has no such
+ * proof, so nothing ambient or persisted is inspected at all.
+ */
+function inspectionDeps(): CodexCliInstallProvenanceDeps {
+  const trusted = trustedNodeLauncherContext()?.codexCliInspectionEnv;
+  if (!trusted || trusted.managerRoots === null) return { env: { PATH: "" }, configDir: "." };
+  return {
+    env: {
+      ...trusted.managerRoots,
+      CODEX_CLI_PATH: trusted.codexCliPath ?? undefined,
+      PATH: trusted.path ?? undefined,
+      PATHEXT: trusted.pathExt ?? undefined,
+    },
+    configDir: trusted.configDir,
+  };
 }
 
 export async function handleCodexCliUpdateCommand(
@@ -71,26 +202,30 @@ export async function handleCodexCliUpdateCommand(
     }
     throw error;
   }
-  return runCliAction(async () => {
-    const trustedInspectionEnv = trustedNodeLauncherContext()?.codexCliInspectionEnv;
-    const inspectionDeps: CodexCliInstallProvenanceDeps = trustedInspectionEnv
-      && trustedInspectionEnv.managerRoots !== null ? {
-      env: {
-        ...trustedInspectionEnv.managerRoots,
-        CODEX_CLI_PATH: trustedInspectionEnv.codexCliPath ?? undefined,
-        PATH: trustedInspectionEnv.path ?? undefined,
-        PATHEXT: trustedInspectionEnv.pathExt ?? undefined,
-      },
-      configDir: trustedInspectionEnv.configDir,
-      // This is a fresh one-shot CLI process. Its proof-bound launcher snapshot
-      // supplies configured candidate evidence, not selected-runtime admission.
-    } : {
-      // Direct Bun/source launches have no pre-dotenv proof. Do not inspect
-      // ambient or persisted candidate state at all.
-      env: { PATH: "" },
-      configDir: ".",
-    };
-    const report = await (deps.inspectInstall ?? inspectCodexCliInstall)(inspectionDeps);
-    printData(report, parsed.json, installSummary(report));
+  // A refusal or an unapplied update is a legitimate answer rather than a crash, so the
+  // outcome exit code is decided here and only a thrown error is left to runCliAction.
+  let outcome = 0;
+  const code = await runCliAction(async () => {
+    if (parsed.action === "check") {
+      const report = await (deps.inspectInstall ?? inspectCodexCliInstall)(inspectionDeps());
+      printData(report, parsed.json, installSummary(report));
+      return;
+    }
+    if (parsed.action === "plan") {
+      const plan = await (deps.createPlan ?? createCodexCliUpdatePlan)({
+        channel: parsed.channel,
+        inspectionDeps: inspectionDeps(),
+        inspect: deps.inspectInstall,
+      });
+      printData(plan, parsed.json, planSummary(plan));
+      return;
+    }
+    const result = await (deps.applyPlan ?? applyCodexCliUpdatePlan)(parsed.planId, {
+      inspectionDeps: inspectionDeps(),
+      inspect: deps.inspectInstall,
+    });
+    printData(result, parsed.json, applySummary(result));
+    outcome = result.status === "applied" ? 0 : 1;
   });
+  return code === 0 ? outcome : code;
 }
