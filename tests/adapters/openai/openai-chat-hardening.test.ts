@@ -308,6 +308,24 @@ describe("unicode property-escape pattern stripping", () => {
     expect(stripped.properties.plain.pattern).toBe("^[a-z0-9_-]{1,64}$");
   });
 
+  test("clones only paths that contain a removed pattern in a broad schema", () => {
+    const properties: Record<string, Record<string, unknown>> = {};
+    for (let i = 0; i < 25_000; i++) properties[`field_${i}`] = { type: "string" };
+    properties.affected = { type: "string", pattern: artifactFieldPattern };
+    const before = { type: "object", properties };
+
+    const stripped = stripUnicodePropertyPatterns(before) as typeof before;
+
+    expect(stripped).not.toBe(before);
+    expect(stripped.properties).not.toBe(properties);
+    expect(stripped.properties.affected).not.toBe(properties.affected);
+    expect(stripped.properties.affected.pattern).toBeUndefined();
+    // Unchanged siblings retain identity instead of being cloned while thousands of traversal
+    // frames and temporary output objects are live at once.
+    expect(stripped.properties.field_0).toBe(properties.field_0);
+    expect(stripped.properties.field_24999).toBe(properties.field_24999);
+  });
+
   test("an escaped backslash before `p{` is a literal, not a property escape", () => {
     // `\\p{2}` is a literal backslash followed by a quantified `p`; Python compiles it, so a
     // substring scan for `\p{` would throw away a working pattern.
