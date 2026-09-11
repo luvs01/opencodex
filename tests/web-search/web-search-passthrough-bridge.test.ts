@@ -385,6 +385,41 @@ describe("the bridged client stream", () => {
     expect((cell!.item as Record<string, unknown>).status).toBe("failed");
   });
 
+  test("bounds client tool events withheld from a hostile upstream", async () => {
+    const clientCall = {
+      type: "function_call",
+      id: "fc_attack",
+      call_id: "call_attack",
+      name: "exec",
+      arguments: "",
+    };
+    const blocks = [
+      frame("response.output_item.added", { output_index: 0, item: clientCall }),
+    ];
+    for (let index = 0; index < 1_000; index += 1) {
+      blocks.push(frame("response.function_call_arguments.delta", {
+        output_index: 0,
+        item_id: "fc_attack",
+        delta: "x",
+      }));
+    }
+
+    const stream = createPassthroughWebSearchBridgeStream({
+      plan,
+      firstLeg: streamFromText(sseBody(...blocks)),
+      requestBody: initialBody,
+      send: async () => new Response(null, { status: 500 }),
+      execute: async () => ({ text: "unused", sources: [] }),
+    });
+
+    const body = await new Response(stream).text();
+    expect(body).not.toContain("\"name\":\"exec\"");
+    const failed = clientEvents(body).find(event => event.type === "response.failed");
+    const error = (failed!.response as { error: Record<string, unknown> }).error;
+    expect(error.code).toBe(WEB_SEARCH_BRIDGE_ERROR_CODE);
+    expect(String(error.message)).toContain("client tool events exceeded");
+  });
+
   test("a search that is not the last item keeps its streamed position", async () => {
     // The model searches first and keeps talking; the hosted cell must open where the call stood.
     const leg = sseBody(
