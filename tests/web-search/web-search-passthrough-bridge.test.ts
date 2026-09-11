@@ -572,6 +572,7 @@ describe("the reported turn, end to end through handleResponses", () => {
   async function post(
     ocxConfig: OcxConfig,
     legs: string[],
+    onSearch?: () => void,
   ): Promise<{ body: string; outbound: string[]; searches: number }> {
     const savedFetch = globalThis.fetch;
     const outbound: string[] = [];
@@ -583,6 +584,7 @@ describe("the reported turn, end to end through handleResponses", () => {
         : input instanceof URL ? input.href : (input as Request).url;
       if (url.includes("/api/web_search")) {
         searches += 1;
+        onSearch?.();
         return new Response(JSON.stringify({
           results: [{ title: "Releases", url: "https://example.test/rel", content: "opencodex 2.50.0" }],
         }), { headers: { "content-type": "application/json" } });
@@ -630,6 +632,20 @@ describe("the reported turn, end to end through handleResponses", () => {
     expect(String(output!.output)).toContain("opencodex 2.50.0");
     expect(continuation.input.some(item =>
       item.type === "function_call" && item.name === "web_search")).toBe(true);
+  });
+
+  test("fails closed when the selected API key changes before a continuation", async () => {
+    const ocxConfig = config(armed);
+    const result = await post(ocxConfig, [searchLeg(), answerLeg()], () => {
+      ocxConfig.providers.fixture!.apiKey = "replacement-key";
+      ocxConfig.providers.fixture!.apiKeySelectionRevision = "replacement-selection";
+    });
+
+    expect(result.searches).toBe(1);
+    expect(result.outbound).toHaveLength(1);
+    expect(result.outbound[0]).toContain("what is the latest release?");
+    expect(result.body).toContain(WEB_SEARCH_BRIDGE_ERROR_CODE);
+    expect(result.body).not.toContain("The current release is 2.50.0.");
   });
 
   test("an unrelated undeclared tool still fails closed through the bridged stream", async () => {

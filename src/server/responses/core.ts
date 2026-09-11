@@ -4254,6 +4254,15 @@ async function handleResponsesInner(
       throw new Error("OAuth account selection changed repeatedly before dispatch");
     };
   };
+  const selectionBoundContinuationDispatch = (
+    wireRequest: AdapterRequest,
+  ): ProviderFetchOptions["dispatchOverride"] => async (input, init, execute) => {
+    if (!selectionIsCurrent(requestBindings.get(wireRequest))) {
+      throw new Error("API key selection changed during a request continuation");
+    }
+    const fetchImpl = (route.provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? execute;
+    return fetchImpl(input, { ...init, redirect: "manual" });
+  };
   const anthropicSessionKey = route.providerName === "anthropic" && route.provider.authMode === "oauth"
     ? anthropicSessionKeyFromParts({
       sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
@@ -5851,7 +5860,9 @@ async function handleResponsesInner(
             connectMs,
             true,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              dispatchOverride: oauthDispatch(request),
+              // The first leg has already been served by this key. Unlike a pre-dispatch
+              // retry, a continuation must never rebuild the turn under a newly selected key.
+              dispatchOverride: selectionBoundContinuationDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
             }),
