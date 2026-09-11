@@ -39,6 +39,37 @@ export const MAX_CONFIGURABLE_INBOUND_BODY_BYTES = 512 * 1024 * 1024;
 export const MIN_CONFIGURABLE_INBOUND_BODY_BYTES = 1024 * 1024;
 
 /**
+ * Process-wide decoded-body admission. Readers reserve their full configured allowance before
+ * consuming a body, so increasing the per-request limit reduces the number of large bodies that
+ * can be decoded concurrently instead of multiplying the process's worst-case memory exposure.
+ */
+export const MAX_CONCURRENT_INBOUND_BODY_BYTES = MAX_CONFIGURABLE_INBOUND_BODY_BYTES;
+let reservedInboundBodyBytes = 0;
+
+export class InboundBodyCapacityError extends Error {
+  constructor() {
+    super("inbound request body capacity is temporarily exhausted");
+    this.name = "InboundBodyCapacityError";
+  }
+}
+
+function reserveInboundBodyCapacity(maxBytes: number): () => void {
+  // Preserve the established default-cap concurrency. The configurable range above that default
+  // is the additional high-amplification surface this gate exists to serialize.
+  if (maxBytes <= MAX_DECOMPRESSED_BODY_BYTES) return () => {};
+  if (maxBytes > MAX_CONCURRENT_INBOUND_BODY_BYTES - reservedInboundBodyBytes) {
+    throw new InboundBodyCapacityError();
+  }
+  reservedInboundBodyBytes += maxBytes;
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    reservedInboundBodyBytes -= maxBytes;
+  };
+}
+
+/**
  * Resolve the configured inbound admission limit, clamped to the supported range.
  *
  * Pure and total on purpose: the schema in `src/config.ts` degrades an invalid hand edit to
@@ -298,43 +329,52 @@ export async function readBoundedJsonRequestBody(
   budget?: TranslatorBudget,
   options?: { emptyBodyFallback?: unknown; signal?: AbortSignal },
 ): Promise<unknown> {
-  const encoding = req.headers.get("content-encoding");
-  const declaredLength = declaredBodyLength(req);
-  // Reject an honest oversized declaration before reading. Missing, malformed,
-  // and dishonest declarations remain bounded by the streaming reader below.
-  if (declaredLength !== null && declaredLength > maxBytes) {
-    const error = new DecompressedBodyTooLargeError(declaredLength, maxBytes, "declared_wire");
-    cancelStreamWithoutWaiting(req.body, error);
-    throw error;
-  }
-  const releaseReservation = budget && declaredLength !== null && declaredLength > 0
-    ? budget.observeAcceptedRequestCopy(declaredLength)
-    : undefined;
-  let raw: Uint8Array;
+  const releaseInboundCapacity = reserveInboundBodyCapacity(maxBytes);
   try {
-    raw = await readRequestBodyBytesCapped(req.body, maxBytes, options?.signal ?? req.signal);
-  } finally {
-    releaseReservation?.();
-  }
-  assertBodySizeWithinLimit(raw, maxBytes, "observed_wire_lower_bound");
-  const releaseRaw = budget?.observeAcceptedRequestCopy(raw.byteLength);
-  let releaseDecoded: (() => void) | undefined;
-  let releaseText: (() => void) | undefined;
-  try {
-    const decoded = decodeRequestBody(raw, encoding, maxBytes);
-    releaseDecoded = decoded === raw ? undefined : budget?.observeAcceptedRequestCopy(decoded.byteLength);
-    const text = new TextDecoder().decode(decoded);
-    releaseText = budget?.observeAcceptedRequestCopy(new TextEncoder().encode(text).byteLength);
-    if (options && "emptyBodyFallback" in options && text.trim() === "") {
-      return options.emptyBodyFallback;
+    const encoding = req.headers.get("content-encoding");
+    const declaredLength = declaredBodyLength(req);
+    // Reject an honest oversized declaration before reading. Missing, malformed,
+    // and dishonest declarations remain bounded by the streaming reader below.
+    if (declaredLength !== null && declaredLength > maxBytes) {
+      const error = new DecompressedBodyTooLargeError(declaredLength, maxBytes, "declared_wire");
+      cancelStreamWithoutWaiting(req.body, error);
+      throw error;
     }
-    const parsed = JSON.parse(text);
-    budget?.observeAcceptedRequestCopy(new TextEncoder().encode(JSON.stringify(parsed)).byteLength);
-    return parsed;
+    const releaseReservation = budget && declaredLength !== null && declaredLength > 0
+      ? budget.observeAcceptedRequestCopy(declaredLength)
+      : undefined;
+    let raw: Uint8Array;
+    try {
+      raw = await readRequestBodyBytesCapped(req.body, maxBytes, options?.signal ?? req.signal);
+    } finally {
+      releaseReservation?.();
+    }
+    assertBodySizeWithinLimit(raw, maxBytes, "observed_wire_lower_bound");
+    const releaseRaw = budget?.observeAcceptedRequestCopy(raw.byteLength);
+    let releaseDecoded: (() => void) | undefined;
+    let releaseText: (() => void) | undefined;
+    try {
+      const decoded = decodeRequestBody(raw, encoding, maxBytes);
+      releaseDecoded = decoded === raw ? undefined : budget?.observeAcceptedRequestCopy(decoded.byteLength);
+      const text = new TextDecoder().decode(decoded);
+      // The source bytes are already the exact UTF-8 representation consumed by TextDecoder.
+      // Re-encoding a potentially huge string just to measure it creates another body-sized copy.
+      releaseText = budget?.observeAcceptedRequestCopy(decoded.byteLength);
+      if (options && "emptyBodyFallback" in options && text.trim() === "") {
+        return options.emptyBodyFallback;
+      }
+      const parsed = JSON.parse(text);
+      // Use the input size as the parsed graph's conservative accounting proxy. Serializing the
+      // graph again doubled the hottest allocation solely for observational telemetry.
+      budget?.observeAcceptedRequestCopy(decoded.byteLength);
+      return parsed;
+    } finally {
+      releaseText?.();
+      releaseDecoded?.();
+      releaseRaw?.();
+    }
   } finally {
-    releaseText?.();
-    releaseDecoded?.();
-    releaseRaw?.();
+    releaseInboundCapacity();
   }
 }
 

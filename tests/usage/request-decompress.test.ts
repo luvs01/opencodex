@@ -6,6 +6,7 @@ import {
   describeInboundBodyRefusal,
   MAX_DECOMPRESSED_BODY_BYTES,
   MAX_CONFIGURABLE_INBOUND_BODY_BYTES,
+  InboundBodyCapacityError,
   MIN_CONFIGURABLE_INBOUND_BODY_BYTES,
   readBoundedJsonRequestBody,
   readJsonRequestBody,
@@ -221,6 +222,31 @@ describe("decodeRequestBody", () => {
 });
 
 describe("configurable inbound body limit (Issue #3573)", () => {
+  test("large readers share a process-wide decoded-byte admission budget", async () => {
+    const controller = new AbortController();
+    const stalled = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({ pull() {} }),
+      signal: controller.signal,
+      // Required by Node's Request typing for a streaming body; Bun accepts the same shape.
+      duplex: "half",
+    } as RequestInit);
+    const largeLimit = 300 * 1024 * 1024;
+    const first = readBoundedJsonRequestBody(stalled, largeLimit);
+
+    await expect(readBoundedJsonRequestBody(
+      new Request("http://localhost/v1/responses", { method: "POST", body: "{}" }),
+      largeLimit,
+    )).rejects.toBeInstanceOf(InboundBodyCapacityError);
+
+    controller.abort(new DOMException("test cleanup", "AbortError"));
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(readBoundedJsonRequestBody(
+      new Request("http://localhost/v1/responses", { method: "POST", body: "{}" }),
+      largeLimit,
+    )).resolves.toEqual({});
+  });
+
   test("an unconfigured proxy keeps the 256 MiB default", () => {
     expect(resolveInboundBodyLimitBytes(undefined)).toBe(MAX_DECOMPRESSED_BODY_BYTES);
     expect(resolveInboundBodyLimitBytes(0)).toBe(MAX_DECOMPRESSED_BODY_BYTES);
