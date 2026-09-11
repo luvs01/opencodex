@@ -4,7 +4,7 @@
  * default follows modern clients, while sourceModels keeps an escape hatch.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync} from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, isShadowSourceModel } from "../../src/server/responses";
@@ -14,6 +14,7 @@ import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { repoPath } from "../helpers/repo-root";
 
 const originalFetch = globalThis.fetch;
 
@@ -295,6 +296,23 @@ function chatOk(text: string): Response {
 }
 
 describe("a combo shadow-call target enters the failover loop (#4129)", () => {
+  test("carries helper conversation isolation into concrete combo children", () => {
+    const core = readFileSync(repoPath("src/server/responses/core.ts"), "utf8");
+    const comboDispatch = core.slice(
+      core.indexOf("const comboId = !options.comboAttempt"),
+      core.indexOf("let unreadableEncryptedAgentTask"),
+    );
+    const parsedHandoff = core.slice(
+      core.indexOf("if (cursorClientThreadId) parsed._cursorClientThreadId"),
+      core.indexOf("} catch (err)", core.indexOf("if (cursorClientThreadId) parsed._cursorClientThreadId")),
+    );
+
+    expect(comboDispatch).toContain("shadowCallIntercepted,");
+    expect(parsedHandoff).toContain(
+      "if (options.shadowCallIntercepted === true) parsed._cursorIsolateConversation = true;",
+    );
+  });
+
   test("a helper call rewritten to a combo hops past a 429 to the second target", async () => {
     const urls: string[] = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
