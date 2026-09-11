@@ -5881,12 +5881,22 @@ async function handleResponsesInner(
         isPassthrough: true,
         stream: parsed.stream === true,
       });
-      // The bridge wraps the RAW upstream body, so terminal repair below still owns the single
-      // client-facing terminal — the bridge drops the terminal of every intercepted leg.
-      const upstreamSseBody = webSearchBridgePlan
+      // Repair must observe the raw first leg before the bridge suppresses an intercepted search
+      // lifecycle. Otherwise a provider that leaves that complete call open never arms repair's
+      // grace timer, so the bridge cannot execute the search or begin its continuation.
+      let passthroughSseBody = terminalRepairPolicy
+        ? relayResponsesSseWithTerminalRepair(
+          upstreamResponse.body,
+          upstream,
+          terminalRepairPolicy,
+          translatorBudget,
+          options.responsesTerminalRepairScheduler,
+        )
+        : upstreamResponse.body;
+      passthroughSseBody = webSearchBridgePlan
         ? createPassthroughWebSearchBridgeStream({
           plan: webSearchBridgePlan,
-          firstLeg: upstreamResponse.body,
+          firstLeg: passthroughSseBody,
           requestBody: request.body,
           // Continuation legs replay the same built request with the executed search appended.
           // The first leg already passed the recovery ladder, the outbound size ceiling, and the
@@ -5913,16 +5923,7 @@ async function handleResponsesInner(
           },
           signal: upstream.signal,
         })
-        : upstreamResponse.body;
-      const passthroughSseBody = terminalRepairPolicy
-        ? relayResponsesSseWithTerminalRepair(
-          upstreamSseBody,
-          upstream,
-          terminalRepairPolicy,
-          translatorBudget,
-          options.responsesTerminalRepairScheduler,
-        )
-        : upstreamSseBody;
+        : passthroughSseBody;
       const repairConfig = route.provider.responsesItemIdRepair;
       // Grok Build renders deltas live but reconstructs its durable assistant
       // turn from the completed response snapshot. Native Responses streams
