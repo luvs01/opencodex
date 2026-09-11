@@ -59,8 +59,15 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     );
 
     expect(sseBranch).toContain("const terminalRepairPolicy = providerModelResponsesTerminalRepair(");
-    expect(sseBranch).toContain("const passthroughSseBody = terminalRepairPolicy");
+    expect(sseBranch).toContain("let passthroughSseBody = terminalRepairPolicy");
     expect(sseBranch).toContain(": upstreamResponse.body;");
+    // Repair has to wrap the raw first leg before the bridge hides its completed web-search call;
+    // otherwise a terminal-less open leg cannot trigger the repair timer and continuation stalls.
+    const terminalRepair = sseBranch.indexOf("relayResponsesSseWithTerminalRepair(");
+    const webSearchBridge = sseBranch.indexOf("createPassthroughWebSearchBridgeStream({");
+    expect(terminalRepair).toBeGreaterThanOrEqual(0);
+    expect(webSearchBridge).toBeGreaterThan(terminalRepair);
+    expect(sseBranch.slice(webSearchBridge)).toContain("firstLeg: passthroughSseBody,");
     expect(sseBranch).toContain("passthroughSseBody.tee()");
     // Rewrite traffic is derived from the finalized block chain so every
     // provider-specific transform participates in the platform gate.
