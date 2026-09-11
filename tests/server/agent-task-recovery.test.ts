@@ -36,48 +36,62 @@ describe("agent task recovery (opt-in, default off)", () => {
     resetAgentTaskRecoveryState();
   });
 
-  for (const messageType of ["NEW_TASK", "MESSAGE"] as const) {
-    test(`typed ${messageType} recovery preserves boolean, replay and discard contracts`, async () => {
-      const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
-      const config = routedConfig();
-      const context = { parentThreadId: "parent-diagnostics" };
-      const input = () => agentMessage([
-        { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType) },
-        { type: "encrypted_content", encrypted_content: FERNET_TASK },
-      ]);
-      let fetches = 0;
-      globalThis.fetch = (async () => {
-        fetches += 1;
-        return new Response(recoverySse("Recovered diagnostic fixture."));
-      }) as typeof fetch;
+  test("typed NEW_TASK recovery preserves boolean, replay and discard contracts", async () => {
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const config = routedConfig();
+    const context = { parentThreadId: "parent-diagnostics" };
+    const input = () => agentMessage([
+      { type: "input_text", text: ROUTING_ENVELOPE },
+      { type: "encrypted_content", encrypted_content: FERNET_TASK },
+    ]);
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response(recoverySse("Recovered diagnostic fixture."));
+    }) as typeof fetch;
 
-      const typedInput = input();
-      expect(await recoverEncryptedAgentTaskWithResult(req, typedInput, {}, config, context))
-        .toEqual({ recovered: true });
-      const booleanInput = input();
-      expect(await recoverEncryptedAgentTask(req, booleanInput, {}, config, context)).toBe(true);
-      expect(booleanInput).toEqual(typedInput);
-      expect(typedInput).toEqual([{
-        type: "message", role: "user", content: [
-          { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType) },
-          { type: "input_text", text: "Recovered diagnostic fixture." },
-        ],
-      }]);
-      const replay = input();
-      expect(restoreCachedEncryptedAgentTasks(req, replay, config, context)).toBe(1);
-      expect(replay).toEqual(typedInput);
-      expect(fetches).toBe(1);
+    const typedInput = input();
+    expect(await recoverEncryptedAgentTaskWithResult(req, typedInput, {}, config, context))
+      .toEqual({ recovered: true });
+    const booleanInput = input();
+    expect(await recoverEncryptedAgentTask(req, booleanInput, {}, config, context)).toBe(true);
+    expect(booleanInput).toEqual(typedInput);
+    expect(typedInput).toEqual([{
+      type: "message", role: "user", content: [
+        { type: "input_text", text: ROUTING_ENVELOPE },
+        { type: "input_text", text: "Recovered diagnostic fixture." },
+      ],
+    }]);
+    const replay = input();
+    expect(restoreCachedEncryptedAgentTasks(req, replay, config, context)).toBe(1);
+    expect(replay).toEqual(typedInput);
+    expect(fetches).toBe(1);
 
-      const otherType = agentMessage([
-        { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", messageType === "MESSAGE" ? "NEW_TASK" : "MESSAGE") },
-        { type: "encrypted_content", encrypted_content: FERNET_TASK },
-      ]);
-      expect(restoreCachedEncryptedAgentTasks(req, otherType, config, context)).toBe(0);
-      discardEncryptedAgentTaskRecovery(req, input(), config, context);
-      expect(restoreCachedEncryptedAgentTasks(req, input(), config, context)).toBe(0);
-      expect(fetches).toBe(1);
-    });
-  }
+    discardEncryptedAgentTaskRecovery(req, input(), config, context);
+    expect(restoreCachedEncryptedAgentTasks(req, input(), config, context)).toBe(0);
+    expect(fetches).toBe(1);
+  });
+
+  test("MESSAGE envelopes fail closed without recovery or cache restoration", async () => {
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const config = routedConfig();
+    const input = agentMessage([
+      { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", "MESSAGE") },
+      { type: "encrypted_content", encrypted_content: FERNET_TASK },
+    ]);
+    const original = structuredClone(input);
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response(recoverySse("must not be recovered"));
+    }) as typeof fetch;
+
+    expect(await recoverEncryptedAgentTaskWithResult(req, input, {}, config))
+      .toEqual({ recovered: false, reason: "unsupported_envelope" });
+    expect(input).toEqual(original);
+    expect(restoreCachedEncryptedAgentTasks(req, input, config)).toBe(0);
+    expect(fetches).toBe(0);
+  });
 
   const failedRecoveries: Array<[string, () => Response, AgentTaskRecoveryFailureReason]> = [
     ["HTTP 401", () => new Response("private-error", { status: 401 }), "recovery_http_rejected"],
@@ -931,6 +945,26 @@ describe("mid-thread encrypted agent task recovery (#4089)", () => {
     expect(urls[1]).toContain("api.x.ai");
     expect(providerBody).toContain("Continue the migration.");
     expect(providerBody).not.toContain(FERNET_TASK);
+  });
+
+  test("a mid-thread MESSAGE fails closed without reaching recovery or the routed provider", async () => {
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      throw new Error("MESSAGE ciphertext must not leave the proxy");
+    }) as typeof fetch;
+    const input = agentMessage([
+      { type: "input_text", text: ROUTING_ENVELOPE.replace("NEW_TASK", "MESSAGE") },
+      { type: "encrypted_content", encrypted_content: FERNET_TASK },
+    ]);
+
+    const response = await post(routedConfig(), "xai/grok-4.5", input, midThreadHeaders());
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "unreadable_encrypted_agent_task", recovery_reason: "unsupported_envelope" },
+    });
+    expect(fetches).toBe(0);
   });
 
   test("a mid-thread replay reuses the cached plaintext instead of recovering again", async () => {
