@@ -253,6 +253,7 @@ import {
   describeInboundBodyRefusal,
   resolveInboundBodyLimitBytes,
   DecompressedBodyTooLargeError,
+  InboundBodyCapacityError,
   UnsupportedContentEncodingError,
 } from "../request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
@@ -1610,6 +1611,9 @@ export function codexForwardTerminalOutcomeRecorder(
 
 
 export function decodeRequestErrorResponse(err: unknown, label: string): Response {
+  if (err instanceof InboundBodyCapacityError) {
+    return formatErrorResponse(503, "server_error", err.message, { code: "server_busy" });
+  }
   if (isTranslatorBudgetExceededError(err)) {
     return formatErrorResponse(413, "request_too_large", "request translation buffer exceeded the safe limit", {
       code: "translation_buffer_limit",
