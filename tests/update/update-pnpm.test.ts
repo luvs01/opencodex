@@ -386,7 +386,21 @@ describe("pnpm package tree verification", () => {
 });
 
 describe("pnpm generated shims", () => {
-  test("verifies POSIX shims point at the active package", () => {
+  // Windows cannot supply POSIX executable mode bits; use the host's shim forms.
+  function writeHostShims(globalBinDir: string, target: string, names = ["ocx", "opencodex"]) {
+    for (const name of names) {
+      if (process.platform === "win32") {
+        const windowsTarget = target.replaceAll("/", "\\");
+        writeFileSync(join(globalBinDir, `${name}.cmd`), `@echo off\r\nnode "%~dp0\\${windowsTarget}" %*\r\n`);
+        writeFileSync(join(globalBinDir, `${name}.ps1`), `$basedir = Split-Path $MyInvocation.MyCommand.Definition -Parent\n& "$basedir\\${windowsTarget}" @args\n`);
+      } else {
+        writeFileSync(join(globalBinDir, name), `#!/bin/sh\nexec node ${target} "$@"\n`);
+        chmodSync(join(globalBinDir, name), 0o755);
+      }
+    }
+  }
+
+  test("verifies host-platform shims point at the active package", () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-pnpm-shims-"));
     try {
       const packageDir = join(root, "global", "v11", "node_modules", PKG);
@@ -395,13 +409,10 @@ describe("pnpm generated shims", () => {
       mkdirSync(globalBinDir, { recursive: true });
       writeFileSync(join(packageDir, "bin", "ocx.mjs"), "#!/usr/bin/env node\n");
       const target = relative(globalBinDir, join(packageDir, "bin", "ocx.mjs"));
-      for (const name of ["ocx", "opencodex"]) {
-        writeFileSync(join(globalBinDir, name), `#!/bin/sh\nexec node ${target} "$@"\n`);
-        chmodSync(join(globalBinDir, name), 0o755);
-      }
-      expect(verifyPnpmGlobalShims(packageDir, globalBinDir, "linux")).toEqual({ ok: true });
-      writeFileSync(join(globalBinDir, "opencodex"), "#!/bin/sh\nexec node ../global/v11/node_modules/old/bin/ocx.mjs\n");
-      expect(verifyPnpmGlobalShims(packageDir, globalBinDir, "linux").ok).toBe(false);
+      writeHostShims(globalBinDir, target);
+      expect(verifyPnpmGlobalShims(packageDir, globalBinDir, process.platform)).toEqual({ ok: true });
+      writeHostShims(globalBinDir, "../global/v11/node_modules/old/bin/ocx.mjs", ["opencodex"]);
+      expect(verifyPnpmGlobalShims(packageDir, globalBinDir, process.platform).ok).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -419,11 +430,8 @@ describe("pnpm generated shims", () => {
       writeFileSync(join(packageDir, "bin", "ocx.mjs"), "#!/usr/bin/env node\n");
       symlinkSync(activeGroup, aliasGroup, "dir");
       const target = relative(globalBinDir, join(aliasGroup, "node_modules", PKG, "bin", "ocx.mjs"));
-      for (const name of ["ocx", "opencodex"]) {
-        writeFileSync(join(globalBinDir, name), `#!/bin/sh\nexec node ${target} "$@"\n`);
-        chmodSync(join(globalBinDir, name), 0o755);
-      }
-      expect(verifyPnpmGlobalShims(packageDir, globalBinDir, "linux")).toEqual({ ok: true });
+      writeHostShims(globalBinDir, target);
+      expect(verifyPnpmGlobalShims(packageDir, globalBinDir, process.platform)).toEqual({ ok: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

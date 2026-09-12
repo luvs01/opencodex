@@ -18,6 +18,7 @@ import { DEVIN_MODEL_CONTEXT_WINDOWS } from "../../src/adapters/devin/live-model
 import { formatProviderDisplayName, providerIconSrc } from "../../gui/src/provider-icons";
 import type { AdapterEvent, OcxParsedRequest } from "../../src/types";
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
@@ -215,8 +216,9 @@ describe("devin cli discovery", () => {
     const previous = process.env[DEVIN_CLI_BIN_ENV];
     delete process.env[DEVIN_CLI_BIN_ENV];
     try {
-      const only = (p: string) => p === "/home/u/.local/bin/devin";
-      expect(resolveDevinCliBinary({ exists: only, home: "/home/u", useCache: false })).toBe("/home/u/.local/bin/devin");
+      const installed = join("/home/u", ".local", "bin", "devin");
+      const only = (p: string) => p === installed;
+      expect(resolveDevinCliBinary({ exists: only, home: "/home/u", useCache: false })).toBe(installed);
       expect(resolveDevinCliBinary({ exists: () => false, home: "/home/u", useCache: false })).toBeUndefined();
     } finally {
       if (previous !== undefined) process.env[DEVIN_CLI_BIN_ENV] = previous;

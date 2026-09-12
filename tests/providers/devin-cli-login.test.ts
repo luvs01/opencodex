@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import {
   DEVIN_CLI_CREDENTIALS_ENV,
   devinCliCredentialsPath,
@@ -41,7 +42,7 @@ function silentController(): OAuthController & { progress: string[] } {
 
 describe("devin-cli credentials path", () => {
   test("uses the data dir the CLI actually prints, not the config dir", () => {
-    expect(devinCliCredentialsPath({ XDG_DATA_HOME: "/d" }, "linux")).toBe("/d/devin/credentials.toml");
+    expect(devinCliCredentialsPath({ XDG_DATA_HOME: "/d" }, "linux")).toBe(join("/d", "devin", "credentials.toml"));
   });
 
   test("Windows uses APPDATA", () => {
@@ -55,7 +56,7 @@ describe("devin-cli credentials path", () => {
     const abs = devinCliCredentialsPath({ [DEVIN_CLI_CREDENTIALS_ENV]: "/tmp/creds.toml", XDG_DATA_HOME: "/d" }, "linux");
     expect(abs).toBe("/tmp/creds.toml");
     const rel = devinCliCredentialsPath({ [DEVIN_CLI_CREDENTIALS_ENV]: "creds.toml", XDG_DATA_HOME: "/d" }, "linux");
-    expect(rel).toBe("/d/devin/credentials.toml");
+    expect(rel).toBe(join("/d", "devin", "credentials.toml"));
   });
 });
 
