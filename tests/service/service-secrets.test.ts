@@ -1,17 +1,21 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as nodeFs from "node:fs";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
+  renameSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  hardenReusedServiceApiToken,
   readServiceApiTokenState,
   readTokenBackupState,
   removeOrphanTokenBackup,
@@ -76,6 +80,27 @@ describe("startup data-plane token resolution", () => {
 });
 
 describe("service API token ownership", () => {
+  test("hardens the validated token descriptor rather than a replacement pathname", () => {
+    if (process.platform === "win32") return;
+    const path = serviceApiTokenFilePath();
+    const openedToken = join(home, "opened-token");
+    const victim = join(home, "victim");
+    writeFileSync(path, "ocx_data_original\n", { mode: 0o644 });
+    writeFileSync(victim, "executable\n", { mode: 0o755 });
+    chmodSync(path, 0o644);
+    chmodSync(victim, 0o755);
+
+    const state = hardenReusedServiceApiToken(token => {
+      expect(token).toBe("ocx_data_original");
+      renameSync(path, openedToken);
+      symlinkSync(victim, path);
+    });
+
+    expect(state).toMatchObject({ kind: "present", token: "ocx_data_original" });
+    expect(statSync(openedToken).mode & 0o777).toBe(0o600);
+    expect(statSync(victim).mode & 0o777).toBe(0o755);
+  });
+
   test("writes only the exact owner path through an atomic owner-only replacement", () => {
     const token = "ocx_data_0123456789abcdef0123456789abcdef01234567";
     const persisted = writeServiceApiTokenFile(token);
