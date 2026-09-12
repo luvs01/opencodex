@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
 import { startMachineListener } from "../../src/client/machine-listener";
+import { standaloneRecycleEnvironment } from "../../src/client/recycle-environment";
 import { serveGuiFile } from "../../src/server/gui-static";
 import type { OcxClientConnectionConfig } from "../../src/types";
 import type { ManagementAuthState } from "../../src/server/management-auth";
@@ -79,6 +80,17 @@ async function guiHeaders(server: Server<unknown>, mutation = false): Promise<He
 }
 
 describe("client machine listener", () => {
+  test("standalone recycle does not inherit connected-client credentials", () => {
+    const env = standaloneRecycleEnvironment({
+      OPENCODEX_API_AUTH_TOKEN: "hub-issued-key",
+      OCX_API_TOKEN_FILE: "/owned/client-token",
+      OPENCODEX_HOME: root,
+    });
+    expect(env.OPENCODEX_API_AUTH_TOKEN).toBeUndefined();
+    expect(env.OCX_API_TOKEN_FILE).toBeUndefined();
+    expect(env.OPENCODEX_HOME).toBe(root);
+  });
+
   test("binds IPv4 loopback and default-denies shared/data-plane routes", async () => {
     const server = startMachineListener(0, { state: connection(), managementAuthState: authState() });
     servers.push(server);

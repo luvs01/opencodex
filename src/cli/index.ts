@@ -292,22 +292,6 @@ async function findProxyOwnerBeforeJournalRecovery(
 }
 
 async function handleStart(options: { block?: boolean } = {}) {
-  // Native (WinSW) service mode has no batch wrapper to read the service token file into
-  // the environment, and a FOREGROUND `ocx start` has no wrapper at all — so the app loads
-  // the token here, before the server binds, with the same precedence the launchd plist and
-  // the systemd unit use when they cat the file into the environment. Without the second
-  // source, `ocx start` refused to bind a non-loopback hostname (assertServerAuthConfig)
-  // that the installed service on the same machine was serving happily (#4236). The server
-  // auth path reads OPENCODEX_API_AUTH_TOKEN from the environment.
-  const serviceToken = startupDataPlaneToken(process.env, {
-    authRequired: isApiAuthRequired(loadConfig()),
-  });
-  if (serviceToken) process.env.OPENCODEX_API_AUTH_TOKEN = serviceToken;
-  // The service wrapper (and WinSW via OCX_API_TOKEN_FILE) can still export a colliding
-  // token that install now refuses to write. Refuse it here too, before bind, so an
-  // already-broken file cannot fence /api/* closed at boot (#2696).
-  const present = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
-  if (present) assertNotAdminToken(present);
   const requestedPort = parsePortOption();
   // Always probe the configured port, even when both state files are absent. A
   // fallback-port sibling overwrites the pid/runtime records when it starts and
@@ -364,6 +348,20 @@ async function handleStart(options: { block?: boolean } = {}) {
     await startClientRuntime({ port: requestedPort, block: options.block });
     return;
   }
+
+  // Native (WinSW) service mode has no batch wrapper to read the service token file into
+  // the environment, and a foreground `ocx start` has no wrapper at all. Hydrate the
+  // standalone admission secret only after ruling out connected-client mode: while connected,
+  // this file contains a hub-issued client key and the machine listener is loopback-only.
+  const serviceToken = startupDataPlaneToken(process.env, {
+    authRequired: isApiAuthRequired(loadConfig()),
+  });
+  if (serviceToken) process.env.OPENCODEX_API_AUTH_TOKEN = serviceToken;
+  // The service wrapper (and WinSW via OCX_API_TOKEN_FILE) can still export a colliding
+  // token that install now refuses to write. Refuse it here too, before bind, so an
+  // already-broken file cannot fence /api/* closed at boot (#2696).
+  const present = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
+  if (present) assertNotAdminToken(present);
 
   // Interactive-only update prompt. Must run BEFORE we bind a port / write a
   // PID: choosing "Update now" installs globally and exits, so we never want a
