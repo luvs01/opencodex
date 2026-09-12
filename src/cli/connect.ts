@@ -205,6 +205,16 @@ function parseClients(raw: string | undefined): OcxConnectedClientId[] {
   return values as OcxConnectedClientId[];
 }
 
+/** Render untrusted diagnostic text without letting it control the operator's terminal. */
+function terminalSafeText(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, character => {
+    const code = character.charCodeAt(0);
+    return code <= 0x7f
+      ? `\\x${code.toString(16).padStart(2, "0")}`
+      : `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+}
+
 /** Reads as a verdict, not a field dump: "ready" is the only word that means the client works. */
 function readinessLine(status: ClientConnectionStatus): string {
   const label = status.readiness === "ready"
@@ -212,7 +222,7 @@ function readinessLine(status: ClientConnectionStatus): string {
     : status.readiness === "incompatible"
       ? "not ready"
       : "unverified";
-  return `Local Codex CLI: ${label}${status.readinessReason ? ` (${status.readinessReason})` : ""}`;
+  return `Local Codex CLI: ${label}${status.readinessReason ? ` (${terminalSafeText(status.readinessReason)})` : ""}`;
 }
 
 export type ConnectCompletionReport = {
@@ -249,9 +259,10 @@ export function connectCompletionReport(
   if (readiness.kind === "unverified") {
     // Not a failure. A client with no observable Codex CLI is a working configuration, and the
     // write-time gate deliberately lets it through; saying so is the honest middle report.
-    return { lines: [connected, `Local Codex CLI: unverified (${readiness.reason}).`], failure: null };
+    return { lines: [connected, `Local Codex CLI: unverified (${terminalSafeText(readiness.reason)}).`], failure: null };
   }
-  const verdict = `Local Codex CLI: not ready (${readiness.reason})`;
+  const safeReason = terminalSafeText(readiness.reason);
+  const verdict = `Local Codex CLI: not ready (${safeReason})`;
   if (!selectedClients.includes("codex")) {
     return {
       lines: [connected, `${verdict} This connection selected ${selectedClients.join(", ")}, so nothing here launches Codex.`],
@@ -260,7 +271,7 @@ export function connectCompletionReport(
   }
   return {
     lines: [verdict, `The connection to ${connection.serverUrl} as key ${connection.apiKeyId} was saved; run 'ocx connect status' to see it.`],
-    failure: `client_not_ready: ${readiness.reason}`,
+    failure: `client_not_ready: ${safeReason}`,
   };
 }
 
