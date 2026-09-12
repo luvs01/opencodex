@@ -697,6 +697,22 @@ describe("ocx account CLI (issue #180 matrix)", () => {
     expect(new Set(parsed.accounts.map(row => row.type))).toEqual(new Set(["codex", "oauth", "api-key"]));
   });
 
+  test("OAuth JSON preserves the plan presence signal from older proxies", async () => {
+    oauthAccounts = [
+      { id: "legacy" },
+      { id: "unknown", plan: null },
+      { id: "known", plan: "max" },
+    ];
+
+    const result = await run(["list", "anthropic", "--json"]);
+    const parsed = JSON.parse(result.stdout) as { accounts: Array<Record<string, unknown>> };
+
+    expect(result.code).toBe(0);
+    expect(parsed.accounts[0]).not.toHaveProperty("plan");
+    expect(parsed.accounts[1]).toHaveProperty("plan", null);
+    expect(parsed.accounts[2]).toHaveProperty("plan", "max");
+  });
+
   test("3: empty providers are skipped by default and shown with --all", async () => {
     const normal = await run(["list"]);
     const withAll = await run(["list", "--all"]);

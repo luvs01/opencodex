@@ -360,7 +360,7 @@ async function fetchOAuthRows(
     needsReauth: a.needsReauth,
     // Forward the server's answer verbatim, including `null`. Collapsing null to "absent" here
     // would destroy the one distinction this field exists to make.
-    plan: a.plan ?? null,
+    ...(Object.hasOwn(a, "plan") ? { plan: a.plan } : {}),
     ...(a.quota !== undefined ? { quota: a.quota } : {}),
     ...(a.quotaUnavailable !== undefined ? { quotaUnavailable: a.quotaUnavailable } : {}),
   }));
