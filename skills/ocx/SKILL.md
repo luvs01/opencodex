@@ -92,7 +92,8 @@ The same boundary covers the session-gated `/api/codex-prompt` writes: read them
 
 ## Secret-bearing commands
 
-**Do not create an access key or start an access-key rotation from an agent session.**
+**Do not create an access key, start an access-key rotation, or run `ocx hub invite`
+from an agent session.**
 This covers the create and rotation-start operations under `ocx access key`,
 `ocx access keys`, and `ocx api-key`, their `opencodex` equivalents and executable
 wrappers, and direct POST requests to `/api/keys` and `/api/keys/rotate`.
@@ -102,6 +103,11 @@ human-operated terminal outside the agent session, configure and verify the
 replacement, and report only confirmation plus non-secret key/rotation IDs.
 Never ask for the plaintext key in chat or offer a pipe, redirection, or API
 workaround to perform the secret-returning step inside the agent session.
+Hub invites have the same boundary: both text and JSON output contain a plaintext
+pairing grant and a command embedding it. Ask the user to run the invite in a
+human-operated terminal outside the agent session and report only non-secret
+confirmation, such as the expiry and bound browser origin. Never ask them to paste
+the grant or generated command into chat.
 
 Configuration confirmation is not approval to revoke the existing credential.
 Identify the existing key ID and obtain separate explicit revocation approval
@@ -129,13 +135,15 @@ cannot.
 
 ## Remote hub: three things agents get wrong
 
-**A hub is one port, and `ocx hub invite` writes the join command for you.** Remote machines dial
+**A hub is one port, and `ocx hub invite` writes the join command for the operator.** Remote machines dial
 `hostname:port` with their own per-client key; the hub's own processes dial `127.0.0.1:<the same
 port>` with no credential, through the loopback companion listener
-(`unauthenticatedLoopbackListener: {"enabled": true}`, no port). Run `ocx hub invite` on the hub
-rather than assembling an `ocx connect` line: it mints a single-use code and prints the exact
-command, with both origins already filled in. Its `--management-url` is a confirmation of
-`hub.managementPublicOrigin`, not an override. Do not persist the code it prints.
+(`unauthenticatedLoopbackListener: {"enabled": true}`, no port). Ask the user to run `ocx hub
+invite` on the hub in a human-operated terminal outside the agent session rather than assembling
+an `ocx connect` line: it mints a single-use code and prints the exact command, with both origins
+already filled in. Its `--management-url` is a confirmation of `hub.managementPublicOrigin`, not
+an override. The user must transfer that command directly to the other machine without exposing it
+to the agent transcript.
 
 Two consequences that look like bugs and are not. `ocx status` on a hub prints a `Hub:` block —
 read it before asking the operator anything about ports or tokens. And a hub does not rewrite its
