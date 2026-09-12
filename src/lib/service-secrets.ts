@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { atomicWriteFile } from "../config/atomic-write";
@@ -46,6 +46,52 @@ export function readServiceApiTokenState(): ServiceApiTokenState {
     return { kind: "present", token, fingerprint: serviceApiTokenFingerprint(token) };
   } catch {
     return { kind: "unsafe", reason: "service token file could not be read" };
+  }
+}
+
+/**
+ * Validate and tighten a reused service token without applying permissions to a
+ * pathname that may have been replaced since validation.
+ */
+export function hardenReusedServiceApiToken(
+  validate: (token: string) => void,
+): ServiceApiTokenState {
+  // Windows ACL tooling is pathname-based. Do not mutate that pathname after a
+  // separate validation; newly written token files are still hardened by their
+  // atomic writer and a reused file remains readable as before.
+  if (process.platform === "win32") {
+    const state = readServiceApiTokenState();
+    if (state.kind === "present") validate(state.token);
+    return state;
+  }
+
+  const path = serviceApiTokenFilePath();
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    return { kind: "unsafe", reason: "service token path could not be inspected" };
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_BYTES) {
+      return { kind: "unsafe", reason: "service token path is not a bounded regular file" };
+    }
+    let token: string;
+    try {
+      token = readFileSync(fd, "utf8").trim();
+    } catch {
+      return { kind: "unsafe", reason: "service token file could not be read" };
+    }
+    if (!token) return { kind: "unsafe", reason: "service token file is empty" };
+    validate(token);
+    // Best-effort matches the previous repair behavior, but the descriptor binds
+    // the chmod to the regular file opened above even if its directory entry moves.
+    try { fchmodSync(fd, 0o600); } catch { /* best-effort */ }
+    return { kind: "present", token, fingerprint: serviceApiTokenFingerprint(token) };
+  } finally {
+    closeSync(fd);
   }
 }
 

@@ -25,7 +25,7 @@ import { BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV, durableBunRuntime } from 
 export const SERVICE_MANAGED_ENV = "OCX_SERVICE_MANAGED";
 import type { BunRuntimeSource, DurableBunRuntime } from "./lib/bun-runtime";
 import { isProcessAlive, stopProxy } from "./lib/process-control";
-import { readServiceApiTokenState, serviceApiTokenFilePath } from "./lib/service-secrets";
+import { hardenReusedServiceApiToken, readServiceApiTokenState, serviceApiTokenFilePath } from "./lib/service-secrets";
 import { tokenCollidesWithAdmin } from "./lib/admin-secrets";
 import { PROXY_ENV_KEYS } from "./lib/proxy-env";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -636,20 +636,13 @@ export function writeServiceApiTokenFile(): ProvisionedServiceApiToken | null {
     return { path, origin: "env" };
   }
   if (isLoopbackHostname(loadConfig().hostname)) return null;
-  const existing = readServiceApiTokenState();
+  const existing = hardenReusedServiceApiToken(token => assertNotAdminToken(token, process.env, "file"));
   if (existing.kind === "present") {
     // The collision check is NOT only for the env branch. A file that already holds the admin
     // token -- hand-pasted before #2696, or written by the very incident this unit closes --
     // was silently accepted here, so `ocx status` reported `present (file)` and the hub
     // crash-looped at boot with no command pointing at the cause.
     const path = serviceApiTokenFilePath();
-    assertNotAdminToken(existing.token, process.env, "file");
-    // `readServiceApiTokenState` accepts any bounded regular file, so a reused token may well
-    // be group- or world-readable. Tighten it on the way through rather than claiming
-    // "owner-only" about a mode nobody checked; best-effort, since a non-owner cannot chmod
-    // and failing the install over it would be worse than the loose mode.
-    try { chmodSync(path, 0o600); } catch { /* best-effort */ }
-    if (process.platform === "win32") hardenSecretPath(path, { required: false });
     // No log line: repair/restart hit this on every run and an unconditional notice about a
     // credential file trains operators to ignore the one that matters.
     return { path, origin: "file" };
