@@ -1,5 +1,8 @@
 # Claude Desktop Integration
 
+The shared server's key-auth Responses hosted-search continuation policy is documented in
+[Responses transport](../transports/responses.md#hosted-search-continuation-binding).
+
 ## Connected Claude Desktop profiles
 
 Connected `ocx claude desktop apply` reads the hub's Desktop snapshot and writes the hub origin

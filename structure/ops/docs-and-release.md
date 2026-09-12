@@ -2,6 +2,9 @@
 
 ## Public docs
 
+The provider configuration reference documents the user-visible
+[hosted-search continuation binding](../transports/responses.md#hosted-search-continuation-binding).
+
 The public documentation site lives in `docs-site/` and is built with Astro + Starlight. English is
 served at the site root, with Korean under `/ko`, Simplified Chinese under `/zh-cn`, Traditional Chinese under `/zh-tw`, Russian under `/ru`, and Japanese under `/ja`. `docs-site/astro.config.mjs` is the locale source of truth.
 

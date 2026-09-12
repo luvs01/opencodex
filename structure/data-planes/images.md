@@ -1,5 +1,8 @@
 # Images Data Plane
 
+For the shared Responses server's hosted-search continuation binding, see
+[Responses transport](../transports/responses.md#hosted-search-continuation-binding).
+
 ## Standalone Images
 
 Codex's local `image_gen.imagegen` tool makes a second Images request after the model calls it:

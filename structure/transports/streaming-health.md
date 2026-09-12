@@ -1,5 +1,8 @@
 # Streaming Health And WebSocket
 
+Key-auth hosted-search continuations validate account selection after pacing and report a failed
+terminal on drift; see [Responses transport](responses.md#hosted-search-continuation-binding).
+
 ## Heartbeat and stall deadline
 
 The HTTP/SSE bridge emits an SSE comment-line keep-alive (`: opencodex heartbeat`) during upstream

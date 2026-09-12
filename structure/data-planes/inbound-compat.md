@@ -1,5 +1,8 @@
 # Inbound Compatibility Surfaces
 
+Requests entering the key-auth Responses hosted-search bridge follow its
+[continuation binding contract](../transports/responses.md#hosted-search-continuation-binding).
+
 ## Chat Completions inbound native path
 
 `POST /v1/chat/completions` sends eligible `openai-chat` routes directly to the provider's Chat
