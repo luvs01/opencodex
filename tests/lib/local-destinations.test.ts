@@ -13,7 +13,9 @@
  * listener off, `hostname` a tailnet address — still handed all eight sites a dead socket. Both
  * resolvers now have the same three-branch shape, and the inference one additionally reports
  * whether its destination demands a data-plane credential, because "reachable" and "will be
- * admitted" are different questions and a string cannot answer the second.
+ * admitted" are different questions and a string cannot answer the second. A DNS bind is the
+ * deliberate exception: local credential-bearing clients fail closed onto loopback rather than
+ * resolving the name again after the listener has bound.
  *
  * The six configurations below are the review's (a)–(f). Every one of them is a shape a real
  * `config.json` can hold, and each lands in a different branch.
@@ -149,6 +151,15 @@ describe("localInferenceDestination", () => {
     expect(new URL(destination.origin).hostname).toBe("[fd7a:115c:a1e0::1]");
   });
 
+  test("a DNS bind name is never reused as a credential-bearing client destination", () => {
+    const destination = localInferenceDestination({ hostname: "mutable-bind.example" }, PUBLIC_PORT);
+    expect(destination).toEqual({
+      origin: "http://127.0.0.1:10100",
+      port: PUBLIC_PORT,
+      requiresAdmissionToken: true,
+    });
+  });
+
   test("every all-zero bind spelling is a wildcard, not a hostname to dial", () => {
     // `probeHostname` used to know three spellings while the bind-scope predicate knew all of
     // them, so these composed `http://0.0.0.0.:10100` and `http://*:10100` — URLs that connect
@@ -266,6 +277,9 @@ describe("localManagementOrigin", () => {
       // A bare IPv6 literal has to be bracketed or the URL is unparseable.
       ["fd7a:115c:a1e0::1", "http://[fd7a:115c:a1e0::1]:10100"],
       [TAILNET, `http://${TAILNET}:10100`],
+      // DNS bind names are resolved independently by clients, so coupling them to local
+      // credentials would permit DNS rebinding after Bun has established the listener.
+      ["mutable-bind.example", "http://127.0.0.1:10100"],
     ];
     for (const [hostname, expected] of cases) {
       const config = hub({ runtimeRole: "standalone", ...(hostname === undefined ? {} : { hostname }) });

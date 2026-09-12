@@ -1,6 +1,6 @@
 import type { OcxConfig } from "../../types";
 import { isWildcardHostname } from "../../codex/loopback-target";
-import { localInferenceDestination } from "../../lib/local-destinations";
+import { localCredentialDestinationHostname, localInferenceDestination } from "../../lib/local-destinations";
 import { probeHostname } from "../proxy-liveness";
 
 export interface ApiAccessEndpoints {
@@ -79,7 +79,7 @@ export function resolveApiAccessBaseUrl(
   const port = config.port ?? 10100;
 
   if (!isWildcardBindHost(config.hostname)) {
-    return `http://${probeHostname(config.hostname)}:${port}/v1`;
+    return `http://${localCredentialDestinationHostname(config.hostname)}:${port}/v1`;
   }
 
   const fromOrigin = opts.requestOrigin ? originBaseUrl(opts.requestOrigin) : null;
@@ -124,7 +124,7 @@ export function resolveApiAccessDisplayHost(
   opts: BuildApiAccessEndpointsOptions = {},
 ): string {
   if (!isWildcardBindHost(configHostname)) {
-    return probeHostname(configHostname);
+    return new URL(resolveApiAccessBaseUrl({ hostname: configHostname, port: 10100 }, opts)).hostname;
   }
   try {
     return new URL(resolveApiAccessBaseUrl({ hostname: configHostname, port: 10100 }, opts)).hostname

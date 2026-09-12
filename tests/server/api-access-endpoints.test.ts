@@ -42,6 +42,11 @@ describe("buildApiAccessEndpoints", () => {
     });
   });
 
+  test("does not publish a mutable DNS bind name as a credential-bearing endpoint", () => {
+    expect(buildApiAccessEndpoints({ hostname: "mutable-bind.example", port: 10100 }).baseUrl)
+      .toBe("http://127.0.0.1:10100/v1");
+  });
+
   test("wildcard binds fall back to loopback only without request context", () => {
     // Every all-zero spelling, not the three this file used to know: `0.0.0.0.`, `::0` and `*`
     // are wildcard binds the server treats as such, and describing them as literal hostnames
