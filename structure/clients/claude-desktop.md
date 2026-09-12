@@ -61,6 +61,9 @@ a running app discarded a key. Local disconnect does not revoke the hub key or r
 external copies. Model-list snapshot version 1 remains a read-only contract, not a new lifecycle
 or profile-upload API. Thinking replay and prompt caching remain separate in #3719.
 
+Connected `ocx status` diagnostics follow the shared
+[status credential binding](../runtime.md#remote-hub-status-credential-binding).
+
 ## Claude Desktop config-library resolution
 
 The Desktop profile writer and the management status probe share
