@@ -88,6 +88,13 @@ function jsonFetch(body: unknown): typeof fetch {
   })) as unknown as typeof fetch;
 }
 
+function rejectingFetch(onCall: () => void): typeof fetch {
+  return (async () => {
+    onCall();
+    throw new Error("fetch must not be called");
+  }) as unknown as typeof fetch;
+}
+
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), "ocx-status-hub-"));
   process.env.OPENCODEX_HOME = testHome;
@@ -124,6 +131,30 @@ describe("collectRemoteHubStatus", () => {
     expect(remoteHub.stateSource).toBe("unavailable");
     expect(remoteHub.providers).toEqual([]);
     expect(remoteHub.reason).toContain("data-plane token");
+  });
+
+  test("a mismatched token is never sent to the snapshotted hub", async () => {
+    writeConnectedHome(testHome, "https://hub.example.test:8443");
+    writeFileSync(join(testHome, "service-api-token"), "token-from-another-connection", { mode: 0o600 });
+    let fetchCalls = 0;
+    const remoteHub = await collectRemoteHubStatus(
+      { state: "connected", serverUrl: "https://hub.example.test:8443", apiKeyId: "status-hub-state", connectedAt: "2026-09-06T00:00:00.000Z" },
+      { fetchImpl: rejectingFetch(() => fetchCalls++) },
+    );
+    expect(fetchCalls).toBe(0);
+    expect(remoteHub.stateSource).toBe("unavailable");
+    expect(remoteHub.reason).toContain("data-plane token");
+  });
+
+  test("a new connection's token is never sent to an earlier connection snapshot", async () => {
+    const snapshot = { state: "connected" as const, serverUrl: "https://hub-a.example.test", apiKeyId: "status-hub-state", connectedAt: "2026-09-06T00:00:00.000Z" };
+    writeConnectedHome(testHome, "https://hub-b.example.test");
+    let fetchCalls = 0;
+    const remoteHub = await collectRemoteHubStatus(snapshot, {
+      fetchImpl: rejectingFetch(() => fetchCalls++),
+    });
+    expect(fetchCalls).toBe(0);
+    expect(remoteHub.stateSource).toBe("unavailable");
   });
 
   test("a disconnected machine asks the hub nothing", async () => {

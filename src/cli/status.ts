@@ -22,6 +22,7 @@ import type { HubStateOAuthEntry, HubStateProvider } from "../remote/hub-state";
 import type { HubStateSource } from "../client/hub-state";
 import { readServiceApiTokenState, serviceApiTokenFilePath } from "../lib/service-secrets";
 import { tokenCollidesWithAdmin } from "../lib/admin-secrets";
+import { readClientConnectionState } from "../client/state";
 export { proxyHealthFailureReason, isConnectionRefused, isUncleanExitEvidence, probeUncleanExitState } from "./status-probes";
 export type { ListenTarget } from "./status-probes";
 import { checkProxyHealth, probeUncleanExitState, type ListenTarget } from "./status-probes";
@@ -340,14 +341,25 @@ export async function collectRemoteHubStatus(
     return disconnectedRemoteHubStatus();
   }
   const { resolveHubState } = await import("../client/hub-state");
+  // Re-read the connection and token as one ownership observation. The connection passed above
+  // is an earlier status snapshot; combining its URL with an independently read token can send a
+  // newly rotated or reconnected credential to the old hub. A transition between these two reads
+  // is also safe: the new token's fingerprint cannot match the old connection generation.
+  const currentConnection = readClientConnectionState();
   const token = readServiceApiTokenState();
+  const tokenBelongsToSnapshot = currentConnection.kind === "connected"
+    && currentConnection.value.serverUrl === connection.serverUrl
+    && currentConnection.value.apiKeyId === connection.apiKeyId
+    && currentConnection.value.connectedAt === connection.connectedAt
+    && token.kind === "present"
+    && token.fingerprint === currentConnection.value.tokenFingerprint;
   const resolved = await resolveHubState({
     owner: {
       serverUrl: connection.serverUrl,
       apiKeyId: connection.apiKeyId,
       connectedAt: connection.connectedAt,
     },
-    token: token.kind === "present" ? token.token : null,
+    token: tokenBelongsToSnapshot ? token.token : null,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
