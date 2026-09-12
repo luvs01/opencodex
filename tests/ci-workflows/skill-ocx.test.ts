@@ -295,3 +295,27 @@ describe("access-key recipes keep plaintext outside agent sessions", () => {
     }
   });
 });
+
+describe("hub invite recipes keep pairing grants outside agent sessions", () => {
+  test("the skill and operational recipes require a human-operated terminal", () => {
+    const skill = readFileSync(SKILL, "utf8");
+    const recipes = read("references/03_recipes.md");
+    const hub = read("references/05_remote_hub.md");
+
+    for (const text of [skill, recipes, hub]) {
+      expect(text).toMatch(/ocx hub\s+invite/);
+      expect(text.replace(/\s+/g, " ")).toContain("human-operated terminal outside the agent session");
+    }
+    expect(skill).toContain("Never ask them to paste");
+    expect(recipes).toContain("Do not run it yourself, including with `--json`");
+    expect(hub).toContain("never execute either mode through an agent tool");
+  });
+
+  test("no hand-written page presents a hub invite as a copyable command", () => {
+    for (const file of ["SKILL.md", "references/03_recipes.md", "references/05_remote_hub.md"]) {
+      const text = read(file);
+      const fencedBodies = Array.from(text.matchAll(/```[^\n]*\n([\s\S]*?)```/g), match => match[1]!);
+      expect(fencedBodies.join("\n"), file).not.toMatch(/\bocx hub\s+invite\b/);
+    }
+  });
+});

@@ -263,22 +263,23 @@ decision, not a broken connection.
 
 ## 10. Invite one more machine onto a hub
 
-Run on the **hub**. This is the whole flow; do not assemble an `ocx connect` line by hand.
+First inspect the non-secret hub state:
 
 ```bash
 ocx status                 # read the Hub: block first -- origins, listener, token source
-ocx hub invite --json
 ```
 
-`--json` gives `{ code, expiresAt, dataUrl, managementUrl, command }` on stdout. Hand the
-operator `command` to run on the other machine; it already carries the data origin, the
-management origin and `--pairing-code-stdin`. The code is a secret with a five-minute TTL and
-one use: do not persist it, do not put it in a file, and prefer letting the operator copy it
-rather than keeping it in a transcript.
+Then ask the operator to run `ocx hub invite` on the **hub** in a human-operated terminal outside
+the agent session. Do not run it yourself, including with `--json`: both modes print a plaintext
+pairing grant and a command embedding it, so tool output would expose the secret to the transcript.
+The operator should transfer the generated command directly to the other machine; it already
+carries the data origin, the management origin, and `--pairing-code-stdin`. The grant has a
+five-minute TTL and one use. Do not ask the operator to paste either the grant or command into chat,
+and do not assemble an `ocx connect` line by hand.
 
-**Also relay the `Bound browser origin:` line from stderr.** It is not in the JSON envelope,
-and when the bound origin is not `http://localhost:10100` the joining machine has to already
-be running on that port or the exchange is refused and the code is spent.
+The operator may report the non-secret `Bound browser origin:` line and expiry as confirmation.
+When the bound origin is not `http://localhost:10100`, tell them the joining machine must already
+be running on that port or the exchange is refused and the grant is spent.
 
 Three refusals are normal and none of them burns a code:
 

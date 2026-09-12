@@ -201,11 +201,11 @@ stored as digests, and rate-capped at 8/min. They are secrets: do not persist on
 
 ## Inviting a machine (`ocx hub invite`)
 
-Run on the **hub**. It prints the command for the other machine:
-
-```bash
-ocx hub invite
-```
+Ask the operator to run `ocx hub invite` on the **hub** in a human-operated terminal outside the
+agent session. It prints the command for the other machine. Both text and JSON modes expose a
+plaintext pairing grant, so never execute either mode through an agent tool and never ask the
+operator to paste the generated command or grant into chat. The operator should transfer the
+command directly to the other machine.
 
 ```text
 # Run on the other machine:
@@ -224,11 +224,11 @@ other machine to dial itself and spends the code for nothing, so `invite` refuse
 the `hub.dataPublicOrigin` fix. An explicit override is never second-guessed: a loopback data
 origin is legitimate over an SSH tunnel.
 
-Every successful invite prints a `Bound browser origin:` line on stderr. A grant is bound to
+Every successful invite prints a `Bound browser origin:` line on stderr. The operator may report
+this non-secret line as confirmation. A grant is bound to
 one origin and a remote `ocx connect` presents `Origin: http://localhost:<its own configured
 port>`, so when the bound origin is not the default the other machine must already be running
-on that port. Relay that line; it is the difference between a working exchange and a spent
-code.
+on that port. It is the difference between a working exchange and a spent code.
 
 `invite` needs no admin token and nothing exported into the shell: it drives the same
 attested local route `ocx gui pair` uses, authorized by the running proxy's own attestation
@@ -258,8 +258,8 @@ up.
 `--json` emits `{ code, expiresAt, dataUrl, managementUrl, command }` with `expiresAt` as
 ISO 8601; `--clients codex,claude` chooses which client configs the printed command points
 at the hub. The code goes to stdout and the "secret, single-use" warning to stderr, matching
-`ocx gui pair`. Treat it as a secret: five-minute TTL, one use, rate-capped. Do not persist
-it, and do not echo it back into a transcript you are keeping.
+`ocx gui pair`. The operator must treat it as a secret: five-minute TTL, one use, rate-capped.
+They must not persist it or disclose it to the agent transcript.
 
 ## Reading `ocx connect status`
 
