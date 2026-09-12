@@ -75,6 +75,10 @@ describe("capability table is a leaf data module", () => {
     expect(CAPABILITIES.some(c => c.command[0] === "capabilities")).toBe(true);
   });
 
+  test("secret-returning hub invites are not advertised to agents", () => {
+    expect(CAPABILITIES.some(c => c.command.join(" ") === "hub invite")).toBe(false);
+  });
+
   test("logs follow does not claim to imply JSONL output", () => {
     const logs = CAPABILITIES.find(c => c.command.length === 1 && c.command[0] === "logs");
     const follow = logs?.flags.find(flag => flag.name === "--follow");

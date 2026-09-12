@@ -137,6 +137,12 @@ describe("documented commands exist", () => {
 });
 
 describe("the consent boundary is stated, not implied", () => {
+  test("hub invitations are deferred to a human terminal", () => {
+    const text = readFileSync(SKILL, "utf8");
+    expect(text).toContain("or run `ocx hub invite`\nfrom an agent session");
+    expect(text).toContain("Ask the user to run it in a separate human-operated terminal");
+  });
+
   test("SKILL.md forbids starring and does not offer a flag for it", () => {
     const text = readFileSync(SKILL, "utf8");
     expect(text).toContain("Do not star the repository");
