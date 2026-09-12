@@ -32,6 +32,19 @@ shares the 12-image active cap. Bounded source labels are emitted in active user
 root pruning cannot erase attachment provenance; the same text participates in token estimation.
 Native Composer/MCP behavior and text-only historical replay remain unchanged.
 
+## Media iteration retention
+
+`src/images/loop.ts` admits at most 32 MiB of serialized non-heartbeat adapter events per
+iteration, including array framing, and 2 MiB of UTF-8 arguments per current tool call. Both
+`runTurn` emission and ordinary stream collection enforce the shared translator limits before
+retaining another event. Overflow aborts the producer and surfaces `translation_buffer_limit`.
+The iteration budget is separate from adapter leases and final response buffers; collected
+`runTurn` events reach the scanner directly without a second charge. Heartbeats do not reset
+argument accounting, and each new iteration receives a fresh retention budget. These bounds do
+not cap process RSS or the conversation messages accumulated across completed media iterations.
+`tests/images/loop.test.ts` covers early producer cancellation, byte boundaries, iteration reset,
+opaque metadata, normal tool passthrough, and consumer cancellation on both execution paths.
+
 ## Provider diagnostic outbound safety
 
 Provider connection tests and live model discovery share the GET-only provider outbound wrapper.
