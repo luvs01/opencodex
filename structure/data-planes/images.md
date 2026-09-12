@@ -9,6 +9,9 @@ Codex Spark exception; standalone Images retain the separate relay contract belo
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts.
 
+For the shared Responses server's hosted-search continuation binding, see
+[continuation binding contract](../runtime.md#hosted-search-continuation-binding).
+
 ## Standalone Images
 
 Codex's local `image_gen.imagegen` tool makes a second Images request after the model calls it:

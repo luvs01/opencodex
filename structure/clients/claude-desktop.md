@@ -8,6 +8,9 @@ That projection does not migrate existing user-selected Desktop configuration or
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts.
 
+The shared server's key-auth Responses hosted-search continuation policy is documented in
+[continuation binding contract](../runtime.md#hosted-search-continuation-binding).
+
 ## Connected Claude Desktop profiles
 
 Connected `ocx claude desktop apply` reads the hub's Desktop snapshot and writes the hub origin

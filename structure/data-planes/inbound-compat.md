@@ -49,6 +49,9 @@ and from native Chat message passthrough.
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts.
 
+Requests entering the key-auth Responses hosted-search bridge follow its
+[continuation binding contract](../runtime.md#hosted-search-continuation-binding).
+
 ## Chat Completions inbound native path
 
 `POST /v1/chat/completions` sends eligible `openai-chat` routes directly to the provider's Chat

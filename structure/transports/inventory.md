@@ -8,6 +8,9 @@ changes translated message placement only; endpoint selection and transport stay
 
 Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts.
 
+The opt-in key-auth Responses hosted-search bridge has a separate
+[continuation binding contract](../runtime.md#hosted-search-continuation-binding).
+
 ## Transport inventory
 
 The sections above cover the transports with load-bearing invariants. The rest of the transport

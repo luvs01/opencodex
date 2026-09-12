@@ -5,6 +5,9 @@ is scoped to canonical ChatGPT Responses forwarding; other source-area behavior 
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts.
 
+The server-owned key-auth Responses hosted-search bridge retains the serving adapter's account
+binding as specified in [continuation binding contract](../runtime.md#hosted-search-continuation-binding).
+
 ## Decision
 
 Runtime adapter construction has one authority: `src/adapters/registry.ts`.

@@ -9,6 +9,9 @@ retains xAI provider behavior; see
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts.
 
+The opt-in key-auth Responses hosted-search bridge uses the shared
+[continuation binding contract](../runtime.md#hosted-search-continuation-binding).
+
 ## xAI Grok hardening (official Grok Build contract parity)
 
 Grounded in the open-sourced official client (xai-org/grok-build); unit + evidence:
