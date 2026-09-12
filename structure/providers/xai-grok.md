@@ -1,5 +1,8 @@
 # xAI Grok Provider
 
+The opt-in key-auth Responses hosted-search bridge uses the shared
+[continuation binding contract](../transports/responses.md#hosted-search-continuation-binding).
+
 ## xAI Grok hardening (official Grok Build contract parity)
 
 Grounded in the open-sourced official client (xai-org/grok-build); unit + evidence:

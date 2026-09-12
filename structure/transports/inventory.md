@@ -1,5 +1,8 @@
 # Transport Inventory
 
+The opt-in key-auth Responses hosted-search bridge has a separate
+[continuation binding contract](responses.md#hosted-search-continuation-binding).
+
 ## Transport inventory
 
 The sections above cover the transports with load-bearing invariants. The rest of the transport

@@ -1,5 +1,8 @@
 # Adapter Registry Authority
 
+The server-owned key-auth Responses hosted-search bridge retains the serving adapter's account
+binding as specified in [Responses transport](../transports/responses.md#hosted-search-continuation-binding).
+
 ## Decision
 
 Runtime adapter construction has one authority: `src/adapters/registry.ts`.

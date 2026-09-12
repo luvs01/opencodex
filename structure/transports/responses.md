@@ -6,6 +6,21 @@
 provider, lets the selected adapter speak the upstream protocol, then bridges adapter events back to
 Responses-compatible streaming output.
 
+### Hosted-search continuation binding
+
+The opt-in key-auth Responses hosted-search bridge in `src/server/responses/core.ts` captures the
+request binding that actually served the first leg, after any permitted initial reselection.
+Before every continuation dispatch, after provider pacing, it requires that binding to remain an
+API-key selection matching the configured entry, reference, revision, resolved key, authentication
+mode, and base URL. A disabled or removed provider also fails this check. Drift produces the
+bridge's failed terminal without sending another provider request. An unchanged binding sends the
+same built request with its executed search result appended; the continuation never invokes the
+initial request's reselection/rebuild path. Initial dispatch retains its normal reselection policy.
+
+`tests/web-search/web-search-passthrough-bridge.test.ts` covers selection drift during search, while
+pacing, and before first-leg headers return, plus successful first-dispatch reselection and result
+preservation.
+
 ### Credential-bearing HTTP redirects
 
 Credential/body-bearing HTTP sends use `redirect: "manual"` at the final executor boundary,

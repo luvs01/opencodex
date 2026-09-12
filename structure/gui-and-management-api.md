@@ -1,5 +1,8 @@
 # GUI And Management API
 
+Changing the selected API key during an opted-in Responses hosted-search turn follows the
+[continuation binding contract](transports/responses.md#hosted-search-continuation-binding).
+
 ## Dashboard serving
 
 The bundled React dashboard is built into `gui/dist` and served by the same Bun proxy. `ocx gui`

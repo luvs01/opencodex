@@ -1,5 +1,8 @@
 # Runtime
 
+Key-auth Responses hosted-search continuations retain the first dispatch's account binding; see
+[the dispatch contract](transports/responses.md#hosted-search-continuation-binding).
+
 ## Entrypoints
 
 | Path | Responsibility |
