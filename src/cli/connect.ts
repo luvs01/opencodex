@@ -105,7 +105,10 @@ function readInstalledCatalogBody(): string | null {
  * skips that path and reuses the resolve cache `ocx status` has usually already filled.
  */
 function observeLocalCodexEffortLadder(): ReadonlySet<string> | null {
-  const command = resolveCodexRuntime().runtime.command;
+  // Readiness consumes only the selected command. Do not probe lower-priority PATH candidates:
+  // unlike runtime diagnostics, they cannot affect this verdict and may be outside the selected
+  // runtime's trust boundary.
+  const command = resolveCodexRuntime({ discoverAlternatives: false }).runtime.command;
   return codexSupportedReasoningEfforts({ commandCandidates: () => [command] });
 }
 

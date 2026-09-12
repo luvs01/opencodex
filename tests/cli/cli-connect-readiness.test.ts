@@ -13,11 +13,11 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { repoRoot } from "../helpers/repo-root";
+import { repoPath, repoRoot } from "../helpers/repo-root";
 import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
 import { connectCompletionReport } from "../../src/cli/connect";
 import type { ClientCatalogReadiness } from "../../src/client/catalog-compatibility";
@@ -133,6 +133,15 @@ function runStatusProbe(options: {
 }
 
 describe("#4207 connected-client readiness", () => {
+  test("the readiness observer does not execute unselected runtime candidates", () => {
+    const source = readFileSync(repoPath("src", "cli", "connect.ts"), "utf8");
+    const observer = source.match(
+      /function observeLocalCodexEffortLadder\(\)[\s\S]*?\n}\n/,
+    )?.[0];
+
+    expect(observer).toContain("resolveCodexRuntime({ discoverAlternatives: false })");
+  });
+
   test("an installed catalog the local CLI rejects is not reported as ready", () => {
     const probe = runStatusProbe({ connected: true, ladder: OLD_CLI });
 
