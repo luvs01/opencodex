@@ -159,6 +159,24 @@ describe("#4207 connected-client readiness", () => {
     expect(probe.lines.find(line => line.startsWith("Hub:"))).toBeDefined();
   });
 
+  test("terminal controls in catalog effort names are rendered as inert text", () => {
+    const effort = "rogue\nFORGED\x1b]52;c;SGVsbG8=\x07\u2028after";
+    const probe = runStatusProbe({
+      connected: true,
+      ladder: OLD_CLI,
+      catalog: JSON.stringify({
+        models: [{ slug: "gpt-5.6-sol", supported_reasoning_levels: [{ effort: "high" }, { effort }] }],
+      }),
+    });
+
+    // Structured callers still receive the exact diagnostic value; JSON serialization escapes it.
+    expect(probe.status.readinessReason).toContain(effort);
+    // Human output keeps the value recognizable without emitting record boundaries or terminal
+    // commands such as OSC 52.
+    expect(probe.lines[1]).toContain("rogue\\x0aFORGED\\x1b]52;c;SGVsbG8=\\x07\\u2028after");
+    expect(probe.lines[1]).not.toMatch(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/);
+  });
+
   test("a catalog the local CLI accepts is ready, with nothing to explain", () => {
     const probe = runStatusProbe({ connected: true, ladder: NEW_CLI });
 
@@ -237,6 +255,20 @@ describe("#4207 what ocx connect reports when the local CLI cannot use the catal
     // The connection really was saved. Saying so is what keeps the failure from reading as a
     // rollback that never happened.
     expect(report.lines.join(" ")).toContain("was saved");
+  });
+
+  test("a connect failure cannot emit terminal controls from its readiness reason", () => {
+    const controlReason = "unsupported\nFORGED\x1b]52;c;SGVsbG8=\x07";
+    const report = connectCompletionReport(connection, ["codex"], {
+      kind: "incompatible",
+      reason: controlReason,
+      unsupportedEfforts: [controlReason],
+      affectedModels: ["gpt-5.6-sol"],
+    });
+
+    expect(report.lines[0]).toContain("unsupported\\x0aFORGED\\x1b]52;c;SGVsbG8=\\x07");
+    expect(report.lines[0]).not.toMatch(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/);
+    expect(report.failure).toContain("unsupported\\x0aFORGED\\x1b]52;c;SGVsbG8=\\x07");
   });
 
   test("a Claude-only connection is told, but not failed, by an old Codex CLI", () => {
