@@ -262,7 +262,7 @@ provider wire mapping; unpinned native requests retain their existing pass-throu
 
 > Decision record: [ADR-0026](decisions/ADR-0026-ultra-reasoning-level.md)
 
-Codex display-cache expiry, retained main-policy evidence, and reset history follow the
+Codex display-cache expiry, retained blocking main-policy evidence, and reset history follow the
 [quota cache contract](providers/openai-tiers.md#quota-cache-and-short-window-history).
 
 Chat helper admission in `src/server/responses/core.ts` follows the

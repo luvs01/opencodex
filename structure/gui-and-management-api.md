@@ -285,7 +285,7 @@ and catalog invariants documented in this folder rather than inventing parallel 
 Codex quota cards consume the display cache from `src/codex/quota.ts`. A partial refresh
 removes an omitted short tuple whose reset deadline has elapsed, so a stale Spark-derived
 5h row does not persist on a weekly-only account. This is independent of the main-account
-hard-lock evidence and reset-notification history; their retention rules are documented in
+blocking hard-lock evidence and reset-notification history; their retention rules are documented in
 [OpenAI account modes](providers/openai-tiers.md#quota-cache-and-short-window-history).
 
 ## Dashboard surfaces
