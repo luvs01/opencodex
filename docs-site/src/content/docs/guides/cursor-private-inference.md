@@ -86,11 +86,6 @@ they took.
   `opencodex-loopback` with Copy; when API auth is on, or any opencodex API key is configured,
   the row tells you to use one of your own keys and links to the API Keys tab. Any configured
   key works, not only `OPENCODEX_API_AUTH_TOKEN`.
-- **Connection.** The last `/v1/models` request whose User-Agent is exactly `Cursor/<version>`
-  (the header Cursor's local-agent runtime sends), with the time and the version. It reads
-  "never seen" until Cursor calls the proxy; pressing
-  **Refresh model list** in Cursor is what makes it flip. The card refreshes every 15 seconds
-  while the tab is open.
 - **What Cursor will show.** A Model / Reasoning / Context table for the models opencodex
   advertises (disabled models and provider allowlists apply, the same as the raw list),
   following the rules in the next section. It is a prediction: Cursor picks the Reasoning
