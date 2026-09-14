@@ -11,6 +11,7 @@ import {
   LOOPBACK_API_KEY_PLACEHOLDER,
   SCHEMA_REQUIRED_OUTPUT_BUDGET,
   buildClientConfig,
+  buildClientContribution,
   buildClientConfigText,
   isExportClientId,
   normalizeExportModels,
@@ -32,6 +33,7 @@ import { normalizeExportModels as leafNormalizeExportModels } from "../../src/cl
 import * as omp from "../../src/clients/config-export/omp";
 import * as dsh from "../../src/clients/config-export/dsh";
 import * as mcode from "../../src/clients/config-export/mcode";
+import * as raycast from "../../src/clients/config-export/raycast";
 import * as zcode from "../../src/clients/config-export/zcode";
 
 /**
@@ -100,6 +102,7 @@ describe("split config-export public facade", () => {
       ["dsh", dsh.buildDshClientConfig, dsh.summarizeDsh, dsh.buildDshContribution],
       ["mcode", mcode.buildMcodeClientConfig, mcode.summarizeMcode, mcode.buildMcodeContribution],
       ["zcode", zcode.buildZcodeClientConfig, zcode.summarizeZcode, zcode.buildZcodeContribution],
+      ["raycast", raycast.buildRaycastClientConfig, raycast.summarizeRaycast, raycast.buildRaycastContribution],
     ] as const;
     for (const [id, build, summarize, contribute] of leaves) {
       expect(EXPORT_CLIENTS[id].build).toBe(build);
@@ -117,7 +120,7 @@ describe("split config-export public facade", () => {
       ["omp", ["providers", "opencodex"], '{"providers":{"opencodex":{"baseUrl":"http://127.0.0.1:10100/v1","api":"openai-completions","apiKey":"opencodex-loopback","models":[{"id":"test/known","name":"known (test)","input":["text","image"],"contextWindow":8192,"maxTokens":8192,"reasoning":true,"thinking":{"mode":"effort","efforts":["high"]}}]}}}'],
       ["dsh", ["llm-pi-ai", "providers", "opencodex"], '{"llm-pi-ai":{"providers":{"opencodex":{"displayName":"OpenCodex","api":"openai-responses","baseURL":"http://127.0.0.1:10100/v1","headers":{"Authorization":"Bearer ocx_data_dsh"},"models":[{"id":"test/known","name":"known (test)","input":["text","image"],"contextWindow":8192,"reasoningEfforts":{"high":"high"}}]}}}}'],
       ["mcode", ["custom_provider", "opencodex"], '{"custom_provider":{"opencodex":{"name":"OpenCodex","kind":"custom","enabled":true,"api":"anthropic-messages","options":{"apiKey":"opencodex-loopback","baseURL":"http://127.0.0.1:10100","authMode":"api-key"},"models":{"test/known":{"limit":{"context":8192},"thinking":{"effortOptions":["high"]}}}}}}'],
-      ["zcode", ["provider", "opencodex"], '{"provider":{"opencodex":{"name":"OpenCodex","kind":"openai-compatible","enabled":true,"source":"custom","options":{"apiKey":"opencodex-loopback","baseURL":"http://127.0.0.1:10100/v1","apiKeyRequired":true},"models":{"test/known":{"name":"known (test)","modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":8192}}}}}}'],
+      ["zcode", ["provider", "opencodex"], '{"provider":{"opencodex":{"name":"OpenCodex","kind":"openai-compatible","enabled":true,"source":"custom","options":{"apiKey":"opencodex-loopback","baseURL":"http://127.0.0.1:10100/v1","apiKeyRequired":true},"models":{"test/known":{"name":"known (test)","modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":8192},"reasoning":{"enabled":true,"variants":["high"]}}}}}}'],
     ] as const;
     for (const [id, path, expectedBytes] of cases) {
       const built = buildClientConfigText(id, context);
@@ -313,6 +316,8 @@ describe("Pi serializer (accept criterion 2)", () => {
     expect(provider.baseUrl).toBe(BASE_URL);
     expect(provider.api).toBe("openai-completions");
     expect(provider.apiKey).toBe(LOOPBACK_API_KEY_PLACEHOLDER);
+    expect(provider.compat?.sendSessionAffinityHeaders).toBe(true);
+    expect(buildClientContribution("pi", ctx()).fragments[0]!.value).toEqual(provider);
   });
 
   test("cost is omitted on every entry — zeros would assert routed models are free", () => {
@@ -803,8 +808,8 @@ describe("hub-resolved Fast exports", () => {
 });
 
 describe("EXPORT_CLIENTS registry", () => {
-  test("covers exactly the twelve file-toggle clients", () => {
-    expect(EXPORT_CLIENT_IDS).toEqual(["opencode", "pi", "omp", "hermes", "openclaw", "kimi", "gajae", "dsh", "mcode", "zcode", "prime", "aside"]);
+  test("covers exactly the thirteen file-toggle clients", () => {
+    expect(EXPORT_CLIENT_IDS).toEqual(["opencode", "pi", "omp", "hermes", "openclaw", "kimi", "gajae", "dsh", "mcode", "zcode", "prime", "aside", "raycast"]);
     for (const id of EXPORT_CLIENT_IDS) expect(isExportClientId(id)).toBe(true);
     // The exception clients keep their own surfaces and are not export clients.
     expect(isExportClientId("claude-desktop")).toBe(false);
@@ -897,7 +902,7 @@ describe("EXPORT_CLIENTS registry", () => {
 `);
   });
 
-  test("pi bytes are unchanged, to the last newline", () => {
+  test("pi bytes include session affinity, to the last newline", () => {
     const built = buildClientConfigText("pi", ctx({ config: cfg() }));
     expect(built.format).toBe("json");
     expect(built.text).toBe(`{
@@ -906,6 +911,9 @@ describe("EXPORT_CLIENTS registry", () => {
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "opencodex-loopback",
+      "compat": {
+        "sendSessionAffinityHeaders": true
+      },
       "models": [
         {
           "id": "anthropic/claude-opus-5",
