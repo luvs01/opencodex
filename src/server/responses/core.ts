@@ -7524,7 +7524,11 @@ async function handleResponsesInner(
   const remainingTransientSendBudget = (budget: number): number =>
     Math.max(1, budget - transientSendsUsed);
   try {
-    initialRequest = await activeAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    initialRequest = await activeAdapter.buildRequest(parsed, {
+      headers: selectedForwardHeaders,
+      translatorBudget,
+      abortSignal: upstream.signal,
+    });
     refreshRequestToolAliases(initialRequest);
     recordAdapterReasoning(logCtx, initialRequest);
     recordAdapterTier(logCtx, initialRequest);
@@ -7659,6 +7663,7 @@ async function handleResponsesInner(
           retryRequest = await activeAdapter.buildRequest(parsed, {
             headers: selectedForwardHeaders,
             translatorBudget,
+            abortSignal: upstream.signal,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
           });
           recordAdapterReasoning(logCtx, retryRequest);

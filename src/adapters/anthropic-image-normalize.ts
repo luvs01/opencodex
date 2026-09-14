@@ -31,6 +31,37 @@ import { bunImageEncode, bunImageValidate, processAt, TERMINAL_POS, TIER0_COUNT,
 import { IMAGE_NORMALIZE_CONCURRENCY, MAX_INPUT_BASE64_LENGTH, MAX_INPUT_PIXELS } from "./anthropic-image-codec";
 import type { NormalizeOptions } from "./anthropic-image-codec";
 
+const IMAGE_DECODE_PROCESS_CONCURRENCY = IMAGE_NORMALIZE_CONCURRENCY;
+let activeImageDecodes = 0;
+const imageDecodeWaiters: Array<() => void> = [];
+
+async function enterImageDecode(signal?: AbortSignal): Promise<() => void> {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  let transferred = false;
+  if (activeImageDecodes >= IMAGE_DECODE_PROCESS_CONCURRENCY) {
+    await new Promise<void>((resolve, reject) => {
+      const admit = (): void => {
+        transferred = true;
+        signal?.removeEventListener("abort", abort);
+        resolve();
+      };
+      const abort = (): void => {
+        const index = imageDecodeWaiters.indexOf(admit);
+        if (index >= 0) imageDecodeWaiters.splice(index, 1);
+        reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+      };
+      imageDecodeWaiters.push(admit);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+  if (!transferred) activeImageDecodes++;
+  return () => {
+    const next = imageDecodeWaiters.shift();
+    if (next) next();
+    else activeImageDecodes--;
+  };
+}
+
 const UNDECODABLE_TEXT = "[image omitted: undecodable or corrupt image data]";
 const BOMB_TEXT = "[image omitted: image too large to process safely]";
 const OVERFLOW_DROP_TEXT = "[image omitted: total image payload exceeded the provider request budget; older images were dropped]";
@@ -79,6 +110,8 @@ export interface NormalizeTarget {
 }
 
 export interface NormalizeTargetsOptions extends NormalizeOptions {
+  /** Cancels queued native decode work and stops pulling more images. */
+  abortSignal?: AbortSignal;
   /** Total base64 budget across all targets. Default: TOTAL_IMAGE_BASE64_BUDGET. */
   budget?: number;
   /**
@@ -103,7 +136,20 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
   const budget = options.budget ?? TOTAL_IMAGE_BASE64_BUDGET;
   const overflowAction = options.overflowAction ?? "none";
   const processLimit = options.processLimit ?? Number.POSITIVE_INFINITY;
+  const abortSignal = options.abortSignal;
   const n = targets.length;
+
+  const process = async (b64: string, pos: number, mediaType: string) => {
+    if (abortSignal?.aborted) throw abortSignal.reason ?? new DOMException("Aborted", "AbortError");
+    const leave = await enterImageDecode(abortSignal);
+    try {
+      const result = await processAt(b64, pos, mediaType, encode, validate);
+      if (abortSignal?.aborted) throw abortSignal.reason ?? new DOMException("Aborted", "AbortError");
+      return result;
+    } finally {
+      leave();
+    }
+  };
 
   // sourceB64/sourceMedia are the ORIGINAL input (encode source + cache identity);
   // size always reflects the bytes currently ON the wire for this target (the core is
@@ -150,7 +196,7 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
       }
       const sourceMedia = target.mediaType.toLowerCase();
       const pos = initialPosition(newestFirstIndex, bias);
-      const result = await processAt(b64, pos, sourceMedia, encode, validate);
+      const result = await process(b64, pos, sourceMedia);
       if (result.kind === "failed") {
         target.drop(UNDECODABLE_TEXT);
         if (target.retainsBytesOnDrop) {
@@ -192,7 +238,7 @@ export async function normalizeImageTargets(targets: NormalizeTarget[], options:
   while (sum > budget) {
     const entry = entries.find((e): e is Entry => e !== null && !e.done);
     if (!entry) break; // all terminal — overflowAction below decides
-    const result = await processAt(entry.sourceB64, entry.pos + 1, entry.sourceMedia, encode, validate);
+    const result = await process(entry.sourceB64, entry.pos + 1, entry.sourceMedia);
     if (result.kind === "failed") {
       entry.target.drop(UNDECODABLE_TEXT);
       if (entry.target.retainsBytesOnDrop) {
