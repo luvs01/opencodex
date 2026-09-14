@@ -203,7 +203,7 @@ Cursor 的 HTTP/1.1 兼容传输：通过 `agent.v1.AgentService/RunSSE` 接收 
 - 通过 `GetCascadeModelConfigs` 按账号获取模型；不在套餐内的模型在列表阶段就被过滤，而不是到请求时才失败。
 - Cognition 对工具说明有长度上限和精确短语黑名单。适配器会改写已知短语并截断过长的说明。
 - 密钥不会刷新。失效后请重新执行 `ocx login devin`。
-- 即使走 CLI 导入路径，本地的也只有凭据，请求本身无论哪条路径都发往 Cognition。早期版本曾在 `devin-cli` id 下提供第二个适配器，把请求作为对本地 `devin acp` 子进程的 Agent Client Protocol 会话来执行，现已移除。仍引用该适配器的已保存配置会在启动时重写为 `devin`，包括 `"devin-acp"` 这类自定义名称的行。
+- 即使走 CLI 导入路径，本地的也只有凭据，请求本身无论哪条路径都发往 Cognition。早期版本曾在 `devin-cli` id 下提供第二个适配器，把请求作为对本地 `devin acp` 子进程的 Agent Client Protocol 会话来执行，现已移除。仍使用 `devin-cli` 提供商 id 的规范配置会在启动时迁移到 `devin`。`"devin-acp"` 这类自定义名称的行会保持禁用，直到你明确选择 `devin` 适配器并配置 Devin 身份验证。
 
 ## `azure-openai`（别名：`azure`）
 

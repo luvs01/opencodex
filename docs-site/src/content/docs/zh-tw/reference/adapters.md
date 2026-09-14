@@ -175,7 +175,7 @@ Kiro 的 assistant 文字本身沒有可靠的回合結束標記，但終止的 
 - 以 `GetCascadeModelConfigs` 依帳號取得模型；方案未涵蓋的模型在清單階段就被濾除。
 - Cognition 對工具說明設有長度上限與完全比對的封鎖清單。轉接器會改寫已知語句並截斷過長說明。
 - 金鑰不會更新。失效後請重新執行 `ocx login devin`。
-- 即使走 CLI 匯入路徑，本機的也只有憑證，請求本身無論哪條路徑都發往 Cognition。早期版本曾在 `devin-cli` id 下提供第二個轉接器，把請求作為對本機 `devin acp` 子行程的 Agent Client Protocol 工作階段來執行，現已移除。仍引用該轉接器的已儲存設定會在啟動時重寫為 `devin`，包括 `"devin-acp"` 這類自訂名稱的列。
+- 即使走 CLI 匯入路徑，本機的也只有憑證，請求本身無論哪條路徑都發往 Cognition。早期版本曾在 `devin-cli` id 下提供第二個轉接器，把請求作為對本機 `devin acp` 子行程的 Agent Client Protocol 工作階段來執行，現已移除。仍使用 `devin-cli` 提供者 id 的標準設定會在啟動時遷移至 `devin`。`"devin-acp"` 這類自訂名稱的列會維持停用，直到你明確選取 `devin` 轉接器並設定 Devin 驗證。
 
 ## `azure-openai`（別名：`azure`）
 

@@ -219,7 +219,7 @@ discovery에 모두 적용됩니다.
 - `GetCascadeModelConfigs`로 계정별 모델을 조회하고, 플랜에 없는 모델은 요청 시점이 아니라 목록에서 걸러집니다.
 - Cognition은 도구 설명 길이 제한과 정확 문구 차단 목록을 적용합니다. 어댑터가 알려진 문구를 바꾸고 긴 설명을 잘라냅니다.
 - 키는 갱신되지 않습니다. 만료되거나 폐기되면 `ocx login devin`을 다시 실행하세요.
-- CLI 임포트 경로를 써도 로컬인 것은 자격뿐이며, 턴은 어느 경로든 Cognition으로 갑니다. 예전 빌드에는 `devin-cli` id 아래 로컬 `devin acp` 자식 프로세스에 Agent Client Protocol 세션으로 턴을 실행하는 두 번째 어댑터가 있었지만 제거됐습니다. 그 어댑터를 아직 가리키는 저장 설정은 스타트업에서 `devin`으로 리라이트되며, `"devin-acp"` 같은 커스텀 이름 행도 마찬가지입니다.
+- CLI 임포트 경로를 써도 로컬인 것은 자격뿐이며, 턴은 어느 경로든 Cognition으로 갑니다. 예전 빌드에는 `devin-cli` id 아래 로컬 `devin acp` 자식 프로세스에 Agent Client Protocol 세션으로 턴을 실행하는 두 번째 어댑터가 있었지만 제거됐습니다. 기존 `devin-cli` 공급자 id를 사용하는 표준 설정은 시작 시 `devin`으로 마이그레이션됩니다. `"devin-acp"` 같은 사용자 지정 이름 행은 `devin` 어댑터를 명시적으로 선택하고 Devin 인증을 구성할 때까지 비활성 상태로 유지됩니다.
 
 ## `azure-openai` (별칭: `azure`)
 

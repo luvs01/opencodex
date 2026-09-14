@@ -453,8 +453,9 @@ configuration that names the old id is rewritten at startup.
   `devin auth login` once, then add the provider.
 - An earlier build shipped a second adapter under the id `devin-cli` that ran the turn as an
   Agent Client Protocol session against a local `devin acp` child process. It is gone. A saved
-  configuration that still names that adapter is rewritten to `devin` at startup, including a
-  custom-named row such as `"devin-acp"`.
+  canonical configuration that still uses the `devin-cli` provider id is migrated to `devin` at
+  startup. A custom-named row such as `"devin-acp"` remains disabled until you explicitly select
+  the `devin` adapter and configure Devin authentication.
 - The chat request is calibrated, not guessed. Three things gate it together: the credential is the
   session token doubled and dash-joined in an `Authorization: Basic` header while the protobuf body
   keeps one copy, the request envelope goes up uncompressed, and `Metadata` #31 carries a

@@ -153,7 +153,7 @@ Si Kiro s’arrête sans appeler l’outil d’achèvement, l’adaptateur effec
 - Les modèles sont découverts par compte avec `GetCascadeModelConfigs` ; ceux qui ne figurent pas dans l'offre disparaissent de la liste au lieu d'échouer au moment de la requête.
 - Cognition impose une limite de longueur sur les descriptions d'outils et une liste de phrases interdites. L'adaptateur réécrit les formulations connues et tronque les descriptions trop longues.
 - Les clés ne se renouvellent pas. Relancez `ocx login devin` lorsqu'une clé expire ou est révoquée.
-- Seul l'identifiant est local quand l'import CLI est utilisé ; le tour part vers Cognition dans les deux cas. Un ancien build livrait sous l'id `devin-cli` un second adaptateur qui exécutait le tour comme une session Agent Client Protocol contre un processus enfant local `devin acp`. Il a été retiré : une configuration qui nomme encore cet adaptateur est réécrite vers `devin` au démarrage, y compris une ligne au nom personnalisé comme `"devin-acp"`.
+- Seul l'identifiant est local quand l'import CLI est utilisé ; le tour part vers Cognition dans les deux cas. Un ancien build livrait sous l'id `devin-cli` un second adaptateur qui exécutait le tour comme une session Agent Client Protocol contre un processus enfant local `devin acp`. Il a été retiré : la configuration canonique qui utilise encore l’id fournisseur `devin-cli` est migrée vers `devin` au démarrage. Une ligne au nom personnalisé comme `"devin-acp"` reste désactivée jusqu’à ce que vous sélectionniez explicitement l’adaptateur `devin` et configuriez l’authentification Devin.
 
 ## `azure-openai` (alias : `azure`)
 

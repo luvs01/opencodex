@@ -317,7 +317,7 @@ başlığından Cursor OAuth/erişim belirteci.
 - Modeller hesaba göre `GetCascadeModelConfigs` ile keşfedilir; pakette olmayanlar istek anında hata vermek yerine listeden düşer.
 - Cognition araç açıklamaları için uzunluk sınırı ve birebir ifade engeli uygular. Bağdaştırıcı bilinen ifadeleri yeniden yazar, uzun açıklamaları kırpar.
 - Anahtarlar yenilenmez. Süresi dolduğunda veya iptal edildiğinde `ocx login devin` komutunu yeniden çalıştırın.
-- CLI içe aktarma yolu kullanıldığında yerel olan yalnızca kimlik bilgisidir; tur her iki yolda da Cognition'a gider. Önceki bir sürüm, `devin-cli` kimliği altında turu yerel bir `devin acp` alt sürecine karşı Agent Client Protocol oturumu olarak çalıştıran ikinci bir bağdaştırıcıyla geliyordu. Kaldırıldı: o bağdaştırıcıyı hâlâ adlandıran kayıtlı bir yapılandırma, `"devin-acp"` gibi özel adlı bir satır da dahil olmak üzere başlangıçta `devin`'e yeniden yazılır.
+- CLI içe aktarma yolu kullanıldığında yerel olan yalnızca kimlik bilgisidir; tur her iki yolda da Cognition'a gider. Önceki bir sürüm, `devin-cli` kimliği altında turu yerel bir `devin acp` alt sürecine karşı Agent Client Protocol oturumu olarak çalıştıran ikinci bir bağdaştırıcıyla geliyordu. Kaldırıldı: hâlâ `devin-cli` sağlayıcı kimliğini kullanan standart yapılandırma başlangıçta `devin`'e taşınır. `"devin-acp"` gibi özel adlı bir satır, `devin` bağdaştırıcısını açıkça seçip Devin kimlik doğrulamasını yapılandırana kadar devre dışı kalır.
 
 ## `azure-openai` (takma ad: `azure`)
 
