@@ -14,7 +14,7 @@ both `--adapter` and `--base-url`.
 
 | Subcommand | Supported flags | Action |
 | --- | --- | --- |
-| `list` | `--json` | List configured providers and the remaining registry entries. |
+| `list` | `--json`, `--jsonl` | List configured providers and the remaining registry entries; `--jsonl` emits one configured provider object per line. |
 | `add <name>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | Add a registry/custom provider. `--force` overwrites; `--sync` refreshes a running proxy in human-output mode. |
 | `edit <name>` | provider field flags, `--headers <json>`, `--json` | Edit validated live provider fields without replacing key pools. `--headers` merges custom request headers; pass `{}` or `-` to clear them. |
 | `test <name>` | `--json` | Probe the real upstream model endpoint. |
@@ -29,6 +29,7 @@ both `--adapter` and `--base-url`.
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl        # one configured provider object per line
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -36,6 +37,11 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` writes only configured providers, one JSON object per line, and omits the
+`registryCount` summary from `--json`. Each object has the same fields as an item in the `configured` array.
+Use it for scripts that process one configured provider object per line.
+`--json` and `--jsonl` cannot be combined.
 
 :::caution[Custom headers are not a credential channel]
 `--headers` is for non-secret request metadata — routing hints, tenant or
@@ -82,19 +88,24 @@ files or a raw network capture.
 
 ### `ocx login <provider>`
 
-Start the provider's registered login flow. OAuth providers open a browser and store auto-refreshed
-credentials under `~/.opencodex/`; API-key login providers open their key dashboard, prompt for the
+Start the provider's registered login flow. OAuth-style account providers open a browser and store
+credentials under `~/.opencodex/` (refreshable tokens rotate automatically; durable key grants such
+as OrcaRouter are reused until the provider revokes them); API-key login providers open their key dashboard, prompt for the
 key, validate it when possible, and save the resulting provider config. The command prints the
 currently accepted OAuth and API-key provider ids when the name is missing or unknown.
 
 Use the same command to **reauthenticate** after `ocx status` / `ocx doctor` reports
 reauthentication required or a terminal refresh failure (or use Reauthenticate in the dashboard).
-Codex pool accounts are not a public `ocx login` provider — reauthenticate via the dashboard Codex
-account pool (Reauthenticate) or the headless `ocx account reauth` flow instead.
+Codex pool accounts are not one of those OAuth or API-key providers, but `ocx login codex` reaches
+them anyway: it routes to the account-pool login, so `ocx login codex --reauth` is the same thing as
+`ocx account reauth codex`. The dashboard Codex account pool (Reauthenticate) does it too. That route
+runs inside the proxy, so it needs a running one.
 
 ```bash
 ocx login xai
 ocx login anthropic
+ocx login orcarouter-oauth # browser consent + S256 PKCE
+ocx login orcarouter       # paste an existing API key
 ```
 
 OAuth reauthentication preserves operator settings such as model selections, pricing overrides,
@@ -145,6 +156,12 @@ by default. This protects new requests using the identified main account, not th
 already-running requests, unmatched caller-owned keyring credentials, and traffic outside the
 proxy can still spend quota. Added accounts and other providers remain available.
 
+With protection enabled, an owned startup restores the main credential's in-memory identity
+binding after native-profile recovery and cleanup, so a persisted 99% block survives a restart.
+Caller-owned Direct, exact-main, main-fallback, and main-pin requests can briefly receive 503
+while that binding is pending; healthy stored Pool accounts stay eligible throughout. No
+credential is read from a foreign or unconfirmed service home for this initialization.
+
 While this policy blocks main, Luna Reserve on that account is blocked too. Staying below ordinary
 quota exhaustion may prevent Reserve activation. Disabling the switch restores normal local
 handling, not additional upstream entitlement. Use the account quota refresh action to obtain a
@@ -190,7 +207,7 @@ List and switch provider accounts and API-key pools through the running proxy. T
 surface is:
 
 ```text
-Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits> ...
+Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits|grok-reset-coupons> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 current <provider>  Show the active account or key.
@@ -202,6 +219,7 @@ remove <provider> <id> --yes  Remove a stored account or key after an existence 
 add-key <provider> [--label <label>]  Add a key read only from piped stdin.
 login/reauth/code/cancel  Run browser or manual-code auth from a headless shell.
 reset-credits <id|main> [--consume --yes]  Inspect or consume Codex reset credits.
+grok-reset-coupons [<id>] [--consume --yes] [--token-id <token-id>] [--operation-id <uuid>]  Inspect or redeem Grok reset coupons.
 Switching the active account takes effect immediately; running threads move on their next request, and in-flight requests keep the account they captured.
 A selection-order change applies from the next unbound request and never moves a bound thread.
 ```
@@ -331,11 +349,11 @@ instead (exit 0), matching the dashboard's quota bars.
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. Generic pool thresholds are currently inert: saving one does not enable threshold-based switching, change the provider enablement override, or disable reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is not applied, and unknown capability never reports `enabled: true`. API-key providers, Anthropic and invalid values are rejected.
+Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. A generic pool threshold steers selection only while `pool.kernel` is on with `strategy: "fill-first"`; with the flag off, saving one does not enable threshold-based switching. It never changes the provider enablement override or disables reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability, which never reports `enabled: true`. API-key providers, Anthropic and invalid values are rejected.
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }
-generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: boolean | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
@@ -431,6 +449,34 @@ security find-generic-password -w openrouter | ocx account add-key openrouter --
 Inspect Codex reset credits for an account. Consuming a credit is destructive and requires both
 `--consume` and `--yes`.
 
+After a confirmed `reset`, fresh usage can recover the same account's eligible existing
+shared reset-derived cooldown. Paused accounts, accounts needing reauthentication and
+cooldowns owned by an in-flight probe remain excluded from this recovery. A failed or busy
+usage refresh after confirmed consumption does not require another credit: check usage
+again instead of repeating `--consume`. Consume success does not guarantee routability;
+see the [management API recovery contract](/reference/management-api/#codex-authentication-delegation)
+for reset/replay, freshness and scope limits.
+
+### `ocx account grok-reset-coupons [<account-id>] [--consume --yes [--token-id <id>] [--operation-id <uuid>]] [--json]`
+
+Inspects remaining reset coupons or redeems one for an xAI / Grok account.
+
+When invoked without `--consume`, returns the available coupon tokens and validity windows:
+
+```bash
+ocx account grok-reset-coupons
+ocx account grok-reset-coupons acc_xai_01 --json
+```
+
+Redeeming a reset coupon mutates billing state and permanently exhausts one coupon token. `--consume` strictly requires `--yes`:
+
+```bash
+ocx account grok-reset-coupons --consume --yes
+ocx account grok-reset-coupons --consume --yes --token-id <token-id>
+```
+
+Pass `--operation-id <uuid>` (must be a valid UUIDv4) to guarantee idempotent settlement. If the network drops or the command is retried, identical operation IDs replay the durably recorded outcome instead of consuming a second coupon.
+
 ### `ocx account main <subcommand>`
 
 Manage named native Codex main-login profiles without changing OpenCodex account-pool routing:
@@ -502,6 +548,8 @@ proxy to be running (`ocx start`, or an installed service).
 | --- | --- | --- |
 | `list` (default) | `--provider <name>`, `--json` | List models seeded in configured providers. |
 | `live` | `--provider <name>`, `--json` | Read the running catalog, including models discovered at runtime. Rows are flagged `native`/`routed`, `custom`, and `enabled`/`disabled`. |
+| `price <provider/model>` | `--json` | Read the model's saved manual price override; no override means automatic pricing. |
+| `set-price <provider/model>` | `--input <rate>`, `--output <rate>`, `--cache-read <rate>`, `--cache-write <rate>`, `--auto`, `--json` | Set display prices in USD per 1M tokens. Input/output are required when setting; omitted cache rates become zero. `--auto` removes only this model's override. |
 | `add <provider> <modelId>` | `--display-name <name>`, `--context-window <tokens>`, `--modalities <text,image,audio>` | Register a model the provider catalog does not advertise. |
 | `edit <custom-id>` | `--model-id <id>`, `--display-name <name\|->`, `--context-window <tokens\|0>`, `--modalities <text,image,audio\|->`, `--json` | Edit a custom model. `-` clears a field; `0` clears the context window. |
 | `remove <custom-id\|provider/modelId>` | `--yes` | Delete a custom model. Requires `--yes` when stdin is not an interactive terminal. |

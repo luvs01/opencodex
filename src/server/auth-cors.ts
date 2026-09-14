@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
 import { formatErrorResponse } from "../bridge";
@@ -6,6 +6,7 @@ import {
   codexAutoStartEnabled,
   modelPreferHostedToolsConfigError,
   providerModelCostsConfigError,
+  providerWebSearchBridgeConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
   sanitizeModelCostsForDisplay,
@@ -13,12 +14,14 @@ import {
 import {
   apiKeyTransportConfigError,
   booleanRecordConfigError,
+  providerReasoningPinsConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerRelativeSendPathConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
 } from "../config/provider-validation";
@@ -351,9 +354,29 @@ function secretEquals(actual: string, expected: string | undefined): boolean {
  */
 export type DataPlaneAdmissionSource = "loopback" | "dedicated" | "bearer" | "x-api-key";
 
+/**
+ * Process-local, salted identity of the admission secret that was actually matched.
+ *
+ * Context-relay ownership is partitioned by this value, so two operators holding different
+ * keys cannot reach each other's sessions even when both resolve to the same upstream
+ * workspace. `source` is deliberately excluded: the same key arriving as a bearer or in the
+ * dedicated header is one principal. Rotating or replacing a secret mints a new principal and
+ * drops continuity, which is the safe direction — a reused key id or a replaced environment
+ * secret must not inherit the previous holder's sessions. Loopback admission carries no caller
+ * identity and mints nothing, so the relay refuses it rather than treating every local process
+ * as one user.
+ */
+const CONTEXT_PRINCIPAL_SALT = randomBytes(32);
+
+function mintContextPrincipal(kind: string, keyId: string, credential: string): string {
+  return createHmac("sha256", CONTEXT_PRINCIPAL_SALT)
+    .update(kind).update("\0").update(keyId).update("\0").update(credential)
+    .digest("hex");
+}
+
 export type DataPlaneAdmission =
-  | { kind: "configured"; keyId: string; source: DataPlaneAdmissionSource }
-  | { kind: "environment"; source: DataPlaneAdmissionSource }
+  | { kind: "configured"; keyId: string; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
+  | { kind: "environment"; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
   | { kind: "loopback"; source: "loopback" };
 
 /**
@@ -372,15 +395,50 @@ export function resolveDataPlaneAdmissionSecret(
 ): DataPlaneAdmission | null {
   const actual = token.trim();
   if (!actual) return null;
-  if (secretEquals(actual, configuredApiAuthToken(config))) return { kind: "environment", source };
+  if (secretEquals(actual, configuredApiAuthToken(config))) {
+    return { kind: "environment", source, contextPrincipalId: mintContextPrincipal("environment", "", actual) };
+  }
   for (const k of config.apiKeys ?? []) {
-    if (secretEquals(actual, k.key)) return { kind: "configured", keyId: k.id, source };
+    if (secretEquals(actual, k.key)) {
+      return { kind: "configured", keyId: k.id, source, contextPrincipalId: mintContextPrincipal("configured", k.id, actual) };
+    }
     const pending = k.pendingRotation;
     if (pending && Date.parse(pending.expiresAt) > Date.now() && secretEquals(actual, pending.key)) {
-      return { kind: "configured", keyId: k.id, source };
+      return { kind: "configured", keyId: k.id, source, contextPrincipalId: mintContextPrincipal("configured", k.id, pending.key) };
     }
   }
   return null;
+}
+
+/** The principal an authenticated admission belongs to, or undefined for loopback. */
+export function contextPrincipalIdOf(admission: DataPlaneAdmission | undefined): string | undefined {
+  return admission && "contextPrincipalId" in admission ? admission.contextPrincipalId : undefined;
+}
+
+/**
+ * The caller principal for a context-relay request, which is a stricter question than admission.
+ *
+ * The default bind is loopback, where admission deliberately never reads a token, so an admitted
+ * request carries no caller identity. History ownership needs one, so the relay asks separately:
+ * a caller that presents a real opencodex API key gets that key’s principal even on loopback,
+ * and a caller that presents none gets nothing and is refused. This adds identity where the caller
+ * volunteered it; it does not admit anyone who was not already admitted, and it does not change
+ * which credential goes upstream.
+ */
+export function resolveContextPrincipal(req: Request, config: OcxConfig, admission: DataPlaneAdmission | undefined): string | undefined {
+  const named = contextPrincipalIdOf(admission);
+  if (named) return named;
+  if (admission?.kind !== "loopback") return undefined;
+  const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
+  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const apiKey = req.headers.get("x-api-key")?.trim();
+  for (const [token, source] of [[dedicated, "dedicated"], [bearer, "bearer"], [apiKey, "x-api-key"]] as const) {
+    if (!token) continue;
+    const resolved = resolveDataPlaneAdmissionSecret(token, config, source);
+    const principal = contextPrincipalIdOf(resolved ?? undefined);
+    if (principal) return principal;
+  }
+  return undefined;
 }
 
 /** Whether `token` is a data-plane admission secret. */
@@ -437,6 +495,11 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   // /v1/models and for the same reason — it forwards no caller credential upstream — so a
   // remote client no longer needs an admin token just to read the model catalog.
   { endpoint: "/v1/catalog", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  // #4236: the hub-state read a connected client uses instead of reporting its own empty
+  // credential store. Same admission set and the same justification as the two rows above —
+  // it forwards no caller credential upstream and its body is booleans plus model ids — and it
+  // 404s on any host whose runtimeRole is not "hub", so no standalone install gains a surface.
+  { endpoint: "/v1/hub-state", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -581,6 +644,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     return "provider must be a plain object";
   }
   const raw = provider as Record<string, unknown>;
+  const pinsError = providerReasoningPinsConfigError(raw);
+  if (pinsError) return pinsError;
   for (const field of FORBIDDEN_PROVIDER_RUNTIME_FIELDS) {
     if (Object.hasOwn(raw, field)) return `provider ${name} must not include runtime field "${field}"`;
   }
@@ -594,6 +659,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     }
     if (seed) seed.codexAccountMode = raw.codexAccountMode;
     const canonicalCandidate = { ...raw };
+    // Validated operator overlays do not change the canonical auth/transport seed.
+    delete canonicalCandidate.pinnedReasoningEffort;
+    delete canonicalCandidate.modelPinnedReasoningEfforts;
     delete canonicalCandidate.responsesSnapshotRepair;
     // modelCosts is a user-owned display overlay, not part of the canonical
     // forward seed; it is validated separately below (providerModelCostsConfigError).
@@ -626,6 +694,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   const typed = provider as unknown as OcxProviderConfig;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
+  for (const field of ["responsesPath", "chatCompletionsPath"] as const) {
+    const sendPathError = providerRelativeSendPathConfigError(field, raw[field]);
+    if (sendPathError) return `provider ${name} ${sendPathError}`;
+  }
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
     const locationError = googleVertexLocationConfigError(typed.location);
     if (locationError) return `provider ${name} ${locationError}`;
@@ -643,6 +715,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
+  }
+  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge);
+  if (webSearchBridgeError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${webSearchBridgeError}`;
   }
   const upstreamHttpVersionError = upstreamHttpVersionConfigError(raw.upstreamHttpVersion);
   if (upstreamHttpVersionError) {
@@ -696,6 +772,11 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     "noStructuredOutputModels",
   );
   if (structuredOutputOptOutError) return `provider ${name} ${structuredOutputOptOutError}`;
+  const jsonSchemaOptOutError = nonBlankStringArrayConfigError(
+    raw.noJsonSchemaModels,
+    "noJsonSchemaModels",
+  );
+  if (jsonSchemaOptOutError) return `provider ${name} ${jsonSchemaOptOutError}`;
   const retainModelsError = nonBlankStringArrayConfigError(raw.retainModels, "retainModels");
   if (retainModelsError) return `provider ${name} ${retainModelsError}`;
   const toolReasoningOptOutError = nonBlankStringArrayConfigError(
@@ -778,6 +859,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   fastWire: "editor",
   baseUrl: "editor",
   responsesPath: "editor",
+  chatCompletionsPath: "editor",
   commandCodeVersion: "editor",
   statelessResponses: "editor",
   requiresAdjacentResponsesToolResults: "editor",
@@ -796,6 +878,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   apiKey: "redacted",
   apiKeyTransport: "editor",
   apiKeyPool: "redacted",
+  // Ordering preference only; it names no key material, so an editor may read and set it.
+  apiKeyPoolStrategy: "editor",
   apiKeySelectionRevision: "runtime",
   _apiKeyAttempt: "runtime",
   defaultModel: "editor",
@@ -829,6 +913,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   reasoningEfforts: "editor",
   modelReasoningEfforts: "editor",
   modelDefaultReasoningEfforts: "editor",
+  pinnedReasoningEffort: "editor",
+  modelPinnedReasoningEfforts: "editor",
   modelSupportsReasoningSummaries: "editor",
   modelSupportsVerbosity: "editor",
   supportsVerbosity: "editor",
@@ -837,8 +923,10 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   supportsOpenAiWebSearchToolFields: "editor",
   xaiResponsesXSearch: "editor",
   xaiResponsesDefaultVersion: "runtime",
+  zaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
   responsesSnapshotRepair: "editor",
+  webSearchBridge: "editor",
   reasoningEffortMap: "editor",
   modelReasoningEffortMap: "editor",
   reasoningWireFormat: "editor",
@@ -847,6 +935,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   noTopPModels: "editor",
   noPenaltyModels: "editor",
   noStructuredOutputModels: "editor",
+  noJsonSchemaModels: "editor",
   omitReasoningEffortWithToolsModels: "editor",
   parallelToolCalls: "editor",
   pinParallelToolCallsFalse: "editor",
