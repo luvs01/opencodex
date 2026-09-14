@@ -109,7 +109,7 @@ function stripAntigravityRejectedClaudeSdkParagraph(systemText: string): string 
  * Unknown ids return `undefined` deliberately. An earlier revision returned a 16,384 floor for
  * anything unmatched, which silently truncated aliases, gateway ids, and any model added after
  * this table was written — the operator asked for N tokens and got 16,384 with no signal. A cap
- * we cannot justify is worse than no cap: `structure/02_config-and-codex-home.md` is explicit
+ * we cannot justify is worse than no cap: `structure/config.md` is explicit
  * that an explicit request value wins, so an unrecognized model passes through untouched and the
  * upstream remains the authority on its own limit.
  *
@@ -429,6 +429,18 @@ function messagesToGeminiFormat(
     }
   }
 
+  // Gemini API and Claude-on-Antigravity reject assistant-tail (model-tail in Gemini terms)
+  // histories. Gemini fails upstream with "Requests ending with a model turn are not supported"
+  // (HTTP 400), while Claude fails with "This model does not support assistant message prefill.
+  // The conversation must end with a user message." Context compaction, previous_response_id
+  // expansion, subagent orchestration, and interrupted-turn replay can all produce a
+  // model-tail history. Append a user "(continue)" nudge, mirroring the anthropic adapter's
+  // tail guard (src/adapters/anthropic.ts).
+  const lastTurn = contents.length > 0 ? (contents[contents.length - 1] as { role?: string }) : undefined;
+  if (!lastTurn || lastTurn.role === "model") {
+    contents.push({ role: "user", parts: [{ text: "(continue)" }] });
+  }
+
   return { systemInstruction, contents, replayedCallIds };
 }
 
@@ -556,13 +568,15 @@ function googleToolCallMetadataFromPart(
  * Keep that provider visibility bit authoritative here so the streaming and buffered parsers
  * cannot accidentally expose the same hidden reasoning through different event types.
  */
-function googlePartTextEvent(part: GoogleResponsePart): AdapterEvent | undefined {
+function googlePartTextEvent(part: GoogleResponsePart, thoughtSummary = false): AdapterEvent | undefined {
   // A malformed scalar/object is not text and must not cross the AdapterEvent boundary. Dropping
   // only this optional field preserves the rest of the part without inventing assistant output by
   // coercion; an empty string keeps its existing no-event behavior.
   if (typeof part.text !== "string" || part.text.length === 0) return undefined;
   return part.thought === true
-    ? { type: "reasoning_raw_delta", text: part.text }
+    ? thoughtSummary
+      ? { type: "thinking_delta", thinking: part.text }
+      : { type: "reasoning_raw_delta", text: part.text }
     : { type: "text_delta", text: part.text };
 }
 
@@ -709,6 +723,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
   // Per-request closure: resolveAdapter builds a fresh adapter per request (server.ts), so buildRequest
   // can stash the CCA model/session for parseStream's reasoning-replay observation.
   let antigravityModel: string | undefined;
+  let returnsThoughtSummaries = false;
   let antigravitySession: string | undefined;
   // Vertex returns the same opaque Gemini thought signatures as CCA, but its replay namespace
   // must stay transport-scoped: a signature minted by one Google backend must never be sent to
@@ -783,6 +798,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         : provider.googleMode === "vertex"
           ? parsed.modelId
           : resolveDirectGeminiWireModelId(parsed.modelId, provider.directGeminiWireRenames !== false);
+      returnsThoughtSummaries = provider.googleMode === "cloud-code-assist"
+        && /^gemini-/.test(routedModelId) && !isImageCapableModel(parsed.modelId);
       // AI Studio's `-tiered` spelling is wire-only; CCA aliases may migrate to another generation.
       const identityModelId = provider.googleMode === "cloud-code-assist" ? routedModelId : parsed.modelId;
       const stripRejectedClaudeSdkParagraph = provider.googleMode === "cloud-code-assist"
@@ -854,11 +871,20 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         );
         antigravityModel = wireModelId;
         antigravitySession = sessionId;
+        // CCA Gemini exposes provider-authored thought summaries with includeThoughts.
+        // Other CCA model families do not share this request contract.
+        const includeThoughts = provider.showThinkingSummary === true
+          && parsed.options.hideThinkingSummary !== true
+          && /^gemini-/.test(wireModelId)
+          && !isImageCapableModel(parsed.modelId);
         // Effort → thinkingConfig for CCA (CLIProxyAPI proven: request.generationConfig.thinkingConfig).
         // Suffix/compat IDs return thinkingLevel=undefined — the suffix IS the effort, no contradiction.
-        if (thinkingLevel) {
+        if (thinkingLevel || includeThoughts) {
           const gc = (body.generationConfig ?? {}) as Record<string, unknown>;
-          gc.thinkingConfig = { thinkingLevel };
+          gc.thinkingConfig = {
+            ...(thinkingLevel ? { thinkingLevel } : {}),
+            ...(includeThoughts ? { includeThoughts: true } : {}),
+          };
           body.generationConfig = gc;
         }
         // Reasoning continuity: Gemini models re-inject cached thoughtSignatures; Claude-on-Antigravity
@@ -894,17 +920,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           // fills a first functionCall that replay could not sign. Outside the cache branch too,
           // because the turn still needs a signature when no session was ever recorded.
           applyAntigravityThoughtSignatureFallback(wireModelId, contents);
-          // Claude-on-Antigravity rejects assistant-tail (model-tail in Gemini terms) histories
-          // as prefill: "This model does not support assistant message prefill. The conversation
-          // must end with a user message." Context compaction, previous_response_id expansion,
-          // and interrupted-turn replay can all produce a model-tail history. Append a user
-          // "(continue)" nudge, mirroring the anthropic adapter's tail guard (src/adapters/anthropic.ts).
-          if (/claude/i.test(wireModelId)) {
-            const last = contents.length > 0 ? contents[contents.length - 1] as { role?: string } : undefined;
-            if (!last || last.role === "model") {
-              contents.push({ role: "user", parts: [{ text: "(continue)" }] });
-            }
-          }
+          // The model-tail "(continue)" guard runs once, in messagesToGeminiFormat, so CCA,
+          // Vertex and AI Studio share one decision. A second check here would append a
+          // duplicate nudge whenever signature sanitization reshapes the tail afterwards.
         }
         const envelope = {
           model: wireModelId,
@@ -1135,7 +1153,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
             if (part.thought === true && sig && isLikelyRealThoughtSignature(sig)) {
               pendingStreamThoughtSig = sig;
             }
-            const textEvent = googlePartTextEvent(part);
+            const textEvent = googlePartTextEvent(part, returnsThoughtSummaries);
             if (textEvent) {
               emittedContentEvent = true;
               yield textEvent;
@@ -1307,7 +1325,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         bytesReservation.commitRetained();
         budget.releaseRetained(total, { kind: "retained_collectors" });
         rawText = new TextDecoder().decode(bytes);
-        rawTextBytes = new TextEncoder().encode(rawText).byteLength;
+        rawTextBytes = Buffer.byteLength(rawText, "utf8");
         const textReservation = budget.reserveTransient(rawTextBytes, { kind: "retained_collectors" });
         textReservation.commitRetained();
         budget.releaseRetained(total, { kind: "retained_collectors" });
@@ -1329,7 +1347,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           return [{ type: "error", message: `google response was not a JSON object (${valueType})` }];
         }
         raw = parsedRaw;
-        rawBytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
+        rawBytes = Buffer.byteLength(JSON.stringify(raw), "utf8");
         const rawReservation = budget.reserveTransient(rawBytes, { kind: "retained_collectors" });
         rawReservation.commitRetained();
         budget.releaseRetained(rawTextBytes, { kind: "retained_collectors" });
@@ -1411,7 +1429,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           if (part.thought === true && sig && isLikelyRealThoughtSignature(sig)) {
             pendingThoughtSig = sig;
           }
-          const textEvent = googlePartTextEvent(part);
+          const textEvent = googlePartTextEvent(part, returnsThoughtSummaries);
           if (textEvent) events.push(textEvent);
           const inline = (part as { inlineData?: { mimeType?: string; data?: string } }).inlineData;
           if (inline && typeof inline.data === "string") {

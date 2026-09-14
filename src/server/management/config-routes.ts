@@ -110,7 +110,7 @@ import { applySystemEnvToggle } from "../system-env";
 import { getCachedStartupHealth, invalidateStartupHealthCache } from "../startup-health-cache";
 import { runWindowsTrayAction } from "../windows-tray-control";
 import { runStartupInstallAction, type StartupInstallAction } from "../startup-action-control";
-import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortClamp, resolveCodexRuntime } from "../../codex/runtime";
+import { displayCodexRuntimePath, effortClampAppliesToRuntime, liveRemovedEfforts, loadLastEffortClamp, resolveCodexRuntime } from "../../codex/runtime";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
@@ -161,13 +161,17 @@ interface ClientIntegrationSyncOutcome {
 }
 
 /**
- * Re-inject native clients that are switched ON and file integrations whose
+ * Re-inject native clients that are switched ON and every file integration whose
  * OpenCodex ownership record is the operator's durable opt-in.
  *
  * Only Codex used to run here, so a catalog change reached Codex and nothing else: a Grok
  * fence or a written Desktop profile kept the context windows it was created with until the
  * next `ocx start`. The startup path already gates each client on its own toggle
  * (`src/cli/index.ts`), and this is that same fan-out for the on-demand command.
+ *
+ * File integrations use the catalog-refresh coordinator so owned blocks are
+ * updated without claiming unowned files. Aside remains on its multi-profile
+ * server-owned path inside that coordinator.
  *
  * A client that is OFF or never connected is omitted from the result rather than reported as skipped — the
  * caller has to be able to tell "not touched" from "tried and failed". A client that fails
@@ -233,7 +237,7 @@ export async function syncEnabledClientIntegrations(
     },
     config,
     port,
-  }, ["mcode", "pi", "aside"]));
+  }, ["mcode", "pi", "aside", "raycast", "omo", "cline"]));
 
   return out;
 }
@@ -312,9 +316,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       appOwnedMemoryBudgetMb: config.appOwnedMemoryBudgetMb ?? 256,
       codexAccountPickerEnabled: codexAccountPickerEnabled(config),
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
-      // Absent means hidden, so the GUI renders the switch without having to know that
-      // `undefined` and `false` mean the same thing.
-      showCodexSparkQuota: config.showCodexSparkQuota === true,
       // Absent means off, same convention: the GUI renders a plain switch without
       // needing to know that `undefined` and `false` mean the same thing here.
       ultraFastTier: config.ultraFastTier === true,
@@ -325,6 +326,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
       codexDesktopAuthless: config.codexDesktopAuthless === true,
+      // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
+      codexClientCompaction: config.codexClientCompaction === true,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
@@ -338,7 +341,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
           : null,
         catalogClamp: {
           active: clampActive,
-          removedEfforts: clampActive ? (lastClamp?.removedEfforts ?? []) : [],
+          removedEfforts: clampActive ? [...liveRemovedEfforts(lastClamp)] : [],
           runtimeVersion: clampActive ? (lastClamp?.runtimeVersion ?? null) : null,
         },
         warning: warningParts.length > 0 ? warningParts.join(" ") : null,
@@ -411,10 +414,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAccountPickerEnabled?: unknown;
       codexQuotaAutoRefresh?: unknown;
       oauthOpenBrowser?: unknown;
-      showCodexSparkQuota?: unknown;
       ultraFastTier?: unknown;
       codexMainAccountHardLock?: unknown;
       codexDesktopAuthless?: unknown;
+      codexClientCompaction?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
@@ -422,11 +425,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexAccountPickerEnabled === undefined
       && body.codexQuotaAutoRefresh === undefined
       && body.oauthOpenBrowser === undefined
-      && body.showCodexSparkQuota === undefined
       && body.ultraFastTier === undefined
       && body.codexMainAccountHardLock === undefined
-      && body.codexDesktopAuthless === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexSparkQuota, ultraFastTier, codexMainAccountHardLock, or codexDesktopAuthless" }, 400);
+      && body.codexDesktopAuthless === undefined
+      && body.codexClientCompaction === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, ultraFastTier, codexMainAccountHardLock, codexDesktopAuthless, or codexClientCompaction" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -441,9 +444,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && typeof body.codexAccountPickerEnabled !== "boolean") {
       return jsonResponse({ error: "codexAccountPickerEnabled boolean is required" }, 400);
     }
-    if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
-      return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
-    }
     if (body.ultraFastTier !== undefined && typeof body.ultraFastTier !== "boolean") {
       return jsonResponse({ error: "ultraFastTier boolean is required" }, 400);
     }
@@ -452,6 +452,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
       return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
+    }
+    if (body.codexClientCompaction !== undefined && typeof body.codexClientCompaction !== "boolean") {
+      return jsonResponse({ error: "codexClientCompaction boolean is required" }, 400);
     }
     let quotaAutoRefreshChange: { id: string; window: "fiveHour" | "weekly"; enabled: boolean } | undefined;
     if (body.codexQuotaAutoRefresh !== undefined) {
@@ -497,18 +500,19 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasCodexQuotaAutoRefresh: Object.hasOwn(config, "codexQuotaAutoRefresh"),
       oauthOpenBrowser: config.oauthOpenBrowser,
       hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
-      showCodexSparkQuota: config.showCodexSparkQuota,
-      hasShowCodexSparkQuota: Object.hasOwn(config, "showCodexSparkQuota"),
       ultraFastTier: config.ultraFastTier,
       hasUltraFastTier: Object.hasOwn(config, "ultraFastTier"),
       codexMainAccountHardLock: config.codexMainAccountHardLock,
       hasCodexMainAccountHardLock: Object.hasOwn(config, "codexMainAccountHardLock"),
       codexDesktopAuthless: config.codexDesktopAuthless,
       hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
+      codexClientCompaction: config.codexClientCompaction,
+      hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
     let pickerIsEnabled = pickerWasEnabled;
     const authlessWasEnabled = config.codexDesktopAuthless === true;
+    const clientCompactionWasEnabled = config.codexClientCompaction === true;
     try {
       if (typeof body.codexAutoStart === "boolean") {
         config.codexAutoStart = body.codexAutoStart;
@@ -532,9 +536,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (typeof body.oauthOpenBrowser === "boolean") {
         config.oauthOpenBrowser = body.oauthOpenBrowser;
       }
-      if (typeof body.showCodexSparkQuota === "boolean") {
-        config.showCodexSparkQuota = body.showCodexSparkQuota;
-      }
       // Off deletes the key rather than persisting `false`: absent is the documented
       // default, and a written `false` would survive as a decision nobody made.
       if (body.ultraFastTier === true) config.ultraFastTier = true;
@@ -543,6 +544,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       else if (body.codexMainAccountHardLock === false) deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
       if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
       else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
+      if (body.codexClientCompaction === true) config.codexClientCompaction = true;
+      else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(config, "codexClientCompaction");
       if (quotaAutoRefreshChange) {
         const { id, window, enabled } = quotaAutoRefreshChange;
         const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
@@ -576,9 +579,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasOauthOpenBrowser) {
         config.oauthOpenBrowser = previousSettings.oauthOpenBrowser;
       } else deleteConfigTopLevelKey(config, "oauthOpenBrowser");
-      if (previousSettings.hasShowCodexSparkQuota) {
-        config.showCodexSparkQuota = previousSettings.showCodexSparkQuota;
-      } else deleteConfigTopLevelKey(config, "showCodexSparkQuota");
       if (previousSettings.hasUltraFastTier) {
         config.ultraFastTier = previousSettings.ultraFastTier;
       } else deleteConfigTopLevelKey(config, "ultraFastTier");
@@ -588,16 +588,22 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasCodexDesktopAuthless) {
         config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
       } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
+      if (previousSettings.hasCodexClientCompaction) {
+        config.codexClientCompaction = previousSettings.codexClientCompaction;
+      } else deleteConfigTopLevelKey(config, "codexClientCompaction");
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
-    // The authless switch changes the injected config.toml shape, so converge now rather than
-    // waiting for the next start; the injector re-reads config and rewrites the form.
+    // Both Desktop compatibility switches change the injected config.toml shape, so converge now
+    // rather than waiting for the next start; the injector re-reads config and rewrites the form.
     const authlessIsEnabled = config.codexDesktopAuthless === true;
-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
+    const clientCompactionIsEnabled = config.codexClientCompaction === true;
+    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
+      || authlessWasEnabled !== authlessIsEnabled
+      || clientCompactionWasEnabled !== clientCompactionIsEnabled
       ? await convergeCodexCatalog()
       : undefined;
     const catalogRefreshPending = catalogRefresh
@@ -614,8 +620,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexQuotaAutoRefresh: quotaAutoRefreshSettings(config),
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
-      showCodexSparkQuota: config.showCodexSparkQuota === true,
       codexDesktopAuthless: authlessIsEnabled,
+      codexClientCompaction: clientCompactionIsEnabled,
       codexMainAccountHardLock: config.codexMainAccountHardLock === true,
       mainAccountHardLock: getMainAccountHardLockStatus(config),
       startupHealth: await readStartupHealth(config),
@@ -697,6 +703,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     const webSearchCandidates = await webSearchCandidateRows(config);
     return jsonResponse({
       webSearch: {
+        enabled: ws.enabled !== false,
         model: ws.model ?? "gpt-5.6-luna",
         backend: ws.backend,
         streamRoutedModelOutput: ws.streamRoutedModelOutput === true,
@@ -796,8 +803,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     if (body.vision && (body.vision.model !== undefined || body.vision.reasoning !== undefined)) {
       visionReasoningTouched = true;
       const model = typeof body.vision.model === "string"
-        ? (body.vision.model === "" ? "gpt-5.4-mini" : body.vision.model)
-        : (config.visionSidecar?.model || "gpt-5.4-mini");
+        ? (body.vision.model === "" ? "gpt-5.6-luna" : body.vision.model)
+        : (config.visionSidecar?.model || "gpt-5.6-luna");
       const sourceReasoning = body.vision.reasoning ?? config.visionSidecar?.reasoning;
       normalizedVisionReasoning = sourceReasoning === undefined
         ? undefined
@@ -935,6 +942,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     return jsonResponse({
       ok: true,
       webSearch: {
+        enabled: ws.enabled !== false,
         model: ws.model ?? "gpt-5.6-luna",
         backend: ws.backend,
         streamRoutedModelOutput: ws.streamRoutedModelOutput === true,

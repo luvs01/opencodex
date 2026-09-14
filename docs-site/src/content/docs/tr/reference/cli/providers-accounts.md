@@ -16,7 +16,7 @@ bir ad hem `--adapter` hem de `--base-url` gerektirir.
 
 | Alt komut | Desteklenen bayraklar | Eylem |
 | --- | --- | --- |
-| `list` | `--json` | Yapılandırılmış sağlayıcıları ve kalan kayıt defteri girdilerini listeleyin. |
+| `list` | `--json`, `--jsonl` | Yapılandırılmış sağlayıcıları ve kalan kayıt defteri girdilerini listeleyin. `--jsonl`, yapılandırılmış her sağlayıcı için satır başına bir JSON nesnesi üretir. |
 | `add <ad>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | Bir kayıt defteri/özel sağlayıcı ekleyin. `--force` üzerine yazar; `--sync`, insan çıktısı modunda çalışan bir proxy'yi yeniler. |
 | `edit <ad>` | sağlayıcı alan bayrakları, `--headers <json>`, `--json` | Anahtar havuzlarını değiştirmeden doğrulanmış canlı sağlayıcı alanlarını düzenleyin. `--headers` özel istek başlıklarını birleştirir; temizlemek için `{}` veya `-` iletin. |
 | `test <ad>` | `--json` | Gerçek yukarı akış model uç noktasını araştırın. |
@@ -30,6 +30,7 @@ bir ad hem `--adapter` hem de `--base-url` gerektirir.
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -37,6 +38,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` yalnızca yapılandırılmış sağlayıcıları, her satırda bir JSON nesnesi olacak şekilde yazar. Her nesne, `--json` çıktısındaki `configured` dizisinin bir öğesiyle aynı alanları içerir; `registryCount` özeti eklenmez. Betikler nesneleri satır satır işleyebilir. `--json` ve `--jsonl` birlikte kullanılamaz.
 
 :::caution[Özel başlıklar bir kimlik bilgisi kanalı değildir]
 `--headers`, gizli olmayan istek meta verileri içindir — yönlendirme ipuçları,
@@ -72,10 +75,12 @@ kabul edilen OAuth ve API anahtarı sağlayıcı kimliklerini yazdırır.
 `ocx status` / `ocx doctor` yeniden kimlik doğrulama gerektiğini veya bir
 terminal yenileme hatasını bildirdikten sonra **yeniden kimlik doğrulaması
 yapmak** için aynı komutu kullanın (veya kontrol panelinde Yeniden Kimlik
-Doğrula'yı kullanın). Codex havuz hesapları genel bir `ocx login` sağlayıcısı
-değildir — bunun yerine kontrol paneli Codex hesap havuzu (Yeniden Kimlik
-Doğrula) veya başsız `ocx account reauth` akışı aracılığıyla yeniden kimlik
-doğrulaması yapın.
+Doğrula'yı kullanın). Codex havuz hesapları yukarıdaki OAuth veya API anahtarı
+sağlayıcılarından biri değildir, ancak `ocx login codex` onlara ulaşır: komut
+hesap havuzu girişine yönlendirilir, bu yüzden `ocx login codex --reauth` ile
+`ocx account reauth codex` aynı şeydir. Kontrol panelindeki Codex hesap havuzu
+(Yeniden Kimlik Doğrula) da aynısını yapar. Bu yol proxy içinde çalışır, bu
+nedenle çalışan bir proxy gerektirir.
 
 ```bash
 ocx login xai
@@ -108,7 +113,7 @@ Bir sağlayıcı için saklanan OAuth kimlik bilgisini kaldırın.
 listeleyin ve değiştirin. Sağlanan yardım arayüzü şöyledir:
 
 ```text
-Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits> ...
+Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits|grok-reset-coupons> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 current <provider>  Show the active account or key.
@@ -120,6 +125,7 @@ remove <provider> <id> --yes  Remove a stored account or key after an existence 
 add-key <provider> [--label <label>]  Add a key read only from piped stdin.
 login/reauth/code/cancel  Run browser or manual-code auth from a headless shell.
 reset-credits <id|main> [--consume --yes]  Inspect or consume Codex reset credits.
+grok-reset-coupons [<id>] [--consume --yes] [--token-id <token-id>] [--operation-id <uuid>]  Inspect or redeem Grok reset coupons.
 Switching the active account takes effect immediately; running threads move on their next request, and in-flight requests keep the account they captured.
 A selection-order change applies from the next unbound request and never moves a bound thread.
 ```
@@ -229,11 +235,11 @@ eşleşen null veya eski bir rapora düşer (çıkış 0).
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-`openai` Codex havuzunun eşiğini yönetir veya genel OAuth havuzunun eşiğini kaydeder. `on` %80, `off` %0 kaydeder; `threshold <n>` 0–100 kabul eder. Genel havuz eşikleri şu anda uygulanmaz: kayıt işlemi eşik tabanlı geçişi, sağlayıcının etkinlik ayarını veya 429 hatasından sonraki otomatik hesap değişimini etkilemez. Genel havuz çıktısı sunucunun doğruladığı değerleri kullanır. Genel havuzlarda `poolEnabled`, kaydedilmiş sağlayıcı ayarıdır (`null` belirtilmemiş demektir); devralınmış etkin durumu göstermez. `inert: true`, eşiğin uygulanmadığını belirtir; yetenek bilinmiyorsa `enabled: true` bildirilmez. API anahtarlı sağlayıcılar, Anthropic ve geçersiz değerler reddedilir.
+`openai` Codex havuzunun eşiğini yönetir veya genel OAuth havuzunun eşiğini kaydeder. `on` %80, `off` %0 kaydeder; `threshold <n>` 0–100 kabul eder. Genel havuz eşiği yalnızca `pool.kernel` açıkken ve `strategy: "fill-first"` seçiliyken seçimi yönlendirir; bayrak kapalıyken kayıt işlemi eşik tabanlı geçişi etkinleştirmez. Her iki durumda da sağlayıcının etkinlik ayarını veya 429 hatasından sonraki otomatik hesap değişimini etkilemez. Genel havuz çıktısı sunucunun doğruladığı değerleri kullanır. Genel havuzlarda `poolEnabled`, kaydedilmiş sağlayıcı ayarıdır (`null` belirtilmemiş demektir); devralınmış etkin durumu göstermez. `inert: true` eşiğin kaydedildiğini ama uygulanmadığını, `inert: false` ise havuzun onu uyguladığını belirtir. `inert` yoksa yetenek bilinmiyordur ve bu durumda da `enabled: true` bildirilmez. API anahtarlı sağlayıcılar, Anthropic ve geçersiz değerler reddedilir.
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }
-generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: boolean | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
@@ -324,6 +330,26 @@ anahtarı içermez.
 Bir hesap için Codex sıfırlama kredilerini inceleyin. Bir krediyi tüketmek
 yıkıcıdır ve hem `--consume` hem de `--yes` gerektirir.
 
+### `ocx account grok-reset-coupons [<account-id>] [--consume --yes [--token-id <id>] [--operation-id <uuid>]] [--json]`
+
+Bir xAI / Grok hesabı için kalan sıfırlama kuponlarını inceler veya bir tanesini kullanır.
+
+`--consume` olmadan çağrıldığında, kullanılabilir kupon jetonlarını ve geçerlilik pencerelerini döndürür:
+
+```bash
+ocx account grok-reset-coupons
+ocx account grok-reset-coupons acc_xai_01 --json
+```
+
+Bir sıfırlama kuponunu kullanmak faturalandırma durumunu değiştirir ve bir kupon jetonunu kalıcı olarak tüketir. `--consume` kesinlikle `--yes` gerektirir:
+
+```bash
+ocx account grok-reset-coupons --consume --yes
+ocx account grok-reset-coupons --consume --yes --token-id <token-id>
+```
+
+İdempotent sonuç garantisi için `--operation-id <uuid>` (geçerli bir UUIDv4 olmalıdır) iletin. Ağ kopması veya komutun yeniden denenmesi durumunda, özdeş işlem kimlikleri ikinci bir kupon tüketmek yerine kalıcı olarak kaydedilen sonucu yeniden oynatır.
+
 ### `ocx account main <alt-komut>`
 
 OpenCodex hesap havuzu yönlendirmesini değiştirmeden adlandırılmış yerel Codex
@@ -334,6 +360,9 @@ ocx account main doctor [--json]
 ocx account main list [--json]
 ocx account main register <etiket> [--json]
 ocx account main add <etiket>
+ocx account main reauth --device [--no-wait] [--json]
+ocx account main reauth status --flow <id> [--json]
+ocx account main reauth cancel --flow <id> [--json]
 ocx account main switch <profil-id-veya-etiket> --yes [--json]
 ocx account main recover [--rollback --yes] [--json]
 ```
@@ -447,4 +476,3 @@ kapalı bir enum olarak ayrıştırır ve başka herhangi bir değer içeren tü
 kataloğu reddeder, bu nedenle `add`, `edit` ve yönetim API'si katalog
 yazıcısının daha sonra çıkarması gereken bir şeyi saklamak yerine hatalı değeri
 reddeder (#759).
-

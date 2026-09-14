@@ -226,6 +226,12 @@ function bindGatherPaths(
   };
 }
 
+/**
+ * Prepara um candidato de catálogo para convergência sem gravá-lo em disco.
+ * Clona a fonte e mescla as observações nativas, os modelos roteados e por conta,
+ * aplicando a configuração, inclusive nomes nativos, e os limites de raciocínio
+ * observados no runtime antes de retornar o catálogo resultante.
+ */
 function prepareCatalog(
   config: Readonly<OcxConfig>,
   source: Extract<CatalogSourceForGather, { kind: "available" }>,
@@ -366,6 +372,7 @@ function prepareCatalog(
     accountBoundEntries,
     suppressedBareNativeSlugs,
     openaiContextCap,
+    nativeDisplayNames: config.providers[OPENAI_CODEX_PROVIDER_ID]?.modelDisplayNames,
     policy: {
       ...CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
       nativeBackfillSlugs: [...availableBareNativeSlugs, ...observedNativeSlugs],
@@ -378,7 +385,7 @@ function prepareCatalog(
       ? supportedCodexReasoningEffortsFromObservedCatalog(source.runtimeSupport.catalog)
       : null,
   );
-  finalizeAutoReviewModelOverride(mergedModels, catalogModels);
+  finalizeAutoReviewModelOverride(mergedModels, catalogModels, config);
   catalog.models = mergedModels;
   return catalog;
 }

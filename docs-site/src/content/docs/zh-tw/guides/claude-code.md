@@ -420,11 +420,13 @@ Claude Code 的 `/effort` 設定會完整保留並傳遞給適配器：
 | Assistant 文字 | `output_text` |
 | Assistant `tool_use` | `function_call`（`input` → JSON 字串化的 `arguments`） |
 | 使用者 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 字首） |
-| 重放 `thinking` / `redacted_thinking` | 丟棄 |
+| 重放 `thinking` / `redacted_thinking` | `reasoning` 項目；簽名與遮蔽載荷保存在有界 `ocxr1` 信封中 |
 | Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定名稱 function→`{type:"function",name}`，hosted WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+在預期的 Anthropic 適配器上，保留未隱藏的簽名區塊（包括空 thinking）和不透明的 redacted 區塊。`hideThinkingSummary` 政策不變：不會向 Claude 用戶端公開本地隱藏的簽名文字，尚未證明經過此隱藏邊界的無損重播。舊版組合信封在串流文字發出後無法恢復原始區塊順序。`claudeCode.compatibility: "enforce"` 仍拒絕 thinking 重播。這不證明真實 Anthropic 接受請求或快取命中改善；[#3719](https://github.com/lidge-jun/opencodex/issues/3719) 仍未關閉。
 
 **錯誤情況（400）：**JSON 格式錯誤；缺少/空的 `model`；缺少/空的 `messages`；不支援的
 role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定名稱的 `tool_choice`
@@ -437,7 +439,8 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | `response.created` | `message_start` + `ping` |
 | 心跳 | `ping` |
 | 文字增量 | `content_block_start` → `content_block_delta`（文字）→ `content_block_stop` |
-| 推理摘要/文字 | 帶合成簽名的 `thinking` 塊 |
+| 推理摘要/文字 | 帶重播簽名或有界 `ocxr1` 備援信封的 `thinking` 塊 |
+| 遮蔽推理 | 從推理信封重播的 `redacted_thinking` 塊 |
 | Function-call 幀 | 帶 `input_json_delta` 的 `tool_use` 塊 |
 | 終止事件 | `message_delta` → `message_stop` |
 | 在終止事件前 EOF | 502 風格的 `api_error` |
@@ -530,3 +533,7 @@ Claude 模型時自動載入。對於原生透傳，這是正常現象；對於�
 
 **子代理派發到錯誤模型**——名冊代理（`ocx-*`）使用 `<!-- ocx-route: ... -->` 指令，
 而不是 Agent 工具的 `model` 引數。請確保指令與預期路由一致。傳入 `"haiku"` 作為模型佔位符。
+
+在 `config.json` 中設定 `claudeCode.stabilizePromptCache: true`，可在轉換路由上將系統指令末尾支援的 Claude 提示移到最後一則使用者訊息。預設值為 `false`。僅在用戶端允許這種角色變更時啟用。程式碼圍欄中的範例和不符合的文字會保留，Anthropic 原生轉送不變。沒有中繼資料時，快取鍵依穩定後的指令計算。此選項不會產生對話識別碼，也不保證上游快取命中。
+
+在 OpenCode Go 的 `deepseek-v4.1-flash` Chat 路由上，轉換後的時間線系統提醒會自動保留原有位置和 system 角色，並排在尚待傳回的工具結果之後。因此，新增提醒不會重寫開頭的系統提示。無論 `stabilizePromptCache` 是否啟用，此行為都會生效；其他模型、目標位址的轉換方式以及 Anthropic 原生轉送維持不變。快取重用仍需要穩定的工作階段識別碼和可用的上游快取。修改較早的指令或工具、壓縮對話也可能影響快取命中；僅保留提醒順序並不保證快取重用。
