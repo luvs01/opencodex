@@ -16,12 +16,14 @@ import {
   asideJournalDeleteResponse, type AsideProfileRouteOptions,
 } from "./aside-profile-routes";
 import type { IntegrationIO } from "../../integrations/config-io";
+import { createClineIO } from "../../integrations/cline-io";
 import { matchesOperationResult } from "../../integrations/journal";
 import {
   INTEGRATION_CLIENT_IDS,
   isIntegrationClientId,
   type IntegrationClientId,
 } from "../../integrations/registry";
+import { detectRaycast, type RaycastInstall } from "../../integrations/raycast-detect";
 import { readIntegrationState } from "../../integrations/state";
 import { createIntegrationStateStore, type IntegrationStateStore } from "../../integrations/store";
 import {
@@ -58,6 +60,13 @@ type RestoreResult = Awaited<ReturnType<typeof restoreIntegrationCoordinated>>;
 
 export type IntegrationStateEnvelope = {
   clientId: IntegrationClientId;
+  /**
+   * Raycast only, and only on the single-client read. Custom Providers is a
+   * Pro feature, so a file that is `current` can still be one Raycast ignores;
+   * this is the fact that lets status and the GUI say so. It is not part of
+   * the shared `IntegrationStatus`, which describes the file, not the app.
+   */
+  raycast?: RaycastInstall;
 } & IntegrationStateRecord;
 
 export interface IntegrationStateListEnvelope {
@@ -141,6 +150,17 @@ export function setIntegrationPathTestHooks(hooks: { env?: NodeJS.ProcessEnv; ho
   integrationPathTestHooks = hooks;
 }
 
+/**
+ * Raycast detection override for tests. The real detector spawns `defaults` and
+ * reads the developer's own subscription state, which is exactly the kind of
+ * host fact a route test must not depend on.
+ */
+let raycastDetectTestHook: (() => RaycastInstall) | null = null;
+
+export function setRaycastDetectTestHook(hook: (() => RaycastInstall) | null): void {
+  raycastDetectTestHook = hook;
+}
+
 /** The `env`/`home` overrides, spread into every registry-resolving call. */
 function pathOverrides(): { env?: NodeJS.ProcessEnv; home?: string } {
   return {
@@ -177,7 +197,10 @@ export function setIntegrationMutationFlightTestHooks(
   setIntegrationMutationFlightTestHook(hooks?.run ?? null);
   // Path overrides are part of the same isolation contract: clearing flights
   // while leaving a temp home bound would let the next suite write real files.
-  if (hooks === null) integrationPathTestHooks = null;
+  if (hooks === null) {
+    integrationPathTestHooks = null;
+    raycastDetectTestHook = null;
+  }
 }
 
 /**
@@ -512,7 +535,11 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
           undoable: (() => {
             if (snapshot === "expired") return false;
             if (newestByClient.get(operation.clientId) !== operation.opId) return false;
-            const current = currentConfigText(operation.configPath);
+            const current = operation.clientId === "cline" ? (() => {
+              const io = createClineIO(integrationMutationTestHooks?.io ?? store.io(), operation.configPath, store);
+              const read = io.readText(operation.configPath);
+              return read.kind === "text" ? read.text : read.kind === "missing" ? null : undefined;
+            })() : currentConfigText(operation.configPath);
             return current === undefined ? false : matchesOperationResult(operation, current);
           })(),
           /*
@@ -633,7 +660,12 @@ export async function handleIntegrationRoutes(ctx: ManagementContext): Promise<R
     try {
       const input = await buildIntegrationWriteInput(requestedClient, ctx, integrationStore());
       const state = readIntegrationState(input);
-      return jsonResponse(state satisfies IntegrationStateEnvelope, 200, req, ctx.config);
+      // Detection runs only for the client that needs it: `defaults` is a
+      // process spawn, and no other client's read should pay for it.
+      const envelope: IntegrationStateEnvelope = requestedClient === "raycast"
+        ? { ...state, raycast: (raycastDetectTestHook ?? detectRaycast)() }
+        : state;
+      return jsonResponse(envelope, 200, req, ctx.config);
     } catch (error) {
       return internalErrorResponse(error, ctx);
     }

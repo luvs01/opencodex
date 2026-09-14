@@ -130,10 +130,19 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "api.clientConfig.clientPrime",
   "integrations.tab.aside",
   "api.clientConfig.clientAside",
+  "integrations.tab.raycast",
+  "api.clientConfig.clientRaycast",
+  // "omo" is the product's own lowercase spelling, identical in every locale.
+  "integrations.tab.omo",
+  "api.clientConfig.clientOmo",
+  // Cline product name and CLI acronym are intentionally preserved.
+  "integrations.tab.cline",
+  "api.clientConfig.clientCline",
   "integrations.codex.title",
   // Provider proper nouns kept in English
   "provider.name.commandCodeAuth",
   "provider.name.commandCodeApi",
+  "provider.name.orcaRouterApi",
   // Routing analytics identifiers and short labels
   "routing.revision",
   "routing.unavailable",
