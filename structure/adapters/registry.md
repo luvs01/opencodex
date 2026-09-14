@@ -27,6 +27,8 @@ Some adapters share another adapter's routed-tool semantics while retaining inde
   a browser sign-in versus a signed-in local CLI. The ACP adapter above remains registered and is
   selected by a custom-named row, never by the `devin-cli` id, because `routedProviderConfig` pins
   the adapter from the registry for any registry id.
+  Connect trailer diagnostics expose only an allowlisted error code and hexadecimal trace id;
+  upstream message text stays inside the parser because it can reflect the request credential.
 
 The registry records those relationships with `contractParent`. A parent relationship does **not** mean the registry recursively constructs a parent adapter and injects it into the child. Azure and MiMo keep owning their existing internal composition. This avoids making production constructors depend on test/conformance needs and keeps this authority refactor behavior-neutral.
 
