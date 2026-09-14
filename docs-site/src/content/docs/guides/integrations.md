@@ -1,10 +1,10 @@
 ---
 title: Integrations
-description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent and Aside from the dashboard — one switch per client, with a backup taken before every write.
+description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo and Cline CLI from the dashboard — one switch per client, with a backup taken before every write.
 ---
 
 The **Integrations** tab writes opencodex's provider block into a client's own config
-file, and removes it again. Twelve clients work this way, each with a switch:
+file, and removes it again. Fifteen clients work this way, each with a switch:
 
 | Client | Config file | Format | When the change takes effect | Credential |
 |---|---|---|---|---|
@@ -14,12 +14,15 @@ file, and removes it again. Twelve clients work this way, each with a switch:
 | Hermes | `~/.hermes/config.yaml` | YAML | new sessions | `OPENCODEX_HERMES_API_KEY` |
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON5 | immediately, on a running gateway | `OPENCODEX_OPENCLAW_API_KEY` |
 | Kimi Code | `~/.kimi-code/config.toml` | TOML | on restart, or `/reload` | loopback placeholder |
-| Gajae Code | `~/.gjc/agent/models.yml` | YAML | new sessions, or when you open `/model` |`OPENCODEX_GAJAE_API_KEY` |
+| gjc | `~/.gjc/agent/models.yml` | YAML | new sessions, or when you open `/model` |`OPENCODEX_GAJAE_API_KEY` |
 | DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | YAML | hot reload | non-secret loopback bearer placeholder |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | new sessions, or after opening the model picker | loopback placeholder |
 | Prime Agent | `~/.prime/agent/models.json` | JSON | new sessions | loopback placeholder |
 | ZCode | `~/.zcode/v2/config.json` | JSON | on restart | loopback placeholder |
 | Aside | `~/.aside/u/<account>/models.json` | JSON | after fully quitting and reopening Aside | loopback placeholder |
+| Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | immediately on save — Raycast watches the file | none — loopback only |
+| omo | `~/.omo/agent/models.json` | JSON | new sessions | loopback placeholder |
+| Cline CLI | `~/.cline/data/settings/providers.json` and sibling `models.json` | JSON pair | after stopping and restarting Cline | loopback placeholder |
 
 Generated catalogs include only enabled models from each provider selection. This applies to both
 downloads and managed integrations, including Pi and Aside. The management model list still shows
@@ -60,6 +63,50 @@ Aside connection enables all profiles by default; individual exclusions survive 
 One caveat specific to Aside: the running app rewrites `models.json` itself, so
 fully quit and reopen Aside after applying, the same way Claude Desktop needs a
 restart. Aside's block is loopback-only and never carries a real credential.
+
+The managed Raycast integration supports **macOS and Windows**. Custom Providers
+is a **Raycast Pro** feature: on a free plan the file is still written, but
+`ocx integration client status --client raycast` and the Integrations page report
+a warning, because Raycast will not read it. On macOS or Windows, open Raycast →
+Settings → AI → **Reveal Providers Config** once so the `ai` folder exists.
+On these supported platforms, opencodex uses that folder as its install signal
+and reports the client as not installed until it exists. Linux is unsupported,
+even if the folder exists.
+
+The status field `aiDirPresent` reports only whether `~/.config/raycast/ai` exists,
+independently of whether the Raycast app is installed or the platform is supported.
+It does not prove that Raycast is installed or usable. The CLI prints `plan` on a
+separate line and adds the macOS/Windows setup instruction when `aiDirPresent` is
+false; `--json` preserves the raw status, including the nested `raycast` block.
+Raycast reads `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike and
+does not honor `XDG_CONFIG_HOME`, so that path is not relocatable.
+
+The managed block is one element, `id: opencodex`, in the file's `providers`
+sequence: `name: OpenCodex`, `base_url: http://<host>:<port>/v1`, and every
+routed model with its `abilities` — the exporter sets `tools` and `system_message` to
+`true` as a client-export convention, `vision` follows the catalog's input modalities, `reasoning_effort`
+is set when the model has an effort ladder, and `temperature` is turned off for
+reasoning models. Other providers in the file are preserved, and disable removes
+only the OpenCodex element. Raycast picks up the change as soon as the file is
+saved, no restart needed; the models appear in Raycast's model picker grouped
+under **OpenCodex**. Raycast supports optional `api_keys`, but OpenCodex intentionally
+omits them and refuses non-loopback or admission-authenticated targets; this integration
+cannot supply OpenCodex's required admission header.
+
+The macOS private preference is only an advisory Pro hint; Windows never reads it and
+reports the plan as unknown. Plan detection does not authorize or block a write.
+The export metadata has no authoritative tool-support flag, so `tools: true` does not
+prove every routed model supports tools. Vision and effort flags follow catalog metadata;
+turning temperature off for an effort ladder is conservative export behavior.
+Provider values are preserved; YAML formatting and comments are not guaranteed to survive.
+The format is documented at
+[manual.raycast.com/ai/custom-providers](https://manual.raycast.com/ai/custom-providers).
+
+Raycast CLI exports and dashboard downloads use the running server's destination and
+admission policy, including a configured unauthenticated loopback listener. `ocx ensure`
+does not refresh Raycast from its saved configuration snapshot: that can differ from the
+running server. Server startup and explicit sync remain the catalog refresh paths.
+
 
 Cursor has a tab but is not one of these switches. Regular Cursor calls custom endpoints from
 its own backend, so a loopback proxy is unreachable without a public tunnel, and Cursor's
@@ -127,11 +174,11 @@ normalized. The exception is something JSON cannot rewrite exactly — a non-fin
 number like `1e999`, a number a rewrite would round (a very large integer, or one
 so small it collapses to zero), `-0`, the same key written twice in one object, or nesting deeper
 than 1000 levels — which locks the switch instead, so nothing is silently changed or dropped.
-**OMP** is unaffected by sibling edits too, for a different reason: its writer
-patches only its own `providers.opencodex` range byte-wise, so the rest of the
+**OMP, DSH and Hermes** are unaffected by sibling edits too, for a different reason: their writers
+patch only their own managed provider ranges byte-wise, so the rest of the
 file is never rewritten. For the remaining formats that can carry comments
-(Hermes, OpenClaw, Kimi Code, Gajae Code, MiniMax Code — YAML, JSON5 and TOML
-written as whole documents), or
+(OpenClaw, Kimi Code, gjc, MiniMax Code, Raycast — JSON5 and TOML
+written as whole documents, or generic YAML without source preservation), or
 whenever our own entries were edited, the switch locks and disable refuses rather
 than guessing which edits were yours.
 
@@ -147,7 +194,7 @@ parse, or one whose structure we cannot reason about, still refuses.
 
 **Formatting is generally not preserved.** Applying parses a config and writes it back
 out, so JSON, JSON5 and TOML may be reformatted and comments in JSON5 or TOML are lost.
-OMP and DSH are the exceptions: their YAML writers patch only `providers.opencodex` and
+OMP, DSH and Hermes are the exceptions: their YAML writers patch only `providers.opencodex` and
 `llm-pi-ai.providers.opencodex`, respectively, preserving
 unrelated provider comments and formatting byte-for-byte. If that exact source range
 cannot be identified safely, the operation refuses instead. For other clients, use
@@ -166,7 +213,7 @@ typed values into quoted strings. This includes values inside arrays and inline
 tables. Quoted date strings remain supported; an unquoted date must be preserved
 by editing the configuration manually.
 
-**Pi, Kimi Code, Gajae Code, MiniMax Code, Prime Agent and the managed DSH integration only work against a loopback bind.**
+**Pi, Kimi Code, gjc, MiniMax Code, Prime Agent, Aside, Raycast, omo and the managed DSH integration only work against a loopback bind.**
 The first four have no config field for the `x-opencodex-api-key` header a non-loopback bind
 requires. DSH has a generic headers map, but rc.6 does not document that dedicated admission
 header as a supported integration contract, so the managed writer fails closed instead of
@@ -216,10 +263,13 @@ ocx integration client enable --client mcode
 ocx mcode
 ```
 
-Once connected, `ocx sync` refreshes owned MCode, Pi, and Aside catalogs with the current
-model selection, context windows, and reasoning-effort ladders. Changes to model visibility,
-provider selection, or presets also refresh connected Pi and Aside catalogs. Foreign-edited
-or unsafe blocks stay untouched, as do previously owned blocks you removed manually.
+Once connected, `ocx sync` and `POST /api/sync` refresh owned MCode, Pi, Aside,
+Raycast, and omo catalogs with the current model selection, context windows, and
+reasoning-effort ladders. Proxy startup refreshes an owned Raycast catalog. Changes to
+model visibility, provider selection, or presets also refresh connected Pi, Aside,
+Raycast, and omo catalogs.
+Missing, foreign-edited, or unsafe blocks stay untouched, as do previously owned blocks
+you removed manually.
 An enabled Aside profile is an exception to the usual owned-only refresh: if its account
 directory exists and it has never had an owned block, sync may create its first block when
 that slot is empty. A prior Aside connection enables this behavior for all registered
@@ -295,3 +345,53 @@ the entire change failed. If saving those settings fails, no profile files are c
 Each profile has separate ownership and history. Existing user edits, unsafe paths and linked
 catalogs are refused; the existing explicit overwrite and drift-confirmation controls remain
 available. Fully quit and reopen Aside to load changed model files.
+
+
+## Cline CLI
+
+This integration targets Cline's current CLI/shared SDK provider store, whose native schema has
+`version: 1`. Legacy VS Code extension `globalState`/secret storage is not migrated or detected
+as this integration. Run Cline once to initialize its settings directory.
+
+**Stop Cline before enabling, syncing, disabling or restoring the integration.** OpenCodex writes
+`providers.opencodex` into both `providers.json` and sibling `models.json`. The first file holds
+the OpenAI Responses connection with a non-secret loopback placeholder; the second holds the
+filtered routed model catalog, including available context and image metadata. Existing provider
+entries and the default provider selection remain unchanged.
+
+```bash
+ocx integration client list --json
+ocx integration client enable --client cline
+ocx integration client history --client cline
+ocx integration client restore --op <operation-id>
+```
+
+After enabling, restart Cline and select OpenCodex, or launch with
+`cline --provider opencodex --model <provider/model>`. External catalog changes are read when
+Cline restarts. Cline is excluded from unattended catalog refresh; after changing the routed
+model selection, stop Cline and run `ocx sync` or enable the integration again to refresh it.
+A selected model is preserved while still routed and cleared if removed from the exported catalog.
+
+`CLINE_PROVIDER_SETTINGS_PATH` overrides the primary file. Otherwise `CLINE_DATA_DIR` selects the
+data directory, then `CLINE_DIR` selects the root, then `~/.cline` is used. The model file is always
+`models.json` beside the selected provider file. Overrides must be absolute or start with `~`.
+Mirror command-local Cline `--config` paths with `CLINE_PROVIDER_SETTINGS_PATH` when starting
+OpenCodex. A primary path named `models.json` is refused because the files must be distinct.
+
+Each file replacement is atomic, but no filesystem operation replaces both simultaneously.
+One journal operation snapshots both original files; a write or bookkeeping failure compensates
+both. An interrupted operation retains a private recovery record. Status reports incomplete
+recovery as unsafe, and the next explicit mutation recovers only if neither file nor its
+ownership has an unrelated edit. If recovery refuses, preserve the files and the recovery path
+reported by the operation; resolve the conflict before retrying.
+
+Undo restores **both original byte strings**, including a file that originally did not exist.
+Edits after the operation require the existing explicit `--confirm-drift`; the edited pair is
+backed up first. An occupied OpenCodex entry requires the existing `--overwrite-conflict` opt-in.
+Disable removes the two managed entries; it does not restore a prior foreign entry. Use Undo
+for that. Snapshot retention and expiration follow the same rules as other integrations.
+
+The download `cline-config-bundle.json` contains two native document members: `settings` for
+`providers.json`, and `catalog` for `models.json`. It is not itself a Cline settings file. Prefer
+the integration command for a journaled merge and rollback. Remote admission wiring is not
+supported by this generated integration; it requires unauthenticated loopback access.
