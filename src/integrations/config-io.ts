@@ -10,7 +10,7 @@
 import { lstatSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import type { ConfigFormat } from "../clients/config-export";
 import { MAX_JSON_NESTING } from "./serialize";
-import { atomicWriteFile } from "../config";
+import { atomicWriteFile, atomicWriteFileNoFollow } from "../config/atomic-write";
 import type { JournalEntry } from "./journal";
 import type { OwnershipRecord } from "./ownership";
 import type { IntegrationClientId } from "./registry";
@@ -192,6 +192,15 @@ export type ReadResult =
 
 export type StatKind = "file" | "dir" | "other" | "missing" | "failed";
 
+function lstatKind(path: string): StatKind {
+  try {
+    const stats = lstatSync(path);
+    return stats.isFile() ? "file" : stats.isDirectory() ? "dir" : "other";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "failed";
+  }
+}
+
 export interface IntegrationIO {
   /**
    * ONLY a missing file yields `missing`. Every other failure (EACCES, EPERM,
@@ -203,6 +212,8 @@ export interface IntegrationIO {
   /** Optional no-follow probe for paired-file clients. */
   lstatKind?: (path: string) => StatKind;
   writeText: (path: string, text: string) => void;
+  /** Atomic replacement of this directory entry; never follows a final symlink. */
+  writeTextNoFollow?: (path: string, text: string) => void;
   removeFile: (path: string) => void;
   mkdirp: (path: string) => void;
   now: () => number;
@@ -252,14 +263,7 @@ export function loadTarget(io: IntegrationIO, configPath: string): TargetState {
  */
 export function fileIO(): Omit<IntegrationIO, "appendJournal" | "putRecord" | "dropRecord"> {
   return {
-    lstatKind: path => {
-      try {
-        const stats = lstatSync(path);
-        return stats.isFile() ? "file" : stats.isDirectory() ? "dir" : "other";
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "failed";
-      }
-    },
+    lstatKind,
     readText: path => {
       try {
         return { kind: "text", text: readFileSync(path, "utf8") };
@@ -279,6 +283,12 @@ export function fileIO(): Omit<IntegrationIO, "appendJournal" | "putRecord" | "d
     writeText: (path, text) => {
       assertIntegrationWriteOwnership(path);
       atomicWriteFile(path, text);
+    },
+    writeTextNoFollow: (path, text) => {
+      const kind = lstatKind(path);
+      if (kind !== "file" && kind !== "missing") throw new Error(`refusing unsafe integration write target: ${path}`);
+      assertIntegrationWriteOwnership(path);
+      atomicWriteFileNoFollow(path, text);
     },
     removeFile: path => rmSync(path, { force: true }),
     mkdirp: path => mkdirSync(path, { recursive: true, mode: 0o700 }),

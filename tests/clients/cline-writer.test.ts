@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { clineConfigPath } from "../../src/clients/config-export";
@@ -140,6 +140,30 @@ describe("Cline journaled pair", () => {
     expect(readFileSync(catalog, "utf8")).toBe(originalCatalog);
   });
 
+  test("a member exchanged for a symlink at the write boundary cannot redirect replacement", () => {
+    seed();
+    const victim = join(root, "victim.json");
+    const displaced = `${settings}.attacker-saved`;
+    writeFileSync(victim, '{"sentinel":true}');
+    const io = input.store!.io();
+    let exchanged = false;
+    const result = applyIntegration({ ...input, io: {
+      ...io,
+      writeTextNoFollow: (path, text) => {
+        if (path === settings && !exchanged) {
+          exchanged = true;
+          renameSync(settings, displaced);
+          symlinkSync(victim, settings);
+        }
+        io.writeTextNoFollow!(path, text);
+      },
+    } });
+    expect(result.ok).toBe(false);
+    expect(readFileSync(victim, "utf8")).toBe('{"sentinel":true}');
+    expect(lstatSync(settings).isSymbolicLink()).toBe(true);
+    expect(readFileSync(displaced, "utf8")).toBe(originalSettings);
+  });
+
   test("occupied custom provider requires explicit overwrite and remains reversible", () => {
     seed();
     const doc = settingsDoc();
@@ -161,9 +185,9 @@ describe("Cline journaled pair", () => {
       let failed = false;
       const result = applyIntegration({ ...input, io: {
         ...io,
-        writeText: (path, text) => {
+        writeTextNoFollow: (path, text) => {
           if (point === "catalog" && path === catalog && !failed) { failed = true; throw new Error("injected"); }
-          io.writeText(path, text);
+          io.writeTextNoFollow!(path, text);
         },
         appendJournal: entry => {
           if (point === "journal") throw new Error("injected");
@@ -182,10 +206,10 @@ describe("Cline journaled pair", () => {
     seed();
     const io = input.store!.io();
     let failWrites = false;
-    const result = applyIntegration({ ...input, io: { ...io, writeText: (path, text) => {
+    const result = applyIntegration({ ...input, io: { ...io, writeTextNoFollow: (path, text) => {
       if (path === catalog) failWrites = true;
       if (failWrites && (path === settings || path === catalog)) throw new Error("disk offline");
-      io.writeText(path, text);
+      io.writeTextNoFollow!(path, text);
     } } });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.residual).toBe(true);
@@ -215,10 +239,10 @@ describe("Cline journaled pair", () => {
     seed();
     const io = input.store!.io();
     let offline = false;
-    expect(applyIntegration({ ...input, io: { ...io, writeText: (path, text) => {
+    expect(applyIntegration({ ...input, io: { ...io, writeTextNoFollow: (path, text) => {
       if (path === catalog) offline = true;
       if (offline && (path === settings || path === catalog)) throw new Error("offline");
-      io.writeText(path, text);
+      io.writeTextNoFollow!(path, text);
     } } }).ok).toBe(false);
     const foreign = '{"version":1,"providers":{"mine":{"changed":true}}}';
     writeFileSync(catalog, foreign);
@@ -301,9 +325,9 @@ describe("Cline journaled pair", () => {
     let failedAppend = false;
     const result = applyIntegration({ ...input, io: { ...io,
       appendJournal: () => { failedAppend = true; throw new Error("append unavailable"); },
-      writeText: (path, text) => {
+      writeTextNoFollow: (path, text) => {
         if (failedAppend && (path === settings || path === catalog)) throw new Error("rollback unavailable");
-        io.writeText(path, text);
+        io.writeTextNoFollow!(path, text);
       },
     } });
     expect(result.ok).toBe(false);

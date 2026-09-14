@@ -49,7 +49,11 @@ export function createClineIO(
   };
   const writeMember = (key: typeof keys[number], text: string | null): void => {
     if (text === null) base.removeFile(targets[key]);
-    else { base.mkdirp(dirname(targets[key])); base.writeText(targets[key], text); }
+    else {
+      base.mkdirp(dirname(targets[key]));
+      if (!base.writeTextNoFollow) throw new ClineTransactionError(markerPath);
+      base.writeTextNoFollow(targets[key], text);
+    }
   };
   const writePair = (pair: ClineRawPair): void => {
     for (const key of keys) writeMember(key, pair[key]);

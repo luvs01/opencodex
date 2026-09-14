@@ -156,14 +156,14 @@ async function writePrivateTempFileAsync(
   }
 }
 
-export function atomicWriteFile(
+function atomicWriteFileToTarget(
   path: string,
   content: string,
+  target: string,
   io?: AtomicWriteIO,
   hooks: AtomicWriteHooks = {},
 ): void {
   recordOwnedConfigPath(getConfigDir(), path);
-  const target = resolveWriteTarget(path);
   assertResolvedTargetAllowed(path, target);
   const tmp = `${target}.ocx.${process.pid}.${nextAtomicTempSequence()}.tmp`;
   let hardened = false;
@@ -221,6 +221,29 @@ export function atomicWriteFile(
     if (!removed) throw new AtomicWriteResidualTempError(tmp, hardened, { cause });
     throw cause;
   }
+}
+
+export function atomicWriteFile(
+  path: string,
+  content: string,
+  io?: AtomicWriteIO,
+  hooks: AtomicWriteHooks = {},
+): void {
+  atomicWriteFileToTarget(path, content, resolveWriteTarget(path), io, hooks);
+}
+
+/**
+ * Atomically replace the named directory entry without resolving a symlink at
+ * that entry. This is for files in directories writable by another process:
+ * a raced symlink is replaced, never followed to a more privileged target.
+ */
+export function atomicWriteFileNoFollow(
+  path: string,
+  content: string,
+  io?: AtomicWriteIO,
+  hooks: AtomicWriteHooks = {},
+): void {
+  atomicWriteFileToTarget(path, content, path, io, hooks);
 }
 
 export interface AtomicWriteAsyncIO {
