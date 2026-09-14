@@ -141,3 +141,7 @@ medium/high/max UID before accepting a suffix already present in the model id.
 The merged `devin` provider uses this resolver for every account, whichever login
 path minted the credential. Omitted effort preserves an explicit
 variant; unrelated model families retain their existing suffix precedence.
+
+## Devin image boundary
+
+The registered Devin implementation in `src/adapters/devin.ts` maps data URLs to its native image field. Its textual fallback accepts only bounded HTTPS references and emits a fixed-size omission marker for unsupported or oversized values.

@@ -33,3 +33,7 @@ plus exact separators, without joining a second full JSON array. `src/lib/admiss
 truncates diagnostic text at UTF-8 code-point boundaries without allocating arrays per character;
 byte sizing retains TextEncoder's coercion behavior for legacy non-string runtime callers.
 These optimizations do not add request queues, retry policies, or RSS-based admission gates.
+
+## Devin remote-image references
+
+`src/adapters/devin.ts` bounds remote image URLs before converting them to text. Values outside that bound become a constant-size marker, so adapter serialization cannot turn a fixed image admission charge into attacker-sized prompt buffers.

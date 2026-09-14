@@ -292,3 +292,7 @@ byte-limit boundaries.
 Canonical Spark Lite metadata follows the final serialized model and surviving nonempty Lite tool catalog; see [Responses transport](../transports/responses.md).
 
 Translated Chat request construction uses the [inline-image budget](../transports/streaming-health.md#translated-chat-inline-image-budget); the shared normalizer counts retained bytes even when a wire-specific drop callback keeps the image attached.
+
+## Devin image compatibility
+
+For Responses content routed through `src/adapters/devin.ts`, inline data URLs use Devin's image field. Bounded HTTPS references remain visible as text, while unsupported or oversized references are represented by a fixed-size omission marker.

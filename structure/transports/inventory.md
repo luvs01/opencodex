@@ -142,3 +142,7 @@ The [explicit model-capability contract](../config.md#explicit-per-model-capabil
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
 
 Renamed fixed-key providers receive [missing reasoning metadata](../catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.
+
+## Devin multimodal transport
+
+`src/adapters/devin.ts` maps inline data URLs to Devin's native image field. It preserves bounded HTTPS image references as text and replaces unsupported or oversized references with a fixed-size marker before protobuf construction.

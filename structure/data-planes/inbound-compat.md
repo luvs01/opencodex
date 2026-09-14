@@ -247,3 +247,7 @@ Translated Chat request construction uses the [inline-image budget](../transport
 The [explicit model-capability contract](../config.md#explicit-per-model-capability-declarations) preserves operator declarations through provider storage and catalog capture; it does not infer upstream capability or change this surface's routing behavior.
 
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
+
+## Devin image references
+
+When compatible inbound content reaches `src/adapters/devin.ts`, inline data URLs use Devin's native image field. Only bounded HTTPS remote references become prompt text; all other remote values become a fixed-size omission marker.
