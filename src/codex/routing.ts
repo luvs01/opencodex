@@ -1506,6 +1506,32 @@ function hasCodexQuotaHeadroom(
 }
 
 /**
+ * Whether quota may retire shared state while cache affinity is active.
+ *
+ * New/unbound selection still uses {@link hasCodexQuotaHeadroom}; only preservation of an
+ * existing shared selection or thread binding gets the exhaustion boundary.
+ */
+function hasCodexSharedStateQuotaHeadroom(
+  config: OcxConfig,
+  accountId: string,
+  selectionOptions?: CodexAccountUsabilityOptions,
+  now: number = Date.now(),
+): boolean {
+  if (
+    config.pool?.cacheAffinity !== true
+    || normalizeAccountPoolStrategy(config.accountPoolStrategy) !== "quota"
+  ) {
+    return hasCodexQuotaHeadroom(config, accountId, selectionOptions, now);
+  }
+  const usage = computeCodexUsageScore(
+    getAccountQuota(accountId),
+    getPoolAccountPlanForSelection(config, accountId, selectionOptions),
+    now,
+  );
+  return isUnknownUsage(usage) || usage < 100;
+}
+
+/**
  * Fill-first: keep selectable active under threshold; otherwise advance to the next
  * eligible id in stable sorted order after the current active (wrapping).
  */
@@ -2028,7 +2054,8 @@ function isHealthySharedCodexSelection(
   selectionOptions: CodexAccountUsabilityOptions | undefined,
 ): boolean {
   return isCodexAccountSelectable(config, accountId, now, quotaScope, selectionOptions)
-    && hasCodexQuotaHeadroom(config, accountId, selectionOptions, now)
+    && hasCodexSharedStateQuotaHeadroom(config, accountId, selectionOptions, now)
+    && !hasUnrecoveredCodexQuotaRefusal(accountId, quotaScope)
     && !shouldFailover(config, accountId, now);
 }
 
@@ -2418,7 +2445,7 @@ export function resolveCodexAccountForThreadDetailed(
     // the account has already told this thread it cannot serve it.
     const quotaRefused = hasUnrecoveredCodexQuotaRefusal(entry.accountId, quotaScope);
     const healthyForSharedAffinity = selectableForSharedState
-      && hasCodexQuotaHeadroom(config, entry.accountId, sharedSelectionOptions, now)
+      && hasCodexSharedStateQuotaHeadroom(config, entry.accountId, sharedSelectionOptions, now)
       && !quotaRefused
       && !failoverReady;
     if (
@@ -2523,7 +2550,7 @@ export function resolveCodexAccountForThreadDetailed(
     sharedSelectionOptions,
   );
   const activeHealthyForSharedSelection = activeSelectableForSharedState
-    && hasCodexQuotaHeadroom(config, active, sharedSelectionOptions, now)
+    && hasCodexSharedStateQuotaHeadroom(config, active, sharedSelectionOptions, now)
     && !shouldFailover(config, active, now);
   if (!isCodexAccountSelectable(config, active, now, quotaScope, selectionOptions)) {
     const fallback = pickLowestUsageCodexAccount(config, active, now, quotaScope, selectionOptions);
