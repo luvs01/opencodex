@@ -6,6 +6,7 @@ import { installCrashGuards } from "../lib/crash-guard";
 import { selfLaunchArgv } from "../lib/self-launch-argv";
 import { findAvailablePort } from "../server/ports";
 import { startMachineListener } from "./machine-listener";
+import { standaloneRecycleEnvironment } from "./recycle-environment";
 import { readClientConnectionState } from "./state";
 
 let activeServer: Server<unknown> | null = null;
@@ -46,7 +47,7 @@ export function scheduleStandaloneRecycle(): void {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
-        env: { ...process.env },
+        env: standaloneRecycleEnvironment(process.env),
       });
       child.unref();
     }
