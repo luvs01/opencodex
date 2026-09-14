@@ -459,7 +459,7 @@ function cursorRow(payload: CursorIntegrationStatus | null): OverviewRow {
   }
   return {
     ...base,
-    state: "absent",
+    state: "unknown",
     installed: true,
     applied: false,
     detailKey: null,
