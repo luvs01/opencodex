@@ -169,6 +169,12 @@ describes a store that may be relabelable on the next attempt, so those keep the
 and the compensating rollback. Recording them as a stand-down would mark the transition
 converged and suppress the relabel permanently.
 
+That stand-down applies only when the provider tags left in place still resolve through the
+resulting configuration. A provider-table transition that finds a paginated `openai` row returns
+`history_paginated_openai_requires_native_writer` and refuses the artifact transaction: removing
+the root `openai_base_url` without relabeling that row would route a resumed conversation through
+Codex's built-in OpenAI provider instead of this proxy.
+
 Standing the relabel down changes what the routing form may retire. Rows this home tagged
 `opencodex` resolve only through a `[model_providers.opencodex]` table; the loopback form
 normally retires that table precisely because the relabel migrates those rows back to `openai`
