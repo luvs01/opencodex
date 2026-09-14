@@ -147,6 +147,14 @@ Codex の `exec` custom-tool grammar を受け付けない key-auth Responses pr
 `custom_tool_call` へ復元します。ネイティブ OpenAI の forward routing と、対応済みの `apply_patch` custom tool は
 変更されません。
 
+ルーティングされた code-mode のターンには、最初の呼び出し前に、ネストされたヘルパーに関する
+ホストの規則も伝えられます。`tools.apply_patch` は、装飾を付けないパッチマーカー行で始まり、
+同様のマーカー行で終わる単一の文字列を受け取ります。isolate では `import` を使用できず、
+長時間実行されるコマンドは `write_stdin` でポーリングします。ネイティブのルーティング済み Responses、
+Kiro、または Cursor の経路で、code-mode の exec 結果にホストの失敗メッセージがまだ含まれている場合、
+opencodex は該当する規則を示す 1 行のヒントを追加します。この変更でモデルのコードやパッチのテキストを
+書き換えることはありません。
+
 選択した provider は function/tool calling をサポートしている必要があります。tool call に対応しない text-only
 provider では `exec`、Browser、Computer Use は使用できません。ネイティブ OpenAI の項目は上流の tool mode を
 そのまま維持します。
@@ -237,7 +245,9 @@ ChatGPT アカウントが Codex アカウント プールに追加されると�
 
 ## ネイティブ Codexの復元
 
-opencodex は決してあなたを罠にはめることはありません。 **`ocx stop` は、ネイティブ Codex に完全に戻す単一のコマンドです**。プロキシを停止し、バックグラウンド サービスがインストールされている場合はそれを停止し、挿入されたすべての行とルーティングされたカタログ エントリを削除するため、プレーンな `codex` は、opencodex が存在しなかったかのように正確に動作します。
+`ocx stop` はプロキシとインストール済みのバックグラウンドサービスを停止し、ネイティブ Codex の復元を試みます。OpenCodex は所有を確認できるルーティング設定を削除し、設定ファイルを安全に復元できない場合は未完了として報告します。
+
+現在の設定またはプロファイルが保存された元の内容と異なり、そのファイルの注入後の状態のハッシュがジャーナルにない場合、自動復元は両方のファイルとジャーナルを変更せずに残します。元の内容と同じファイルは再書き込みしません。ルーティング済み設定への再注入も、この未確認の状態では拒否されます。ネイティブ設定では新しいスナップショットを作成できます。[復元規則](/guides/codex-integration/#recovery-without-injection-hashes)を参照してください。
 
 ```bash
 ocx stop       # stop the proxy + service, restore native Codex

@@ -6,7 +6,7 @@ import { EXPORT_CLIENTS, EXPORT_CLIENT_IDS, type ExportModel } from "../../src/c
 import { parseConfig } from "../../src/integrations/config-io";
 import { INTEGRATION_CLIENTS, INTEGRATION_CLIENT_IDS, type IntegrationClientId } from "../../src/integrations/registry";
 import { createIntegrationStateStore, type IntegrationStateStore } from "../../src/integrations/store";
-import { readIntegrationState } from "../../src/integrations/state";
+import { readIntegrationState, readPath } from "../../src/integrations/state";
 import { applyIntegration, disableIntegration, restoreIntegration } from "../../src/integrations/writer";
 import { printSubcommandUsage, printUsage } from "../../src/cli/help";
 import type { OcxConfig } from "../../src/types";
@@ -78,9 +78,9 @@ afterEach(() => {
 });
 
 describe("the client registries cannot drift apart", () => {
-  test("every list of clients holds exactly the same twelve ids", async () => {
+  test("every list of clients holds exactly the same thirteen ids", async () => {
     /*
-     * Five lists name the same twelve clients, and two of them are maintained by
+     * Five lists name the same thirteen clients, and two of them are maintained by
      * hand: the GUI cannot import the backend registry, because that would
      * pull node:os and node:path into the browser bundle. A client added
      * server-side renders no row until someone remembers the tuple, and the
@@ -91,7 +91,7 @@ describe("the client registries cannot drift apart", () => {
     const guiRouting = await import("../../gui/src/app-routing");
 
     const expected = [...EXPORT_CLIENT_IDS].sort();
-    expect(expected).toHaveLength(12);
+    expect(expected).toHaveLength(13);
 
     expect([...INTEGRATION_CLIENT_IDS].sort()).toEqual(expected);
     expect([...gui.CLIENTS].sort()).toEqual(expected);
@@ -111,6 +111,7 @@ describe("the client registries cannot drift apart", () => {
 
   test("source preservation and cross-process locking are registry capabilities", () => {
     expect(INTEGRATION_CLIENTS.omp.sourcePreservingYaml?.path).toEqual(["providers", "opencodex"]);
+    expect(INTEGRATION_CLIENTS.hermes.sourcePreservingYaml?.path).toEqual(["providers", "opencodex"]);
     expect(INTEGRATION_CLIENTS.dsh.sourcePreservingYaml?.path).toEqual([
       "llm-pi-ai", "providers", "opencodex",
     ]);
@@ -170,6 +171,13 @@ describe("every client survives a full lifecycle", () => {
     prime: '{\n  "providers": {\n    "mine": { "api": "http://keep-me" }\n  }\n}\n',
     // Aside reads the same models.json contract as Pi and Prime.
     aside: '{\n  "providers": {\n    "mine": { "api": "http://keep-me" }\n  }\n}\n',
+    // Raycast's `providers` is a SEQUENCE keyed by `id`, so the user's entry is
+    // a sibling element rather than a sibling map key.
+    raycast: "providers:\n  - id: lmstudio\n    name: LM Studio\n    base_url: http://localhost:1234/v1\n    models: []\n",
+  };
+  /** Where the seed's user-owned entry lives when the seed is a sequence. */
+  const USER_ELEMENT: Partial<Record<IntegrationClientId, readonly string[]>> = {
+    raycast: ["providers", "[id=lmstudio]"],
   };
 
   for (const clientId of INTEGRATION_CLIENT_IDS) {
@@ -190,18 +198,22 @@ describe("every client survives a full lifecycle", () => {
       const afterApply = parseConfig(readFileSync(configPath, "utf8"), format);
       const record = store.readRecords()[clientId]!;
       expect(record.fragmentPaths.length).toBeGreaterThan(0);
+      // Read through the writer's own segment grammar: Raycast's path holds a
+      // `[id=opencodex]` selector into a sequence, not a map key.
       for (const path of record.fragmentPaths) {
-        let cursor: unknown = afterApply;
-        for (const segment of path) {
-          expect(cursor && typeof cursor === "object").toBe(true);
-          cursor = (cursor as Record<string, unknown>)[segment];
-        }
-        expect(cursor).toBeDefined();
+        expect(readPath(afterApply, path)).toBeDefined();
       }
-      // …and the user's own entry is untouched.
-      expect((afterApply as Record<string, unknown>)).toMatchObject(
-        original as Record<string, unknown>,
-      );
+      // …and the user's own entry is untouched. `toMatchObject` treats an
+      // array as exact-length, so a sequence-shaped seed is checked by the
+      // same selector the writer uses to find its own element.
+      const userElement = USER_ELEMENT[clientId];
+      if (userElement) {
+        expect(readPath(afterApply, userElement)).toEqual(readPath(original, userElement));
+      } else {
+        expect((afterApply as Record<string, unknown>)).toMatchObject(
+          original as Record<string, unknown>,
+        );
+      }
 
       const disabled = disableIntegration({
         clientId, models: MODELS, config: CONFIG, port: 10100,
@@ -638,7 +650,6 @@ describe("the base URL is composed, never interpolated", () => {
     ];
     for (const [hostname, expected] of cases) {
       const configPath = installClient("hermes");
-      writeFileSync(configPath, "providers: {}\n");
       const result = applyIntegration({
         clientId: "hermes", models: MODELS, port: 10100,
         config: { ...CONFIG, hostname } as OcxConfig,
@@ -662,14 +673,14 @@ describe("a restore never launders a foreign edit into owned content", () => {
      * made the state read `current`, and disable then deleted the user's own
      * field as if it were ours.
      */
-    const configPath = installClient("hermes");
+    const configPath = installClient("gajae");
     writeFileSync(configPath, "providers:\n  mine:\n    api: http://keep-me\n");
     const write = {
-      clientId: "hermes" as const, models: MODELS, config: CONFIG, port: 10100,
+      clientId: "gajae" as const, models: MODELS, config: CONFIG, port: 10100,
       env: TEST_ENV, home, store,
     };
     expect(applyIntegration(write).ok).toBe(true);
-    const applyOp = store.listOperations("hermes")[0]!.opId;
+    const applyOp = store.listOperations("gajae")[0]!.opId;
 
     // The user edits the file by hand, adding something of their own.
     const edited = `${readFileSync(configPath, "utf8")}user_field: mine\n`;
@@ -677,7 +688,7 @@ describe("a restore never launders a foreign edit into owned content", () => {
 
     // Confirmed drift-restore back to the applied bytes; the edit is snapshotted.
     expect(restoreIntegration({ ...write, opId: applyOp, confirmDrift: true }).ok).toBe(true);
-    const restoreOp = store.listOperations("hermes")[0]!.opId;
+    const restoreOp = store.listOperations("gajae")[0]!.opId;
 
     // Undo that restore: the user's edited bytes come back.
     expect(restoreIntegration({ ...write, opId: restoreOp, confirmDrift: true }).ok).toBe(true);
@@ -685,7 +696,7 @@ describe("a restore never launders a foreign edit into owned content", () => {
 
     // The record no longer describes these bytes, so the state is conflict…
     const status = readIntegrationState({
-      clientId: "hermes", models: MODELS, config: CONFIG, port: 10100,
+      clientId: "gajae", models: MODELS, config: CONFIG, port: 10100,
       env: TEST_ENV, home, store,
     });
     expect(status.state).toBe("conflict");
@@ -706,9 +717,9 @@ describe("the store's own root stays tidy", () => {
      * catches is a new bookkeeping file appearing without anyone deciding it
      * should exist.
      */
-    writeFileSync(installClient("hermes"), "providers: {}\n");
+    writeFileSync(installClient("gajae"), "providers: {}\n");
     const write = {
-      clientId: "hermes" as const, models: MODELS, config: CONFIG, port: 10100,
+      clientId: "gajae" as const, models: MODELS, config: CONFIG, port: 10100,
       env: TEST_ENV, home, store,
     };
     expect(applyIntegration(write).ok).toBe(true);

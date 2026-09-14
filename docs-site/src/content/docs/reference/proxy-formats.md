@@ -20,6 +20,10 @@ response safety still happen at the proxy boundary. Configure the listener and a
 [Configuration](/reference/configuration/); use [Combos](/guides/combos/) when one public model id
 should select among several targets.
 
+## Upstream redirects
+
+Credential-bearing model, image, video, and search requests do not automatically follow HTTP redirects, including same-origin redirects. Configure the final upstream API URL instead of a redirecting alias. A redirect does not cause the server to resend credentials or the request body to its destination. The response owner retains its existing error or relay behavior; native Responses and compact routes can return the original 3xx and `Location` to the client. Client redirect behavior is separate from this server transport policy.
+
 ## Endpoint overview
 
 | Client surface | Endpoint | Successful non-stream result | Successful stream or socket result |
@@ -278,6 +282,12 @@ These endpoints speak the Anthropic Messages dialect used by Claude Code and com
 Most requests are translated to Responses, routed normally, then translated back to Anthropic JSON
 or Anthropic SSE.
 
+On translated Messages requests, reasoning replay shares the request's translation budget.
+Envelope admission includes encoding/decoding copy overhead, not just the original signature
+length. Requests exceeding this budget return HTTP 413 with `translation_buffer_limit`;
+signatures and opaque reasoning data are never truncated to make a request fit. Native
+Anthropic passthrough retains its separate body-size contract.
+
 Base64 and URL image sources are translated in user messages and nested tool results. File-backed
 images (`source.type: "file"`) require native Anthropic passthrough; translated routes return a
 fixed HTTP 400 error asking for base64 or URL input. OpenCodex does not resolve another provider's
@@ -396,8 +406,15 @@ conversation.
 
 | Route type | Behavior |
 | --- | --- |
-| Canonical ChatGPT or official OpenAI route | Forwards the request to the native `/responses/compact` endpoint with the resolved account and model authentication |
+| Canonical ChatGPT or official OpenAI route | Tries the native `/responses/compact` endpoint with the resolved account and model authentication; HTTP 404 falls back to a regular Responses compaction turn |
 | Other routed model | Runs an internal, non-streaming, no-tools compaction turn with a `compaction_trigger`; requires exactly one synthetic `compaction` item whose `encrypted_content` is an `ocx1:` envelope; decodes that summary into v1 replacement history |
+
+If the native compact endpoint returns HTTP 404, OpenCodex retries compaction through a regular
+Responses turn with the same model selector and session headers. Canonical ChatGPT fallback
+turns use upstream SSE; the compact caller still receives JSON. A completed native opaque
+compaction item is preserved, while an `ocx1:` summary is decoded into replacement user history.
+Failed or incomplete fallback turns return an error instead of replacement history. Other
+native compact statuses retain their existing handling.
 
 Codex names a bare OpenAI-family model (for example `gpt-5.6-sol`) for its compaction turns
 regardless of which provider the operator routes ordinary turns to. Ordinary requests reserve
@@ -409,7 +426,30 @@ default provider is enabled and is not itself an OpenAI-family entry; account-qu
 such as `side/gpt-5.6-sol` still fail closed. The proxy logs one notice per provider when this
 fallback engages. Configurations with an enabled canonical `openai` provider are unchanged.
 
-Native compact responses are buffered with a 32 MiB maximum, including responses whose declared
+Inbound bodies on both `/v1/responses` and `/v1/responses/compact` retain the shared 256 MiB
+wire/decompression admission limit. Application-level size rejection returns HTTP 413 with
+`type` and `code` both `invalid_request_error`. Its message includes a bounded diagnostic suffix,
+for example:
+
+```text
+Decompressed request body exceeds 268435456 bytes [measurement=decoded_lower_bound; bytes=268435457]
+```
+
+| Measurement | Meaning of `bytes` |
+| --- | --- |
+| `declared_wire` | Numeric `Content-Length` declared by the sender; rejected before reading, not a measured decoded size |
+| `observed_wire_lower_bound` | Wire bytes encountered when reading stopped; the complete body may be larger |
+| `decoded_exact` | Exact size of the buffer supplied to the identity decoder or returned by a decoder |
+| `decoded_lower_bound` | Admission limit plus one after inflation aborts; a lower bound, never the exact decoded size |
+
+The suffix contains only a fixed category and a finite numeric byte value. Rejected bodies are
+not read or inflated further, parsed for item counts, or retained for diagnostics. Legacy errors
+without measurement provenance retain the limit-only message. Bun's listener can reject an
+oversized wire body before application diagnostics run, so not every 413 carries this suffix.
+A lower-bound diagnostic cannot establish the complete compact payload size. The admission
+limit and retry behavior are unchanged.
+
+Native compact responses are buffered with a separate 32 MiB maximum, including responses whose declared
 `Content-Length` already exceeds the limit. The compact-specific failures include:
 
 | Status | Type or code | Meaning |
@@ -429,16 +469,18 @@ use the matrix below. “Dedicated” means `X-OpenCodex-API-Key`; the other col
 
 | Surface | Dedicated | Bearer | `x-api-key` |
 | --- | --- | --- | --- |
-| `/v1/responses` HTTP and WebSocket | Required | Rejected for proxy admission | Rejected |
-| `/v1/responses/compact` | Required | Rejected for proxy admission | Rejected |
-| `/v1/chat/completions` | Required | Rejected for proxy admission | Rejected |
+| `/v1/responses` HTTP and WebSocket | Accepted | Accepted | Rejected |
+| `/v1/responses/compact` | Accepted | Accepted | Rejected |
+| `/v1/chat/completions` | Accepted | Accepted | Rejected |
 | `/v1/messages` and `/v1/messages/count_tokens` | Accepted | Accepted | Accepted |
 | `/v1/models` | Accepted | Accepted | Accepted |
 | `/v1/live`, `/v1/realtime/calls`, and sideband joins | Accepted | Accepted | Accepted |
 
-Responses-family and Chat requests reserve `Authorization` for provider or Codex Direct
-passthrough, so a remote proxy key must use the dedicated header. Messages and Realtime surfaces
-need broader client compatibility and therefore accept all three forms.
+Responses-family and Chat requests accept a proxy key in the dedicated header or Bearer field. On native routes, the selected stored Codex credential replaces the admission bearer; on other routes it is removed. It is never an upstream credential. Use the dedicated header when also supplying a separate provider bearer.
+
+A keyless, non-OAuth Cursor route may use that separate caller bearer, but never a proxy secret or automatic ChatGPT-main enrichment. Combo/policy selection and actual shadow/thread-spawn rewrites do not transfer raw caller credentials to new targets. Canonical OpenAI routing can restore the caller’s single non-proxy bearer after an internal route change only when its JWT carries a ChatGPT account claim and any explicit account header matches that claim. Forwarding caller authentication to optional OpenAI sidecars requires a single JWT and a matching explicit `chatgpt-account-id`. Opaque bearers are not restored across route changes, even with an explicit account header. Otherwise, the final target needs its own configured, OAuth, or stored credential; otherwise it fails locally. A thread-spawn marker alone does not strip credentials.
+
+Claude replay retains main auth only as a turn-claimed in-memory snapshot and reconstructs it only for a final canonical ChatGPT route.
 
 :::caution
 Data-plane keys are not management credentials. The management API uses a separate admin secret;

@@ -201,6 +201,12 @@ metadata，使用 Codex 的 `low | medium | high | xhigh | max | ultra` 檔位�
 歷史編碼成上游 function tool，再於 Codex 看見前將串流 function-call lifecycle 還原成
 `custom_tool_call`。原生 OpenAI forward 路由與受支援的 `apply_patch` custom tool 維持不變。
 
+路由的 code-mode 回合也會在首次呼叫前收到主機對巢狀輔助工具的規則：`tools.apply_patch`
+接收一個字串，開頭與結尾必須是沒有額外包裝的獨立補丁標記行；isolate 中沒有 `import`，長時間執行的
+命令透過 `write_stdin` 輪詢。如果原生路由 Responses、Kiro 或 Cursor 路徑上的 code-mode exec
+結果仍包含主機的某則失敗訊息，opencodex 會附加一行提示，指出對應規則。這項變更不會重寫模型的
+程式碼或補丁文字。
+
 所選 provider 必須支援 function/tool calling。不支援 tool call 的純文字 provider 無法使用 `exec`、
 Browser 或 Computer Use。原生 OpenAI 列保留上游 tool mode 不變。
 
@@ -322,9 +328,9 @@ body。背景重新驗證是獨立功能，預設關閉；只有啟用 Token Gua
 
 ## 恢復原生 Codex
 
-opencodex 絕不會把你困住。**`ocx stop` 是完整恢復原生 Codex 的單一命令**。它會停止 proxy、停止
-背景服務（若已安裝），並移除所有注入行與路由目錄條目，讓普通的 `codex` 就像從未安裝 opencodex 一樣
-運作：
+`ocx stop` 會停止 proxy 與已安裝的背景服務，然後嘗試恢復原生 Codex。OpenCodex 只移除能確認歸屬的路由設定；若無法安全恢復設定檔，會回報恢復未完成。
+
+若目前的 config 或 profile 與儲存的原始內容不同，且日誌缺少該檔案注入狀態的雜湊值，自動快照恢復會保留兩個檔案及日誌，不做修改。已與原始內容相同的檔案不會重新寫入。對已路由設定再次注入時，也會拒絕使用這種未確認的基準；原生設定可以建立新的快照。詳見[恢復規則](/guides/codex-integration/#recovery-without-injection-hashes)。
 
 ```bash
 ocx stop       # 停止 proxy + service，恢復原生 Codex
