@@ -106,7 +106,9 @@ function openAIChatTransport(provider: OcxProviderConfig): {
     const pathError = providerRelativeSendPathConfigError("chatCompletionsPath", provider.chatCompletionsPath);
     if (pathError) throw new Error(pathError);
     const base = new URL(provider.baseUrl);
-    const candidate = new URL(provider.chatCompletionsPath, base);
+    const trimmedBase = provider.baseUrl.replace(/\/+$/, "");
+    const appended = `${trimmedBase}/${provider.chatCompletionsPath.replace(/^\/+/, "")}`;
+    const candidate = new URL(appended);
     if (candidate.origin !== base.origin) throw new Error("chatCompletionsPath must preserve the provider origin");
     url = candidate.toString();
   }
