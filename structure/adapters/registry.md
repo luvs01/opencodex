@@ -48,8 +48,9 @@ Some adapters share another adapter's routed-tool semantics while retaining inde
   credential turned out to be the ordinary cloud token, so the child process bought nothing that
   importing the token did not, and it cost a placeholder `buildRequest`, a disabled
   `parseStream`, an identity-only `baseUrl`, and a subprocess running in the operator's tree.
-  `projectDevinCliAuthMode` rewrites any saved row that still names the retired adapter id,
-  alongside the merge migration that retires the `devin-cli` provider id itself.
+  The merge migration rewrites the canonical `devin-cli` provider id. A custom-named row that
+  still names the retired adapter is left on that unknown id so requests fail closed until the
+  operator explicitly selects `devin` and configures Devin authentication.
 
 The registry records those relationships with `contractParent`. A parent relationship does **not** mean the registry recursively constructs a parent adapter and injects it into the child. Azure and MiMo keep owning their existing internal composition. This avoids making production constructors depend on test/conformance needs and keeps this authority refactor behavior-neutral.
 
