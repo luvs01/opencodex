@@ -233,6 +233,14 @@ opencodex encode cette déclaration et son historique sous forme d'outil de fonc
 cycle de vie diffusé de l'appel de fonction en `custom_tool_call` avant que Codex ne le reçoive. Le routage natif
 par transfert OpenAI et l'outil personnalisé `apply_patch`, qui est pris en charge, restent inchangés.
 
+Avant le premier appel, les tours routés en mode code reçoivent aussi les règles de l'hôte pour les
+outils auxiliaires imbriqués : `tools.apply_patch` prend une seule chaîne qui commence et se termine
+par les lignes de marqueur de patch seules, sans habillage ; l'isolate ne dispose pas de `import`,
+et les commandes longues sont interrogées via `write_stdin`. Lorsqu'un résultat exec en mode code
+sur le chemin natif Responses routé, Kiro ou Cursor contient encore l'un des messages d'échec de
+l'hôte, opencodex ajoute une indication d'une ligne qui nomme la règle. Cette modification ne
+réécrit ni le code du modèle ni le texte de son patch.
+
 Le fournisseur sélectionné doit prendre en charge les appels de fonctions ou d'outils. Un fournisseur purement
 textuel dépourvu de cette prise en charge ne peut pas utiliser `exec`, Browser ni Computer Use. Les lignes
 OpenAI natives conservent leur mode d'outil en amont.
@@ -377,10 +385,9 @@ d'actualisation `chatgpt` vaut `proactive` et si `tokenGuardian.codexWarmupEnabl
 
 ## Restauration de Codex natif
 
-opencodex ne vous enferme jamais dans sa configuration. **`ocx stop` est l'unique commande qui restaure
-entièrement Codex natif** : elle arrête le proxy et le service d'arrière-plan s'il est installé, puis supprime
-toutes les lignes injectées et toutes les entrées routées du catalogue. La commande `codex` fonctionne alors
-exactement comme si opencodex n'avait jamais été installé :
+`ocx stop` arrête le proxy et le service d'arrière-plan installé, puis tente de restaurer Codex natif. OpenCodex retire les éléments de routage dont il peut vérifier la propriété et signale une restauration incomplète si les fichiers de configuration ne peuvent pas être récupérés en toute sécurité.
+
+Si la configuration ou le profil actuel diffère de l'original sauvegardé et que le journal ne contient pas le hash de l'état injecté de ce fichier, la récupération automatique conserve les deux fichiers et le journal sans les modifier. Un fichier déjà identique à son original n'est pas réécrit. La réinjection d'une configuration routée refuse aussi cet état incertain ; une configuration native peut créer un nouvel instantané. Voir les [règles de récupération](/guides/codex-integration/#recovery-without-injection-hashes).
 
 ```bash
 ocx stop       # stop the proxy + service, restore native Codex
