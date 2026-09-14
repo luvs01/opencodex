@@ -6300,6 +6300,10 @@ async function handleResponsesInner(
             const result = checkOutboundBodySize(continuationBody, config.maxUpstreamBodyBytes);
             return result.admitted ? undefined : describeOutboundBodyRefusal(result);
           },
+          // Resolution can acquire the account's sole cooldown-recovery probe before the routed
+          // provider reveals whether it will request search. Hand an unused lease back on every
+          // terminal path; after an executed search, the outcome recorder has already settled it.
+          onFinalize: () => releaseCodexAuthContextProbeLease(openAiSidecar?.authContext),
           signal: upstream.signal,
         })
         : upstreamResponse.body;
