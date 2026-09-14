@@ -1,7 +1,6 @@
 import {
   chmodSync,
   closeSync,
-  constants,
   fchmodSync,
   fstatSync,
   lstatSync,
@@ -121,7 +120,7 @@ function writePrivateTempFile(
   timeoutMemoKey: string,
   onCreated: () => void,
 ): void {
-  const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  const descriptor = openSync(path, "wx", 0o600);
   onCreated();
   try {
     if (process.platform === "win32") {
@@ -142,7 +141,7 @@ async function writePrivateTempFileAsync(
   timeoutMemoKey: string,
   onCreated: () => void,
 ): Promise<void> {
-  const descriptor = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  const descriptor = openSync(path, "wx", 0o600);
   onCreated();
   try {
     if (process.platform === "win32") {
@@ -157,14 +156,14 @@ async function writePrivateTempFileAsync(
   }
 }
 
-export function atomicWriteFile(
+function atomicWriteFileToTarget(
   path: string,
   content: string,
+  target: string,
   io?: AtomicWriteIO,
   hooks: AtomicWriteHooks = {},
 ): void {
   recordOwnedConfigPath(getConfigDir(), path);
-  const target = resolveWriteTarget(path);
   assertResolvedTargetAllowed(path, target);
   const tmp = `${target}.ocx.${process.pid}.${nextAtomicTempSequence()}.tmp`;
   let hardened = false;
@@ -222,6 +221,29 @@ export function atomicWriteFile(
     if (!removed) throw new AtomicWriteResidualTempError(tmp, hardened, { cause });
     throw cause;
   }
+}
+
+export function atomicWriteFile(
+  path: string,
+  content: string,
+  io?: AtomicWriteIO,
+  hooks: AtomicWriteHooks = {},
+): void {
+  atomicWriteFileToTarget(path, content, resolveWriteTarget(path), io, hooks);
+}
+
+/**
+ * Atomically replace the named directory entry without resolving a symlink at
+ * that entry. This is for files in directories writable by another process:
+ * a raced symlink is replaced, never followed to a more privileged target.
+ */
+export function atomicWriteFileNoFollow(
+  path: string,
+  content: string,
+  io?: AtomicWriteIO,
+  hooks: AtomicWriteHooks = {},
+): void {
+  atomicWriteFileToTarget(path, content, path, io, hooks);
 }
 
 export interface AtomicWriteAsyncIO {
