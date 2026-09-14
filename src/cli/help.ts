@@ -33,6 +33,8 @@ Usage:
   ocx restore back            Re-point codex at the running proxy (undo restore)
   ocx recover-history --legacy-openai --yes
                                Force all user-message opencodex rows to OpenAI (legacy recovery)
+  ocx recover-history --ocx-compaction <thread-id> --yes
+                               Back up and make one ocx1-compacted thread replayable by native Codex
   ocx uninstall               Remove service/shim/config and restore native Codex (alias: remove)
   ocx service [sub]           Run as a background service (default: install/update/start)
   ocx codex-shim <sub>        Auto-start proxy when \`codex\` launches (install|status|uninstall|remove)
@@ -77,7 +79,7 @@ Usage:
   ocx memory [--json]         Alias of ocx observe memory
   ocx api-key <sub>           Alias of ocx access key
   ocx access <sub>            External API keys and endpoint information
-  ocx export --client <id>    Print a client config wired to the running proxy (12 clients)
+  ocx export --client <id>    Print a client config wired to the running proxy (13 clients)
   ocx integration client <sub> Enable, disable, inspect or roll back a client integration
   ocx grok <sub>              Grok Build model selection and apply
   ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection
