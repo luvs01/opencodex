@@ -66,8 +66,10 @@ portions of the CI gate:
 bun run setup:hooks
 ```
 
-This installs a `pre-push` hook (into the hooks dir git reports, so worktrees and
-`core.hooksPath` work) that runs `bun run prepush` — `typecheck`,
+This installs a `pre-push` hook into this repository's hooks directory (including
+linked-worktree layouts). For safety, setup refuses to replace hooks when
+`core.hooksPath` redirects them to a potentially shared directory. The hook runs
+`bun run prepush` — `typecheck`,
 `lint:gui:if-changed`, `test`, `privacy:scan`, and `doctor:gui:if-changed` —
 before every `git push`. Both `lint:gui:if-changed` and `doctor:gui:if-changed`
 run their check only when the push touches `gui/`.
