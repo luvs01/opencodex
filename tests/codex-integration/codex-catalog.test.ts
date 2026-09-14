@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexAccountGatedCanonicalWireModel } from "../../src/server/responses/core";
@@ -53,9 +53,17 @@ import {
 import {
   CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
   mergeCatalogEntriesFromObservedState,
+  syncCatalogModels,
   type ObservedCatalogMergeInput,
 } from "../../src/codex/catalog/sync";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { saveConfig } from "../../src/config";
+import { SUBAGENT_MODELS_VERSION } from "../../src/config/subagent-models";
+import { captureCatalogAdmissionSnapshot } from "../../src/codex/catalog-admission";
+import { convergeCodexCatalog } from "../../src/codex/convergence";
+import { resetCodexRuntimeResolveCacheForTests } from "../../src/codex/runtime";
+import { resolveCodexCatalogSerializationDatabasePath, resolveEffectiveUserIdentity } from "../../src/codex/user-identity";
+import { CODEX_FORWARD_BASE_URL } from "../../src/providers/openai-tiers";
 
 const originalFetch = globalThis.fetch;
 
@@ -1632,6 +1640,43 @@ describe("combo catalog capability intersection", () => {
     )).not.toHaveProperty("reasoningEfforts");
   });
 
+  test("resolveComboCatalogMember restores canonical OpenAI effort levels through generic routes", () => {
+    const providers = new Map([["azu-lab2", {
+      adapter: "openai-chat" as const,
+      baseUrl: "https://azu-lab2.example/v1",
+    }]]);
+    const member = resolveComboCatalogMember(
+      { provider: "azu-lab2", model: "gpt-5.6-terra" },
+      new Map([["azu-lab2/gpt-5.6-terra", {
+        provider: "azu-lab2",
+        id: "gpt-5.6-terra",
+        contextWindow: 373_000,
+        inputModalities: ["text", "image"],
+      }]]),
+      providers,
+    );
+    expect(member?.reasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  test("resolveComboCatalogMember applies sidecar hints to complete discovery rows", () => {
+    const providers = new Map([["sidecar", {
+      adapter: "openai-chat" as const,
+      baseUrl: "https://sidecar.example/v1",
+      modelInputModalities: { planner: ["text"] },
+    }]]);
+    const member = resolveComboCatalogMember(
+      { provider: "sidecar", model: "planner" },
+      new Map([["sidecar/planner", {
+        provider: "sidecar",
+        id: "planner",
+        contextWindow: 200_000,
+        inputModalities: ["text"],
+      }]]),
+      providers,
+    );
+    expect(member?.inputModalities).toEqual(["text", "image"]);
+  });
+
   // Sniper for the OUTPUT-vs-INPUT mapping defect carried over from PR #3332. The test
   // above uses toMatchObject, which only inspects the keys it names, so without this a
   // regression that puts the OUTPUT ceiling into the INPUT slot passes green.
@@ -3045,7 +3090,207 @@ function mergeObservedForTest(
   });
 }
 
+// Exercise both production callers: removing either caller's nativeDisplayNames argument
+// must fail the persisted-label assertion, even if the pure merge tests still pass.
+test.each(["retained", "convergence"] as const)("%s persists and restores native labels through the catalog writer", async writer => {
+  const envKeys = ["CODEX_HOME", "OPENCODEX_HOME", "CODEX_CLI_PATH"] as const;
+  const previousEnv = envKeys.map(key => process.env[key]);
+  const previousFetch = globalThis.fetch;
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ocx-native-label-writer-")));
+  const codexHome = join(root, "codex");
+  const catalogPath = join(codexHome, "custom-catalog.json");
+  let fetchCalls = 0;
+  try {
+    mkdirSync(codexHome);
+    mkdirSync(join(root, "ocx"));
+    process.env.CODEX_HOME = codexHome;
+    process.env.OPENCODEX_HOME = join(root, "ocx");
+    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "custom-catalog.json"\n');
+    const catalog = { models: [{ ...nativeTemplate(), slug: "gpt-5.6-sol", display_name: "Fixture Sol" }] };
+    // Reuse the executable-fixture protocol from catalog-full-picker-order.test.ts so
+    // admission and a forced runtime refresh observe the same version and bundled rows.
+    const script = join(root, "fixture-codex.js");
+    writeFileSync(script, [
+      'if (process.argv.includes("--version")) console.log("codex-cli 0.145.0");',
+      `else process.stdout.write(${JSON.stringify(JSON.stringify(catalog))});`,
+    ].join("\n"));
+    if (process.platform === "win32") {
+      process.env.CODEX_CLI_PATH = join(root, "fixture-codex.cmd");
+      writeFileSync(process.env.CODEX_CLI_PATH, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+    } else {
+      process.env.CODEX_CLI_PATH = join(root, "fixture-codex");
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      writeFileSync(process.env.CODEX_CLI_PATH, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`);
+      chmodSync(process.env.CODEX_CLI_PATH, 0o755);
+    }
+    resetCatalogRuntimeStateForTests();
+    resetCodexRuntimeResolveCacheForTests();
+    resetCodexModelEntitlementCacheForTests();
+    expect(loadBundledCodexCatalog()?.models?.[0]?.slug).toBe("gpt-5.6-sol");
+    writeFileSync(catalogPath, JSON.stringify(catalog));
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("native label writer fixture must not make a network request");
+    }) as typeof fetch;
+    const config: OcxConfig = {
+      port: 10100, defaultProvider: "openai",
+      subagentModels: [], subagentModelsVersion: SUBAGENT_MODELS_VERSION,
+      providers: {
+        openai: { adapter: "openai-responses", baseUrl: CODEX_FORWARD_BASE_URL, authMode: "forward" },
+      },
+    };
+    const write = async (labels?: Record<string, string>) => {
+      if (labels) config.providers.openai!.modelDisplayNames = labels;
+      else delete config.providers.openai!.modelDisplayNames;
+      saveConfig(config);
+      if (writer === "convergence") {
+        const result = await convergeCodexCatalog(captureCatalogAdmissionSnapshot(config), {
+          action: "converge", scope: "catalog", reason: "management-mutation", mode: "explicit", deadlineMs: 5_000,
+        });
+        expect(result.catalogRefresh.status).toBe("committed");
+      } else {
+        const result = await syncCatalogModels(config);
+        expect(result.path).toBe(catalogPath);
+        expect(result.skippedReason).toBeUndefined();
+      }
+      return (JSON.parse(readFileSync(catalogPath, "utf8")) as { models: Record<string, unknown>[] }).models;
+    };
+    const original = await write();
+    const renamed = await write({ "gpt-5.6-sol": "Custom Sol" });
+    const renamedBytes = readFileSync(catalogPath, "utf8");
+    const native = renamed.find(row => row.slug === "gpt-5.6-sol")!;
+    expect(native.display_name).toBe("Custom Sol");
+    expect(native.opencodex_native_display_name).toEqual({
+      slug: "gpt-5.6-sol", original: "Fixture Sol", applied: "Custom Sol",
+    });
+    const { opencodex_native_display_name: marker, ...withoutMarker } = native;
+    expect(marker).toBeDefined();
+    expect({ ...withoutMarker, display_name: "Fixture Sol" })
+      .toEqual(original.find(row => row.slug === "gpt-5.6-sol")!);
+    expect(await write({ "gpt-5.6-sol": "Custom Sol" })).toEqual(renamed);
+    expect(readFileSync(catalogPath, "utf8")).toBe(renamedBytes);
+    expect((await write({ "gpt-5.6-sol": "Changed Sol" })).find(row => row.slug === "gpt-5.6-sol")?.display_name)
+      .toBe("Changed Sol");
+    expect(await write()).toEqual(original);
+    expect(fetchCalls).toBe(0);
+  } finally {
+    try {
+      const database = resolveCodexCatalogSerializationDatabasePath(resolveEffectiveUserIdentity(), codexHome);
+      for (const suffix of ["", "-journal", "-wal", "-shm"]) rmSync(`${database}${suffix}`, { force: true });
+    } finally {
+      globalThis.fetch = previousFetch;
+      envKeys.forEach((key, index) => {
+        const value = previousEnv[index];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      });
+      resetCatalogRuntimeStateForTests();
+      resetCodexRuntimeResolveCacheForTests();
+      resetCodexModelEntitlementCacheForTests();
+      removeTreeWithRetry(root);
+    }
+  }
+}, 30_000);
+
 describe("Codex catalog routed normalization", () => {
+  test("reapplies native display names after repeated catalog merges without changing model metadata", () => {
+    const input = {
+      catalogModels: [{ ...nativeTemplate(), slug: "gpt-5.6-sol" }],
+      routedEntries: [],
+    };
+    const original = mergeObservedForTest(input);
+    const labels = { "gpt-5.6-sol": "GPT 5.6 Sol" };
+    const renamed = mergeObservedForTest({ ...input, nativeDisplayNames: labels });
+    const row = renamed.find(entry => entry.slug === "gpt-5.6-sol")!;
+    expect(row.display_name).toBe("GPT 5.6 Sol");
+    expect({ ...row, display_name: undefined, opencodex_native_display_name: undefined }).toEqual({
+      ...original.find(entry => entry.slug === "gpt-5.6-sol"), display_name: undefined,
+    });
+    const regenerated = mergeObservedForTest({
+      ...input, catalogModels: renamed, nativeDisplayNames: labels,
+    });
+    expect(regenerated.find(entry => entry.slug === "gpt-5.6-sol")?.display_name).toBe("GPT 5.6 Sol");
+    const changed = mergeObservedForTest({
+      ...input, catalogModels: regenerated,
+      nativeDisplayNames: { "gpt-5.6-sol": "  Sol 5.6  " },
+    });
+    expect(changed.find(entry => entry.slug === "gpt-5.6-sol")?.display_name).toBe("Sol 5.6");
+    expect(JSON.stringify(regenerated)).toBe(JSON.stringify(renamed));
+    for (const nativeDisplayNames of [undefined, {}, { "gpt-5.6-sol": "   " }]) {
+      const restored = mergeObservedForTest({ ...input, catalogModels: changed, nativeDisplayNames });
+      expect(restored).toEqual(original);
+    }
+  });
+
+  test("native display names preserve external label changes when clearing the overlay", () => {
+    const renamed = mergeObservedForTest({
+      catalogModels: [{ ...nativeTemplate(), slug: "gpt-5.6-sol" }], routedEntries: [],
+      nativeDisplayNames: { "gpt-5.6-sol": "Custom Sol" },
+    });
+    renamed.find(entry => entry.slug === "gpt-5.6-sol")!.display_name = "Updated upstream Sol";
+    const restored = mergeObservedForTest({ catalogModels: renamed, routedEntries: [] });
+    const row = restored.find(entry => entry.slug === "gpt-5.6-sol")!;
+    expect(row.display_name).toBe("Updated upstream Sol");
+    expect(row.opencodex_native_display_name).toBeUndefined();
+  });
+
+  test("native display names preserve pinned metadata upgrades and restore pinned names", () => {
+    for (const slug of ["gpt-5.6-sol", "gpt-6-astra"]) {
+      const input = { catalogModels: [{ ...nativeTemplate(), slug, display_name: slug }], routedEntries: [] };
+      const original = mergeObservedForTest(input);
+      const renamed = mergeObservedForTest({ ...input, nativeDisplayNames: { [slug]: "Custom name" } });
+      expect(renamed.find(entry => entry.slug === slug)?.display_name).toBe("Custom name");
+      expect(mergeObservedForTest({ catalogModels: renamed, routedEntries: [] })).toEqual(original);
+    }
+  });
+
+  test("clearing a native label keeps Astra external edits subject to pinned metadata normalization", () => {
+    const original = mergeObservedForTest({
+      catalogModels: [{ ...nativeTemplate(), slug: "gpt-6-astra", display_name: "gpt-6-astra" }],
+      routedEntries: [],
+    });
+    const renamed = mergeObservedForTest({
+      catalogModels: original, routedEntries: [],
+      nativeDisplayNames: { "gpt-6-astra": "Custom Astra" },
+    });
+    const external = JSON.parse(JSON.stringify(renamed)) as Record<string, unknown>[];
+    const astra = external.find(entry => entry.slug === "gpt-6-astra")!;
+    astra.display_name = "External Astra name";
+    astra.context_window = 123;
+    const restored = mergeObservedForTest({ catalogModels: external, routedEntries: [] });
+    const row = restored.find(entry => entry.slug === "gpt-6-astra")!;
+    expect(row).toEqual(original.find(entry => entry.slug === "gpt-6-astra")!);
+    expect(row.display_name).not.toBe("External Astra name");
+    expect(row.context_window).toBe(272_000);
+    expect(row.opencodex_native_display_name).toBeUndefined();
+    expect(astra.display_name).toBe("External Astra name");
+    expect(astra.opencodex_native_display_name).toBeDefined();
+  });
+
+  test("native display names do not leak overlay markers through catalog templates", () => {
+    const template = {
+      ...nativeTemplate(),
+      opencodex_native_display_name: { slug: "gpt-5.6-sol", original: "Sol", applied: "Custom" },
+    };
+    const entries = buildCatalogEntries(template, ["gpt-5.5"], [{ provider: "local", id: "qwen3-coder" }]);
+    expect(entries.length).toBeGreaterThanOrEqual(2);
+    for (const entry of entries) expect(entry.opencodex_native_display_name).toBeUndefined();
+    expect(template.opencodex_native_display_name).toBeDefined();
+  });
+
+  test("native display names do not relabel a routed combo occupying a native slug", () => {
+    const routed = {
+      ...nativeTemplate(), slug: "gpt-5.6-sol", display_name: "My combo",
+      owned_by: "combo", description: "Routed via opencodex → combo (combo).",
+      opencodex_catalog_kind: CODEX_NATIVE_ALIAS_CATALOG_KIND,
+    };
+    const rows = mergeObservedForTest({
+      catalogModels: [], routedEntries: [routed],
+      nativeDisplayNames: { "gpt-5.6-sol": "GPT 5.6 Sol" },
+    });
+    expect(rows.find(entry => entry.slug === "gpt-5.6-sol")?.display_name).toBe("My combo");
+  });
+
   test("pending re-registration cannot recover ON rows from a degraded old catalog", () => {
     const old = { ...nativeTemplate(), slug: "vendor/model-0", owned_by: "vendor", opencodex_catalog_kind: CODEX_PROVIDER_MODEL_CATALOG_KIND };
     const input = {
@@ -6819,23 +7064,25 @@ describe("Codex reasoning-effort capability clamp", () => {
     const supported = supportedCodexReasoningEffortsFromObservedCatalog(observed);
     const clamp = clampCatalogModelsToObservedCodexSupport(models, supported);
 
+    // max and ultra are exempt from the observed-runtime intersection: nothing is removed,
+    // the ladder is untouched, and an ultra default survives a runtime that stops at xhigh.
     expect(clamp).toEqual({
-      removedEfforts: ["max", "ultra"],
-      affectedModels: ["openrouter/example"],
+      removedEfforts: [],
+      affectedModels: [],
     });
     expect(models[0]!.supported_reasoning_levels.map(level => level.effort))
-      .toEqual(["low", "medium", "high", "xhigh"]);
-    expect(models[0]!.default_reasoning_level).toBe("xhigh");
+      .toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(models[0]!.default_reasoning_level).toBe("ultra");
     expect(JSON.stringify(observed)).toBe(before);
   });
 
-  test("strips max and ultra when the installed Codex ladder stops at xhigh", () => {
+  test("keeps max and ultra when the installed Codex ladder stops at xhigh", () => {
     const models = [routedEntry()];
 
     clampCatalogModelsToCodexSupport(models, bundledCatalogDeps(["low", "medium", "high", "xhigh"]));
 
     expect(models[0]!.supported_reasoning_levels.map(level => level.effort))
-      .toEqual(["low", "medium", "high", "xhigh"]);
+      .toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
   test("preserves max and ultra when the installed Codex ladder includes them", () => {
@@ -6847,7 +7094,7 @@ describe("Codex reasoning-effort capability clamp", () => {
       .toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
-  test("falls back to the conservative universal ladder when every advertised effort is unsupported", () => {
+  test("a max/ultra-only ladder survives instead of collapsing to the universal fallback", () => {
     const entry = {
       supported_reasoning_levels: [{ effort: "max" }, { effort: "ultra" }],
       default_reasoning_level: "ultra",
@@ -6855,16 +7102,39 @@ describe("Codex reasoning-effort capability clamp", () => {
 
     clampEntryToCodexSupportedEfforts(entry, new Set(["low", "medium", "high", "xhigh"]));
 
+    expect(entry.supported_reasoning_levels.map(level => level.effort)).toEqual(["max", "ultra"]);
+    expect(entry.default_reasoning_level).toBe("ultra");
+  });
+
+  test("still falls back to the conservative universal ladder when every advertised effort is genuinely unsupported", () => {
+    const entry = {
+      supported_reasoning_levels: [{ effort: "xhigh" }],
+      default_reasoning_level: "xhigh",
+    };
+
+    clampEntryToCodexSupportedEfforts(entry, new Set(["low", "medium"]));
+
     expect(entry.supported_reasoning_levels.map(level => level.effort)).toEqual(["low", "medium", "high"]);
     expect(clampedDefaultEffort("max", [])).toBe("medium");
   });
 
-  test("repairs an unsupported max default to the highest surviving xhigh rung", () => {
+  test("keeps an unclampable max default instead of repairing it down to xhigh", () => {
     const entry = routedEntry();
 
     clampEntryToCodexSupportedEfforts(entry, new Set(["low", "medium", "high", "xhigh"]));
 
-    expect(entry.default_reasoning_level).toBe("xhigh");
+    expect(entry.default_reasoning_level).toBe("max");
+  });
+
+  test("still repairs a genuinely unsupported default to the highest surviving rung", () => {
+    const entry = routedEntry();
+    entry.default_reasoning_level = "xhigh";
+
+    clampEntryToCodexSupportedEfforts(entry, new Set(["low", "medium", "high"]));
+
+    expect(entry.supported_reasoning_levels.map(level => level.effort))
+      .toEqual(["low", "medium", "high", "max", "ultra"]);
+    expect(entry.default_reasoning_level).toBe("high");
   });
 
   test("is a no-op when the installed Codex binary cannot be probed", () => {
@@ -6875,6 +7145,21 @@ describe("Codex reasoning-effort capability clamp", () => {
 
     expect(models).toEqual(before);
   });
+});
+
+test("provider-configured cap applies to discovered window and does not get overwritten by discovery", () => {
+  const resolved = applyProviderConfigHints("prov", {
+    adapter: "openai-chat",
+    baseUrl: "https://prov.test/v1",
+    modelContextWindows: { "disco-model": 100_000 },
+  }, {
+    provider: "prov",
+    id: "disco-model",
+    contextWindow: 200_000,
+  }, 150_000);
+
+  expect(resolved.contextWindow).toBe(100_000);
+  expect(resolved.contextCap).toBe(150_000);
 });
 
 describe("auto_review_model configuration (#1225)", () => {
