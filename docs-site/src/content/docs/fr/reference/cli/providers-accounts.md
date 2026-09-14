@@ -14,7 +14,7 @@ Gestion des fournisseurs non interactive. Les entrées de registre sont classée
 
 | Sous-commande | Drapeaux pris en charge | Actions |
 | --- | --- | --- |
-| `list` | `--json` | Répertoriez les fournisseurs configurés et les entrées de registre restantes. |
+| `list` | `--json`, `--jsonl` | Répertoriez les fournisseurs configurés et les entrées de registre restantes. `--jsonl` émet un objet JSON par fournisseur configuré et par ligne. |
 | `add <name>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | Ajoutez un fournisseur registry/custom. `--force` écrase ; `--sync` actualise un proxy en cours d'exécution en mode sortie humaine. |
 | `edit <name>` | indicateurs de champ du fournisseur, `--headers <json>`, `--json` | Modifiez les champs de fournisseur en direct validés sans remplacer les pools de clés. `--headers` fusionne les en-têtes de requête personnalisés ; passez `{}` ou `-` pour les effacer. |
 | `test <name>` | `--json` | Sondez le véritable point de terminaison du modèle en amont. |
@@ -28,6 +28,7 @@ Gestion des fournisseurs non interactive. Les entrées de registre sont classée
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -35,6 +36,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` écrit uniquement les fournisseurs configurés, un objet JSON par ligne. Chaque objet contient les mêmes champs qu’un élément du tableau `configured` de `--json`, sans le résumé `registryCount`. Les scripts peuvent traiter les objets ligne par ligne. `--json` et `--jsonl` ne peuvent pas être combinés.
 
 :::caution[Les en-têtes personnalisés ne sont pas un canal d'identification]
 `--headers` est destiné aux métadonnées de requête non secrètes : conseils de routage, locataire ou
@@ -67,9 +70,11 @@ de fournisseurs OAuth et à clé API actuellement acceptés.
 
 Utilisez la même commande pour **réauthentifier** après `ocx status` / `ocx doctor` rapports
 réauthentification requise ou échec de l'actualisation du terminal (ou utilisez Réauthentifier dans le tableau de bord).
-Les comptes du groupe Codex ne constituent pas un fournisseur public pour `ocx login` : réauthentifiez-vous
-plutôt depuis le groupe de comptes Codex du tableau de bord (**Réauthentifier**) ou avec le flux non
-interactif `ocx account reauth`.
+Les comptes du pool Codex ne font pas partie des fournisseurs OAuth ou API-key ci-dessus, mais
+`ocx login codex` les atteint : la commande est routée vers la connexion au pool de comptes, si bien que
+`ocx login codex --reauth` équivaut à `ocx account reauth codex`. Le pool de comptes Codex du tableau de
+bord (**Réauthentifier**) fait de même. Cette route s'exécute dans le proxy, elle en exige donc un en
+cours d'exécution.
 
 ```bash
 ocx login xai
@@ -100,7 +105,7 @@ Répertoriez et changez de compte de fournisseur et de pools de clés API via le
 la surface est :
 
 ```text
-Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits> ...
+Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits|grok-reset-coupons> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 current <provider>  Show the active account or key.
@@ -112,6 +117,7 @@ remove <provider> <id> --yes  Remove a stored account or key after an existence 
 add-key <provider> [--label <label>]  Add a key read only from piped stdin.
 login/reauth/code/cancel  Run browser or manual-code auth from a headless shell.
 reset-credits <id|main> [--consume --yes]  Inspect or consume Codex reset credits.
+grok-reset-coupons [<id>] [--consume --yes] [--token-id <token-id>] [--operation-id <uuid>]  Inspect or redeem Grok reset coupons.
 Switching the active account takes effect immediately; running threads move on their next request, and in-flight requests keep the account they captured.
 A selection-order change applies from the next unbound request and never moves a bound thread.
 ```
@@ -203,11 +209,11 @@ renvoient 1 ; une sonde de quota en amont qui échoue ou expire produit plutôt 
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Contrôle le seuil du pool Codex `openai`, ou enregistre celui d’un pool OAuth générique. `on` enregistre 80 %, `off` 0 % et `threshold <n>` accepte 0–100. Les seuils génériques sont actuellement inactifs : leur sauvegarde ne change ni le basculement par seuil, ni l’activation du fournisseur, ni la rotation réactive après une erreur 429. Pour les pools génériques, les sorties utilisent la réponse confirmée du serveur. Pour un pool générique, `poolEnabled` est le réglage enregistré (`null` signifie non spécifié), pas l’état effectif hérité. `inert: true` indique que le seuil ne s’applique pas ; une capacité inconnue ne produit jamais `enabled: true`. Les fournisseurs à clé API, Anthropic et les valeurs invalides sont refusés.
+Contrôle le seuil du pool Codex `openai`, ou enregistre celui d’un pool OAuth générique. `on` enregistre 80 %, `off` 0 % et `threshold <n>` accepte 0–100. Un seuil générique n’oriente la sélection que si `pool.kernel` est activé avec `strategy: "fill-first"` ; le drapeau désactivé, sa sauvegarde n’active pas le basculement par seuil. Dans les deux cas, elle ne change ni l’activation du fournisseur, ni la rotation réactive après une erreur 429. Pour les pools génériques, les sorties utilisent la réponse confirmée du serveur. Pour un pool générique, `poolEnabled` est le réglage enregistré (`null` signifie non spécifié), pas l’état effectif hérité. `inert: true` indique un seuil enregistré mais non appliqué, `inert: false` un seuil que le pool applique réellement. L’absence d’`inert` signale une capacité inconnue, qui ne produit jamais `enabled: true`. Les fournisseurs à clé API, Anthropic et les valeurs invalides sont refusés.
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }
-generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: boolean | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
@@ -279,6 +285,26 @@ security find-generic-password -w openrouter | ocx account add-key openrouter --
 
 Inspectez Codex réinitialiser les crédits d'un compte. Consommer un crédit est destructeur et nécessite à la fois
 `--consume` et `--yes`.
+
+### `ocx account grok-reset-coupons [<account-id>] [--consume --yes [--token-id <id>] [--operation-id <uuid>]] [--json]`
+
+Inspecte les coupons de réinitialisation restants ou en échange un pour un compte xAI / Grok.
+
+Sans `--consume`, la commande renvoie les jetons de coupon disponibles et leurs fenêtres de validité :
+
+```bash
+ocx account grok-reset-coupons
+ocx account grok-reset-coupons acc_xai_01 --json
+```
+
+Échanger un coupon de réinitialisation modifie l'état de facturation et épuise définitivement un jeton de coupon. `--consume` exige strictement `--yes` :
+
+```bash
+ocx account grok-reset-coupons --consume --yes
+ocx account grok-reset-coupons --consume --yes --token-id <token-id>
+```
+
+Passez `--operation-id <uuid>` (doit être un UUIDv4 valide) pour garantir une règlement idempotent. En cas de coupure réseau ou de nouvelle tentative, des identifiants d'opération identiques rejouent le résultat enregistré de manière durable au lieu de consommer un second coupon.
 
 ### `ocx account main <subcommand>`
 

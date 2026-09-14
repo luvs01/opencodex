@@ -28,6 +28,22 @@ These answer in the CLI head and never reach the proxy, so they work with nothin
 
 Safe to run at any time; none of these change state.
 
+### `ocx models price`
+
+Read the saved manual price for an exact provider/model selector.
+
+| Method | Route |
+|---|---|
+| GET | `/api/providers/{provider}/model-costs` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit provider, modelId, and cost (null for automatic pricing). |
+
+JSON mode: `envelope`.
+
+- The provider must be configured; everything after the first slash is the exact upstream model ID.
+
 ### `ocx status`
 
 Proxy status, injection state, and version skew between this CLI and the running proxy.
@@ -67,6 +83,7 @@ Drives no management route.
 | Flag | Value | Meaning |
 |---|---|---|
 | `--json` | boolean | Emit the provider list as JSON. |
+| `--jsonl` | boolean | Emit one configured provider per JSON line. |
 
 JSON mode: `envelope`.
 
@@ -115,6 +132,8 @@ Token and estimated-cost report over a time range.
 | Flag | Value | Meaning |
 |---|---|---|
 | `--range` | string | today | 1d | 7d | 30d | all |
+| `--since` | string | Inclusive start: epoch milliseconds or full ISO datetime with timezone; requires --until and overrides --range. |
+| `--until` | string | Inclusive end: epoch milliseconds or full ISO datetime with timezone; requires --since. |
 | `--provider` | string | Restrict to one provider. |
 | `--model` | string | Restrict to one model id. |
 | `--json` | boolean | Emit the usage report as JSON. |
@@ -126,7 +145,7 @@ JSON mode: `payload`.
 
 ### `ocx logs`
 
-Recent request log rows, filterable by provider, model, conversation, and status.
+Recent request log rows, filterable by provider, model, conversation, account, and status.
 
 | Method | Route |
 |---|---|
@@ -137,6 +156,7 @@ Recent request log rows, filterable by provider, model, conversation, and status
 | `--provider` | string | Restrict to one provider, matching failover attempts too. |
 | `--model` | string | Restrict to one model id, matching failover attempts too. |
 | `--conversation` | string | Restrict to one conversation id (`--conversationId` is accepted too). |
+| `--account` | string | Restrict to one account log label (`main`, `p<hex6>`, `o<hex6>`), matching failover attempts too. |
 | `--status` | string | An exact code (429) or a class (5xx). |
 | `--limit` | number | Row cap; defaults to 200. |
 | `--follow` | boolean | Poll for new rows; add --jsonl to emit JSONL. |
@@ -147,6 +167,7 @@ JSON mode: `payload`.
 
 - `--provider` and `--model` both match a failover attempt, so a request is findable by what actually served it, not only by what was asked for.
 - Rows print `conv=<id>` when the entry carries one, so a conversation filter can be told apart from an empty result.
+- Rows print `acct=<label>` when the account is known, so an `--account` filter can be told apart from an empty result.
 - `--follow` deduplicates by row id and cannot be combined with `--json`.
 
 ### `ocx storage report`
@@ -352,6 +373,49 @@ JSON mode: `payload`.
 
 Each of these writes. Check the flags column before running one unattended.
 
+### `ocx models set-price`
+
+Save four manual USD-per-1M-token rates, or restore automatic pricing for one model.
+
+| Method | Route |
+|---|---|
+| PUT | `/api/providers/{provider}/model-costs` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--input` | number | Input rate; required unless --auto is used. |
+| `--output` | number | Output rate; required unless --auto is used. |
+| `--cache-read` | number | Cache read rate; defaults to 0. |
+| `--cache-write` | number | Cache write rate; defaults to 0. |
+| `--auto` | boolean | Remove this model's override; cannot be combined with rates. |
+| `--json` | boolean | Emit the saved price or reset result as JSON. |
+
+JSON mode: `payload`.
+
+- Uses the exact upstream model ID after the first slash. Omitted cache rates default to zero; sibling model prices are preserved.
+
+### `ocx hub invite`
+
+Mint a single-use pairing code on a hub and print the exact `ocx connect` line for one more machine.
+
+Drives no management route.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit code, expiresAt, dataUrl, managementUrl, and command. |
+| `--data-url` | string | Advertise this data origin instead of hub.dataPublicOrigin or the bind address. |
+| `--management-url` | string | Confirm the management origin; it must equal hub.managementPublicOrigin. |
+| `--clients` | string | Pre-select codex and/or claude in the printed connect command. |
+
+JSON mode: `envelope`.
+
+- Hub only: refuses when runtimeRole is not hub, and requires a running attested proxy.
+- The code is secret, single-use and short-lived; it is bound to hub.managementPublicOrigin and to the connecting machine's loopback browser origin.
+- The bound browser origin is always printed; when it is not http://localhost:10100 the warning names the port the connecting machine must use.
+- Refuses when the advertised data origin would be loopback (a loopback or wildcard bind with no hub.dataPublicOrigin and no --data-url) rather than printing a line that dials the other machine itself.
+- Prints no data-plane token. Remote machines receive their own revocable per-client key from the exchange.
+- Mints through the attested local pairing-grant route, the same one ocx gui pair uses; no admin token is read.
+
 ### `ocx connect rotate`
 
 Rotate the connected client's data key against the hub, with commit and abort.
@@ -390,6 +454,45 @@ JSON mode: `payload`.
 
 - `store` verifies every keychain write by read-back before config.json is rewritten with keychain: references; an unavailable keychain refuses with 503 and leaves the file untouched.
 - Headless services usually have no unlocked keychain session; prefer ${ENV_VAR} references there.
+
+### `ocx account refresh`
+
+Refresh account quotas without model validation; pending Codex accounts require dashboard consent.
+
+| Method | Route |
+|---|---|
+| POST | `/api/codex-auth/accounts/refresh` |
+| GET | `/api/provider-quotas` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the refresh result as JSON. |
+
+JSON mode: `payload`.
+
+- CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary.
+
+### `ocx account grok-reset-coupons`
+
+Inspect or redeem Grok billing reset coupons; redemption is journaled and idempotent.
+
+| Method | Route |
+|---|---|
+| GET | `/api/grok/reset-coupons` |
+| POST | `/api/grok/reset-coupons/consume` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--consume` | boolean | Redeem one reset coupon; requires --yes. |
+| `--yes` | boolean | Explicit confirmation required by --consume. |
+| `--token-id` | string | Redeem a specific reset token instead of the default selection. |
+| `--operation-id` | string | UUIDv4 making a redemption idempotent: retries replay the journaled outcome. |
+| `--json` | boolean | Emit the coupon list or redemption result as JSON. |
+
+JSON mode: `payload`.
+
+- Without --consume this is a read: remaining coupons and their validity windows.
+- The operation is journaled before the upstream call, so retrying the same --operation-id replays the recorded outcome instead of spending a second coupon.
 
 ### `ocx account pause`
 
@@ -444,10 +547,9 @@ Show or set how an account pool picks the next account.
 
 | Method | Route |
 |---|---|
-| GET | `/api/codex-auth/active` |
-| PUT | `/api/codex-auth/pool-strategy` |
-| GET | `/api/oauth/accounts/pool` |
-| PUT | `/api/oauth/accounts/pool` |
+| GET | `/api/pool/settings` |
+| PUT | `/api/pool/settings` |
+| PATCH | `/api/pool/settings` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -458,7 +560,7 @@ JSON mode: `envelope`.
 - A bare invocation reads and never writes.
 - The APPLIED value is echoed, not the requested one, so a server-side normalization stays visible.
 - Values are not re-validated in the CLI: the server owns the strategy names and the 1-100 sticky bound.
-- `anthropic` owns the full pool contract. Other OAuth providers reach the same endpoint with a generic subset (enabled/strategy/autoSwitchThreshold) whose settings persist but do not yet steer selection; `sticky` and `quotaWindow` are refused for them.
+- One route answers for every pool kind and declares which fields that kind honours in `supported`, so an unsupported field is a stated null rather than an absence. `anthropic` alone carries `quotaWindow`. Generic-provider settings steer selection only while `pool.kernel` is on. The legacy per-pool paths still work and are unchanged.
 
 ### `ocx account sticky`
 
@@ -466,10 +568,9 @@ Show or set how many consecutive requests stay on one account.
 
 | Method | Route |
 |---|---|
-| GET | `/api/codex-auth/active` |
-| PUT | `/api/codex-auth/pool-strategy` |
-| GET | `/api/oauth/accounts/pool` |
-| PUT | `/api/oauth/accounts/pool` |
+| GET | `/api/pool/settings` |
+| PUT | `/api/pool/settings` |
+| PATCH | `/api/pool/settings` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -478,6 +579,27 @@ Show or set how many consecutive requests stay on one account.
 JSON mode: `envelope`.
 
 - Only meaningful under the sticky-capable strategies; the pool strategy is the other half of this setting.
+
+### `ocx account auto-switch`
+
+Show or set the usage percentage at which a pool moves to another account.
+
+| Method | Route |
+|---|---|
+| GET | `/api/codex-auth/active` |
+| PUT | `/api/codex-auth/auto-switch` |
+| GET | `/api/oauth/accounts/pool` |
+| PUT | `/api/oauth/accounts/pool` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the stored threshold and whether it is applied. |
+
+JSON mode: `envelope`.
+
+- A bare invocation reads and never writes.
+- `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0-100.
+- For a generic OAuth pool, `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability.
 
 ### `ocx storage cleanup`
 
@@ -647,6 +769,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 35
-- of those, state-changing: 15
+- declared capabilities: 41
+- of those, state-changing: 20
 - head-resolved invocations: 2
