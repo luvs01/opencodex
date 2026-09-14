@@ -158,6 +158,8 @@ export interface InjectCodexOptions {
   journalOwner?: { kind: "process" } | { kind: "client"; apiKeyId: string };
   /** Synchronous read-only client ownership guard, evaluated at the artifact commit boundary. */
   beforeClientWrite?: () => void;
+  /** Test seam for the native Codex feature command used when a v1 pin must disable v2. */
+  toggleCodexMultiAgentV2?: (enabled: boolean) => void;
 }
 
 function runClientWriteGuard(guard: InjectCodexOptions["beforeClientWrite"]): void {
@@ -975,7 +977,7 @@ async function injectCodexConfigImpl(
     };
   }
 
-  const rawContent = readFileSync(CODEX_CONFIG_PATH, "utf-8");
+  let rawContent = readFileSync(CODEX_CONFIG_PATH, "utf-8");
   const preflightTableMode = usesProviderTable(routingTarget);
   const compactionOnly = routingTarget.clientCompaction === true
     && routingTarget.desktopAuthless !== true
@@ -1009,6 +1011,31 @@ async function injectCodexConfigImpl(
         `${routingTarget.requiresAdmissionToken ? ` with x-opencodex-api-key from ${routingTarget.tokenEnv}` : ""}.\n` +
         `  For direct injection, switch to the built-in openai provider, remove any user-owned root openai_base_url, and rerun 'ocx start'.`,
     };
+  }
+
+  // Codex resolves its global v2 feature before catalog-level surface pins. A fresh
+  // OpenCodex config explicitly selects v1, so retaining an older global v2 flag would
+  // make the injected catalog claim v1 while new Codex sessions actually run v2. Reuse
+  // the same format-preserving transition as the explicit CLI/API mode selectors before
+  // taking the journal baseline. External provider-owned configs returned above remain
+  // byte-for-byte untouched, and read-only preflight remains read-only.
+  if (!options.validateOnly && config?.multiAgentMode === "v1") {
+    const { isMultiAgentV2Enabled, transitionMultiAgentV2 } = await import("./features");
+    if (isMultiAgentV2Enabled()) {
+      let toggle = options.toggleCodexMultiAgentV2;
+      if (!toggle) {
+        const { runCodexFeaturesCommand } = await import("../cli/v2");
+        toggle = enabled => runCodexFeaturesCommand(enabled ? "enable" : "disable");
+      }
+      const transition = transitionMultiAgentV2(false, toggle);
+      if (!transition.ok) {
+        return {
+          success: false,
+          message: `Codex config injection refused: could not reconcile the v1 surface with the global multi_agent_v2 feature: ${transition.error}.`,
+        };
+      }
+      rawContent = readFileSync(CODEX_CONFIG_PATH, "utf-8");
+    }
   }
 
   // Marker-owned native defaults are OpenCodex residue, never part of the
