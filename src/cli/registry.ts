@@ -293,7 +293,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     usage: "ocx integration <claude|grok|client|native> ...",
     summary: "Manage supported client integrations, and the native client toggles.",
     details: [
-      "`native` shows or flips the native Claude/Claude Desktop/Codex/Grok toggles; the other subcommands manage the reversible file integrations.",
+      "`native` shows or flips the native Claude/Claude Desktop/Codex/Grok toggles, or inspects Cursor status (`ocx integration native cursor`); the other subcommands manage the reversible file integrations.",
     ],
   },
   {
