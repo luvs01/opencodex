@@ -244,7 +244,9 @@ on the planned search endpoint. `openai`, `anthropic`, `xai`, `gemini`, and `exa
 sidecar executor and that executor's own credential; a missing credential leaves the bridge
 disarmed rather than falling through to another paid search. A leg that mixes an intercepted
 `web_search` call with another client-executed tool still fails closed. Assistant text is not
-treated as a search instruction.
+treated as a search instruction. The bridge finalizes request-scoped OpenAI sidecar authority on
+completion, failure, and client cancellation, returning any recovery probe lease when no search
+request consumed it.
 
 ## Remote Hub hardening ownership
 
