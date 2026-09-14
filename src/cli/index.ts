@@ -92,6 +92,15 @@ import {
   grokSyncFailureMessage,
   reconcileEnsureDesiredIntegrations,
 } from "./ensure-desired-integrations";
+import { refreshOwnedCatalogIntegrations } from "../integrations/catalog-refresh";
+import { loadExportModels } from "../server/management/model-rows";
+
+import { removeOwnedConfigAfterDesktopCleanup } from "./uninstall-client-state";
+import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
+import { selfLaunchArgv } from "../lib/self-launch-argv";
+import { initializeNodeLauncherContext } from "./launcher-context";
+import { createLocalAttestationSecret } from "../lib/local-management-attestation";
+import { MEMORY_DRAIN_RESTART_MS, REPLACEMENT_READY_TIMEOUT_MS } from "../lib/system-restart-contract";
 
 /**
  * A failed shell-hook reconcile is not cosmetic: a stale hook keeps sourcing
@@ -105,13 +114,25 @@ function reportShellHookFailure(result: { state: "installed" | "absent" | "faile
   console.warn("   Check ~/.zshrc for the '# opencodex claude-env hook' block.");
 }
 
-
-import { removeOwnedConfigAfterDesktopCleanup } from "./uninstall-client-state";
-import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
-import { selfLaunchArgv } from "../lib/self-launch-argv";
-import { initializeNodeLauncherContext } from "./launcher-context";
-import { createLocalAttestationSecret } from "../lib/local-management-attestation";
-import { MEMORY_DRAIN_RESTART_MS, REPLACEMENT_READY_TIMEOUT_MS } from "../lib/system-restart-contract";
+async function refreshOwnedRaycastCatalog(
+  config: ReturnType<typeof loadConfig>,
+  port: number,
+): Promise<void> {
+  try {
+    const outcomes = await refreshOwnedCatalogIntegrations({
+      models: () => loadExportModels(config),
+      config,
+      port,
+    }, ["raycast"]);
+    for (const outcome of outcomes) {
+      if (!outcome.ok) {
+        console.error(`⚠️  Raycast integration was not refreshed: ${outcome.reason}`);
+      }
+    }
+  } catch (error) {
+    console.error(`⚠️  Raycast integration was not refreshed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 initializeNodeLauncherContext();
 
@@ -493,6 +514,7 @@ async function handleStart(options: { block?: boolean } = {}) {
     },
   );
   if (!startupSync.ran) console.log("   Codex integration OFF; startup left Codex native.");
+  await refreshOwnedRaycastCatalog(config, port);
   // #1046: one warning per startup, after BOTH writes. The server's cache
   // invalidation happens first and the catalog sync second, so the mtime is only
   // final here — and neither write site warns on its own, or a boot that hits
@@ -558,6 +580,9 @@ async function handleEnsure(options: { existingIsSuccess?: boolean } = {}): Prom
         return null;
       });
       if (synced?.status === "skipped") console.log("   Codex integration OFF; startup left Codex native.");
+      // Do not refresh Raycast from saved config here: live bind/admission and
+      // secondary-listener settings may differ. Explicit sync or server startup
+      // owns catalog refresh; ensure must not overwrite a working destination.
       // Ensure env file exists for already-running proxy (may have been deleted or pre-dates this feature).
       const systemEnv = await injectSystemEnv(live.port, config).catch(() => ({ injected: false }));
       reportShellHookFailure(reconcileShellHook(systemEnv.injected));
@@ -602,6 +627,8 @@ async function handleEnsure(options: { existingIsSuccess?: boolean } = {}): Prom
     return null;
   });
   if (synced?.status === "skipped") console.log("   Codex integration OFF; startup left Codex native.");
+  // The child performs Raycast refresh with its actual startup config. The
+  // parent's pre-spawn snapshot is not authoritative for a client-file write.
   // The child opens /healthz before its best-effort roster reconcile. Await the same idempotent
   // operation in the parent so `ocx ensure` cannot report success while stale ocx-*.md files are
   // still observable. Always use the live port, including fallback-port starts.
@@ -1401,9 +1428,13 @@ async function handleStatus() {
     }
   }
   const { collectOAuthHealthEntriesForCli, oauthLoginSummary } = await import("../oauth");
+  const { emailMaskingEnabled } = await import("../lib/privacy");
   const { formatOAuthHealthForStatus } = await import("./status-oauth");
   console.log(`   OAuth logins:`);
-  for (const e of oauthLoginSummary()) {
+  // The operator's own `privacy.maskEmails` decision applies to the CLI too: `ocx status` is not
+  // the dashboard, but it reads the same stored addresses, and a flag that only moved one of the
+  // two would leave the operator unable to tell which surface they had configured.
+  for (const e of oauthLoginSummary(emailMaskingEnabled(loadConfig()))) {
     console.log(`     ${e.provider.padEnd(10)} ${e.loggedIn ? `✓ logged in${e.email ? ` (${e.email})` : ""}` : "✗ not logged in"}`);
   }
   const oauthHealthBlock = formatOAuthHealthForStatus(await collectOAuthHealthEntriesForCli());
@@ -1415,8 +1446,31 @@ async function handleStatus() {
 }
 
 async function handleRecoverHistory() {
+  if (args[1] === "--ocx-compaction") {
+    const threadId = args[2];
+    if (args.length !== 4 || !threadId || args[3] !== "--yes") {
+      console.error("Usage: ocx recover-history --ocx-compaction <thread-id> --yes");
+      console.error("This rewrites one rollout after saving a private byte-for-byte backup. Close that Codex thread before retrying.");
+      process.exit(1);
+    }
+    console.error("WARNING: this converts OpenCodeX-owned ocx1 compaction state into a plain summary for native Codex replay.");
+    try {
+      const { recoverOcxCompactionHistory } = await import("../codex/ocx-compaction-history");
+      const result = recoverOcxCompactionHistory({ threadId });
+      if (result.replaced === 0) {
+        console.log(`Thread ${threadId} has no repairable ocx1 compaction history; no files changed.`);
+        return;
+      }
+      console.log(`Recovered ${result.replaced} ocx1 compaction item(s) in thread ${threadId}.`);
+      console.log(`Backup: ${result.backupPath}`);
+      return;
+    } catch (error) {
+      console.error(`Recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  }
   if (args[1] !== "--legacy-openai") {
-    console.error("Usage: ocx recover-history --legacy-openai --yes");
+    console.error("Usage: ocx recover-history (--legacy-openai | --ocx-compaction <thread-id>) --yes");
     console.error("This force-relabels every user-message opencodex row to OpenAI, including legitimate dedicated-provider history. Back up first and use it only for pre-backup legacy recovery.");
     process.exit(1);
   }

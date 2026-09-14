@@ -88,6 +88,18 @@ Read `accounts[]`. Two things to respect:
 
 - A row with `ambiguous: true` (label `legacy-ambiguous`) aggregates several accounts from before
   labelling existed. Do not read it as one identity.
+
+For the per-REQUEST view of the same identity, filter the log by the account label:
+
+```bash
+ocx logs --account p3f9a1 --jsonl
+```
+
+The label is the stable non-PII digest the proxy already persists — `main` and `p<hex6>` for Codex
+pool accounts, `o<hex6>` for other OAuth providers — never an email or an upstream account id.
+Rows served by a single-account provider carry no label. Like `--provider` and `--model`, the
+filter matches failover attempts, so the request is findable by the account that finally served it.
+Human output prints `acct=<label>` so a filtered result can be told apart from an empty one.
 - Per-account totals are **withheld** under `--provider` or `--model`, because account rows cannot
   be honestly re-partitioned that way. The report says so rather than printing an empty table.
 
@@ -157,6 +169,7 @@ exist for them — do not attribute usage to either.
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl                   # one configured provider per line
 ocx provider add <name> --json                # registry providers auto-configure by name
 ocx provider test <name> --json
 ocx provider set-default <name> --json
