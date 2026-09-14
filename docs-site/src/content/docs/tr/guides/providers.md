@@ -355,6 +355,7 @@ yalnızca Cline IDE/CLI içinde mevcuttur; `minimax/minimax-m2.5` belgelenmiş A
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Kodlama) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
+| [BigModel Coding Plan — Responses (statik model listesi)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
 | Qwen Cloud | Token planı (varsayılan): `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Kullandıkça öde: `https://dashscope.aliyuncs.com/compatible-mode/v1` · veya Özel |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
@@ -378,6 +379,23 @@ opencodex istemci hatasına sağlayıcı rehberliği ve sentetik bir `Retry-Afte
 ekler; bir yukarı akış `Retry-After`'ı yine de önceliklidir. Aynı anahtarla
 bekle ve yeniden dene özelliği [`retryOn429`](/tr/reference/configuration/)
 aracılığıyla isteğe bağlı kalır.
+
+**Anahtarsız `opencode-free` katmanı şu anda üçüncü taraf istemcilere kapalıdır.** Zen,
+`x-opencode-session` başlığı olmadan gelen her isteği reddeder ve `MissingSessionID` hata
+tipiyle "OpenCode's free tier can only be used in OpenCode" mesajını döndürür. Kapıda
+yalnızca başlığın varlığı denetlenir; yani bir proxy uydurma bir değerle geçebilirdi,
+opencodex bunu yapmaz. Bir oturum kimliği ile sürüm taşıyan `opencode/<version>`
+User-Agent üretmek, kendini OpenCode istemcisi ilan etmek demektir ve OpenCode bu
+anahtarsız katman için üçüncü taraf entegrasyon sözleşmesi yayımlamamıştır; böyle elde
+edilen bir HTTP 200, izin değil atlatılmış bir kabul denetimidir. Bu yüzden opencodex
+kısıtlamayı aşmak yerine bildirir: `opencode-free` sağlayıcısına giden bir istek, yukarı
+akıştaki kapıyı açıklayan bir hata döndürür.
+
+Aynı modellere giden desteklenen yol, [opencode.ai/auth](https://opencode.ai/auth)
+üzerinden alınan bir OpenCode Zen API anahtarıyla kullanılan anahtarlı
+**`opencode-zen`** sağlayıcısıdır. OpenCode ileride anahtarsız katman için desteklenen
+bir üçüncü taraf yolu yayımlarsa opencodex bunu izleyebilir; o zamana kadar önayar
+kısıtlamayı belgeler. Yukarı akış koşulları: [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
 
 Çoğu bir taşıyıcı anahtarla `openai-chat` adaptörünü kullanır; yalnızca
 Anthropic uyumlu bir uç nokta sunan birkaç tanesi (örneğin **Xiaomi MiMo**)
@@ -537,7 +555,7 @@ tutarsız faturalandırma toplamları yanıltıcı bir çubuk yerine hiçbir rap
 
 > **Tencent Cloud Coding Plan kullanım kısıtlaması:** Tencent bu aboneliği yalnızca etkileşimli kodlama araçları için belgeler. Genel API otomasyonu, özel uygulama arka uçları ve etkileşimsiz toplu kullanım yasaktır ve plan anahtarının askıya alınmasına neden olabilir.
 
-> **İki GLM rotası:** `zai`, Z.AI uluslararası kodlama planı aboneliğidir; `zhipu-bigmodel`, Zhipu'nun yerel BigModel kullandıkça öde uç noktasıdır. Farklı ana bilgisayarlar, farklı anahtarlar, farklı faturalandırma — biri için verilen bir anahtar diğerine karşı kimlik doğrulaması yapmaz.
+> **GLM faturalandırma rotaları:** `zai`, Z.AI uluslararası kodlama planı aboneliğidir; `zhipu-bigmodel`, Zhipu'nun yerel BigModel kullandıkça öde uç noktasıdır. Farklı ana bilgisayarlar, farklı anahtarlar, farklı faturalandırma — biri için verilen bir anahtar diğerine karşı kimlik doğrulaması yapmaz.
 
 ### Birden fazla API anahtarı
 
@@ -588,8 +606,8 @@ login github-copilot`). **GitLab Duo**, OpenAI uyumlu uç noktasında bir
 anahtar/abonelik belirteci ağ geçidi olarak kalır. **Cloudflare AI Gateway**,
 URL'ye doldurulan hesap + ağ geçidi kimliklerinize ihtiyaç duyar.
 
-Copilot karma hatlı bir katalog sunar: GPT-5 ailesi (`gpt-5.3-codex`, `gpt-5.4`,
-`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) ajan
+Copilot karma hatlı bir katalog sunar: modeller (`gpt-5.3-codex`, `gpt-5.4`,
+`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) ajan
 trafiği için `/chat/completions`'ı reddeder, bu nedenle opencodex yerleşik
 varsayılan olarak bu modelleri Responses API üzerinden yönlendirirken diğer tüm
 Copilot modelleri sohbet tamamlamalarında kalır. Öncelik sırası: sabit hat
