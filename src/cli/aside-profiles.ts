@@ -35,9 +35,7 @@ export async function refreshAsideProfilesThroughServer(
     if (!capability) throw new RuntimeApiError("Aside profile synchronization capability was unavailable", 503, null);
     const response = await directLocalHttpFetch(`${baseUrl}${LOCAL_ASIDE_SYNC_PATH}`, {
       method: LOCAL_ASIDE_SYNC_METHOD,
-      body: "{}",
       headers: {
-        "content-type": "application/json",
         [LOCAL_ASIDE_SYNC_EXPECTED_PID_HEADER]: String(live.pid),
         [LOCAL_ASIDE_SYNC_NONCE_HEADER]: nonce,
         [LOCAL_ASIDE_SYNC_EXPIRES_AT_HEADER]: String(expiresAt),
