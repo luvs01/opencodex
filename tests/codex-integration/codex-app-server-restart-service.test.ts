@@ -75,6 +75,7 @@ describe("performCodexRestart", () => {
     expect(result.code).toBe("nothing_running");
     expect(result.success).toBe(true);
     expect(restarted).toBe(false);
+    expect(result.desktopApp).toBeUndefined();
   });
 
   test("an unknown classifier reading signals NOTHING", async () => {
