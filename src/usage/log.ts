@@ -537,7 +537,8 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(typeof entry.requestedModel === "string" && entry.requestedModel
-      ? { requestedModel: entry.requestedModel.slice(0, MAX_TRACE_STRING) }
+      // Two-segment model selectors span 64/64 (129 chars); permit up to 130 chars so exact lookup is preserved.
+      ? { requestedModel: entry.requestedModel.slice(0, 130) }
       : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
