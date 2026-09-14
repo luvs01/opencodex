@@ -33,11 +33,15 @@ import {
   submitManualLoginCode,
   upsertOAuthProvider,
 } from "../../oauth";
+import { captureConfigTopLevelRollback } from "../../config/rebase-provenance";
+import { mergeModelPinnedEfforts, modelPinnedEffortsConfigError, pinnedReasoningEffortConfigError } from "../../config/provider-validation";
 import { replaceProviderAccountSet } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
+import { fetchQoderModels } from "../../adapters/qoder/live-models";
+import { resolveQoderProfile } from "../../adapters/qoder/profiles";
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets, providerConfigSeed } from "../../providers/derive";
@@ -50,9 +54,13 @@ import {
   readBoundedDiscoveryJson,
   resolveProviderModelDiscovery,
 } from "../../providers/model-discovery";
+import { extractGoogleAiStudioModelItems } from "../../providers/google-ai-studio-model-discovery";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
-import { clearKeyCooldowns } from "../../providers/key-failover";
+import { getCachedProviderRoutingQuota } from "../../providers/quota-routing-cache";
+import { PROVIDER_QUOTA_MAX_AGE_MS, type ProviderRoutingQuota } from "../../providers/quota-types";
+import { cachedProviderQuotaIsExhausted } from "../../combos/resolve";
+import { clearKeyCooldowns, forgetApiKeyRotationCursor } from "../../providers/key-failover";
 import { providerRequestPacingStatus } from "../../providers/request-pacing";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
@@ -107,6 +115,7 @@ import {
   XAI_RESPONSES_DEFAULT_VERSION,
   xaiResponsesOptInState,
 } from "../../providers/xai-responses-opt-in";
+import { ZAI_PROVIDER_ID } from "../../providers/zai-responses-migration";
 import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
@@ -274,6 +283,11 @@ function providerEditorCandidate(
   if (!validated.ok) {
     return { ok: false, status: 400, error: validated.error, code: "invalid_provider_editor_config" };
   }
+  for (const [name, provider] of Object.entries(candidate.providers)) {
+    if (provider.modelPinnedReasoningEfforts !== undefined) {
+      provider.modelPinnedReasoningEfforts = validated.config.providers[name]!.modelPinnedReasoningEfforts;
+    }
+  }
   return { ok: true, config: candidate, removedProviders };
 }
 
@@ -295,6 +309,27 @@ function adoptProviderEditorCandidate(live: OcxConfig, persisted: OcxConfig): vo
   else live.disabledModels = [...persisted.disabledModels];
   if (persisted.modelDiscovery === undefined) delete live.modelDiscovery;
   else live.modelDiscovery = structuredClone(persisted.modelDiscovery);
+}
+
+/** Share pin merge/clear semantics between POST and the PATCH mask. */
+function applyProviderPinFields(
+  next: OcxProviderConfig,
+  patch: Record<string, unknown>,
+  current: OcxProviderConfig | undefined,
+): string | null {
+  const scalarError = pinnedReasoningEffortConfigError(patch.pinnedReasoningEffort, true);
+  const mapError = modelPinnedEffortsConfigError(patch.modelPinnedReasoningEfforts, "modelPinnedReasoningEfforts", true);
+  if (scalarError || mapError) return scalarError ?? mapError;
+  const scalar = Object.hasOwn(patch, "pinnedReasoningEffort")
+    ? patch.pinnedReasoningEffort : current?.pinnedReasoningEffort;
+  const map = Object.hasOwn(patch, "modelPinnedReasoningEfforts")
+    ? mergeModelPinnedEfforts(current?.modelPinnedReasoningEfforts, patch.modelPinnedReasoningEfforts)
+    : current?.modelPinnedReasoningEfforts;
+  if (scalar === undefined || scalar === null || scalar === "") delete next.pinnedReasoningEffort;
+  else next.pinnedReasoningEffort = scalar as string;
+  if (map === undefined) delete next.modelPinnedReasoningEfforts;
+  else next.modelPinnedReasoningEfforts = { ...map };
+  return null;
 }
 
 /**
@@ -478,6 +513,11 @@ function applyProviderPatchFields(
     }
     touched = true;
   }
+  if (Object.hasOwn(rawBody, "pinnedReasoningEffort") || Object.hasOwn(rawBody, "modelPinnedReasoningEfforts")) {
+    const error = applyProviderPinFields(next, rawBody, provider);
+    if (error) return { error };
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "modelAutoCompactTokenLimits")) {
     const value = rawBody.modelAutoCompactTokenLimits;
     const error = modelAutoCompactTokenLimitsConfigError(value, {
@@ -534,6 +574,19 @@ function applyProviderPatchFields(
       const models = normalizeNonBlankStringArray(value as string[]);
       if (models.length > 0) next.noStructuredOutputModels = models;
       else delete next.noStructuredOutputModels;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "noJsonSchemaModels")) {
+    const value = rawBody.noJsonSchemaModels;
+    if (value === null) {
+      delete next.noJsonSchemaModels;
+    } else {
+      const error = nonBlankStringArrayConfigError(value, "noJsonSchemaModels");
+      if (error) return { error };
+      const models = normalizeNonBlankStringArray(value as string[]);
+      if (models.length > 0) next.noJsonSchemaModels = models;
+      else delete next.noJsonSchemaModels;
     }
     touched = true;
   }
@@ -653,12 +706,54 @@ function canonicalOpenAiBudgetPatchError(
     ?? providerEmptyToolOutputConfigError("openai", applied.next);
 }
 
+function providerRoutingQuota(config: OcxConfig, name: string, now: number): ProviderRoutingQuota {
+  const provider = hasOwnProvider(config.providers, name) ? config.providers[name] : undefined;
+  const quota = getCachedProviderRoutingQuota(name, provider, now);
+  if (!quota || !Number.isFinite(quota.updatedAt) || quota.updatedAt < 0 || quota.updatedAt > now
+    || now >= quota.updatedAt + PROVIDER_QUOTA_MAX_AGE_MS) return { state: "unknown" };
+
+  // Removing search/MCP windows may leave only a timestamp. That is not inference evidence.
+  const percentages = [quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent,
+    ...(quota.customWindows ?? []).map(window => window.percent)];
+  const hasPercentage = percentages.some(value => typeof value === "number" && Number.isFinite(value) && value >= 0);
+  const credits = quota.creditsUsd;
+  const hasCredits = credits !== undefined && Number.isFinite(credits.percent)
+    && credits.percent >= 0 && Number.isFinite(credits.remaining);
+  if (!hasPercentage && !hasCredits) return { state: "unknown" };
+
+  const state = cachedProviderQuotaIsExhausted(quota, now) ? "exhausted" : "available";
+  let validUntil = quota.updatedAt + PROVIDER_QUOTA_MAX_AGE_MS;
+  if (state === "exhausted") {
+    const resets = [quota.fiveHourResetAt, quota.weeklyResetAt, quota.monthlyResetAt,
+      ...(quota.customWindows ?? []).map(window => window.resetAt)]
+      .filter((reset): reset is number => typeof reset === "number" && Number.isFinite(reset)
+        && reset > now && reset < validUntil)
+      .sort((left, right) => left - right);
+    // Reuse dispatch's predicate: another exhausted window or USD cap may still block.
+    for (const reset of resets) {
+      if (!cachedProviderQuotaIsExhausted(quota, reset)) {
+        validUntil = reset;
+        break;
+      }
+    }
+  }
+  return { state, updatedAt: quota.updatedAt, validUntil };
+}
+
 export async function handleProviderRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, principal, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
 
   if (url.pathname === "/api/provider-quotas" && req.method === "GET") {
     const forceRefresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
-    return jsonResponse(await fetchProviderQuotaReports(config, forceRefresh));
+    const snapshot = await fetchProviderQuotaReports(config, forceRefresh);
+    const now = Date.now();
+    return jsonResponse({
+      ...snapshot,
+      reports: snapshot.reports.map(report => ({
+        ...report,
+        routingQuota: providerRoutingQuota(config, report.provider, now),
+      })),
+    });
   }
 
   if (url.pathname === "/api/provider-request-pacing" && req.method === "GET") {
@@ -689,9 +784,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       models: p.models ?? [],
       contextWindow: p.contextWindow,
       modelContextWindows: p.modelContextWindows,
+      pinnedReasoningEffort: p.pinnedReasoningEffort,
+      modelPinnedReasoningEfforts: p.modelPinnedReasoningEfforts,
       modelAutoCompactTokenLimits: p.modelAutoCompactTokenLimits,
       modelSupportsServiceTier: p.modelSupportsServiceTier,
       noStructuredOutputModels: p.noStructuredOutputModels,
+      noJsonSchemaModels: p.noJsonSchemaModels,
       retainModels: p.retainModels,
       omitReasoningEffortWithToolsModels: p.omitReasoningEffortWithToolsModels,
       upstreamHttpVersion: p.upstreamHttpVersion,
@@ -778,6 +876,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     (deps.clearProviderQuotaCache ?? clearProviderQuotaCache)();
     clearAccountQuotaCache(name);
     clearKeyCooldowns(name);
+    // The rotation cursor describes a pool this edit just changed; keeping it would let a
+    // stale position steer the next proactive pick.
+    forgetApiKeyRotationCursor(name);
     clearModelCache(name);
     if (name === "openai") (deps.clearThreadAccountMap ?? clearThreadAccountMap)();
     const catalogRefresh = await convergeCodexCatalog();
@@ -877,6 +978,10 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     (deps.clearProviderQuotaCache ?? clearProviderQuotaCache)();
     clearAccountQuotaCache();
     clearKeyCooldowns();
+    // Cursors too, for the same reason the cooldown clear above takes no name: this PUT
+    // replaces the whole roster, and a cursor that outlives it still names a real id, so
+    // round-robin would resume after the pre-edit position instead of the new roster head.
+    forgetApiKeyRotationCursor();
     clearModelCache();
     (deps.clearThreadAccountMap ?? clearThreadAccountMap)();
     const catalogRefresh = await convergeCodexCatalog();
@@ -895,6 +1000,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const aliasOwnershipError = providerAliasOverlayOwnershipError(body.provider, existing);
     if (aliasOwnershipError) return jsonResponse({ error: aliasOwnershipError }, 400);
     const transportCandidate = providerTransportValidationCandidate(body.provider);
+    const pinError = applyProviderPinFields(transportCandidate as unknown as OcxProviderConfig, body.provider, existing);
+    if (pinError) return jsonResponse({ error: pinError }, 400);
     const providerError = providerManagementConfigError(name, transportCandidate)
       ?? providerEmptyToolOutputConfigError(name, transportCandidate);
     if (providerError) return jsonResponse({ error: providerError }, 400);
@@ -1021,10 +1128,57 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         prov.xaiResponsesDefaultVersion = latest.xaiResponsesDefaultVersion;
       }
     }
-    initializeProviderModelSelection(name, prov, config.providers[name], config);
-    config.providers[name] = stripRegistryOnlyStaticHeaders(name, prov);
-    if (body.setDefault === true) config.defaultProvider = name;
-    save(config);
+    // Same reason for the Z.AI marker: the provider form never carries it, and losing it on an
+    // unrelated edit would let the one-time wire rewrite run a second time.
+    if (name === ZAI_PROVIDER_ID) {
+      const latest = config.providers[name];
+      if (latest?.zaiResponsesDefaultVersion !== undefined) {
+        prov.zaiResponsesDefaultVersion = latest.zaiResponsesDefaultVersion;
+      }
+    }
+    // Reapply pins to the latest live row after DNS/import awaits, then validate the
+    // complete draft before adopting any provider/default state.
+    const latest = config.providers[name];
+    const latestPinError = applyProviderPinFields(prov, body.provider, latest);
+    if (latestPinError) return jsonResponse({ error: latestPinError }, 400);
+    const pinsOwned = Object.hasOwn(body.provider, "pinnedReasoningEffort")
+      || Object.hasOwn(body.provider, "modelPinnedReasoningEfforts")
+      || latest?.pinnedReasoningEffort !== undefined || latest?.modelPinnedReasoningEfforts !== undefined;
+    // New registration also edits discovery/disabled-model state; stage those
+    // side effects with the pin draft instead of mutating live state before validation.
+    const registrationDraft = pinsOwned && !latest ? {
+      ...config,
+      ...(config.modelDiscovery === undefined ? {} : { modelDiscovery: structuredClone(config.modelDiscovery) }),
+    } : undefined;
+    initializeProviderModelSelection(name, prov, latest, registrationDraft ?? config);
+    const candidate = stripRegistryOnlyStaticHeaders(name, prov);
+    if (pinsOwned) {
+      const draft = { ...(registrationDraft ?? config), providers: { ...config.providers, [name]: candidate },
+        ...(body.setDefault === true ? { defaultProvider: name } : {}) };
+      const validation = validateConfigCandidate(draft);
+      if (!validation.ok) return jsonResponse({ error: validation.error }, 400);
+    }
+    const previous = Object.getOwnPropertyDescriptor(config.providers, name);
+    const rollback = pinsOwned ? captureConfigTopLevelRollback(config, ["defaultProvider", "modelDiscovery", "disabledModels"]) : undefined;
+    try {
+      if (registrationDraft) {
+        for (const key of ["modelDiscovery", "disabledModels"] as const) {
+          if (Object.hasOwn(registrationDraft, key)) Object.defineProperty(config, key, {
+            value: registrationDraft[key], writable: true, enumerable: true, configurable: true,
+          });
+        }
+      }
+      config.providers[name] = candidate;
+      if (body.setDefault === true) config.defaultProvider = name;
+      (deps.saveConfigPreservingClaudeCode ?? save)(config);
+    } catch (error) {
+      if (rollback) {
+        if (previous) Object.defineProperty(config.providers, name, previous);
+        else delete config.providers[name];
+        rollback();
+      }
+      throw error;
+    }
     reconcileLiveStateStores();
     if (prov.apiKey && prov.apiKeyPool) {
       const { addProviderApiKey } = await import("../../providers/api-keys");
@@ -1179,8 +1333,25 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       }
       // A PATCH that managed headers owns the resulting block: the clear path restores
       // registry static headers, so exact-match stripping must not erase them again.
-      config.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
-      saveConfigPreservingClaudeCode(config);
+      const candidate = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
+      const pinsTouched = Object.hasOwn(rawBody, "pinnedReasoningEffort") || Object.hasOwn(rawBody, "modelPinnedReasoningEfforts");
+      if (pinsTouched) {
+        const validation = validateConfigCandidate({ ...config, providers: { ...config.providers, [name]: candidate } });
+        if (!validation.ok) { replayError = validation.error; return; }
+      }
+      const previous = Object.getOwnPropertyDescriptor(config.providers, name);
+      const rollback = pinsTouched ? captureConfigTopLevelRollback(config, []) : undefined;
+      try {
+        config.providers[name] = candidate;
+        (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      } catch (error) {
+        if (rollback) {
+          if (previous) Object.defineProperty(config.providers, name, previous);
+          else delete config.providers[name];
+          rollback();
+        }
+        throw error;
+      }
     });
     if (replayError !== undefined) return jsonResponse({ error: replayError }, 409);
     reconcileLiveStateStores();
@@ -1257,6 +1428,28 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         message: `Connected. ${live.models.length} models.`,
       });
     }
+    if (prov.adapter === "qoder") {
+      const started = Date.now();
+      const profile = resolveQoderProfile(prov.baseUrl);
+      if (!profile) {
+        return jsonResponse({ ok: false, latencyMs: 0, error: "qoder discovery refused a non-canonical destination" });
+      }
+      const live = await fetchQoderModels(profile, apiKey ?? "");
+      const latencyMs = Date.now() - started;
+      if (!live.ok) {
+        return jsonResponse({
+          ok: false,
+          latencyMs,
+          error: `qoder discovery ${live.error}${live.detail ? `: ${live.detail}` : ""}`,
+        });
+      }
+      return jsonResponse({
+        ok: true,
+        latencyMs,
+        models: live.models.length,
+        message: `Connected. ${live.models.length} models.`,
+      });
+    }
     const project = prov.project ?? snapshot?.projectId;
     if (antigravity && !project) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "Antigravity project unavailable — re-run `ocx login google-antigravity`" });
@@ -1311,13 +1504,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return jsonResponse({ ok: false, latencyMs, error: "upstream CCA model discovery returned an unexpected shape" });
       }
       // OpenAI-style lists (and Together top-level arrays) use the same validation/dedupe/filter
-      // as catalog discovery. Google's /v1beta/models uses `models[].name` and remains a
-      // connectivity-only count because it is not an authoritative catalog source.
+      // as catalog discovery. Google AI Studio parses the native `models[]` envelope and filters to
+      // `generateContent`, while other providers fall back to generic envelope rows if they return `models[]`.
       const record = bounded.value !== null && typeof bounded.value === "object" && !Array.isArray(bounded.value)
         ? bounded.value as Record<string, unknown>
         : undefined;
+      const isAiStudio = effectiveGoogleMode(name, prov) === "ai-studio";
+      const googleAiStudio = !ccaModels && isAiStudio
+        ? extractGoogleAiStudioModelItems(bounded.value, discovery.maxModels)
+        : undefined;
       const extracted = ccaModels
         ? undefined
+        : googleAiStudio?.ok
+        ? googleAiStudio
         : Array.isArray(bounded.value) || Array.isArray(record?.data)
         ? extractProviderModelItems(bounded.value, discovery)
         : extractModelEnvelopeRows(bounded.value, discovery.maxModels, ["models"]);

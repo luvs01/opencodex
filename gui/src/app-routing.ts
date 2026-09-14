@@ -100,6 +100,9 @@ export const INTEGRATION_TAB_HASHES = [
   "integrations/zcode",
   "integrations/prime",
   "integrations/aside",
+  "integrations/raycast",
+  "integrations/omo",
+  "integrations/cline",
 ] as const;
 
 export function hashBelongsToPage(rawHash: string, page: Page): boolean {
