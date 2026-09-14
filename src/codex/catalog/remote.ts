@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 
 import { MAX_REMOTE_CATALOG_BYTES } from "../../server/catalog-download";
 import { readBoundedResponseBytes } from "../../lib/bounded-body";
+import { resolveProxyRoute } from "../../lib/proxy-env";
 import { withCatalogWriteSerialization, type CatalogSerializationOutcome, type CatalogWritePermit } from "../catalog-write-serialization";
 import { replaceActiveCodexCatalog } from "../internal/catalog-writer";
 import { resetCodexAppServerCatalogStateCache } from "../app-server-processes";
@@ -119,6 +120,12 @@ export async function fetchRemoteCatalog(
 ): Promise<{ document: RemoteCatalogDocument; content: string }> {
   const url = validateRemoteCatalogUrl(input);
   const token = validateToken(options.token);
+  if (url.protocol === "http:" && resolveProxyRoute(url).kind !== "direct") {
+    throw new RemoteCatalogError(
+      "insecure_http_refused",
+      "Loopback HTTP catalog requests must bypass outbound proxy routing",
+    );
+  }
   const headers = new Headers({ Accept: "application/json" });
   if (token !== undefined) headers.set("Authorization", `Bearer ${token}`);
   let response: Response;

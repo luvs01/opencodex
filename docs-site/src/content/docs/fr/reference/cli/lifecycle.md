@@ -165,7 +165,7 @@ Invalide le cache local du sélecteur de modèles de Codex afin qu’il soit rec
 
 Installe un catalogue complet servi par le point de terminaison `/v1/catalog` d'une autre instance
 OpenCodex, puis synchronise `models_cache.json`. L'URL doit être en HTTPS ; le HTTP est accepté
-uniquement en loopback. Les identifiants intégrés à l'URL, les requêtes, les fragments, les
+uniquement en loopback lorsque la configuration de proxy effective l'achemine directement. Les identifiants intégrés à l'URL, les requêtes, les fragments, les
 redirections, les réponses trop volumineuses et les catalogues invalides sont refusés avant toute
 écriture locale. L'authentification est facultative et lue uniquement par référence à une variable
 d'environnement (`--auth-env`), jamais depuis argv.

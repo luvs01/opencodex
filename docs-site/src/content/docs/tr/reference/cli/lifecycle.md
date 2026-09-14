@@ -260,8 +260,8 @@ ve isteğe bağlı yeniden başlatma bayrakları geçerlidir.
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 Başka bir OpenCodex örneğinin `/v1/catalog` uç noktasının sunduğu eksiksiz kataloğu kurar ve
-ardından `models_cache.json` dosyasını eşitler. URL HTTPS olmalıdır; HTTP yalnızca loopback için
-kabul edilir. URL içine gömülü kimlik bilgileri, sorgular, parçalar, yönlendirmeler, boyutu aşan
+ardından `models_cache.json` dosyasını eşitler. URL HTTPS olmalıdır; HTTP yalnızca etkin proxy
+yapılandırmasının doğrudan yönlendirdiği loopback için kabul edilir. URL içine gömülü kimlik bilgileri, sorgular, parçalar, yönlendirmeler, boyutu aşan
 yanıtlar ve geçersiz kataloglar, herhangi bir yerel yazma işleminden önce reddedilir. Kimlik
 doğrulama isteğe bağlıdır ve yalnızca ortam değişkeni adıyla (`--auth-env`) okunur, argv'den
 alınmaz.

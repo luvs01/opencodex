@@ -167,8 +167,8 @@ Codex のローカル モデル ピッカー キャッシュを無効にし、�
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 別の OpenCodex インスタンスの `/v1/catalog` エンドポイントが提供する完全なカタログをインストール
-し、続いて `models_cache.json` を同期します。URL は HTTPS が必須で、HTTP はループバックのみ許可
-されます。URL 埋め込み資格情報、クエリ、フラグメント、リダイレクト、サイズ超過の応答、不正な
+し、続いて `models_cache.json` を同期します。URL は HTTPS が必須で、HTTP は有効なプロキシ設定が
+直接接続として扱うループバックにのみ許可されます。URL 埋め込み資格情報、クエリ、フラグメント、リダイレクト、サイズ超過の応答、不正な
 カタログは、ローカル書き込みの前に拒否されます。認証は任意で、環境変数参照 (`--auth-env`) から
 のみ読み取られ、argv からは読み取られません。
 

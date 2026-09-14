@@ -302,7 +302,8 @@ synchronize `models_cache.json`. Unlike `ocx sync`, this command does not discov
 providers or inject Codex configuration. Unlike `ocx sync-cache`, it replaces the active catalog
 before rebuilding the cache. It works even when the local Codex integration desired state is off.
 
-The URL must be HTTPS; loopback HTTP is accepted for local testing. Embedded URL credentials,
+The URL must be HTTPS; loopback HTTP is accepted for local testing only when the effective
+environment proxy configuration routes it directly. Embedded URL credentials,
 queries, fragments, redirects, oversized responses, malformed JSON, duplicate or unsafe slugs, and
 unknown `input_modalities` are refused before any local write. Authentication is optional and is
 read only by environment-variable reference:

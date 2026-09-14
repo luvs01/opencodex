@@ -252,7 +252,8 @@ Codex의 로컬 모델 선택기 캐시를 무효화하여, 활성 opencodex 카
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 다른 OpenCodex 인스턴스의 `/v1/catalog` 엔드포인트가 제공하는 완성된 카탈로그를 설치한 뒤
-`models_cache.json`을 맞춥니다. URL은 HTTPS여야 하고 HTTP는 루프백만 허용합니다. URL에 박힌
+`models_cache.json`을 맞춥니다. URL은 HTTPS여야 하고 HTTP는 유효한 프록시 설정이 직접 연결로
+라우팅하는 루프백에만 허용합니다. URL에 박힌
 자격증명, 쿼리, 프래그먼트, 리다이렉트, 크기를 넘는 응답, 잘못된 카탈로그는 로컬에 쓰기 전에
 거절합니다. 인증은 선택이며 환경변수 이름(`--auth-env`)으로만 읽고 argv로는 받지 않습니다.
 

@@ -162,7 +162,7 @@ ocx status --json
 
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
-安装由另一个 OpenCodex 实例的 `/v1/catalog` 端点提供的完整目录，然后同步 `models_cache.json`。URL 必须是 HTTPS；仅回环地址允许 HTTP。URL 内嵌凭据、查询、片段、重定向、超出大小的响应以及无效目录，都会在任何本地写入之前被拒绝。认证是可选的，并且只通过环境变量名（`--auth-env`）读取，不接受 argv 传入。
+安装由另一个 OpenCodex 实例的 `/v1/catalog` 端点提供的完整目录，然后同步 `models_cache.json`。URL 必须是 HTTPS；仅当有效的代理配置将请求直接路由时，回环地址才允许 HTTP。URL 内嵌凭据、查询、片段、重定向、超出大小的响应以及无效目录，都会在任何本地写入之前被拒绝。认证是可选的，并且只通过环境变量名（`--auth-env`）读取，不接受 argv 传入。
 
 目录和缓存在共享的 Codex 目录锁下写入；失败时保留 last-known-good 文件。字节完全相同时是保留 mtime 的空操作。`--restart-codex`、`--restart-app-server-only` 以及已弃用别名 `--restart-desktop-app` 仅在发生真实写入之后生效，含义与 `ocx sync` / `ocx sync-cache` 相同。`ETag` 条件请求不属于此命令。完整的 `--json` 信封与退出码请参见[英文参考](/reference/cli/lifecycle/)。
 

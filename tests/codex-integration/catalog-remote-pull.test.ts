@@ -53,6 +53,35 @@ describe("remote catalog acquisition", () => {
     })).rejects.toMatchObject({ code: "redirect_refused", message: "Remote catalog redirect was refused" });
   });
 
+  test("refuses loopback HTTP when the request would use an outbound proxy", async () => {
+    const previous = Object.fromEntries(
+      ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]
+        .map(key => [key, process.env[key]]),
+    );
+    const fetchImpl = mock(async () => response(catalog)) as typeof fetch;
+    try {
+      process.env.HTTP_PROXY = "http://proxy.example:8080";
+      process.env.NO_PROXY = "";
+      delete process.env.http_proxy;
+      delete process.env.ALL_PROXY;
+      delete process.env.all_proxy;
+      delete process.env.no_proxy;
+      await expect(fetchRemoteCatalog("http://127.0.0.1:10100/v1/catalog", {
+        token: "env-token", fetchImpl,
+      })).rejects.toMatchObject({ code: "insecure_http_refused" });
+      expect(fetchImpl).not.toHaveBeenCalled();
+
+      process.env.NO_PROXY = "127.0.0.1";
+      await expect(fetchRemoteCatalog("http://127.0.0.1:10100/v1/catalog", {
+        token: "env-token", fetchImpl,
+      })).resolves.toMatchObject({ document: catalog });
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
   test("never reflects credentials, remote bodies, URLs, or transport causes", async () => {
     for (const fetchImpl of [
       async () => new Response("remote-body-marker", { status: 401 }),

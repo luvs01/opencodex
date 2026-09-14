@@ -7,6 +7,10 @@ Shared parsing and streaming follow the [request-copy](transports/byte-accountin
 
 ## Shared catalog
 
+Remote catalog acquisition permits loopback HTTP only when the effective environment route is
+direct; if `HTTP_PROXY` would handle the request because `NO_PROXY` does not match, acquisition is
+refused before credentials are attached or any request is made.
+
 `src/codex/catalog.ts` builds a shared Codex-shaped catalog for CLI, TUI, App, and SDK. It:
 
 - preserves native OpenAI entries from the live catalog or static fallback, and emits
