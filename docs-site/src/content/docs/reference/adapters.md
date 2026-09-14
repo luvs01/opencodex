@@ -473,10 +473,10 @@ api-server URL beside it, and never the file's other fields.
 - The CLI's own tool calls stay internal. Devin executes them inside its session, so forwarding
   them as client tools would either fail the turn — the bridge rejects a tool Codex never declared —
   or ask Codex to run something the agent already ran.
-- **Permission requests are refused by default.** This provider runs an agent in the operator's own
-  tree, so `session/request_permission` is answered with `cancelled` unless
-  `OPENCODEX_DEVIN_CLI_ALLOW_TOOLS=1` is set. The child also gets a scoped environment rather than
-  the proxy's, and `OPENCODEX_DEVIN_CLI_CWD` chooses where it runs.
+- **Permission requests are always refused.** ACP does not attach a request-scoped capability that
+  opencodex can match to the complete native operation, so a shared data-plane request cannot grant
+  the child file or shell authority. The child also gets a scoped environment rather than the
+  proxy's, and `OPENCODEX_DEVIN_CLI_CWD` chooses where it runs.
 - Binary discovery prefers `OPENCODEX_DEVIN_CLI_BIN`, then the paths the official installer and the
   Homebrew cask use, then `PATH`. Install with `curl -fsSL https://cli.devin.ai/install.sh | bash`
   or `brew install --cask devin-cli`.

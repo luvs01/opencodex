@@ -264,3 +264,5 @@ fragments are not guessed onto pending ID-only calls.
 parallel/colliding identities, distinct unsafe raw JSON index literals, the maximum
 safe-integer boundary, invalid index types, missing/null continuations and UTF-8
 byte-limit boundaries.
+
+Local Devin ACP turns follow the [adapter registry permission boundary](../adapters/registry.md#semantic-inheritance-is-not-constructor-inheritance).

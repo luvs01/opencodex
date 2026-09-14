@@ -91,27 +91,16 @@ describe("acp handshake frames", () => {
     });
   });
 
-  test("a permission request is refused unless the operator opted in", () => {
-    // This provider runs an agent in the operator's own tree. Auto-approving
-    // whatever a prompt asks for would make the proxy a remote shell.
-    const options = [
-      { optionId: "no", name: "Reject", kind: "reject_once" },
-      { optionId: "yes", name: "Approve", kind: "allow_once" },
-    ];
-    expect(permissionResponseFrame(9, options)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
-    const allowed = permissionResponseFrame(9, options, true) as { result: { outcome: { optionId: string } } };
-    // Positional guessing would have taken the reject here.
-    expect(allowed.result.outcome.optionId).toBe("yes");
-    expect(
-      (permissionResponseFrame(9, [{ optionId: "accept-all", name: "Accept" }], true) as { result: { outcome: { optionId: string } } })
-        .result.outcome.optionId,
-    ).toBe("accept-all");
-    // Nothing on offer says allow, so approving would mean selecting a
-    // rejection and calling it approval.
-    expect(permissionResponseFrame(9, [{ optionId: "no", kind: "reject_once" }], true)).toMatchObject({
-      result: { outcome: { outcome: "cancelled" } },
-    });
-    expect(permissionResponseFrame(9, undefined, true)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
+  test("permission requests are always refused", () => {
+    // ACP does not provide a request-scoped capability that can safely grant
+    // native authority through the shared data plane.
+    expect(permissionResponseFrame(9)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
+    process.env.OPENCODEX_DEVIN_CLI_ALLOW_TOOLS = "1";
+    try {
+      expect(permissionResponseFrame(9)).toMatchObject({ result: { outcome: { outcome: "cancelled" } } });
+    } finally {
+      delete process.env.OPENCODEX_DEVIN_CLI_ALLOW_TOOLS;
+    }
   });
 });
 
@@ -302,6 +291,40 @@ describe("devin-cli runTurn", () => {
     expect((terminals[0] as { stopReason?: string }).stopReason).toBeUndefined();
     expect(events.filter((e) => e.type === "text_delta")).toEqual([{ type: "text_delta", text: "PONG" }]);
     expect(stdinWrites.join("")).toContain('"method":"session/prompt"');
+  });
+
+  test("the removed process-wide opt-in cannot approve a native tool", async () => {
+    const { child, stdout, stdinWrites } = fakeChild();
+    const events: AdapterEvent[] = [];
+    let childEnv: Record<string, string> | undefined;
+    process.env[DEVIN_CLI_BIN_ENV] = "/fake/devin";
+    process.env.OPENCODEX_DEVIN_CLI_ALLOW_TOOLS = "1";
+    const adapter = createDevinCliAdapter({ adapter: "devin-cli", baseUrl: "https://cli.devin.ai" }, {
+      spawn: (_binary, _args, options) => {
+        childEnv = options.env;
+        queueMicrotask(() => {
+          stdout.write('{"jsonrpc":"2.0","id":1,"result":{}}\n');
+          stdout.write('{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}\n');
+          stdout.write('{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"options":[{"optionId":"yes","kind":"allow_once"}]}}\n');
+          stdout.write('{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}\n');
+        });
+        return child;
+      },
+    });
+    try {
+      await adapter.runTurn!(parsed, {} as never, (event) => events.push(event));
+    } finally {
+      delete process.env[DEVIN_CLI_BIN_ENV];
+      delete process.env.OPENCODEX_DEVIN_CLI_ALLOW_TOOLS;
+    }
+
+    expect(childEnv?.DEVIN_PERMISSION_MODE).toBe("normal");
+    expect(stdinWrites.map((line) => JSON.parse(line))).toContainEqual({
+      jsonrpc: "2.0",
+      id: 9,
+      result: { outcome: { outcome: "cancelled" } },
+    });
+    expect(events.at(-1)?.type).toBe("done");
   });
 
   test("a crash before the prompt reply is an error, not an empty success", async () => {

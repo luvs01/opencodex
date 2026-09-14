@@ -82,3 +82,6 @@ constraints cannot widen the canonical shape. Bare shell bridge names are reject
 on the freeform path.
 Namespaced tools do not acquire bare-shell behavior. Regression coverage lives in
 `tests/providers/cursor/cursor-tool-definitions.test.ts`.
+
+Other local-agent adapters do not inherit Cursor's opt-in: local Devin ACP turns follow the
+[adapter registry permission boundary](../adapters/registry.md#semantic-inheritance-is-not-constructor-inheritance).

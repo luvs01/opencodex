@@ -62,31 +62,15 @@ export function sessionPromptFrame(sessionId: string, prompt: string): Record<st
  *
  * A headless turn has nobody to approve a tool call, and an unanswered
  * `session/request_permission` stalls the agent until the turn times out. The
- * answer is a refusal by default: this provider runs an agent in the operator's
- * own tree, and auto-approving whatever it asks for would let any prompt that
- * reaches the proxy read, write and execute there. Approval is an explicit
- * operator decision, and only then is an allow-shaped option preferred over
- * positional guessing — the first option in a real prompt is sometimes the
- * rejection.
+ * answer is always a refusal: this provider runs behind a shared data plane,
+ * and ACP permission requests do not carry a request-scoped capability that
+ * can be matched to an operation. A process-wide opt-in cannot safely grant
+ * native execution authority to an individual request.
  */
 export function permissionResponseFrame(
   id: number | string,
-  options: Array<{ optionId?: string; name?: string; kind?: string }> | undefined,
-  allowed = false,
 ): Record<string, unknown> {
-  if (!allowed) {
-    return { jsonrpc: "2.0", id, result: { outcome: { outcome: "cancelled" } } };
-  }
-  const list = options ?? [];
-  const allow =
-    list.find((o) => typeof o.kind === "string" && /^allow/i.test(o.kind)) ??
-    list.find((o) => /allow|accept|yes/i.test(`${o.optionId ?? ""} ${o.name ?? ""}`));
-  if (!allow?.optionId) {
-    // Nothing offered says "allow". Guessing at `list[0]` here is how an
-    // auto-answer selects a rejection and calls it approval.
-    return { jsonrpc: "2.0", id, result: { outcome: { outcome: "cancelled" } } };
-  }
-  return { jsonrpc: "2.0", id, result: { outcome: { outcome: "selected", optionId: allow.optionId } } };
+  return { jsonrpc: "2.0", id, result: { outcome: { outcome: "cancelled" } } };
 }
 
 /**

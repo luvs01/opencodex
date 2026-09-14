@@ -11,8 +11,8 @@
  * path.
  *
  * The child is treated as untrusted and unprivileged. It gets a scoped
- * environment rather than the proxy's, its permission requests are refused
- * unless an operator opted in, and it is reaped rather than merely signalled,
+ * environment rather than the proxy's, its permission requests are refused,
+ * and it is reaped rather than merely signalled,
  * because a Devin grandchild that ignores SIGTERM would otherwise keep writing
  * in the operator's tree after the turn returned.
  */
@@ -51,20 +51,7 @@ const DEVIN_CLI_REAP_MS = 5_000;
  */
 export const DEVIN_CLI_IDENTITY_URL = "https://cli.devin.ai";
 
-/**
- * Opt-in for letting the CLI act on the machine.
- *
- * Off by default: this provider runs an agent in the operator's own tree, and a
- * proxy that auto-approves whatever a prompt asks for is a remote shell.
- */
-const DEVIN_CLI_ALLOW_TOOLS_ENV = "OPENCODEX_DEVIN_CLI_ALLOW_TOOLS";
-
 export type DevinCliSpawn = (binary: string, args: string[], options: { cwd: string; env: Record<string, string> }) => ChildProcessWithoutNullStreams;
-
-export function devinCliToolsAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = env[DEVIN_CLI_ALLOW_TOOLS_ENV]?.trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
-}
 
 export function createDevinCliAdapter(provider: OcxProviderConfig, deps?: { spawn?: DevinCliSpawn }): ProviderAdapter {
   const spawnChild: DevinCliSpawn = deps?.spawn
@@ -107,7 +94,6 @@ export function createDevinCliAdapter(provider: OcxProviderConfig, deps?: { spaw
         ? parsed.modelId.slice(parsed.modelId.lastIndexOf("/") + 1)
         : parsed.modelId;
       const cwd = process.env.OPENCODEX_DEVIN_CLI_CWD?.trim() || process.cwd();
-      const toolsAllowed = devinCliToolsAllowed();
 
       await new Promise<void>((resolve) => {
         let child: ChildProcessWithoutNullStreams;
@@ -130,7 +116,7 @@ export function createDevinCliAdapter(provider: OcxProviderConfig, deps?: { spaw
               // one path most operators are on. Found by running a real turn
               // against an installed, signed-in CLI; no unit test could see it,
               // because the spawn is injected and the fake child accepts anything.
-              DEVIN_PERMISSION_MODE: toolsAllowed ? (process.env.DEVIN_PERMISSION_MODE ?? "bypass") : "normal",
+              DEVIN_PERMISSION_MODE: "normal",
             },
           });
         } catch (error) {
@@ -317,8 +303,7 @@ export function createDevinCliAdapter(provider: OcxProviderConfig, deps?: { spaw
             return;
           }
           if (frame.method === "session/request_permission" && frame.id != null) {
-            const params = frame.params as { options?: Array<{ optionId?: string; name?: string; kind?: string }> } | undefined;
-            send(permissionResponseFrame(frame.id as number | string, params?.options, toolsAllowed));
+            send(permissionResponseFrame(frame.id as number | string));
             return;
           }
           if (frame.method === "session/update") {

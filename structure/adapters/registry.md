@@ -18,6 +18,8 @@ Some adapters share another adapter's routed-tool semantics while retaining inde
   so `buildRequest` returns a placeholder and `parseStream` is disabled. Its registry `baseUrl` is a
   canonical identity URL rather than a destination anything connects to, which is what keeps the
   generated configuration loadable: `providerBaseUrlConfigError` accepts only `http(s)` schemes.
+  ACP permission requests are always cancelled because the protocol supplies no request-scoped
+  capability that the shared data plane can bind to a complete native operation.
 - `devin` is the cloud half of the same family and is also direct. It streams Cognition's
   `ApiServerService/GetChatMessage` over Connect-RPC from `runTurn` with hand-written protobuf
   framing, so like Cursor and `devin-cli` it never travels the `buildRequest`/`parseStream` path.
