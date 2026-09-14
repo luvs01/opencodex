@@ -1523,6 +1523,8 @@ function hasCodexSharedStateQuotaHeadroom(
   ) {
     return hasCodexQuotaHeadroom(config, accountId, selectionOptions, now);
   }
+  const threshold = config.pool?.autoSwitchThreshold;
+  if (typeof threshold === "number" && threshold <= 0) return true;
   const usage = computeCodexUsageScore(
     getAccountQuota(accountId),
     getPoolAccountPlanForSelection(config, accountId, selectionOptions),
