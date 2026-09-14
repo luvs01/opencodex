@@ -1,5 +1,7 @@
 # Byte Accounting
 
+Translated Chat inline-image normalization keeps retained wire bytes in its aggregate budget while process-wide native-decode admission and a decoded-pixel ceiling bound memory outside that byte accounting.
+
 How opencodex measures request and stream bytes without allocating copies solely to count
 them. These contracts are shared by request parsing, SSE rewriting, the provider adapters and
 the translator budget, which is why so many documents link here rather than restating them.
