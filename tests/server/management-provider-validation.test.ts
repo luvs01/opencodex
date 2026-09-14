@@ -4547,6 +4547,35 @@ describe("provider transport option management contract (#1668, #2816)", () => {
     });
   });
 
+  test("POST rejects an invalid API-key pool strategy before persistence", async () => {
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const response = await request("/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "invalid-pool-strategy",
+          provider: {
+            adapter: "openai-chat",
+            baseUrl: "https://api.example.test/v1",
+            apiKeyPoolStrategy: "round_robin",
+          },
+        }),
+      });
+
+      expect(response?.status).toBe(400);
+      expect(await response?.json()).toMatchObject({
+        error: expect.stringContaining("apiKeyPoolStrategy"),
+      });
+      expect(liveConfig.providers["invalid-pool-strategy"]).toBeUndefined();
+      expect(loadConfig().providers["invalid-pool-strategy"]).toBeUndefined();
+    });
+  });
+
 
   test("POST with upstreamHttpVersion: null persists nothing and survives a reload", async () => {
     // The management validator accepts null as "clear this", but POST persisted the body as

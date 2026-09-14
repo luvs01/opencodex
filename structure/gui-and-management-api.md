@@ -142,7 +142,8 @@ this document owns is which module holds which area and what invariant that area
 
 Provider writes must not round-trip masked API keys as real secrets. Dashboard actions that change
 model visibility or subagent selection should trigger catalog/cache sync behavior through the server
-path that owns it.
+path that owns it. A provider POST validates the complete prospective configuration before mutating
+live state or persisting it, so its accepted representation is also valid on the next startup.
 
 The UI must show one provider card and one Models group for Codex-login OpenAI, describe Pool and
 Direct accurately, and keep the main account inside Pool. Public model state keeps virtual Pro ids
