@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Keep the runtime aligned with package.json and pin the multi-platform image index.
-ARG BUN_IMAGE=oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6
+ARG BUN_IMAGE=oven/bun:1.4.2@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895
 
 FROM ${BUN_IMAGE} AS build
 WORKDIR /home/bun/app
@@ -25,7 +25,10 @@ RUN cd gui && bun run build
 FROM ${BUN_IMAGE} AS runtime
 WORKDIR /home/bun/app
 
+# Docker supervises this foreground process; retain routed state on stop/recreate.
+# This uses the existing service lifecycle mode and does not install a service manager.
 ENV NODE_ENV=production \
+    OCX_SERVICE=1 \
     OPENCODEX_HOME=/home/bun/.opencodex \
     CODEX_HOME=/home/bun/.codex \
     OCX_API_TOKEN_FILE=/home/bun/.opencodex/service-api-token
