@@ -876,6 +876,37 @@ export function applyProviderConfigHints(
   };
 }
 
+/** Build a Devin row without letting its degraded provider fallback replace live account evidence. */
+export function buildDevinLiveCatalogEntry(
+  name: string,
+  prov: OcxProviderConfig,
+  id: string,
+  liveWindow: number | undefined,
+  liveEfforts: string[] | undefined,
+  providerCap?: number,
+  metadataModelIdCaseFold?: boolean,
+  effectiveAlias?: string | null,
+): CatalogModel {
+  const hinted = catalogHintsFromProviderConfig(
+    name,
+    prov,
+    id,
+    providerCap,
+    metadataModelIdCaseFold,
+    effectiveAlias,
+  );
+  const modelEfforts = modelRecordValue(prov.modelReasoningEfforts, id);
+  return {
+    id,
+    provider: name,
+    ...(liveWindow ? { contextWindow: liveWindow } : {}),
+    ...hinted,
+    // A per-model setting is an operator override. The provider-wide value is
+    // only a degraded-mode fallback, so live account evidence supersedes it.
+    ...(liveEfforts?.length && modelEfforts === undefined ? { reasoningEfforts: liveEfforts } : {}),
+  };
+}
+
 export function catalogHintsFromProviderConfig(
   name: string,
   prov: OcxProviderConfig,
@@ -1735,18 +1766,16 @@ async function fetchProviderModelsWithAuth(
       // chose.
       const result = liveResult.models.map((id) => {
         const liveWindow = liveResult.contextWindows[id];
-        return {
+        return buildDevinLiveCatalogEntry(
+          name,
+          prov,
           id,
-          provider: name,
-          ...(liveWindow ? { contextWindow: liveWindow } : {}),
-          // The account catalog names the effort variants each base model has, so
-          // its ladder is measured rather than assumed. Without this the entry
-          // inherits the generic routed ladder and offers rungs the model rounds
-          // away, and every client that keys an effort control off this field —
-          // the Pi-shaped exports — renders no control at all.
-          ...(liveResult.efforts[id]?.length ? { reasoningEfforts: liveResult.efforts[id] } : {}),
-          ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
-        } as CatalogModel;
+          liveWindow,
+          liveResult.efforts[id],
+          contextCap,
+          metadataModelIdCaseFold,
+          captured.effectiveAlias,
+        );
       });
       const forCache = withConfiguredRetention(result, { retainComboTargets: false });
       if (!setCached(name, forCache, Date.now(), cacheGeneration)) {

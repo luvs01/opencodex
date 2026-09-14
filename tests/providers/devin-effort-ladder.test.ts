@@ -7,6 +7,8 @@ import {
   sortDevinRungs,
 } from "../../src/adapters/devin/live-models";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
+import { providerConfigSeed } from "../../src/providers/derive";
+import { buildDevinLiveCatalogEntry } from "../../src/codex/catalog/provider-fetch";
 
 const devinRow = () => PROVIDER_REGISTRY.find(row => row.id === "devin")!;
 
@@ -39,6 +41,35 @@ describe("devin reasoning rungs come from the catalog suffixes", () => {
 });
 
 describe("devin advertises a ladder instead of inheriting the generic one", () => {
+  test("live account rungs supersede the degraded provider fallback", () => {
+    const provider = providerConfigSeed(devinRow());
+    const model = buildDevinLiveCatalogEntry(
+      "devin",
+      provider,
+      "account-model",
+      200_000,
+      ["low", "high"],
+    );
+
+    expect(model.reasoningEfforts).toEqual(["low", "high"]);
+  });
+
+  test("an explicit per-model ladder still overrides live account rungs", () => {
+    const provider = {
+      ...providerConfigSeed(devinRow()),
+      modelReasoningEfforts: { "account-model": ["medium", "max"] },
+    };
+    const model = buildDevinLiveCatalogEntry(
+      "devin",
+      provider,
+      "account-model",
+      undefined,
+      ["low", "high"],
+    );
+
+    expect(model.reasoningEfforts).toEqual(["medium", "max"]);
+  });
+
   test("the provider row carries both fields", () => {
     // modelReasoningEfforts drives the Codex picker; reasoningEfforts is what the
     // Pi-shaped client exports read. Without them the row inherited the routed

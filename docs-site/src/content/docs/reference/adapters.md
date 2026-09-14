@@ -439,7 +439,10 @@ configuration that names the old id is rewritten at startup.
   with manual protobuf framing in `devin/cloud-direct/wire.ts`; the ordinary `buildRequest` /
   `parseStream` path is disabled.
 - Live model discovery via `GetCascadeModelConfigs`; the static seed is filtered against the
-  account's live roster so models not on the plan drop out instead of failing at request time.
+  account's live roster so models not on the plan drop out instead of failing at request time. Each
+  model's effort control uses the variants exposed by that account; the static fallback ladder is
+  used only before discovery or when discovery fails. An explicit per-model ladder remains an
+  operator override.
 - Tool definitions are encoded in the request and tool-call events are decoded from the response
   stream. Cognition enforces a per-tool-description length limit (6,998 chars) and an exact-phrase
   blocklist; the adapter sanitizes known triggers and truncates over-long descriptions before
