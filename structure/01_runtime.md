@@ -16,6 +16,7 @@
 | `src/server/ports.ts` | Owns bind availability and ephemeral-port selection. Temporary probes dispose accepted peers and wait for listener close before reporting success. |
 | `src/cli/status.ts` / `src/cli/status-probes.ts` | Status snapshot assembly and the shared read-only health/stale-process probes used by status and doctor. Probe evidence keeps recorded-port choice, before/after snapshots and per-call timer cleanup together. |
 | `src/router.ts` | Provider/model selection before adapter dispatch. Policy execution and ordinary management dry-run share effective-provider capability evidence; unresolved, missing, and disabled providers are excluded before scoring. |
+| `src/providers/api-key-selection-capture.ts` | Pure request-owned snapshot of the configured key entry, reference, and revision. The router and stateful selection module share this leaf with type-only dependencies; `api-key-selection.ts` retains the compatibility export and owns persisted selection changes and route resolution. |
 | `src/types.ts` | Shared config, parsed request, adapter, and event types. |
 | `src/reasoning-effort.ts` | Codex reasoning-level definitions (`low`/`medium`/`high`/`xhigh`), per-model effort mapping, and catalog effort sanitization. |
 | `src/codex/shim.ts` | Codex autostart shim: replaces the `codex` binary with a wrapper that auto-starts the proxy on demand. It skips startup for management subcommands even when value-taking global flags precede the subcommand, and transactionally restores complete, stable external launcher replacements without a watcher or PATH rediscovery. |
@@ -78,6 +79,12 @@ fixed-path command-line check required before stop, kill, port reclaim, or stale
 Callers must not replace the latter with the former merely to avoid the Windows WMIC/PowerShell
 probe. Expected-PID and snapshot removal helpers are the TOCTOU boundary when a replacement proxy
 can write new state during a probe.
+
+Port reclamation must honor a rejected OCX verifier result even for a PID captured before stop or
+update. A rejected live holder prevents both termination and TCP-row deletion for that scan; later
+scans may proceed if verification succeeds or the holder exits. The allowlist narrows termination
+eligibility and supplies no identity evidence by itself. This contract uses the existing verifier;
+it does not add process-instance proof or change the classification cache.
 
 [Decision Log]
 - 목적과 의도: Separate proxy process ownership from persisted configuration without changing lifecycle behavior.
@@ -165,6 +172,22 @@ destination, and key boundary instead of being silently canonicalized onto the n
 OAuth presets resolve discovery against the same canonical registry transport as normal routing
 before any adapter-specific transport override, so a stale configured `baseUrl` cannot receive an
 OAuth bearer token.
+
+The BigModel Coding Plan Responses preset uses the separately documented
+`https://open.bigmodel.cn/api/v1` transport and a static catalog. Its provider row
+disables live discovery: a local Codex `models.json` example does not establish an
+authenticated HTTP models endpoint. Its static context and reasoning metadata are
+kept in the canonical registry, including an explicit empty selectable effort
+ladder for `glm-5-turbo`.
+
+Raycast is a managed client export, not an upstream model provider. Its YAML
+contribution owns only the unique `providers/[id=opencodex]` entry, with the
+existing manifest and fingerprint checks protecting user-owned provider values.
+Ambiguous selector matches and incompatible containers cannot be adopted or
+mutated. Catalog refresh uses the existing owned-integration activation check;
+an unowned client remains disconnected. OpenCodex omits Raycast API-key fields
+and exports only to eligible local targets. Pro detection is an advisory hint,
+not an authentication or entitlement decision.
 
 ## Remote Hub hardening ownership
 
