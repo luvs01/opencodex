@@ -110,6 +110,8 @@ The [explicit model-capability contract](../config.md#explicit-per-model-capabil
 Provider-scoped approval reviewer settings are projected by the [catalog owner](../catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
 
 Renamed fixed-key providers receive [missing reasoning metadata](../catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.
+The learned-refusal cache in `src/providers/reasoning-metadata.ts` is isolated by active API-key
+digest; this shared provider mechanism does not promote a credential refusal to its destination.
 
 ### OAuth Fast Tier (Priority Processing)
 
