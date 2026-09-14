@@ -95,6 +95,9 @@ Provider live-model lists are cached with a configured TTL (`src/codex/model-cac
 deleting, or editing a provider's shape clears that per-provider cache; a disabled-only change
 deliberately does not, because a disabled provider is already excluded from the catalog gather
 instead. Codex's own `models_cache.json` is a different cache, invalidated by catalog refresh.
+Synchronizing a supported routed provider first refreshes its models.dev effort snapshot through
+`src/codex/sync.ts` and `src/providers/reasoning-metadata.ts`; this keeps missing-cache network work
+out of request-time ladder resolution.
 
 For `liveModels: false`, a static provider publishes the ordered union of `models` and
 `retainModels`. When `models` is absent or empty, its configured `defaultModel` seeds that
