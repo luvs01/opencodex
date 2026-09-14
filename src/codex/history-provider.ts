@@ -354,15 +354,22 @@ export function preflightCodexHistoryInjection(
     const paginatedColumn = columns.some(column => column.name === "history_mode");
     if (paginatedColumn && restoreEntries.length > 0) return "history_paginated_requires_native_writer";
     for (const entry of restoreEntries) assertLegacyHistoryWritable(entry.rolloutPath);
-    const rows = db.query<{ rollout_path: string; history_mode: string | null }, []>(`
-      SELECT rollout_path, ${paginatedColumn ? "history_mode" : "NULL AS history_mode"}
+    const rows = db.query<{ rollout_path: string; history_mode: string | null; model_provider: string }, []>(`
+      SELECT rollout_path, ${paginatedColumn ? "history_mode" : "NULL AS history_mode"}, model_provider
       FROM threads
       WHERE ${providerTableMode
         ? resumeHistory ? "model_provider IN ('openai', 'opencodex')" : "0"
         : "model_provider = 'opencodex'"}
     `).all();
     for (const row of rows) {
-      if (paginatedColumn || row.history_mode === "paginated") return "history_paginated_requires_native_writer";
+      if (paginatedColumn || row.history_mode === "paginated") {
+        // A provider-table transition removes the root openai_base_url. Standing this case
+        // down would leave an openai-tagged thread routed to Codex's built-in OpenAI endpoint.
+        if (providerTableMode && row.model_provider === "openai") {
+          return "history_paginated_openai_requires_native_writer";
+        }
+        return "history_paginated_requires_native_writer";
+      }
       assertLegacyHistoryWritable(row.rollout_path);
     }
     return null;
