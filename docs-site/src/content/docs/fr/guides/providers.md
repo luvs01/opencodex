@@ -312,6 +312,7 @@ promotionnels de Cline ne sont accessibles que dans l'IDE ou la CLI Cline, pas p
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
+| [BigModel Coding Plan — Responses (liste statique)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
 | Qwen Cloud | Forfait à jetons (par défaut) : `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Facturation à l'usage : `https://dashscope.aliyuncs.com/compatible-mode/v1` · ou personnalisé |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
@@ -333,6 +334,21 @@ annoncé par OpenCode (environ 200 requêtes Big Pickle ou vers des modèles gra
 des indications propres au fournisseur ainsi qu'un `Retry-After` synthétique ; un `Retry-After` reçu en amont
 reste prioritaire. L'attente et la nouvelle tentative avec la même clé restent facultatives et s'activent avec
 [`retryOn429`](/fr/reference/configuration/).
+
+**Le niveau sans clé `opencode-free` est actuellement fermé aux clients tiers.** Zen refuse toute requête
+qui arrive sans en-tête `x-opencode-session` et répond avec le type d'erreur `MissingSessionID` et le message
+« OpenCode's free tier can only be used in OpenCode ». Le contrôle porte uniquement sur la présence de
+l'en-tête : un proxy pourrait donc le franchir en inventant une valeur, ce que opencodex ne fait pas.
+Fabriquer un identifiant de session et un User-Agent versionné `opencode/<version>` revient à se déclarer
+client OpenCode, alors qu'OpenCode ne publie aucun contrat d'intégration tierce pour ce niveau sans clé ;
+une réponse HTTP 200 obtenue ainsi est un contrôle d'admission contourné, pas une autorisation. opencodex
+signale donc la restriction au lieu de la contourner : une requête vers `opencode-free` renvoie une erreur
+qui explique le blocage en amont.
+
+La voie prise en charge vers les mêmes modèles est le fournisseur **`opencode-zen`** avec une clé d'API
+OpenCode Zen obtenue sur [opencode.ai/auth](https://opencode.ai/auth). Si OpenCode publie plus tard un accès
+tiers pour le niveau sans clé, opencodex pourra le suivre ; d'ici là, le préréglage sert à documenter la
+restriction. Conditions en amont : [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
 
 La plupart utilisent l'adaptateur `openai-chat` avec une clé Bearer ; quelques fournisseurs qui n'exposent
 qu'un point de terminaison compatible Anthropic, comme **Xiaomi MiMo**, emploient l'adaptateur `anthropic`
@@ -495,7 +511,7 @@ une barre trompeuse.
 > programmation interactifs. L'automatisation générale par API, les services applicatifs personnalisés et les
 > traitements par lots non interactifs sont interdits et peuvent entraîner la suspension de la clé du forfait.
 
-> **Deux routes GLM :** `zai` correspond à l'abonnement international Z.AI Coding Plan ; `zhipu-bigmodel`
+> **Facturation GLM :** `zai` correspond à l'abonnement international Z.AI Coding Plan ; `zhipu-bigmodel`
 > correspond au point de terminaison national BigModel de Zhipu, facturé à l'usage. Les hôtes, les clés et la
 > facturation diffèrent : une clé émise pour l'un ne permet pas de s'authentifier auprès de l'autre.
 
@@ -542,8 +558,8 @@ flux d'appareil contre un jeton d'API Copilot de courte durée, et non contre un
 reste une passerelle à clé ou jeton d'abonnement sur son point de terminaison compatible OpenAI.
 **Cloudflare AI Gateway** exige que les identifiants de votre compte et de votre passerelle figurent dans l'URL.
 
-Copilot présente un catalogue qui utilise plusieurs protocoles : sa famille GPT-5 (`gpt-5.3-codex`, `gpt-5.4`,
-`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) rejette
+Copilot présente un catalogue qui utilise plusieurs protocoles : ces modèles (`gpt-5.3-codex`, `gpt-5.4`,
+`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) rejettent
 `/chat/completions` pour le trafic d'agent. opencodex route donc ces modèles sur l'API Responses par défaut,
 tandis que tous les autres modèles Copilot restent sur Chat Completions. L'ordre de priorité est le suivant :
 verrouillage explicite du protocole → entrée [`modelAdapters`](/fr/reference/configuration/providers/) définie

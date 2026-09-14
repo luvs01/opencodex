@@ -27,9 +27,18 @@ rotation does not protect against provider enforcement.
 
 Operational contract when enabled:
 
-- Upstream **429** cools that account using `Retry-After` when present (else a default backoff),
-  clears its affinities, and may rotate to another eligible account within the same request
-  (bounded).
+- Upstream **429** cools that account, clears its affinities, and may rotate to another eligible
+  account within the same request (bounded). The cooldown uses a usable `Retry-After` when present,
+  otherwise the latest valid reset time among windows Anthropic marks `rejected`, including
+  weekly windows. Valid upstream deadlines are not shortened to a fixed cooldown ceiling.
+  A refusal with no usable deadline falls back to a 60-second default backoff.
+- Responses report the serving account's 5-hour and weekly utilization, and whichever of those
+  two the response carries is recorded for that account — each window independently, and a
+  refusal counts as well as a success. Usage-aware selection works from ordinary traffic,
+  without waiting for a dashboard poll. Headers preserve model-specific quota windows and do
+  not postpone usage probes or clear a failed usage probe's unavailable status. Measurements
+  whose known reset time has passed are discarded as unknown, including retained model-specific
+  windows. Values without a known reset are preserved; missing data is never reported as zero usage.
 - Affinity is **process-local** (lost on proxy restart).
 - **401/403** credential failures quarantine the account (`needsReauth`) so it is excluded from
   selection until re-authenticated.
@@ -300,8 +309,16 @@ canonical ids. The synthetic 2026 date is an internal slot, not a release date. 
 and `claude-ocx-<provider>--<model>` ids from older configs still resolve.
 
 If Claude Desktop's footer picker does not change the model for an already-running 3P
-conversation, use `/model <id>` in that conversation. OpenCodex cannot observe picker state; it
-routes the model id carried by each request. Confirm the result under **Logs → requestedModel**.
+conversation, you can try `/model <id>`, but this workaround may also fail on affected Desktop
+builds. [Issue #3782](https://github.com/lidge-jun/opencodex/issues/3782) reports that on Windows
+with Claude Desktop 1.46388.4, the conversation continues using its initial model after both
+footer-picker and `/model` changes. The report does not establish which client or routing
+component causes the behavior.
+
+You can also try selecting the intended default model in the OpenCodex Claude Desktop profile,
+reapplying the profile, and starting a new conversation. This is a troubleshooting step, not a
+guaranteed fix. OpenCodex cannot observe picker state; it routes the model id carried by each
+request. Confirm what the client sends under **Logs → requestedModel**.
 
 Models with an authoritative 1M context window get an extra `…[1m]` picker row: selecting it makes
 Claude Code account a full 1M context for that model (auto-compaction stays on) — the proxy strips
@@ -513,15 +530,50 @@ The proxy translates every Anthropic Messages API request into the Codex Respons
 | Assistant text | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringified `arguments`) |
 | User `tool_result` | `function_call_output` (`is_error` → `[tool error]` prefix) |
-| `thinking` / `redacted_thinking` replay | Dropped |
+| `thinking` / `redacted_thinking` replay | `reasoning` items with bounded `ocxr1` envelopes for signatures and redacted payloads |
 | Function tools | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, named function→`{type:"function",name}`, hosted WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
 
+Replay preserves non-hidden signed blocks (including empty thinking) and opaque redacted blocks on the intended Anthropic adapter. `hideThinkingSummary` remains unchanged: locally hidden signed text is not exposed to Claude clients, and lossless replay through that hidden Claude boundary is not established. Older combined reasoning envelopes cannot recover original block order once streaming text has been emitted. `claudeCode.compatibility: "enforce"` still rejects thinking replay. This does not establish live Anthropic acceptance or cache-hit improvements; [#3719](https://github.com/lidge-jun/opencodex/issues/3719) remains open.
+
 **Error cases (400):** malformed JSON; missing/empty `model`; missing/empty `messages`; unsupported
 role; `tool_result` without `tool_use_id`; `tool_use` without id/name; named `tool_choice` without
 name.
+
+### Unicode-property patterns in tool schemas
+
+A JSON Schema `pattern` written for JavaScript may use Unicode property escapes such as
+`\p{Cc}` or `\P{L}`. OpenAI-family backends validate `pattern` by compiling it with Python's
+`re`, which does not support those escapes, and a schema they cannot compile is refused whole —
+so a single such pattern on one built-in tool fails every request in the session, not just calls
+to that tool.
+
+To keep ordinary Artifact parameters working, the `openai-chat` and `openai-responses` adapter
+paths omit scalar `pattern` constraints containing Unicode property escapes in ordinary positive
+schema positions. Sibling constraints, `required`, literal data and supported regexes remain.
+A tool implementation must validate its own inputs because an omitted constraint is not enforced
+by this proxy.
+
+`patternProperties` matchers and their value schemas remain unchanged. Removing a matcher can
+change which keys are evaluated by an ancestor's `unevaluatedProperties`, so local openness is
+not enough to prove a safe transformation. Patterns under `not`, `oneOf`, `if`, `contains`,
+`$defs` and `definitions` also remain unchanged: relaxing those subtrees can change negation,
+branch selection, match counts or the meaning of a reference.
+
+The destination validates these preserved schemas. An ECMA-compatible destination can use the
+original regex; a destination that cannot compile it may reject the schema. OpenCodex does not
+silently replace that contract with one that forbids previously valid arguments.
+
+This is normalization on the selected adapter path, not a provider-wide guarantee. Provider
+configuration and authentication are untouched, and a provider on a different adapter is
+unaffected.
+
+It is a compatibility measure, not a claim that every custom OpenAI-compatible backend rejects
+these patterns. What it costs is worth knowing: an omitted regex is not preserved anywhere and is
+not enforced upstream, so a tool implementation should validate its own inputs rather than relying
+on the schema to reject a malformed argument.
 
 ## Outbound translation (Responses → Messages SSE)
 
@@ -530,7 +582,8 @@ name.
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | Text deltas | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
-| Reasoning summary/text | `thinking` block with synthetic signature |
+| Reasoning summary/text | `thinking` block with the replayed signature, or a bounded `ocxr1` fallback envelope |
+| Redacted reasoning | `redacted_thinking` blocks replayed from the reasoning envelope |
 | Function-call frames | `tool_use` block with `input_json_delta` |
 | Terminal event | `message_delta` → `message_stop` |
 | EOF before terminal | 502-style `api_error` |
