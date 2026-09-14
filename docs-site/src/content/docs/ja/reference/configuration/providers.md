@@ -36,8 +36,9 @@ GUI で登録または OAuth ログインが完了すると、Models ページ�
 | `codexAccountPickerEnabled?` | `boolean` | map が空なら off | 有効な `codexAccountNamespaces` mapping から account-qualified Codex picker row を生成するかを制御します。`true` は mapping された行の表示を許可します。空でない map で省略した場合は後方互換性のため有効として扱われ、map が空なら off です。`false` は mapping を削除せず、明示的な `<selector>/<native-openai-model>` routing も無効にせずに、生成行を非表示にして picker の bare native 行を復元します。 |
 | `activeCodexAccountId?` | `string` | — |次のリクエスト用に手動で選択されたプール アカウント。選択するとスレッドのアフィニティがクリアされます。実行中のリクエストでは、取得された資格情報が保持されます。 |
 | `codexAccountPriorities?` | `Record<string,number>` | — | Codex pool のアカウント別選択順。アカウント ID → `-100` から `100` の整数で、**大きいほど先に使われ**、未設定は `0` です。これは eligibility ではなく順序の境界です。選択は適格なアカウントを、まだ quota に余裕がある最上位 tier に絞り込み、その tier の中を `accountPoolStrategy` が選びます。tier が飛ばされるのは、そのメンバー全員が `autoSwitchThreshold` 超過、cooldown 中、soft-avoid、一時停止、または再認証待ちのときだけで、usage 不明が tier を drain させることはありません。順序付けが不適格なアカウントを選択可能にすることはなく、すでにアカウントが結び付いた thread を再 bind することもありません。メインの `__main__` も同じ条件で参加するため、Codex Desktop ログインを最後に使わせられます。エントリが 1 つもなければ挙動は従来どおりです。map が不正な場合は警告を出して順序付けを無効にします（config の修復処理は走りません）。`ocx account priority` と Codex Auth ページで管理します。 |
-| `autoSwitchThreshold?` | `number` | `80` | 使用量ベースのプロアクティブ切り替えしきい値。`quota` は紐付け済み/未紐付けタスクの次のリクエストを再評価でき、`fill-first` は未紐付け割り当ての使い切り基準としてのみ使用し、通常の `round-robin` 選択は使用しません。既知の 5 時間、週次、30 日 quota window の最大スコアを使います。`0` は使用量ベースの切り替えだけを無効にし、未紐付け割り当てや障害回復は無効にしません。 |
-| `accountPoolStrategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | 新規/未紐付け Codex リクエストの割り当て戦略。live な `(parent thread id, quota scope)` affinity がなければ未紐付けで、プロキシ再起動や affinity リセット後は既存の表示タスクも未紐付けになり得ます。`quota` はアクティブアカウントがなければ既知 usage 最小の適格アカウントを選び、適格なアクティブアカウントが `autoSwitchThreshold` 未満なら維持します。しきい値到達後は、未紐付けリクエストまたは紐付け済みタスクの次のリクエストを usage の低い適格アカウントへ移せます。`round-robin` は未紐付けリクエストを均等分散し、`fill-first` は cooldown、使用不可、または drain threshold までアクティブアカウントへ割り当てます。 |
+| `autoSwitchThreshold?` | `number` | `80` | 使用量ベースのプロアクティブ切り替えしきい値。`quota` は未紐付けタスクの次のリクエストを再評価でき、既定では使用量がこのしきい値を超えると紐付け済みタスクも再評価します。`pool.cacheAffinity` がオンなら、紐付け済みタスクはアカウントが使い切られるか処理できなくなるまでしきい値超過後も同じアカウントを維持します。`fill-first` は未紐付け割り当ての使い切り基準としてのみ使用し、通常の `round-robin` 選択は使用しません。既知の 5 時間、週次、30 日 quota window の最大スコアを使います。`0` は使用量ベースの切り替えだけを無効にし、未紐付け割り当てや障害回復は無効にしません。 |
+| `accountPoolStrategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | 新規/未紐付け Codex リクエストの割り当て戦略。live な `(parent thread id, quota scope)` affinity がなければ未紐付けで、プロキシ再起動や affinity リセット後は既存の表示タスクも未紐付けになり得ます。`quota` はアクティブアカウントがなければ既知 usage 最小の適格アカウントを選び、適格なアクティブアカウントが `autoSwitchThreshold` 未満なら維持します。しきい値到達後は未紐付けリクエストを移せます。`pool.cacheAffinity` がオフなら紐付け済みタスクの次のリクエストも usage の低い適格アカウントへ移せます。オンなら紐付け済みタスクはアカウントが使い切られるか（既知 usage 100%）処理できなくなるまで維持されます。`round-robin` は未紐付けリクエストを均等分散し、`fill-first` は cooldown、使用不可、または drain threshold までアクティブアカウントへ割り当てます。 |
+| `pool.cacheAffinity?` | `boolean` | `false` | 紐付け済み Codex スレッド向けのオプトイン cache-affinity 順序。`pool.kernel` とは独立で、既定はオフです。不正な値はオフとして読みます。オンにすると live な紐付けが quota 余裕より優先されます。`quota` は使用量が `autoSwitchThreshold` を超えたという理由だけではスレッドを移しません。一時停止、使用不可、または実際に使い切られたアカウント（既知 usage 100%）では離れるので、affinity は固定ではなく並べ替えです。 |
 | `accountPoolStickyLimit?` | `number` | `1` | 1 回の round-robin 選択で次へ進む前に保持する新規/未紐付けタスク割り当て数。カウンターは上流の成功後ではなくタスクの紐付け時に増えます。範囲 1–100。`accountPoolStrategy` が `round-robin` のときのみ。 |
 | `upstreamFailoverThreshold?` | `number` | `3` |今後の新しいセッションがフェイルオーバーする前に一時的なエラーが連続して発生する。 `0` を無効に設定します。通常のResponses送信とネイティブcompact送信では、実証済みの接続前DNS/TCP到達不能障害はprovider-host単位で記録され、アカウントの健全性、アカウントのクールダウン、スレッド/セッションの親和性、アクティブアカウントの選択、Poolルーティングには影響せず、この閾値にもカウントされません。 |
 | `upstreamHostCircuitThreshold?` | `number` | `0` | ネイティブOpenAI forwardのResponses送信とcompact送信で、実証済みの接続前DNS/TCP障害に適用するオプトインのサーキットしきい値です。`0`で無効、`1`〜`20`ではその回数の終端論理リクエストが失敗するとprovider-originを30秒間遮断します。遮断中はアカウント選択やupstream送信の前に`Retry-After`付き`503`を返し、時間経過後はhalf-openリクエストを1件だけ許可します。タイムアウトとHTTP応答は数えず、HTTP応答が1件でもあれば回路を閉じます。 Codex Pool ルーティングでアカウントが固定されていない場合にのみ適用され、`codexAccountMode: "direct"` とアカウント修飾セレクターでは動作しません。 |
@@ -66,6 +67,10 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 
 `openaiProviderTierVersion: 2` は、現在の単一プロバイダーの投影をマークします。出荷された v1 設定を移行する前に、opencodex は別のバックアップを置き換えずに `config.json.pre-openai-tiers-v2.bak` を作成し、既知の名前空間で選択された既知のレガシー ID を裸の ID に書き換えます。
 
+## プロバイダー名前空間のエイリアス
+
+プロバイダーには、`google-antigravity` の `agy` のような組み込みの短縮名があります。設定済みのプロバイダー名または明示的なエイリアスが、大文字と小文字を区別せずにその短縮名を使用している場合、別のプロバイダーの組み込み短縮名はカタログ表示とエイリアスルーティングの両方で無効になります。たとえば、`agy` というプロバイダーを設定すると、Google のモデルは `google-antigravity/<model>` と表示され、`agy/<model>` は設定済みのプロバイダーを選択します。正規のプロバイダー名は引き続き大文字と小文字の完全一致が必要で、認識されない接頭辞には既存のモデルルーティングのフォールバックが適用されます。
+
 ## プロバイダーエントリー (`OcxProviderConfig`)
 
 |フィールド |タイプ |意味 |
@@ -93,7 +98,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `modelAutoCompactTokenLimits?` | `Record<string, number>` | モデルごとの正の安全な整数によるソフト自動圧縮予算。実効値であるコンテキストまたは最大入力の 90% の上限を下げることだけができ、信頼できるコンテキストウィンドウが不明な場合は出力されません。canonical `openai` では、キーは provider や account-selector の接頭辞を含まない、サポート対象の正確なネイティブモデル ID でなければなりません。provider PATCH はエントリをマージし、キーを `null` にするとそのキーを削除し、フィールド全体を `null` にするとマップを消去します。これらの `null` tombstone は PATCH 専用です。 |
 | `defaultMaxOutputTokens?` | `number` |クライアントが `max_output_tokens` を省略した場合の、プロバイダー全体の `openai-chat` フォールバック。 |
 | `modelMaxOutputTokens?` | `Record<string, number>` |モデルごとの `openai-chat` フォールバック バジェットがプラスになります。正確な/パターン一致はプロバイダーのデフォルトを上回ります。 |
-| `modelCosts?` | `Record<string, Cost4>` | モデルごとの表示価格（100万トークンあたりの米ドル）。そのプロバイダーの正確なアップストリーム モデル ID をキーにします（プロバイダー識別子やルーティングされた `provider/model` ラベルではありません）。値は `input`, `output`, `cacheRead`, `cacheWrite` の 4 フィールドです（例: `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`）。組み込みカタログにないモデル ID も、任意の OpenAI 互換エンドポイントを対象とするカスタムプロバイダーや、ローカル・内部プロバイダーで有効です。ユーザー設定の価格は Logs の `~$` と Usage の見積もりで組み込みカタログより優先されます。過去のエントリも現在のオーバーレイで再計算されるため、価格を編集すると過去の合計が変わることがあります（フォールバック順: ユーザー設定 → jawcode カタログ → expected-price オーバーレイ → モデル別ベンダー価格）。全ゼロのエントリは次のソースにフォールバックします。各レートは 0 以上の有限数で、最大 1,000,000（100万トークンあたりの米ドル）です。範囲外の行は管理境界で拒否され、読み込み時に破棄されます。表示専用の見積もりであり、ルーティング・アカウント選択・クォータ・請求には影響しません。 |
+| `modelCosts?` | `Record<string, Cost4>` | モデルごとの表示価格（100万トークンあたりの米ドル）。そのプロバイダーの正確なアップストリーム モデル ID をキーにします（プロバイダー識別子やルーティングされた `provider/model` ラベルではありません）。値は `input`, `output`, `cacheRead`, `cacheWrite` の 4 フィールドです（例: `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`）。組み込みカタログにないモデル ID も、任意の OpenAI 互換エンドポイントを対象とするカスタムプロバイダーや、ローカル・内部プロバイダーで有効です。ユーザー設定の価格は Logs の `~$` と Usage の見積もりで組み込みカタログより優先されます。過去のエントリも現在のオーバーレイで再計算されるため、価格を編集すると過去の合計が変わることがあります（フォールバック順: ユーザー設定 → jawcode カタログ → expected-price オーバーレイ → モデル別ベンダー価格）。ユーザーが明示的に全レートを 0 にした場合は、既知のゼロ料金として見積もります。自動料金に戻すにはそのモデルの設定を削除してください。カタログの全ゼロ料金は引き続きフォールバックします。各レートは 0 以上の有限数で、最大 1,000,000（100万トークンあたりの米ドル）です。範囲外の行は管理境界で拒否され、読み込み時に破棄されます。表示専用の見積もりであり、ルーティング・アカウント選択・クォータ・請求には影響しません。 |
 | `headers?` | `Record<string, string>` |追加の上流ヘッダー。認証、Cookie、API キー ヘッダー、埋め込まれた改行、および無効な名前は拒否されます。 |
 | `openRouterRouting?` | `OpenRouterProviderRouting` |デフォルトの OpenRouter `order`、`only`、および `allowFallbacks` 設定。 `openai-chat` を持つ正規 OpenRouter に対してのみ有効です。 |
 | `modelOpenRouterRouting?` | `Record<string, OpenRouterProviderRouting>` |プロバイダー全体の OpenRouter 設定を置き換える正確なモデル ID のオーバーライド。 |
@@ -105,7 +110,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `modelReasoningEfforts?` | `Record<string, string[]>` |モデルごとのラベル。空のリストは努力制御を非表示にします。 |
 | `modelSupportsReasoningSummaries?` | `Record<string, boolean>` |モデルを `false` に設定して、概要の広告を停止し、概要配信フィールドを削除します。 |
 | `modelReasoningSummaryDelivery?` | `Record<string, "sequential" \| "sequential_cutoff" \| "concurrent" \| "concurrent_cutoff">` |モデルごとの応答配信列挙型。既存の配信フィールドを書き換えます。 |
-| `modelAdapters?` | `Record<string, string>` | 混合配線ゲートウェイのモデルごとの `openai-chat` または `openai-responses` 配線オーバーライド。明示的なエントリはレジストリのデフォルトを破ります。DeepSeek のプリセットは `deepseek-v4-flash` のネイティブ Responses を選択でき、GitHub Copilot は GPT-5 ファミリー (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) を Responses 専用デフォルトとして宣言します。これらのモデルはエージェント トラフィックで `/chat/completions` を拒否するためです。`gpt-5.4-nano` のようなビルトイン デフォルトのないモデルはここでオプトインできます。単線アップストリーム ピンと正規の ChatGPT 転送はオーバーライドを拒否します。 |
+| `modelAdapters?` | `Record<string, string>` | 混合配線ゲートウェイのモデルごとの `openai-chat` または `openai-responses` 配線オーバーライド。明示的なエントリはレジストリのデフォルトを破ります。DeepSeek のプリセットは `deepseek-v4-flash` のネイティブ Responses を選択でき、GitHub Copilot は モデル (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) を Responses 専用デフォルトとして宣言します。これらのモデルはエージェント トラフィックで `/chat/completions` を拒否するためです。`gpt-5.4-nano` のようなビルトイン デフォルトのないモデルはここでオプトインできます。単線アップストリーム ピンと正規の ChatGPT 転送はオーバーライドを拒否します。 |
 | xAI Responses オプトイン（ダッシュボード） | スイッチ | `xai` のみで、`grok-4.5` と `grok-4.6` の `modelAdapters` エントリを原子的に設定または削除します。片方だけの場合は、次のスイッチ操作で両方が正規化されるまで混合状態を表示します。他のオーバーライドと tier 動作は変わりません。 |
 | `xaiResponsesXSearch?` | `boolean` | デフォルトでは無効です。xAI Responses の宛先では、最終的なリクエスト正規化後もライブの `web_search` ツールが残っている場合にのみ、プロバイダーがホストする `x_search` 宣言を追加します。既存の宣言は重複させず、呼び出し元の `tool_choice` / `allowed_tools` セレクターの範囲を拡張することもありません。また、これは `search.xSearch` オプションを持つウェブ検索サイドカーとは別です。 |
 | `modelPreferHostedTools?` | `Record<string,string[]>` | hosted tool namespace を予約する非 forward Responses gateway 向けの完全一致モデル opt-in。現在は `["image_generation"]` のみを受け付けます。一致したモデルは `openai-responses` wire を使い、その hosted tool をサポートする必要があります。競合するクライアント `image_gen` 宣言を除去し、呼び出し元の tool choice を維持するため selector も書き換えます。OpenAI API の仮想 `-pro` モデルでは、まず選択した公開 ID に一致させ、解決後のベース wire-model ID をフォールバックとして使用します。`modelAdapters` は公開 ID、次にベース ID の順に解決し、後者の結果が最終 wire を決めます。未設定のモデルは通常の alias 動作を維持します。 |
@@ -118,6 +123,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `noTopPModels?` | `string[]` |発信者指定の`top_p`を拒否するモデル。 |
 | `noPenaltyModels?` | `string[]` |存在/周波数ペナルティを拒否するモデル。 |
 | `noStructuredOutputModels?` | `string[]` | `openai-chat` エンドポイントが `response_format` を拒否する正確なモデル ID。要求モデルが項目と完全一致する場合だけフィールドを省略し、その他の `openai-chat` モデルでは structured-output 変換を維持します。 |
+| `noJsonSchemaModels?` | `string[]` | `openai-chat` エンドポイントが `json_schema` 形式は拒否しつつ `json_object` は受け入れる正確なモデル ID。この要求はフィールドを削除せず `json_object` に降格して送るため、JSON を求めた呼び出し側は散文ではなく JSON を受け取れます。両方の一覧に載るモデルでは `noStructuredOutputModels` が優先します。`opencode go` / `opencode zen` / `opencode free` プリセットが DeepSeek 経路に既定で載せます。 |
 | `parallelToolCalls?` | `boolean` |並列ツール呼び出しを切り替えます。 OpenAI Chat はデフォルトでオンになっています。非チャット アダプターは明示的な `true` でのみアドバタイズします。 |
 | `responsesItemIdRepair?` | `{ message?: string[]; reasoning?: string[]; repairMissingTerminalIds?: boolean; repairInvalidIds?: boolean }` |正確なプレースホルダー ID、欠落している端末 ID、および（`repairInvalidIds` で）正規の `msg_`/`rs_` 接頭辞を欠く message/reasoning ID に対するダウンストリーム SSE 修復はデフォルトで無効になっています。関数呼び出し ID は決して書き換えられません。組み込み DeepSeek は最後の 2 つをデフォルトで有効にします。 |
 | `responsesSnapshotRepair?` | `boolean` | デフォルトで無効のクライアント向け修復です。SSE と JSON の Responses ライフサイクルで欠落した status、output、ツールメタデータを補完し、raw 検査と永続化は変更しません。 |
@@ -157,7 +163,8 @@ Clash / Surge / Mihomo 利用者向けの fake-IP DNS 例外は 2 種類あり�
 pool アカウントの追加と quota 更新はダッシュボードの **Codex Auth** ページで処理してください。設定には secret で
 ないアカウント metadata だけを保存し、access/refresh token は強化された Codex アカウント credential store に別途
 保管します。Pool routing は新規/未紐付け割り当て、使用量ベースのプロアクティブ切り替え、障害回復に分かれます。
-紐付け済みタスクは通常 affinity を維持しますが、`quota` はしきい値超過後の次のリクエストで再紐付けでき、
+紐付け済みタスクは通常 affinity を維持します。既定では `quota` はしきい値超過後の次のリクエストで再紐付けでき、
+`pool.cacheAffinity` がオンなら、紐付け先アカウントが使い切られるか処理できなくなるまでその再紐付けを延期します。
 pause、cooldown、再認証、障害処理も独立して routing を消去または変更できます。未紐付けリクエストには
 プロキシ再起動や affinity リセット後の既存タスクも含まれます。出力前の **429/402** は使用量ベースの
 切り替えがオフでも同じリクエストで適格な代替アカウントへ 1 回再試行できます。アカウント変更後も会話
@@ -171,7 +178,7 @@ pause、cooldown、再認証、障害処理も独立して routing を消去ま�
 別の適格な Pool アカウントへリクエストを切り替えることがあります。これらの障害回復は
 `autoSwitchThreshold: 0` でも有効であり、`0` が無効にするのは使用量に基づく予防的な切り替えだけです。
 
-**割り当てとプロアクティブ切り替え戦略：** `quota`（既定）はアクティブアカウントがない場合に最小 usage の適格アカウントを選び、適格なアクティブアカウントが `autoSwitchThreshold` 未満なら維持します。`autoSwitchThreshold` 超過後は紐付け済みタスクの次のリクエストも再紐付けできます。`round-robin` は
+**割り当てとプロアクティブ切り替え戦略：** `quota`（既定）はアクティブアカウントがない場合に最小 usage の適格アカウントを選び、適格なアクティブアカウントが `autoSwitchThreshold` 未満なら維持します。`autoSwitchThreshold` 超過後は未紐付けリクエストを移せます。`pool.cacheAffinity` がオフなら紐付け済みタスクの次のリクエストも再紐付けできます。オンなら cache affinity が quota 余裕より優先され、紐付け済みタスクはアカウントが使い切られるか（既知 usage 100%）処理できなくなるまで維持されます。`round-robin` は
 未紐付けリクエストを均等分散し、しきい値は通常の rotation を変えません。`accountPoolStickyLimit`
 （既定 `1`、1–100）は成功応答ではなく割り当て/紐付け数を数えます。`fill-first` は未紐付けリクエストを
 cooldown、再認証、または drain threshold までアクティブアカウントへ割り当て、正常な紐付け済みタスクは
@@ -212,7 +219,7 @@ Anthropic アカウント ポリシーのリスクを理解していない限り
 | `failureBackoffMaxSeconds?` | `number` | `3600` |バックオフの上限と永続的な障害による遅延。 |
 | `codexWarmupEnabled?` | `boolean` | `false` |合成 Codex プールアカウント検証をオプトインします。 |
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | 8 日後にアカウントを再認証します。 |
-| `codexWarmupModel?` | `string` | `gpt-5.4-mini` |オプションのウォームアップに使用されるネイティブ モデル。 |
+| `codexWarmupModel?` | `string` | `gpt-5.6-luna` |オプションのウォームアップに使用されるネイティブ モデル。 |
 
 ## 固定プロバイダーエンドポイント
 
@@ -370,6 +377,14 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
 
 表示名には `modelDisplayNames` を使用します。優先順位は、運用者が設定した `modelDisplayNames`、プロバイダーカタログのメタデータ、通常の `provider/model` 表示の順です。キーはこのプロバイダー内の正確なネイティブモデル ID です。例えば `xai/grok-4.6` のキーは `grok-4.6` です。ラベルは表示専用で、正確なルーティング ID や上流モデル ID を変更しません。`config.json` の既存プロバイダー設定にこのフィールドだけを追加し、他のすべてのフィールドを残してください。`PUT /api/providers/:provider/model-display-names` に `{ "modelId": "grok-4.6", "displayName": "Grok 4.6" }` を送ると保存され、`displayName: null` を送るとその名前だけがリセットされます。
 
+ローカル Codex カタログでサポートされるプレフィックスなしのネイティブ GPT 行にも、
+`providers.openai.modelDisplayNames` で正確な表示名を指定できます。例えば `"gpt-6-astra": "GPT 6 Astra"` です。
+起動時の同期とローカルカタログの収束処理は、どちらもこれらの名前を再適用します。名前の設定を削除すると、行の現在の表示名が
+適用済みの上書きとまだ一致する場合にのみ、元のネイティブ名が復元されます。外部で変更された表示名にも既存のネイティブメタデータ正規化が適用されます。
+例えば Astra (`gpt-6-astra`) では、固定されたネイティブ名と異なる名前は引き続きその固定名に置き換えられます。
+表示名の上書きによってモデル ID、メタデータ（機能を含む）、順序、ルーティングされたコンボのエイリアス、アカウント修飾付きの行は変更されません。
+このローカルカタログの上書きは、HTTP のモデル一覧や仮想 `*-pro` 行の表示名には適用されません。
+
 プレビュー GPT-5.6 フォールバック エントリは同じメカニズムを使用します。 OpenAI API キー プリセットは、ベース ID と Pro ID にコンテキスト `922000` と最大入力 `922000` をシードします。 OpenRouter は、コンテキスト `922000` を持つ `openai/gpt-5.6-sol`、`openai/gpt-5.6-terra`、および `openai/gpt-5.6-luna` をシードします。プール/ダイレクトは `922000` をアドバタイズします。同期されたカタログは、`xhigh` を区別しつつ、`max` をアドバタイズします。
 
 ```json
@@ -385,6 +400,22 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
   }
 }
 ```
+
+## モデルの表示名エディター
+
+ダッシュボードの **Models** では、検出されたモデルに読みやすい名前を付けて永続的に保存できます。プロバイダーを展開し、検出された
+モデルを見つけて **Name** を選択します。読みやすい名前を保存する間も、ダイアログには正確な
+`provider/model` セレクターが表示されます。**Reset name** を選ぶと、プロバイダーのメタデータ、
+または通常のセレクター表示に戻ります。**Name** が変更するのは表示だけです。別のエイリアス用
+鉛筆アイコンは短いルーティングエイリアスを変更するもので、表示名エディターではありません。
+ネイティブ OpenAI とカスタムモデルの行では、既存の操作方法が維持されます。
+
+変更は保存されたものの更新に失敗した場合、ダイアログは保存済みの上書き設定を反映し、**Retry** を
+引き続き利用できます。サーバーがカタログの収束処理の失敗を報告した場合、Retry はその処理を再実行し、
+一覧取得のリクエストだけが失敗した場合は一覧を再読み込みします。リセット後の復旧でもリセット操作を
+維持し、以前の名前には戻しません。リクエストには、書き込みとその後の一覧更新を合わせて 60 秒の
+期限があります。タイムアウトしても書き込みは取り消されません。次の変更を行う前に **Retry** で
+現在の名前を確認してください。
 
 ## 完全な例
 
@@ -408,7 +439,7 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
       "baseUrl": "https://ollama.com/v1",
       "apiKey": "${OLLAMA_API_KEY}",
       "defaultModel": "glm-5.2",
-      "noVisionModels": ["glm-5.2", "gpt-oss", "qwen3-coder", "deepseek-v4-pro"]
+      "noVisionModels": ["glm-5.2", "gpt-oss", "qwen3-coder", "deepseek-v4-flash"]
     }
   },
   "subagentModels": ["anthropic/claude-opus-5", "ollama-cloud/glm-5.2"],
