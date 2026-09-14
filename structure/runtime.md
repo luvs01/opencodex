@@ -201,6 +201,9 @@ Provider-scoped capability hints remain authoritative when discovery returns an 
 capabilities. In particular, `src/providers/registry.ts` assigns OpenCode Go's live
 `deepseek-v4.1-flash` route the official 1,048,576-token window instead of the conservative 128k
 routed-model fallback.
+`src/codex/sync.ts` refreshes the `src/providers/reasoning-metadata.ts` models.dev snapshot for
+supported routed destinations before catalog gathering, so missing and corrupt snapshots bootstrap
+without adding network work to `src/reasoning-effort.ts` request-time ladder reads.
 The same registry declares the first-party `deepseek-flash` model with `text` and `image` input,
 so it bypasses the vision sidecar by default; explicit `noVisionModels` or text-only declarations
 remain authoritative. First-party `deepseek-chat`, `deepseek-reasoner`, and `deepseek-v4-flash`
