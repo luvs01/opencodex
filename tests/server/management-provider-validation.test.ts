@@ -839,6 +839,28 @@ describe("provider management validation", () => {
     expect(error).toContain("[REDACTED]");
   });
 
+  test("provider management rejects send paths that can change the destination origin", async () => {
+    const provider = { adapter: "openai-chat", baseUrl: "https://api.z.ai" };
+    for (const field of ["responsesPath", "chatCompletionsPath"] as const) {
+      expect(providerManagementConfigError("zai", {
+        ...provider,
+        [field]: ".attacker.example/leak",
+      })).toContain(`${field} must start with /`);
+
+      const liveConfig = config("127.0.0.1");
+      const url = new URL("http://127.0.0.1/api/providers");
+      const response = await handleManagementAPI(new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "zai", provider: { ...provider, [field]: ".attacker.example/leak" } }),
+      }), url, liveConfig);
+
+      expect(response?.status).toBe(400);
+      expect(await response?.json()).toMatchObject({ error: expect.stringContaining(`${field} must start with /`) });
+      expect(liveConfig.providers.zai).toBeUndefined();
+    }
+  });
+
   test("provider request pacing PATCH persists provider and model limits without catalog churn", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });

@@ -20,6 +20,7 @@ import {
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerRelativeSendPathConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
 } from "./config/provider-validation";
@@ -672,25 +673,10 @@ export {
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerRelativeSendPathConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
 } from "./config/provider-validation";
-
-/**
- * Shared shape check for the two relative send-path overrides. `field` names the
- * offending key so the message stays specific to what the user actually wrote.
- */
-function providerRelativeSendPathConfigError(field: string, value: string | undefined): string | null {
-  if (value === undefined) return null;
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) || value.includes("://")) {
-    return `${field} must be a relative path without a URL scheme`;
-  }
-  if (!value.startsWith("/")) return `${field} must start with /`;
-  if (value.includes("?") || value.includes("#")) {
-    return `${field} must not include query strings or fragments`;
-  }
-  return null;
-}
 
 /**
  * Validate `providers.<name>.modelCosts`: a plain object keyed by exact model

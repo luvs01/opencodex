@@ -10,7 +10,9 @@ normalization, credential and provider headers, capability-specific fields, and 
 canonical `openaiChatCompletionsUrl()` path, or `chatCompletionsPath` when the provider declares one.
 That field is the `openai-chat` mirror of `responsesPath` and exists because a per-model wire
 override swaps the adapter without touching `baseUrl`, so an upstream serving the two wires under
-different prefixes cannot be reached by the swap alone. The passthrough builder uses an explicit Chat-field whitelist so
+different prefixes cannot be reached by the swap alone. The adapter independently validates the
+override as a relative path and verifies that URL resolution preserves the configured base origin
+before returning an authenticated request. The passthrough builder uses an explicit Chat-field whitelist so
 messages (including `name` and separate `system`/`developer` entries), Chat token controls,
 sampling/logprob fields, caller identity/metadata, and caller stream options retain their wire
 shape. For streams, caller `stream_options` are merged with mandatory `include_usage: true`. On

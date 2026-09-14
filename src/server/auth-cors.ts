@@ -21,6 +21,7 @@ import {
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerRelativeSendPathConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
 } from "../config/provider-validation";
@@ -693,6 +694,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   const typed = provider as unknown as OcxProviderConfig;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
+  for (const field of ["responsesPath", "chatCompletionsPath"] as const) {
+    const sendPathError = providerRelativeSendPathConfigError(field, raw[field]);
+    if (sendPathError) return `provider ${name} ${sendPathError}`;
+  }
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
     const locationError = googleVertexLocationConfigError(typed.location);
     if (locationError) return `provider ${name} ${locationError}`;

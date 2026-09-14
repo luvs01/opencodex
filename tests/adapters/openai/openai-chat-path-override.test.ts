@@ -40,6 +40,17 @@ describe("openai-chat send path override", () => {
     expect(req.url).toBe("https://example.test/api/other/v4/chat/completions");
   });
 
+  test("rejects a malformed configured path before constructing an authenticated request", () => {
+    const provider: OcxProviderConfig = {
+      adapter: "openai-chat",
+      baseUrl: "https://api.z.ai",
+      apiKey: "synthetic-secret",
+      chatCompletionsPath: ".attacker.example/leak",
+    };
+    expect(() => createOpenAIChatAdapter(provider).buildRequest(parsed("some-model")))
+      .toThrow("chatCompletionsPath must start with /");
+  });
+
   test("the zai row carries both wires, so a Chat opt-in reaches the Chat prefix", () => {
     const config: OcxConfig = {
       port: 10100,

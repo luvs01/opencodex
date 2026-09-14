@@ -27,6 +27,20 @@ const REASONING_SUMMARY_DELIVERY_SET = new Set<string>(REASONING_SUMMARY_DELIVER
 const DISPLAY_NAME_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const MAX_MODEL_DISPLAY_NAME_LENGTH = 128;
 
+/** Validate provider send-path overrides shared by config load and management writes. */
+export function providerRelativeSendPathConfigError(field: string, value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string") return `${field} must be a string`;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) || value.includes("://")) {
+    return `${field} must be a relative path without a URL scheme`;
+  }
+  if (!value.startsWith("/")) return `${field} must start with /`;
+  if (value.includes("?") || value.includes("#")) {
+    return `${field} must not include query strings or fragments`;
+  }
+  return null;
+}
+
 /** Operator pins share one strict boundary across config and management writes. */
 export function pinnedReasoningEffortConfigError(value: unknown, allowClear = false): string | null {
   if (value === undefined || (allowClear && (value === null || value === ""))) return null;

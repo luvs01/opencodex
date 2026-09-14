@@ -27,6 +27,7 @@ import {
   type ResolvedFastPolicy,
 } from "../providers/fastwire";
 import { openaiChatCompletionsUrl } from "./openai-chat-url";
+import { providerRelativeSendPathConfigError } from "../config/provider-validation";
 import { stripResponsesOnlyEncryptedMarker, stripUnicodePropertyPatterns } from "./responses-tool-schema";
 import { agentRouterDefaultHeaders, frameAgentRouterMessages } from "./agentrouter";
 import {
@@ -100,9 +101,15 @@ function openAIChatTransport(provider: OcxProviderConfig): {
   // `responsesPath`. An upstream can serve both wires under different prefixes, and a
   // per-model wire override only swaps the adapter, so without this the opted-in Chat
   // request would be sent to the Responses base with `/chat/completions` appended.
-  const url = provider.chatCompletionsPath === undefined
-    ? openaiChatCompletionsUrl(provider.baseUrl)
-    : `${provider.baseUrl.replace(/\/$/, "")}${provider.chatCompletionsPath}`;
+  let url = openaiChatCompletionsUrl(provider.baseUrl);
+  if (provider.chatCompletionsPath !== undefined) {
+    const pathError = providerRelativeSendPathConfigError("chatCompletionsPath", provider.chatCompletionsPath);
+    if (pathError) throw new Error(pathError);
+    const base = new URL(provider.baseUrl);
+    const candidate = new URL(provider.chatCompletionsPath, base);
+    if (candidate.origin !== base.origin) throw new Error("chatCompletionsPath must preserve the provider origin");
+    url = candidate.toString();
+  }
   return { url, headers, hasCredential };
 }
 

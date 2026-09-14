@@ -170,6 +170,8 @@ CLI writes, and management DTO validation. `src/config.ts` imports those checks 
 and re-exports them as a compatibility facade; it must not grow a second copy. Validation error text,
 ordering, and cross-field rules are part of the write/load contract because management requests and
 hand-edited `config.json` must accept and reject the same provider shapes.
+The shared relative-send-path check requires `responsesPath` and `chatCompletionsPath` to start with
+`/` and rejects schemes, query strings, and fragments at both boundaries.
 
 > Decision record: [ADR-0020](decisions/ADR-0020-provider-validation-ownership.md)
 
