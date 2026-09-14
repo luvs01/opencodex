@@ -36,7 +36,7 @@ export interface ClaudeAgentDef {
 const OWNED_PREFIX = "ocx-";
 /** Ownership proof (audit 071 #2): a file without this marker is NEVER touched. */
 const GENERATED_MARKER = "generated-by: opencodex";
-const SAFE_AGENT_MODEL_ID = /^[a-z0-9][a-z0-9._:/@+\[\]-]*$/i;
+const SAFE_AGENT_MODEL_ID = /^[a-z0-9][a-z0-9._:/@+\[\]~-]*$/i;
 
 function sanitizeName(value: string): string {
   const cleaned = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
