@@ -75,6 +75,10 @@ describe("capability table is a leaf data module", () => {
     expect(CAPABILITIES.some(c => c.command[0] === "capabilities")).toBe(true);
   });
 
+  test("secret-returning hub invites are not advertised to agents", () => {
+    expect(CAPABILITIES.some(c => c.command.join(" ") === "hub invite")).toBe(false);
+  });
+
   test("logs follow does not claim to imply JSONL output", () => {
     const logs = CAPABILITIES.find(c => c.command.length === 1 && c.command[0] === "logs");
     const follow = logs?.flags.find(flag => flag.name === "--follow");
@@ -240,7 +244,6 @@ const UNDECLARED_ROUTES_2026_08_28: readonly string[] = [
   "GET /api/oauth/status",
   "GET /api/provider-context-caps",
   "GET /api/provider-presets",
-  "GET /api/provider-quotas",
   "GET /api/providers",
   "GET /api/providers/keys",
   "GET /api/request-history",
