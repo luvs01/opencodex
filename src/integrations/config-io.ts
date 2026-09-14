@@ -235,11 +235,13 @@ export type TargetState =
  */
 export function loadTarget(io: IntegrationIO, configPath: string): TargetState {
   // Managed client paths are a lower-trust boundary. Never inspect through a
-  // symlink that can be retargeted between this read and the eventual write.
-  const kind = (io.lstatKind ?? io.statKind)(configPath);
+  // symlink that can be retargeted between this read and the eventual write,
+  // while preserving virtual pair probes (such as Cline's pair-aware statKind).
+  const kind = io.statKind(configPath);
   if (kind === "missing") return { ok: true, before: null };
   if (kind === "failed") return { ok: false, why: "read-failed" };
   if (kind !== "file") return { ok: false, why: "not-regular-file" };
+  if (io.lstatKind && io.lstatKind(configPath) === "symlink") return { ok: false, why: "not-regular-file" };
   const read = io.readText(configPath);
   if (read.kind === "text") return { ok: true, before: read.text };
   if (read.kind === "failed") return { ok: false, why: "read-failed" };
