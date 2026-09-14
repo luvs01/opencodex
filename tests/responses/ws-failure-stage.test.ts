@@ -304,6 +304,24 @@ describe("codex ws stage record marker (#4191)", () => {
     expect(readCodexWsStage(response)).toEqual(stage);
   });
 
+  test("later stage updates finalize the record already adopted by logging", () => {
+    const response = new Response("ok");
+    markCodexWsStage(response, stage);
+    const adopted = readCodexWsStage(response);
+    const finalStage = {
+      ...stage,
+      requestBytes: 4321,
+      upstreamFrames: 5,
+      relayedEvents: 4,
+      elapsedMs: 1200,
+    };
+
+    markCodexWsStage(response, finalStage);
+
+    expect(readCodexWsStage(response)).toBe(adopted);
+    expect(adopted).toEqual(finalStage);
+  });
+
   test("a committed exchange ends with the final counters on its stage record", async () => {
     installFake(ws => {
       ws.emit("open", {});
