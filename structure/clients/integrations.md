@@ -4,6 +4,8 @@ The client-integration subsystem writes one generated OpenCodex provider contrib
 third-party client's existing config without taking ownership of the rest of that file. Its core
 promise is reversibility: apply snapshots first, writes atomically, records exactly what it owns,
 and refuses refresh, disable, or restore when the current file cannot be classified safely.
+Managed client targets are inspected without following a final symbolic link, and their atomic
+replacement addresses the named directory entry rather than resolving that link again at commit.
 
 ## Module Responsibilities
 

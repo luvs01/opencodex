@@ -10,7 +10,7 @@
 import { lstatSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import type { ConfigFormat } from "../clients/config-export";
 import { MAX_JSON_NESTING } from "./serialize";
-import { atomicWriteFile } from "../config";
+import { atomicWriteFile, isMissingPathError } from "../config/atomic-write";
 import type { JournalEntry } from "./journal";
 import type { OwnershipRecord } from "./ownership";
 import type { IntegrationClientId } from "./registry";
@@ -234,7 +234,9 @@ export type TargetState =
  * an unreadable config gets clobbered.
  */
 export function loadTarget(io: IntegrationIO, configPath: string): TargetState {
-  const kind = io.statKind(configPath);
+  // Managed client paths are a lower-trust boundary. Never inspect through a
+  // symlink that can be retargeted between this read and the eventual write.
+  const kind = (io.lstatKind ?? io.statKind)(configPath);
   if (kind === "missing") return { ok: true, before: null };
   if (kind === "failed") return { ok: false, why: "read-failed" };
   if (kind !== "file") return { ok: false, why: "not-regular-file" };
@@ -278,7 +280,19 @@ export function fileIO(): Omit<IntegrationIO, "appendJournal" | "putRecord" | "d
     },
     writeText: (path, text) => {
       assertIntegrationWriteOwnership(path);
-      atomicWriteFile(path, text);
+      atomicWriteFile(path, text, undefined, {
+        preserveTargetSymlink: false,
+        validateBeforeRename: target => {
+          try {
+            if (lstatSync(target).isSymbolicLink()) {
+              throw new Error(`refusing to replace symbolic-link integration target: ${target}`);
+            }
+          } catch (error) {
+            if (isMissingPathError(error)) return;
+            throw error;
+          }
+        },
+      });
     },
     removeFile: path => rmSync(path, { force: true }),
     mkdirp: path => mkdirSync(path, { recursive: true, mode: 0o700 }),

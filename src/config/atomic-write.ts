@@ -50,6 +50,8 @@ export interface AtomicWriteHooks {
   afterTempWrite?: (tempPath: string, targetPath: string) => void;
   beforeRename?: (tempPath: string, targetPath: string) => void;
   validateBeforeRename?: (targetPath: string) => void;
+  /** Replace the named directory entry instead of following a target symlink. */
+  preserveTargetSymlink?: boolean;
 }
 
 export class AtomicWriteResidualTempError extends Error {
@@ -163,7 +165,7 @@ export function atomicWriteFile(
   hooks: AtomicWriteHooks = {},
 ): void {
   recordOwnedConfigPath(getConfigDir(), path);
-  const target = resolveWriteTarget(path);
+  const target = hooks.preserveTargetSymlink === false ? path : resolveWriteTarget(path);
   assertResolvedTargetAllowed(path, target);
   const tmp = `${target}.ocx.${process.pid}.${nextAtomicTempSequence()}.tmp`;
   let hardened = false;
