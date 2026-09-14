@@ -136,3 +136,5 @@ Pool quota producers and account commands follow the [bounded raw-observation co
 Account quota surfaces use [safe probe diagnostics](../transports/inventory.md#account-quota-failure-diagnostics) separately from quota validity, credential health and routing authority.
 
 Live sideband admission and its bounded upstream handshake follow the [runtime contract](../runtime.md#live-sideband-handshake); the ordinary Responses WebSocket exchange remains separate.
+
+Shared startup provider-id migration preserves the account binding between configuration and OAuth credentials; see the [runtime contract](../runtime.md).
