@@ -6,6 +6,8 @@ import {
   collectChatCompletion,
   isChatCompletionsStreamError,
 } from "../chat/outbound";
+import { applyChatEffortCap, chatCollabSurface, effortCapAppliesTo, resolvePinnedEffort, supportedLadderFor } from "./effort-policy";
+import { mapReasoningEffort } from "../reasoning-effort";
 import {
   classifyError,
   cyberPolicyErrorType,
@@ -31,6 +33,7 @@ import {
 } from "../lib/translator-budget";
 import {
   hasKeyPoolFailover,
+  selectProactiveApiKeyTransport,
   rateLimitRetryDelayMs,
   rateLimitRetryPolicyFor,
   rotateProviderTransportOn429,
@@ -38,6 +41,7 @@ import {
 } from "../providers/key-failover";
 import { fastPolicyForModel } from "../providers/service-tier";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../providers/api-key-selection";
+import { enrichOpenCodeZenFreeTierMessage } from "../providers/opencode-zen-rate-limit";
 import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -59,6 +63,68 @@ type Rec = Record<string, unknown>;
 
 const MAX_NATIVE_CHAT_JSON_BYTES = 32 * 1024 * 1024;
 const MAX_NATIVE_CHAT_ERROR_BYTES = 64 * 1024;
+
+const chatEffortSnapshots = new WeakMap<Rec, {
+  inputModel: string;
+  providerName: string;
+  modelId: string;
+  present: boolean;
+  value: unknown;
+  annotation: string | undefined;
+}>();
+
+function normalizePinnedChatEffort(options: HandleNativeChatOptions): void {
+  const { chatBody, route, config, req, logCtx, requestedModel } = options;
+  let snapshot = chatEffortSnapshots.get(chatBody);
+  const inputModel = typeof chatBody.model === "string" ? chatBody.model : requestedModel;
+  let selector = inputModel;
+  if (snapshot) {
+    if (snapshot.providerName === route.providerName && snapshot.modelId === route.modelId) {
+      logCtx.requestedEffort = snapshot.annotation;
+      return;
+    }
+    if (snapshot.present) chatBody.reasoning_effort = snapshot.value;
+    else delete chatBody.reasoning_effort;
+    if (selector === snapshot.inputModel || selector === snapshot.modelId) {
+      selector = `${route.providerName}/${route.modelId}`;
+    }
+  } else {
+    snapshot = {
+      inputModel,
+      providerName: route.providerName,
+      modelId: route.modelId,
+      present: Object.hasOwn(chatBody, "reasoning_effort"),
+      value: chatBody.reasoning_effort,
+      annotation: undefined,
+    };
+    chatEffortSnapshots.set(chatBody, snapshot);
+  }
+  snapshot.inputModel = inputModel;
+  snapshot.providerName = route.providerName;
+  snapshot.modelId = route.modelId;
+  const from = typeof chatBody.reasoning_effort === "string" ? chatBody.reasoning_effort : undefined;
+  logCtx.requestedEffort = from;
+  // Compaction is normally excluded by native-route eligibility; preserve that boundary here too.
+  const pinned = chatBody.compaction_trigger === undefined
+    ? resolvePinnedEffort(route, selector, config)
+    : undefined;
+  if (pinned !== undefined) {
+    logCtx.requestedEffort = from ? `${from}->${pinned}` : pinned;
+    if (pinned === "none") delete chatBody.reasoning_effort;
+    else chatBody.reasoning_effort = pinned;
+    // The native lane historically passes caller effort through, including with caps set.
+    // Only a newly operator-pinned value enters the cap and provider-mapping pipeline.
+    if (effortCapAppliesTo(chatCollabSurface(chatBody), req.headers, config)) {
+      const capped = applyChatEffortCap(chatBody, req.headers, config, supportedLadderFor(route));
+      if (capped) logCtx.requestedEffort = `${logCtx.requestedEffort}->${capped.to}`;
+    }
+    const effort = typeof chatBody.reasoning_effort === "string" ? chatBody.reasoning_effort : undefined;
+    const wireEffort = mapReasoningEffort(route.provider, route.modelId, effort);
+    if (wireEffort === undefined) delete chatBody.reasoning_effort;
+    else chatBody.reasoning_effort = wireEffort;
+  }
+  snapshot.annotation = logCtx.requestedEffort;
+}
 
 function isRec(value: unknown): value is Rec {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -147,9 +213,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     return chatCompletionsErrorResponse(status, safeMessage, type, code);
   };
 
-  logCtx.requestedEffort = typeof options.chatBody.reasoning_effort === "string"
-    ? options.chatBody.reasoning_effort
-    : undefined;
+  normalizePinnedChatEffort(options);
   logCtx.requestedServiceTier = typeof options.chatBody.service_tier === "string"
     ? options.chatBody.service_tier
     : undefined;
@@ -172,6 +236,14 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     unregisterTurn(upstream);
   };
   const connectMs = config.connectTimeoutMs ?? 200_000;
+  // Native chat is its own entry path -- chat-completions.ts routes here directly and never
+  // through the Responses core -- so the pre-dispatch key preference is applied again here
+  // rather than inherited. Assigned before the adapter binds below, for the same reason it is
+  // assigned before the transport pin in core.ts.
+  // Transport variant: the bare picker answers with the persisted row, which for a built-in
+  // provider carries no adapter id or base URL until routedProviderConfig backfills it.
+  const proactiveKeyProvider = selectProactiveApiKeyTransport(config, route.providerName, route.provider);
+  if (proactiveKeyProvider) route.provider = proactiveKeyProvider;
   let activeProvider: OcxProviderConfig = route.provider;
   let activeAdapter: ProviderAdapter = createOpenAIChatAdapter(activeProvider);
   let activeRequest: AdapterRequest;
@@ -376,12 +448,20 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       && (isCyberPolicyCode(upstreamCode) || isCyberPolicyMessage(upstreamMessage))
       ? upstreamMessage
       : detail ? `Provider error ${response.status}: ${detail}` : `Provider error ${response.status}`;
+    // Zen's keyless free tier refuses the request outright rather than rate-limiting it, and
+    // the raw `MissingSessionID` tells a user nothing about why or what to do (#4121).
+    const clientMessage = enrichOpenCodeZenFreeTierMessage(message, {
+      providerName: route.providerName,
+      baseUrl: route.provider.baseUrl,
+      adapter: route.provider.adapter,
+      upstreamErrorType: upstreamType,
+    });
     const classified = classifyError(
       response.status,
       upstreamType ?? (response.status === 401 ? "authentication_error"
         : response.status === 429 ? "rate_limit_error"
           : response.status >= 500 ? "server_error" : "invalid_request_error"),
-      message,
+      clientMessage,
     );
     if (isCyberPolicyCode(upstreamCode) || classified.code === CYBER_POLICY_ERROR_CODE) {
       classified.code = CYBER_POLICY_ERROR_CODE;

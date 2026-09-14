@@ -42,6 +42,8 @@ import {
   resolveCodexModelEntitlements,
   type CodexModelEntitlementSnapshot,
 } from "../model-entitlements";
+import { isAccountNeedsReauth } from "../account-runtime-state";
+import { codexAccountLogLabel, fallbackCodexAccountLogLabel } from "../account-label";
 
 
 import { CODEX_CUSTOM_MODEL_CATALOG_KIND, CODEX_PROVIDER_MODEL_CATALOG_KIND, activeCodexModelsCachePath, applyCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, applyRoutedCodexToolMode, catalogBackupPathFor, catalogHasRoutedEntries, catalogModelSlug, ensureStrictCatalogFields, findNativeTemplate, findSupportedNativeTemplate, isDefaultCatalogPath, isRoutedModelCompatibilityExcluded, legacyCatalogBackupPath, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readCodexCatalogPathForHome, readConfiguredAutoReviewModel, readNativeBaseline } from "./parsing";
@@ -98,6 +100,12 @@ export const PICKER_ORDER_PRIORITY_BASE = 1_000;
 // is invisible to Codex; effectiveSubagentRoster reads it to keep OpenCodex guidance candidates
 // independent of display order. It does not freeze native advertisements. Absent on unmoved rows.
 export const SPAWN_PRIORITY_FIELD = "opencodex_spawn_priority";
+
+// OpenCodex-private catalog field: this row is listed but currently unable to serve (#1711).
+// Codex ignores unknown catalog fields (same as opencodex_catalog_kind and the spawn priority
+// above) and ensureStrictCatalogFields does not strip extras, so this is invisible to the native
+// picker and cannot change what Codex offers. It never touches `visibility`.
+export const CATALOG_INACTIVE_REASON_FIELD = "opencodex_inactive_reason";
 
 export type SpawnAgentSurface = "v1" | "v2";
 
@@ -252,7 +260,7 @@ export function finishUpstreamNativeEntry(clone: RawEntry, priority: number, con
   if (priority !== 9) clone.priority = priority;
   applyNativeOpenAiContextOverride(clone, contextCap);
   // GPT-5.6 natives keep their exact upstream ladders (e.g. luna has max but no ultra).
-  // Older natives (gpt-5.5 / 5.4 / 5.4-mini / 5.3-codex-spark) get mock max + ultra
+  // Older natives (gpt-5.5 / 5.3-codex-spark) get mock max + ultra
   // (wire-clamped to xhigh). Ultra is always advertised regardless of v2 toggle.
   if (!isGpt56NativeSlug(String(clone.slug ?? ""))) ensureUltraReasoningLevel(clone);
   return ensureStrictCatalogFields(normalizeServiceTiers(clone));
@@ -307,6 +315,11 @@ function routedDisplayName(slug: string, model?: CatalogModel, config?: Pick<Ocx
   return slug;
 }
 
+/**
+ * Cria uma entrada nativa ou roteada a partir do snapshot upstream, de um clone
+ * do template ou de campos mínimos. Aplica os metadados e limites pertinentes
+ * sem alterar o template nem herdar sua marca de nome ou histórico de prioridade.
+ */
 export function deriveEntry(
   template: RawEntry | null,
   slug: string,
@@ -332,6 +345,7 @@ export function deriveEntry(
   }
   if (template || codexForwardNativeCapabilityAlias) {
     const e = JSON.parse(JSON.stringify(codexForwardNativeCapabilityAlias ?? template)) as RawEntry;
+    delete e.opencodex_native_display_name;
     // A cached template may carry display-order history; each new row owns its natural rank.
     delete e[SPAWN_PRIORITY_FIELD];
     e.slug = slug;
@@ -377,6 +391,10 @@ export function deriveEntry(
       if (model) applyCatalogMetadata(e, model.provider, model.id, model.contextCap);
       applyCatalogModelMetadata(e, model);
       if (model?.catalogKind) e.opencodex_catalog_kind = model.catalogKind;
+      // Additive only. `visibility` is untouched: an inactive row must still be OFFERED, which is
+      // the whole point of #1711 — operator disable is what removes rows, and it stays a separate
+      // path from this one.
+      if (model?.quotaInactiveReason) e[CATALOG_INACTIVE_REASON_FIELD] = model.quotaInactiveReason;
     } else {
       applyNativeOpenAiContextOverride(e, contextCap);
       if (isGpt56NativeSlug(slug)) ensureGpt56ReasoningLevels(e);
@@ -424,6 +442,10 @@ export function deriveEntry(
   if (model && isRouted) applyCatalogMetadata(entry, model.provider, model.id, model.contextCap);
   applyCatalogModelMetadata(entry, model);
   if (model?.catalogKind) entry.opencodex_catalog_kind = model.catalogKind;
+  // Same additive stamp as the templated path above. A routed row that reaches the no-template
+  // fallback is still a served row, so omitting it here would make the field depend on whether a
+  // template happened to be cached — which is exactly what the regression test caught.
+  if (model?.quotaInactiveReason) entry[CATALOG_INACTIVE_REASON_FIELD] = model.quotaInactiveReason;
   if (!isRouted) applyNativeOpenAiContextOverride(entry, contextCap);
   return ensureStrictCatalogFields(normalizeServiceTiers(entry), {
     preserveExactInputModalities: preserveExact,
@@ -773,6 +795,20 @@ function recoverableNativeSlug(entry: RawEntry): string | null {
     : null;
 }
 
+/** Undo our display overlay before native metadata normalization and template reuse. */
+function restoreNativeDisplayName(entry: RawEntry): RawEntry {
+  const saved = entry.opencodex_native_display_name;
+  delete entry.opencodex_native_display_name;
+  if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+    const label = saved as Record<string, unknown>;
+    if (recoverableNativeSlug(entry) === label.slug
+      && typeof label.original === "string" && entry.display_name === label.applied) {
+      entry.display_name = label.original;
+    }
+  }
+  return entry;
+}
+
 /** Append missing supported native rows from trusted catalog sources only. */
 export function mergeCatalogModelsWithNativeRecovery(
   primaryCatalogModels: readonly RawEntry[],
@@ -862,6 +898,8 @@ export interface ObservedCatalogMergeInput {
   readonly suppressedBareNativeSlugs?: ReadonlySet<string>;
   readonly policy: ObservedCatalogMergePolicy;
   readonly openaiContextCap?: NativeContextLimitsInput;
+  /** Exact display-only labels for bare native OpenAI models. */
+  readonly nativeDisplayNames?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -896,12 +934,14 @@ export function mergeCatalogEntriesFromObservedState({
   suppressedBareNativeSlugs = new Set(),
   policy,
   openaiContextCap,
+  nativeDisplayNames,
 }: ObservedCatalogMergeInput): RawEntry[] {
   // Raw catalog rows contain nested arrays/objects that normalization mutates. Detach every row at
   // the observed-core boundary so callers can safely retain evidence objects or repeat the merge.
-  const detachedCatalogModels = catalogModels.map(entry => structuredClone(entry) as RawEntry);
+  const detachedCatalogModels = catalogModels
+    .map(entry => restoreNativeDisplayName(structuredClone(entry) as RawEntry));
   const detachedBaselineCatalogModels = baselineCatalogModels
-    .map(entry => structuredClone(entry) as RawEntry);
+    .map(entry => restoreNativeDisplayName(structuredClone(entry) as RawEntry));
   const detachedRoutedEntries = routedEntries.map(entry => structuredClone(entry) as RawEntry);
   // Track this invocation's generated custom rows, not ownership markers read from disk.
   // Their builder already finalized exact native ladders and ordinary routed mock tiers.
@@ -1256,6 +1296,17 @@ export function mergeCatalogEntriesFromObservedState({
   );
   applyFullModelPickerOrder(versionedEntries, modelPickerOrder);
   for (const entry of versionedEntries) {
+    // Templates and account clones must not inherit the native row's overlay marker.
+    delete entry.opencodex_native_display_name;
+    const slug = recoverableNativeSlug(entry);
+    if (slug !== null) {
+      const label = nativeDisplayNames && Object.hasOwn(nativeDisplayNames, slug)
+        ? nativeDisplayNames[slug]?.trim() : undefined;
+      if (label && label !== entry.display_name) {
+        entry.opencodex_native_display_name = { slug, original: entry.display_name, applied: label };
+        entry.display_name = label;
+      }
+    }
     const kind = entry.opencodex_catalog_kind;
     if (trustedAccountBoundNativeCatalogSlug(entry) === undefined
       && kind !== CODEX_CUSTOM_MODEL_CATALOG_KIND
@@ -1659,6 +1710,81 @@ export function finalizeAutoReviewModelOverride(
   return applyAutoReviewModelOverride(models, readConfiguredAutoReviewModel(), sourceModels);
 }
 
+/**
+ * Why an account-gated native model stopped being offered, but only when the answer is one the
+ * operator can act on.
+ *
+ * Suppression is an omission: the row is never built, so there is no catalog entry for a reason
+ * to ride on and no downstream consumer that could explain it later. #4212's reporter watched
+ * their models disappear and reasonably concluded the proxy was broken, because every surface
+ * that changed said nothing about the account that caused it.
+ *
+ * Returns `undefined` for the ordinary case — an account that is simply not entitled to a gated
+ * model. That is the default state for most installations, it is not news, and warning about it
+ * on every sync would bury the one case that matters. A credential the operator must repair is
+ * the case that matters, so that is the only one this speaks up about.
+ *
+ * Accounts are named with the durable `p`-prefixed log label, the same identifier the dashboard
+ * shows, never the raw pool id or the email.
+ */
+export function gatedNativeReauthSuppressionReason(args: {
+  snapshot: CodexModelEntitlementSnapshot;
+  slug: string;
+  eligibleAccountIds?: ReadonlySet<string>;
+  needsReauth: (accountId: string) => boolean;
+  label: (accountId: string) => string;
+}): string | undefined {
+  const observed = [...args.snapshot.modelsByAccount.keys()]
+    .filter(accountId => !args.eligibleAccountIds || args.eligibleAccountIds.has(accountId))
+    // Only accounts that could actually have served THIS model. An account upstream positively
+    // denied is not why the model is missing, and blaming it would send the operator to repair a
+    // credential that was never going to help. `unknown` has to stay in: an account whose roster
+    // could not be confirmed reports `unknown` rather than `granted`, and a credential stuck on
+    // a failed refresh is exactly that account.
+    .filter(accountId => (
+      codexModelEntitlementStateForAccount(args.snapshot, accountId, args.slug) !== "denied"
+    ));
+  const stuck = observed.filter(accountId => args.needsReauth(accountId));
+  if (stuck.length === 0) return undefined;
+  const names = stuck.map(accountId => args.label(accountId)).sort().join(", ");
+  return stuck.length === observed.length
+    ? `every Codex account that could serve it needs reauthentication (${names})`
+    : `${stuck.length} of ${observed.length} Codex accounts that could serve it need reauthentication (${names})`;
+}
+
+/** Durable, operator-facing label for a pool account id; never the raw id or the email. */
+function gatedNativeAccountLabel(config: OcxConfig, accountId: string): string {
+  // Direct mode narrows eligibility to the native main credential, so this is the account most
+  // likely to be named here. `codexAuthContextLogLabel` calls it "main" everywhere else; hashing
+  // it into a `p`-prefixed digest would name the one account the operator cannot look up.
+  if (accountId === MAIN_CODEX_ACCOUNT_ID) return "main";
+  const account = (config.codexAccounts ?? []).find(candidate => candidate.id === accountId);
+  return account ? codexAccountLogLabel(account) : fallbackCodexAccountLogLabel(accountId);
+}
+
+const warnedGatedNativeSuppression = new Set<string>();
+
+/** Test seam: the warn-once memory is process-global, so a case needs to be able to clear it. */
+export function resetGatedNativeSuppressionWarningsForTests(): void {
+  warnedGatedNativeSuppression.clear();
+}
+
+function warnGatedNativeSuppressedOnce(slug: string, reason: string): void {
+  const signature = `${slug}\u0000${reason}`;
+  if (warnedGatedNativeSuppression.has(signature)) return;
+  warnedGatedNativeSuppression.add(signature);
+  console.warn(
+    `[opencodex] catalog sync: ${slug} is not being offered because ${reason}. `
+      + "Sign in again to restore it.",
+  );
+}
+
+/**
+ * Mescla o catálogo retido com os modelos visíveis e as configurações atuais,
+ * incluindo os nomes nativos. Tenta preservar o backup original e usa a permissão
+ * de escrita para publicar o resultado apenas se os bytes mudarem, retornando
+ * a contagem de entradas roteadas e por conta, o caminho e o estado da gravação.
+ */
 function writeRetainedCatalogSync({
   config,
   goModels,
@@ -1722,6 +1848,20 @@ function writeRetainedCatalogSync({
   const unavailableGatedNativeSlugs = new Set([...ACCOUNT_GATED_NATIVE_OPENAI_MODELS].filter(slug => (
     !availableBareGatedNativeSlugs.has(slug)
   )));
+  // #4212: this set is the whole record of a model vanishing, and it is a set of strings that
+  // nothing downstream ever asks a question of. Explain it here, while the entitlement snapshot
+  // that produced it is still in scope, because after this point the model is simply absent and
+  // no later surface can tell "never entitled" apart from "the account broke this morning".
+  for (const slug of unavailableGatedNativeSlugs) {
+    const reason = gatedNativeReauthSuppressionReason({
+      snapshot: modelEntitlements,
+      slug,
+      eligibleAccountIds: bareEligibleAccountIds,
+      needsReauth: isAccountNeedsReauth,
+      label: accountId => gatedNativeAccountLabel(config, accountId),
+    });
+    if (reason) warnGatedNativeSuppressedOnce(slug, reason);
+  }
   const suppressedBareNativeSlugs = new Set([
     ...desktopAllowlistSuppressedNativeSlugs(config),
     ...unavailableGatedNativeSlugs,
@@ -1880,6 +2020,7 @@ function writeRetainedCatalogSync({
     accountBoundEntries,
     suppressedBareNativeSlugs,
     openaiContextCap,
+    nativeDisplayNames: config.providers[OPENAI_CODEX_PROVIDER_ID]?.modelDisplayNames,
     policy: {
       ...CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
       nativeBackfillSlugs: [...availableBareNativeSlugs, ...observedNativeSlugs],
