@@ -145,3 +145,4 @@ Renamed fixed-key providers receive [missing reasoning metadata](../catalog.md#r
 
 Translated audio/file admission follows the [final-adapter input contract](../adapters/registry.md#untranslated-input-media); native raw passthrough remains separate.
 Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
+The Devin transport preserves the [single-pair reasoning replay contract](../adapters/registry.md#semantic-inheritance-is-not-constructor-inheritance) when constructing its Cognition prompt.

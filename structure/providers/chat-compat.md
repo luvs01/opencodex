@@ -339,3 +339,4 @@ prose the model reads beside them. Vendor tool execution stays disabled on both
 adapters, and Qoder's explicit refusal of original images is unchanged.
 
 Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
+Direct Devin history reasoning follows the [single-pair replay contract](../adapters/registry.md#semantic-inheritance-is-not-constructor-inheritance), outside the translated Chat replay contract.
