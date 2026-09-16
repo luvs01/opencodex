@@ -54,7 +54,9 @@ interface ActiveFlow {
   /** Set once auth.json has been replaced; cancellation can no longer win. */
   published: boolean;
   /** Snapshot-holding commit prepared at start; closure-private identity. */
-  prepared?: { commit: (tokens: NativeMainReauthTokens) => Promise<{ chatgptAccountId: string }> };
+  prepared?: {
+    commit: (tokens: NativeMainReauthTokens, options?: { signal?: AbortSignal }) => Promise<{ chatgptAccountId: string }>;
+  };
 }
 
 /** Bounded terminal retention so status/cancel stay answerable after completion. */
@@ -65,7 +67,9 @@ const terminalFlows = new Map<string, { status: MainDeviceReauthStatus; expiresA
 
 export interface MainDeviceReauthDeps {
   login?: (ctrl: OAuthController) => Promise<NativeDeviceLogin>;
-  beginCommit?: () => { commit: (tokens: NativeMainReauthTokens) => Promise<{ chatgptAccountId: string }> };
+  beginCommit?: () => {
+    commit: (tokens: NativeMainReauthTokens, options?: { signal?: AbortSignal }) => Promise<{ chatgptAccountId: string }>;
+  };
   flowId?: () => string;
   now?: () => number;
 }
@@ -81,13 +85,9 @@ function sweepTerminal(now: number): void {
 }
 
 function finish(flow: ActiveFlow, status: MainDeviceReauthStatus, now: number): void {
-  // Publication beats a racing cancellation: once auth.json was replaced the
-  // honest terminal is succeeded, never cancelled (080). Every other terminal
-  // is first-write-wins so a superseded or cancelled completion cannot
-  // publish a later result.
-  if (isTerminal(flow.status)) {
-    if (!(flow.published && status.status === "succeeded")) return;
-  }
+  // Terminal results are first-write-wins. In particular, a commit completing
+  // after cancellation must not replace the cancellation with success.
+  if (isTerminal(flow.status)) return;
   if (status.status === "succeeded") flow.published = true;
   flow.status = status;
   terminalFlows.set(flow.flowId, { status, expiresAt: now + TERMINAL_RETENTION_MS });
@@ -173,7 +173,7 @@ export function startMainDeviceReauth(deps: MainDeviceReauthDeps = {}): MainDevi
         refreshToken: grant.credential.refresh,
         idToken: grant.idToken,
         chatgptAccountId: grant.credential.accountId!,
-      });
+      }, { signal: flow.controller.signal });
       flow.published = true;
       finish(flow, { flowId, status: "succeeded", credentialUpdated: true }, clock());
     } catch (error) {
