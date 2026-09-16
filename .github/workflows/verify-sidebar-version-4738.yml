@@ -16,14 +16,15 @@ jobs:
   gui-validation:
     if: github.repository == 'luvs01/opencodex'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
-      TARGET_SHA: 4c675bd416aa7bf64bb7a78a4cd9a83baaf3a03c
+      TARGET_SHA: c547ca6f81c981367d62e440b919acb22ce4ff48
     steps:
       - name: Checkout exact PR head without credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: 4c675bd416aa7bf64bb7a78a4cd9a83baaf3a03c
+          ref: c547ca6f81c981367d62e440b919acb22ce4ff48
+          fetch-depth: 3
           persist-credentials: false
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
@@ -60,45 +61,33 @@ jobs:
         run: |
           set -o pipefail
           bun run build 2>&1 | tee ../.tmp/pr4738-evidence/gui-build.log
+      - name: Built CSS browser geometry (128 cases)
+        if: ${{ !cancelled() }}
+        working-directory: gui
+        run: |
+          set -o pipefail
+          bun run test:sidebar-version ../.tmp/pr4738-evidence/browser 2>&1 | tee ../.tmp/pr4738-evidence/browser.log
       - name: Root TypeScript
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           bun run typecheck 2>&1 | tee .tmp/pr4738-evidence/root-typecheck.log
+      - name: React Doctor against PR base
+        if: ${{ !cancelled() }}
+        working-directory: gui
+        run: |
+          set -o pipefail
+          npx --yes react-doctor@0.9.11 --verbose --scope changed --base 3070d64d8822c6d8c62989665f82ab665e4d164c --no-telemetry 2>&1 | tee ../.tmp/pr4738-evidence/react-doctor.log
       - name: Privacy scan
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           bun run privacy:scan 2>&1 | tee .tmp/pr4738-evidence/privacy.log
-      - name: Export public source and runtime for offline follow-up
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          export_root="$RUNNER_TEMP/pr4738-offline"
-          mkdir -p "$export_root/source" "$export_root/bin"
-          git archive HEAD | tar -x -C "$export_root/source"
-          cp -a node_modules "$export_root/source/node_modules"
-          cp -a gui/node_modules "$export_root/source/gui/node_modules"
-          if [ -d gui/dist ]; then cp -a gui/dist "$export_root/source/gui/dist"; fi
-          cp "$(command -v bun)" "$export_root/bin/bun"
-          cp .tmp/pr4738-evidence/environment.txt "$export_root/environment.txt"
-          tar -czf "$RUNNER_TEMP/pr4738-offline.tar.gz" -C "$export_root" .
-          sha256sum "$RUNNER_TEMP/pr4738-offline.tar.gz" > .tmp/pr4738-evidence/offline-sha256.txt
-          du -h "$RUNNER_TEMP/pr4738-offline.tar.gz"
-      - name: Upload validation logs
+      - name: Upload exact-head validation logs and browser evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pr4738-validation-logs
           path: .tmp/pr4738-evidence/
           retention-days: 7
-          if-no-files-found: error
-      - name: Upload offline validation environment
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: pr4738-offline-environment
-          path: ${{ runner.temp }}/pr4738-offline.tar.gz
-          compression-level: 0
-          retention-days: 3
           if-no-files-found: error
