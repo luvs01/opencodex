@@ -1,0 +1,47 @@
+name: Capture native steering author follow-up workspace
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-review-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 5cfc0c8795e128c2876aa20d75dbf3644fe65687
+          fetch-depth: 128
+          persist-credentials: false
+      - name: Capture pinned public source and review metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=128 https://github.com/lidge-jun/opencodex.git ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa
+          git update-ref refs/remotes/upstream/dev FETCH_HEAD
+          mkdir -p /tmp/steering-review-evidence
+          python3 - <<'PY'
+          import json, urllib.request
+          from pathlib import Path
+          root = 'https://api.github.com/repos/lidge-jun/opencodex/'
+          result = {}
+          for key, endpoint in [('comments', 'issues/4782/comments?per_page=100'), ('reviews', 'pulls/4782/reviews?per_page=100'), ('inline', 'pulls/4782/comments?per_page=100'), ('checks', 'commits/5cfc0c8795e128c2876aa20d75dbf3644fe65687/check-runs?per_page=100')]:
+              request = urllib.request.Request(root + endpoint, headers={'User-Agent':'PR4782-author-followup'})
+              with urllib.request.urlopen(request, timeout=30) as r:
+                  result[key] = json.load(r)
+          Path('/tmp/steering-review-evidence/review.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+          PY
+          # This is only public repository content and public Git objects.
+          # No runner home, environment, checkout auth config, hooks or credentials.
+          tar --exclude='./.git/config' --exclude='./.git/hooks' --exclude='./.git/logs' \
+            --exclude='./.git/FETCH_HEAD' -czf /tmp/steering-review-evidence/source.tar.gz .
+          git rev-parse HEAD refs/remotes/upstream/dev > /tmp/steering-review-evidence/refs.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr4782-author-followup-workspace
+          path: /tmp/steering-review-evidence
+          retention-days: 2
+          if-no-files-found: error
