@@ -1,0 +1,69 @@
+name: PR177 synchronized head verification
+
+on:
+  push:
+    branches: [codex/pr177-validation-20260916]
+    paths: [.github/workflows/pr177-merge-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - name: Checkout synchronized implementation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7adf8c6de8dc2df0a472ebde9fc2a1775dd1229f
+          persist-credentials: false
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install frozen dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+      - name: Typecheck and focused platform regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr177-merge"
+          git rev-parse HEAD > "$RUNNER_TEMP/pr177-merge/head.txt"
+          bun --version > "$RUNNER_TEMP/pr177-merge/bun-version.txt"
+          bun run typecheck 2>&1 | tee "$RUNNER_TEMP/pr177-merge/typecheck.txt"
+          for file in tests/server/response-log-inspection.test.ts tests/usage/request-log-nonstream.test.ts tests/server/consume-for-inspection-cancel.test.ts; do
+            echo "=== $file ===" | tee -a "$RUNNER_TEMP/pr177-merge/tests.txt"
+            bun test "$file" --timeout 20000 2>&1 | tee -a "$RUNNER_TEMP/pr177-merge/tests.txt"
+          done
+      - name: Related regressions, layout, structure, privacy and docs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files tests | grep -E '/(request-log[^/]*|consume-for-inspection[^/]*|relay[^/]*|sse-inspect[^/]*)\.test\.ts$' | grep -Ev '/(request-log-nonstream|consume-for-inspection-cancel)\.test\.ts$')
+          printf '%s\n' "${files[@]}" > "$RUNNER_TEMP/pr177-merge/related-files.txt"
+          for file in "${files[@]}"; do
+            echo "=== $file ===" | tee -a "$RUNNER_TEMP/pr177-merge/related-tests.txt"
+            bun test "$file" --timeout 20000 2>&1 | tee -a "$RUNNER_TEMP/pr177-merge/related-tests.txt"
+          done
+          bun test tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee "$RUNNER_TEMP/pr177-merge/layout.txt"
+          bun run structure:check 2>&1 | tee "$RUNNER_TEMP/pr177-merge/structure.txt"
+          bun run privacy:scan 2>&1 | tee "$RUNNER_TEMP/pr177-merge/privacy.txt"
+          (cd docs-site && bun install --frozen-lockfile && bun run build) 2>&1 | tee "$RUNNER_TEMP/pr177-merge/docs.txt"
+          git diff --exit-code
+      - name: Upload exact-head validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr177-synchronized-${{ matrix.os }}
+          path: ${{ runner.temp }}/pr177-merge/
+          retention-days: 7
+          if-no-files-found: warn
