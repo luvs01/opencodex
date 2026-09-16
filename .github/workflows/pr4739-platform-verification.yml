@@ -1,0 +1,107 @@
+name: PR 4739 platform and negative-control verification
+
+on:
+  push:
+    branches: [verify/pr4739-bun-20260916]
+    paths: [.github/workflows/pr4739-platform-verification.yml]
+
+permissions:
+  contents: read
+
+# Fork-only, read-only hosted checks. This file is excluded from the product PR.
+jobs:
+  platforms:
+    if: github.repository == 'luvs01/opencodex'
+    name: terminal guard / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Checkout exact product head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          persist-credentials: false
+      - name: Isolate user homes
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = path.join(process.env.RUNNER_TEMP, 'pr4739-platform');
+          for (const [key, leaf] of Object.entries({HOME:'home', USERPROFILE:'home', OPENCODEX_HOME:'opencodex', CODEX_HOME:'codex', XDG_CONFIG_HOME:'config', XDG_STATE_HOME:'state'})) {
+            const value = path.join(root, leaf);
+            fs.mkdirSync(value, {recursive:true});
+            fs.appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
+          }
+          NODE
+          test "$(git rev-parse HEAD)" = 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+      - name: Setup pinned project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install frozen dependencies
+        shell: bash
+        run: |
+          bun --revision
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+      - name: Native focused and server integration tests
+        shell: bash
+        run: bun test tests/server/terminal-guard.test.ts tests/server/terminal-guard-server.test.ts
+      - name: Repository typecheck
+        if: always() && !cancelled()
+        shell: bash
+        run: bun run typecheck
+      - name: Product integrity
+        if: always() && !cancelled()
+        shell: bash
+        run: git diff --exit-code HEAD
+
+  negative-control:
+    if: github.repository == 'luvs01/opencodex'
+    name: native Bun / baseline negative control
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact product head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Isolate homes
+        run: |
+          root="$RUNNER_TEMP/pr4739-negative"
+          mkdir -p "$root/home" "$root/opencodex" "$root/codex"
+          printf 'HOME=%s\nOPENCODEX_HOME=%s\nCODEX_HOME=%s\n' "$root/home" "$root/opencodex" "$root/codex" >> "$GITHUB_ENV"
+      - name: Setup pinned project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install frozen dependencies
+        run: bun install --frozen-lockfile
+      - name: Require the unchanged upstream implementation to fail the new tests
+        run: |
+          set -euo pipefail
+          source=src/server/responses/terminal-guard.ts
+          trap 'git restore --source=HEAD -- "$source"' EXIT
+          test "$(git rev-parse HEAD)" = 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          git show 3070d64d8822c6d8c62989665f82ab665e4d164c:"$source" > "$source"
+          set +e
+          bun test tests/server/terminal-guard.test.ts > "$RUNNER_TEMP/pr4739-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/pr4739-negative.log"
+          test "$status" -eq 1
+          grep -Eq '(^|[[:space:]])18 fail' "$RUNNER_TEMP/pr4739-negative.log"
+          grep -q 'Ran 64 tests across 1 file' "$RUNNER_TEMP/pr4739-negative.log"
+          test "$(grep -c '^(fail) terminal guard bounded retention' "$RUNNER_TEMP/pr4739-negative.log")" -eq 18
+          printf 'Native negative control: original upstream implementation fails exactly 18 bounded-retention cases; all 64 tests ran. Expected failure, not a passing product suite.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Confirm the production source was restored
+        if: always() && !cancelled()
+        run: git diff --exit-code HEAD
