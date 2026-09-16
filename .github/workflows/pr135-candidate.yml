@@ -1,0 +1,372 @@
+name: PR 135 candidate verification
+
+on:
+  push:
+    branches: [work/pr135-verification-env-20260916]
+    paths: [.github/workflows/pr135-candidate.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout immutable upstream source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          persist-credentials: false
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build focused regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr135-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/lib/upstream-retry.test.ts')
+          p.write_text(p.read_text() + '''
+          describe("ambiguous reset safety", () => {
+            test("a reset is terminal by default, even with a remaining send budget", async () => {
+              const reports: number[] = [];
+              const mock = mockDoFetch([bunResetError(), new Response("duplicate")]);
+              const response = await fetchWithResetRetry(mock.doFetch, {
+                attempts: 3, onSendsConsumed: count => reports.push(count),
+              });
+              expect(response.status).toBe(502);
+              expect(isNonReplayableResponse(response)).toBe(true);
+              expect((await response.json()).error.code).toBe(UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE);
+              expect(mock.calls).toHaveLength(1);
+              expect(reports).toEqual([1]);
+            });
+
+            test("a 503 followed by a reset stops both retry layers and reports both sends once", async () => {
+              silenceWarn();
+              const reports: number[] = [];
+              const mock = mockDoFetch([
+                new Response("busy", { status: 503 }), bunResetError(), new Response("duplicate"),
+              ]);
+              const response = await fetchWithTransientRetry(mock.doFetch, {
+                attempts: 3, onSendsConsumed: count => reports.push(count),
+              });
+              expect(response.status).toBe(502);
+              expect(isNonReplayableResponse(response)).toBe(true);
+              expect((await response.json()).error.code).toBe(UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE);
+              expect(mock.calls).toHaveLength(2);
+              expect(reports).toEqual([2]);
+            });
+
+            test("an exhausted last send still carries the no-replay verdict", async () => {
+              const mock = mockDoFetch([bunResetError()]);
+              const response = await fetchWithResetRetry(mock.doFetch, { attempts: 1 });
+              expect(isNonReplayableResponse(response)).toBe(true);
+              expect(mock.calls).toHaveLength(1);
+            });
+
+            test("EPIPE and message-only resets are ambiguous too, without leaking the exception", async () => {
+              for (const error of [
+                Object.assign(new Error("private transport detail"), { code: "EPIPE" }),
+                new Error("The socket connection was closed unexpectedly. private transport detail"),
+              ]) {
+                const mock = mockDoFetch([error]);
+                const response = await fetchWithResetRetry(mock.doFetch);
+                expect(isNonReplayableResponse(response)).toBe(true);
+                expect(await response.text()).not.toContain("private transport detail");
+                expect(mock.calls).toHaveLength(1);
+              }
+            });
+
+            test("zero and invalid budgets never dispatch regardless of replay safety", async () => {
+              for (const replaySafe of [false, true]) {
+                for (const attempts of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+                  const mock = mockDoFetch([new Response("must not send")]);
+                  await expect(fetchWithResetRetry(mock.doFetch, { attempts, replaySafe })).rejects.toThrow();
+                  expect(mock.calls).toHaveLength(0);
+                }
+              }
+            });
+
+            test("explicitly replay-safe resets still share the total budget with 5xx", async () => {
+              silenceWarn();
+              const reports: number[] = [];
+              const mock = mockDoFetch([
+                bunResetError(), new Response("busy", { status: 503 }), new Response("ok"),
+              ]);
+              const response = await fetchWithTransientRetry(mock.doFetch, {
+                attempts: 3, replaySafe: true, onSendsConsumed: count => reports.push(count),
+              });
+              expect(await response.text()).toBe("ok");
+              expect(mock.calls).toHaveLength(3);
+              expect(reports).toEqual([3]);
+            });
+          });
+          ''')
+          text = p.read_text().replace('  isConnectionResetError,', '  isConnectionResetError,\n  isNonReplayableResponse,\n  UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE,', 1)
+          p.write_text(text)
+          p = Path('tests/responses/responses-send-budget-counts.test.ts')
+          p.write_text(p.read_text() + '''
+          describe("ambiguous reset safety across Responses recovery", () => {
+            for (const adapter of ["openai-chat", "openai-responses"]) {
+              for (const combo of [false, true]) {
+                test(`${adapter}: no replay or target hop after an ambiguous reset (combo=${combo})`, async () => {
+                  const config = comboOverTargets(2);
+                  for (const provider of Object.values(config.providers)) provider.adapter = adapter;
+                  const authorizations: string[] = [];
+                  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+                    authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+                    throw Object.assign(new Error("The socket connection was closed unexpectedly."), { code: "ECONNRESET" });
+                  }) as typeof fetch;
+                  const logCtx: RequestLogContext = { model: "", provider: "" };
+                  const response = await handleResponses(
+                    responsesRequest(combo ? "combo/fan" : "t0/model-t0"), config, logCtx,
+                  );
+                  expect(response.status).toBe(502);
+                  const payload = await response.json();
+                  expect(payload.error.code).toBe("upstream_closed_before_response");
+                  expect(authorizations).toEqual(["Bearer sk-t0"]);
+                  expect(totalSends(logCtx)).toBe(1);
+                });
+              }
+            }
+
+            test("a provider 503 policy is retained, but the following reset cannot reach a combo sibling", async () => {
+              const authorizations: string[] = [];
+              globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+                authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+                if (authorizations.length === 1) {
+                  return new Response(JSON.stringify({ error: { message: "busy" } }), {
+                    status: 503, headers: { "content-type": "application/json" },
+                  });
+                }
+                throw Object.assign(new Error("connection reset by peer"), { code: "ECONNRESET" });
+              }) as typeof fetch;
+              const logCtx: RequestLogContext = { model: "", provider: "" };
+              const response = await handleResponses(responsesRequest("combo/fan"), comboOverTargets(2), logCtx);
+              expect(response.status).toBe(502);
+              expect((await response.json()).error.code).toBe("upstream_closed_before_response");
+              expect(authorizations).toEqual(["Bearer sk-t0", "Bearer sk-t0"]);
+              expect(totalSends(logCtx)).toBe(2);
+            });
+
+            test("reset-only providers stop too, without opting into the transient policy", async () => {
+              const config = comboOverTargets(2);
+              for (const provider of Object.values(config.providers)) delete provider.transientRetryOn5xx;
+              let sends = 0;
+              globalThis.fetch = (async () => {
+                sends += 1;
+                throw Object.assign(new Error("reset"), { code: "ECONNRESET" });
+              }) as typeof fetch;
+              const response = await handleResponses(responsesRequest("combo/fan"), config, { model: "", provider: "" });
+              expect(response.status).toBe(502);
+              expect((await response.json()).error.code).toBe("upstream_closed_before_response");
+              expect(sends).toBe(1);
+            });
+          });
+          ''')
+          PY
+      - name: Prove the new regressions fail on the unchanged runtime
+        shell: bash
+        run: |
+          set +e
+          bun test tests/lib/upstream-retry.test.ts tests/responses/responses-send-budget-counts.test.ts --test-name-pattern 'ambiguous reset safety' > /tmp/pr135-evidence/before.txt 2>&1
+          result=$?
+          cat /tmp/pr135-evidence/before.txt
+          test "$result" -ne 0
+      - name: Apply the runtime and compatibility-test changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          def replace_one(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              assert text.count(old) == 1, (path, old[:100], text.count(old))
+              p.write_text(text.replace(old, new, 1))
+          p = Path('src/lib/upstream-retry.ts')
+          text = p.read_text()
+          start = text.index(' * reuses the half-closed socket')
+          end = text.index(' *\n * Deliberately narrow:', start)
+          text = text[:start] + ''' * reuses the half-closed socket and a request can fail before response headers arrive.
+           * A pre-header rejection does not prove that the origin did not process the request.
+           * Mechanically reusable bytes do not make a model POST idempotent: an ambiguous reset
+           * becomes a terminal, non-replayable response unless the operation is explicitly safe.
+          ''' + text[end:]
+          old = 'export interface ResetRetryOptions {\n'
+          assert text.count(old) == 1
+          text = text.replace(old, old + '''  /**
+             * Opt in only when repeating this operation cannot duplicate upstream effects.
+             * This permits reset retries, not extra sends: attempts and onSendsConsumed still
+             * bound and count every physical send. A string body is not replay-safety proof.
+             */
+            replaySafe?: boolean;
+          ''', 1)
+          old = '      if (attempt === attempts - 1) throw err;'
+          assert text.count(old) == 1
+          text = text.replace(old, '''      if (opts.replaySafe !== true) {
+                  // Return evidence instead of throwing a generic transport error: outer catches
+                  // otherwise turn it into a replayable 502 and a combo/account recovery resends it.
+                  // The WeakSet protects in-process recovery; the code survives JSON re-wrapping.
+                  // Never expose the raw exception, which can contain credentials or request data.
+                  const response = new Response(JSON.stringify({ error: {
+                    type: "upstream_error",
+                    code: UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE,
+                    message: "The upstream connection closed before a response was received. The request may already have been processed; automatic replay was stopped.",
+                  } }), { status: 502, headers: { "content-type": "application/json" } });
+                  markResponseNonReplayable(response);
+                  return response;
+                }
+          ''' + old, 1)
+          old = ''' * Run `doFetch`, retrying only connection-reset-shaped rejections (see
+           * isConnectionResetError) with jittered backoff. The caller's thunk must be replay-safe
+           * (string body); every retry is logged so persistent resets stay visible.'''
+          assert old in text
+          text = text.replace(old, ''' * Run `doFetch` within one send budget. Connection-reset-shaped rejections are
+           * terminal by default; only an explicitly replay-safe operation receives reset retries
+           * with jittered backoff. HTTP responses retain the caller's existing retry policy.''')
+          old = ''' * fetchWithResetRetry plus a transient-5xx status retry layer, PRE-STREAM only: a
+           * returned Response has by definition not been relayed to the client yet, so replaying
+           * the (string-body) request is safe. The failed attempt's body is cancelled before the'''
+          assert old in text
+          text = text.replace(old, ''' * fetchWithResetRetry plus the caller-selected transient-5xx policy, PRE-STREAM only.
+           * A received HTTP error follows that policy; an ambiguous reset's non-replayable
+           * verdict always stops it. The failed attempt's body is cancelled before the''')
+          # Keep the inserted block aligned with the surrounding catch.
+          text = text.replace('                // Return evidence', '        // Return evidence')
+          lines = text.splitlines(True)
+          inside = False
+          for i, line in enumerate(lines):
+              if 'if (opts.replaySafe !== true)' in line: inside = True; continue
+              if inside:
+                  if line.startswith('          '): lines[i] = line[8:]
+                  if line.strip() == '}' and 'return response' in ''.join(lines[max(0,i-2):i]): inside = False
+          p.write_text(''.join(lines))
+          path = 'src/server/responses/adapter-dispatch.ts'
+          p = Path(path)
+          text = p.read_text()
+          assert 'import { isNonReplayableResponse }' not in text
+          text = 'import { isNonReplayableResponse } from "../../lib/upstream-retry";\n' + text
+          old = '    recovery: for (;;) {\n'
+          assert text.count(old) == 1
+          text = text.replace(old, old + '''      // Preserve the terminal verdict through adapter and combo error formatting.
+                // This also covers a reset reached by a 401/429/413 recovery refetch.
+                if (isNonReplayableResponse(upstreamResponse)) {
+                  cleanupUpstreamAbort();
+                  return upstreamResponse;
+                }
+          ''', 1)
+          text = text.replace('                // This also covers', '      // This also covers').replace('                if (isNonReplayableResponse', '      if (isNonReplayableResponse').replace('                  cleanupUpstreamAbort();', '        cleanupUpstreamAbort();').replace('                  return upstreamResponse;', '        return upstreamResponse;').replace('                }\n      if (', '      }\n      if (')
+          p.write_text(text)
+          # Existing tests that intentionally exercise allowed reset recovery must say why
+          # replay is legal; leave every production POST call site opted out.
+          p = Path('tests/lib/upstream-retry.test.ts')
+          text = p.read_text()
+          titles = [
+            "retries a Bun-shaped reset and returns the second attempt's response",
+            "retries on message-only reset (no code property)",
+            "gives up after max attempts and rethrows the last reset error",
+            "aborting during the backoff sleep rejects without a further attempt",
+          ]
+          for title in titles:
+              start = text.index('  test("' + title + '"')
+              end = text.find('\n  test(', start + 1)
+              if end < 0: end = text.index('\n});', start)
+              block = text[start:end]
+              block = block.replace('fetchWithResetRetry(mock.doFetch);', 'fetchWithResetRetry(mock.doFetch, { replaySafe: true });')
+              block = block.replace('fetchWithResetRetry(mock.doFetch))', 'fetchWithResetRetry(mock.doFetch, { replaySafe: true }))')
+              block = block.replace('{ label: "test" }', '{ label: "test", replaySafe: true }')
+              block = block.replace('{ abortSignal: ac.signal }', '{ abortSignal: ac.signal, replaySafe: true }')
+              text = text[:start] + block + text[end:]
+          p.write_text(text)
+          p = Path('tests/providers/upstream-transient-retry.test.ts')
+          text = p.read_text()
+          for title in ['onSendsConsumed still reports when the helper throws', 'a connection reset and a transient status share the same budget']:
+              start = text.index('  test("' + title + '"')
+              end = text.find('\n  test(', start + 1)
+              block = text[start:end].replace('{ attempts: 3, slowAttemptMs:', '{ replaySafe: true, attempts: 3, slowAttemptMs:')
+              text = text[:start] + block + text[end:]
+          p.write_text(text)
+          paths = list(Path('tests').rglob('issue-914-transport-attribution.test.ts'))
+          for p in paths:
+              text = p.read_text()
+              text = text.replace('    }).catch((e: unknown) => e);', '    }, { replaySafe: true }).catch((e: unknown) => e);')
+              p.write_text(text)
+          p = Path('structure/transports/responses.md')
+          p.write_text(p.read_text() + '''
+          ## Ambiguous connection-reset replay boundary
+
+          `src/lib/upstream-retry.ts` returns a marked 502 with
+          `upstream_closed_before_response` when a fetch rejects with an ambiguous connection
+          reset. No response headers is not evidence that a model POST was never processed.
+          Only an explicitly replay-safe operation opts into reset retries. The existing
+          provider HTTP-status policy and the shared physical-send budget remain independent:
+          zero refuses dispatch, invalid counts fail, and a stopped send is counted once.
+          `src/server/responses/adapter-dispatch.ts` preserves this verdict instead of formatting
+          it as a generic replayable upstream error. The existing account and combo guards stop
+          on the marker or structured code. The helper and public Responses count regressions
+          live in `tests/lib/upstream-retry.test.ts` and
+          `tests/responses/responses-send-budget-counts.test.ts`.
+          ''')
+          # No automation file is in this checkout or in the candidate commit.
+          PY
+          git diff --check
+          git diff --stat
+          git diff -- src/lib/upstream-retry.ts src/server/responses/adapter-dispatch.ts
+      - name: Focused test suites
+        id: focused
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mapfile -t attribution < <(find tests -name issue-914-transport-attribution.test.ts)
+          bun test tests/lib/upstream-retry.test.ts tests/providers/upstream-transient-retry.test.ts tests/responses/responses-send-budget-counts.test.ts "${attribution[@]}" 2>&1 | tee /tmp/pr135-evidence/focused.txt
+      - name: Typecheck
+        id: types
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          bun run typecheck 2>&1 | tee /tmp/pr135-evidence/typecheck.txt
+      - name: Structure and privacy checks
+        id: guards
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add src/lib/upstream-retry.ts src/server/responses/adapter-dispatch.ts tests/lib/upstream-retry.test.ts tests/providers/upstream-transient-retry.test.ts tests/responses/responses-send-budget-counts.test.ts structure/transports/responses.md
+          find tests -name issue-914-transport-attribution.test.ts -exec git add {} \;
+          bun run structure:check
+          bun run privacy:scan
+          bun scripts/file-size-ratchet.ts
+      - name: Publish isolated candidate branch without changing integration branches
+        if: steps.focused.outcome == 'success' && steps.types.outcome == 'success' && steps.guards.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=fix/pr135-ambiguous-reset-safety-20260916
+          test -z "$(git ls-remote https://github.com/luvs01/opencodex.git "refs/heads/$branch")"
+          git config user.name 'luvs01'
+          git config user.email '27862058+luvs01@users.noreply.github.com'
+          git diff --cached --check
+          git commit -m 'fix(retry): stop ambiguous reset replay across recovery boundaries' -m 'Redesigns luvs01/opencodex#135 on upstream dev. Preserve total-send accounting and provider HTTP retry policy while carrying the terminal verdict through combo recovery.'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex.git "HEAD:refs/heads/$branch"
+          git rev-parse HEAD
+          git diff 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573 --stat
+      - name: Record verification status
+        if: always()
+        run: |
+          echo 'Focused: ${{ steps.focused.outcome }}'
+          echo 'Typecheck: ${{ steps.types.outcome }}'
+          echo 'Guards: ${{ steps.guards.outcome }}'
