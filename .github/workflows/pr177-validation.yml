@@ -1,0 +1,47 @@
+name: PR177 isolated validation workspace
+
+on:
+  push:
+    branches: [codex/pr177-validation-20260916]
+    paths: [.github/workflows/pr177-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout the pinned upstream baseline
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3070d64d8822c6d8c62989665f82ab665e4d164c
+          persist-credentials: false
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install frozen test dependencies
+        run: |
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+      - name: Package public source and isolated dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pr177-workspace"
+          mkdir -p "$out"
+          git archive --format=tar HEAD | gzip > "$out/source.tar.gz"
+          tar -czf "$out/dependencies.tar.gz" node_modules gui/node_modules
+          cp "$(command -v bun)" "$out/bun"
+          git rev-parse HEAD > "$out/baseline.txt"
+          bun --version > "$out/bun-version.txt"
+          (cd "$out" && sha256sum source.tar.gz dependencies.tar.gz bun > SHA256SUMS)
+      - name: Upload validation workspace
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr177-validation-workspace
+          path: ${{ runner.temp }}/pr177-workspace/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
