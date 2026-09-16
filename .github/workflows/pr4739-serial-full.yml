@@ -1,0 +1,73 @@
+name: PR 4739 exact-head full suite sequential control
+
+on:
+  push:
+    branches: [verify/pr4739-bun-20260916]
+    paths: [.github/workflows/pr4739-serial-full.yml]
+
+permissions:
+  contents: read
+
+# Fork-only evidence. No source or test mutation, no disabled tests, no relaxed
+# assertions/timeouts. Sequential execution is the repository runner's supported
+# option; the earlier failed parallel run remains a distinct result.
+jobs:
+  full:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout the exact product head with official upstream tags
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Isolate homes and verify source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          git fetch --no-recurse-submodules https://github.com/lidge-jun/opencodex.git '+refs/tags/*:refs/tags/*'
+          root="$RUNNER_TEMP/pr4739-serial"
+          mkdir -p "$root/home" "$root/opencodex" "$root/codex" "$root/config" "$root/state"
+          printf 'HOME=%s\nUSERPROFILE=%s\nOPENCODEX_HOME=%s\nCODEX_HOME=%s\nXDG_CONFIG_HOME=%s\nXDG_STATE_HOME=%s\n' \
+            "$root/home" "$root/home" "$root/opencodex" "$root/codex" "$root/config" "$root/state" >> "$GITHUB_ENV"
+      - name: Setup pinned project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Frozen dependency install and dashboard build
+        run: |
+          set -euo pipefail
+          bun --revision
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile && bun run build)
+      - name: Entire native suite without parallel test-file overlap
+        run: |
+          set +e
+          bun run test --parallel=1 > "$RUNNER_TEMP/pr4739-serial.log" 2>&1
+          status=$?
+          set -e
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const bytes = fs.readFileSync(path.join(process.env.RUNNER_TEMP,'pr4739-serial.log'));
+          const text = bytes.toString('utf8').replace(/\u001b\[[0-9;]*m/g,'');
+          const lines = text.split('\n');
+          console.log('PRODUCT_HEAD 469e7ab21689d5cf938ea9cf85ef36f9ff977572');
+          console.log('LOG_SHA256 '+crypto.createHash('sha256').update(bytes).digest('hex'));
+          console.log('COMMAND bun run test --parallel=1');
+          const summary = lines.filter(line=>/^\s*\d+ (pass|skip|fail)\s*$/.test(line)||/^Ran \d+ tests? across/.test(line)||/^\[test\].*finished/.test(line)||/^bun test v/.test(line));
+          console.log(summary.join('\n'));
+          const interesting = new Set();
+          for(let n=0;n<lines.length;n++) if(lines[n].startsWith('(fail) ')||/Bun has crashed|panic:|error: script/.test(lines[n])) for(let k=Math.max(0,n-22);k<=Math.min(lines.length-1,n+2);k++) interesting.add(k);
+          console.log('FAILURE_CONTEXT\n'+[...interesting].sort((a,b)=>a-b).map(k=>lines[k]).join('\n').slice(-32000));
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Exact-head sequential full-suite result\n\nProduct: `469e7ab21689d5cf938ea9cf85ef36f9ff977572`. Bun 1.4.2 from the project pin. Command `bun run test --parallel=1`. No source/test edits, assertion changes or timeout relaxation.\n\n```text\n'+summary.join('\n')+'\n```\n\nThe prior parallel run remains non-green and is not relabeled by this sequential control.\n');
+          NODE
+          exit "$status"
+      - name: Product integrity
+        if: always() && !cancelled()
+        run: git diff --exit-code HEAD
