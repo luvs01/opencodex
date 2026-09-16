@@ -1,0 +1,139 @@
+name: PR 4739 baseline comparison for full-suite failures
+
+on:
+  push:
+    branches: [verify/pr4739-bun-20260916]
+    paths: [.github/workflows/pr4739-failure-baseline.yml]
+
+permissions:
+  contents: read
+
+# Fork-only diagnostic controls, excluded from the upstream product PR.
+# Each selected test runs once per ref in its own process/home. Results are
+# evidence about isolated reproduction, not a replacement for the failed full run.
+jobs:
+  compare:
+    if: github.repository == 'luvs01/opencodex'
+    name: baseline comparison / ${{ matrix.ref.name }} / ${{ matrix.group }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        ref:
+          - name: base
+            sha: 3070d64d8822c6d8c62989665f82ab665e4d164c
+          - name: head
+            sha: 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+        group: [protocol, lifecycle]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact product ancestry
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Select pinned ref and isolate homes
+        env:
+          PRODUCT_SHA: ${{ matrix.ref.sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$PRODUCT_SHA"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          root="$RUNNER_TEMP/pr4739-comparison"
+          mkdir -p "$root/home" "$root/opencodex" "$root/codex" "$root/config" "$root/state"
+          printf 'HOME=%s\nUSERPROFILE=%s\nOPENCODEX_HOME=%s\nCODEX_HOME=%s\nXDG_CONFIG_HOME=%s\nXDG_STATE_HOME=%s\n' \
+            "$root/home" "$root/home" "$root/opencodex" "$root/codex" "$root/config" "$root/state" >> "$GITHUB_ENV"
+      - name: Setup pinned project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Frozen dependencies and dashboard fixtures
+        run: |
+          set -euo pipefail
+          bun --revision
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile && bun run build)
+      - name: Run selected failures once and retain concise diagnostic evidence
+        env:
+          TEST_GROUP: ${{ matrix.group }}
+          PRODUCT_SHA: ${{ matrix.ref.sha }}
+          PRODUCT_LABEL: ${{ matrix.ref.name }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const cp = require('node:child_process');
+          const groups = {
+            protocol: [
+              ['tests/routing/router-engine-runtime-safety.test.ts'],
+              ['tests/routing/router-cost-ttft.test.ts'],
+              ['tests/clients/live-models-cc-hosted.test.ts'],
+              ['tests/providers/blockrun.test.ts'],
+              ['tests/adapters/openai/openai-chat-request-private-tools.test.ts'],
+              ['tests/adapters/openai/openai-chat-combo-tool-proof.test.ts'],
+              ['tests/providers/proxy-responses.test.ts'],
+            ],
+            lifecycle: [
+              ['tests/adapters/codex-relay-codec.test.ts'],
+              ['tests/server/chrome-devtools-route.test.ts'],
+              ['tests/clients/sideband-admin-routes.test.ts'],
+              ['tests/budgets/translator-budget-boundary.test.ts'],
+              ['tests/service/service-status-probe.test.ts'],
+              ['tests/clients/chrome-discovery.test.ts'],
+              ['tests/server/dashboard-shutdown-idle.test.ts'],
+              ['tests/codex-integration/codex-shim.test.ts', 'main-account quarantine is visible to an observational status probe'],
+            ],
+          };
+          const rows = [];
+          let bad = false;
+          const root = path.join(process.env.RUNNER_TEMP, 'pr4739-case-homes');
+          fs.mkdirSync(root, {recursive:true});
+          for (const [index, [file, pattern]] of groups[process.env.TEST_GROUP].entries()) {
+            const home = path.join(root, String(index));
+            const env = {...process.env, NO_COLOR:'1'};
+            for (const [key, leaf] of Object.entries({HOME:'home', USERPROFILE:'home', OPENCODEX_HOME:'opencodex', CODEX_HOME:'codex', XDG_CONFIG_HOME:'config', XDG_STATE_HOME:'state'})) {
+              env[key] = path.join(home, leaf);
+              fs.mkdirSync(env[key], {recursive:true});
+            }
+            const baseBlob = cp.execFileSync('git', ['rev-parse', `3070d64d8822c6d8c62989665f82ab665e4d164c:${file}`], {encoding:'utf8'}).trim();
+            const headBlob = cp.execFileSync('git', ['rev-parse', `469e7ab21689d5cf938ea9cf85ef36f9ff977572:${file}`], {encoding:'utf8'}).trim();
+            if (baseBlob !== headBlob) throw new Error(`Comparison test differs between base and head: ${file}`);
+            const args = ['test', '--timeout', '10000', file];
+            if (pattern) args.push('-t', pattern);
+            console.log(`::group::${process.env.PRODUCT_LABEL} / ${file}${pattern ? ' / selected failure only' : ''}`);
+            console.log(`Source ${process.env.PRODUCT_SHA}; unchanged test blob ${baseBlob}; command bun ${args.join(' ')}`);
+            const start = Date.now();
+            const result = cp.spawnSync('bun', args, {cwd:process.cwd(), env, encoding:'utf8', timeout:330000, maxBuffer:12*1024*1024});
+            const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.replace(/\u001b\[[0-9;]*m/g, '');
+            const log = path.join(home, 'test.log');
+            fs.writeFileSync(log, output);
+            const pass = (output.match(/^\s*(\d+) pass\s*$/m) || [])[1] ?? '?';
+            const fail = (output.match(/^\s*(\d+) fail\s*$/m) || [])[1] ?? '?';
+            const skip = (output.match(/^\s*(\d+) skip\s*$/m) || [])[1] ?? '0';
+            const selected = pattern ? ' (one named case)' : '';
+            const failures = [...new Set([...output.matchAll(/^\(fail\) (.+)$/gm)].map(m => m[1].replace(/\s+\[[^\]]+\]$/, '')))];
+            console.log(`RESULT ${JSON.stringify({ref:process.env.PRODUCT_LABEL, file, pattern:pattern ?? null, exit:result.status, signal:result.signal, error:result.error?.message, pass, fail, skip, milliseconds:Date.now()-start, failures})}`);
+            if (result.status !== 0 || result.error) {
+              bad = true;
+              // Preserve useful failure context without dumping thousands of passing assertions.
+              const lines = output.split('\n');
+              const keep = new Set();
+              for (let n=0; n<lines.length; n++) if (/^\(fail\)|error:|Expected:|Received:|timed out|Test timed out/.test(lines[n])) {
+                for (let k=Math.max(0,n-14); k<=Math.min(lines.length-1,n+5); k++) keep.add(k);
+              }
+              console.log([...keep].sort((a,b)=>a-b).map(n=>lines[n]).join('\n').slice(-20000));
+            }
+            console.log(output.split('\n').slice(-10).join('\n'));
+            console.log('::endgroup::');
+            rows.push(`| ${file}${selected} | ${result.status ?? result.signal ?? 'error'} | ${pass} | ${fail} | ${skip} |`);
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `## ${process.env.PRODUCT_LABEL} / ${process.env.TEST_GROUP}\n\nExact product: \`${process.env.PRODUCT_SHA}\`. Every selected test file is byte-identical on base/head. One run per selected file/ref, fresh processes/homes, no test edits or timeout relaxation. The Codex shim selection names only the case that failed in the full run.\n\n| File | Exit | Pass | Fail | Skip |\n|---|---:|---:|---:|---:|\n${rows.join('\n')}\n\nThese isolated comparisons do not replace the failed full parallel run or prove absence of order/load-sensitive regressions.\n`);
+          process.exitCode = bad ? 1 : 0;
+          NODE
+      - name: Confirm tracked product files were not altered
+        if: always() && !cancelled()
+        run: git diff --exit-code HEAD
