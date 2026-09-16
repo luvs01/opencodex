@@ -1,0 +1,47 @@
+name: PR 135 isolated verification workspace
+
+on:
+  push:
+    branches: [work/pr135-verification-env-20260916]
+    paths: [.github/workflows/pr135-verification-env.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout immutable public upstream base
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          persist-credentials: false
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies without lifecycle scripts
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile --ignore-scripts
+          (cd gui && bun install --frozen-lockfile --ignore-scripts)
+      - name: Export public source and isolated test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr135-workspace
+          git archive --format=tar HEAD > /tmp/pr135-workspace/source.tar
+          tar -czf /tmp/pr135-workspace/dependencies.tar.gz node_modules gui/node_modules
+          cp "$(command -v bun)" /tmp/pr135-workspace/bun
+          bun --version > /tmp/pr135-workspace/bun-version.txt
+          git rev-parse HEAD > /tmp/pr135-workspace/base-sha.txt
+          # Only tracked public source and installed packages are exported.
+          # No .git configuration, credentials, user home, or workflow secrets.
+      - name: Upload bounded verification workspace
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr135-verification-workspace
+          path: /tmp/pr135-workspace/
+          retention-days: 1
+          if-no-files-found: error
