@@ -1,0 +1,210 @@
+name: Final native steering validation and publication
+
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-final-verify.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  platforms:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3062a07e62d50c2b0b95ab89f43ba9bfcdbe2cba
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Apply exact reviewed follow-up
+        run: python payload/.github/steering-followup/apply.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Transport, persistence and structural regression coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git write-tree > evidence/tested-tree.txt
+          bun test tests/responses/ws-native-steering.test.ts tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts tests/ci-workflows/file-size-ratchet.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee evidence/focused-tests.log
+      - name: Privacy and architecture checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          git diff --cached --check
+      - name: Retain verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: final-steering-${{ matrix.os }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: ignore
+
+  full-linux:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3062a07e62d50c2b0b95ab89f43ba9bfcdbe2cba
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Apply exact reviewed follow-up
+        run: python payload/.github/steering-followup/apply.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install full-suite dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+          mkdir -p evidence
+          git write-tree > evidence/tested-tree.txt
+      - name: Run unchanged upstream shard runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/run-bun-test-batches.sh '${{ matrix.shard }}/4' 2>&1 | tee evidence/full-suite.log
+      - name: Retain full-suite evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: final-steering-linux-shard-${{ matrix.shard }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: ignore
+
+  isolated-linux:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3062a07e62d50c2b0b95ab89f43ba9bfcdbe2cba
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - run: python payload/.github/steering-followup/apply.py
+      - uses: ./.github/actions/setup-project-bun
+      - run: bun install --frozen-lockfile
+      - name: Run worker-heavy tests separately
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git write-tree > evidence/tested-tree.txt
+          status=0
+          while IFS= read -r -d '' file; do
+            timeout 180 bun test "$file" > "evidence/$(basename "$file").log" 2>&1 || status=1
+            cat "evidence/$(basename "$file").log"
+          done < <(find tests -type f \( -name 'api-storage-policy*.test.ts' -o -name 'api-storage.test.ts' -o -name 'api-usage.test.ts' \) -print0)
+          exit "$status"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: final-steering-isolated-linux
+          path: evidence
+          retention-days: 7
+          if-no-files-found: ignore
+
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3062a07e62d50c2b0b95ab89f43ba9bfcdbe2cba
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - run: python payload/.github/steering-followup/apply.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Build docs without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUN_BIN="$(command -v bun)"
+          cd docs-site
+          "$BUN_BIN" install --frozen-lockfile --ignore-scripts
+          "$BUN_BIN" --bun run build
+
+  # This job publishes only the fixed feature branch after every validation job
+  # succeeds. It executes no dependencies, tests, hooks or application code.
+  publish:
+    needs: [platforms, full-linux, isolated-linux, docs]
+    if: github.repository == 'luvs01/opencodex'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3062a07e62d50c2b0b95ab89f43ba9bfcdbe2cba
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Verify and commit feature-only files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python payload/.github/steering-followup/apply.py
+          git config user.name luvs01
+          git config user.email 27862058+luvs01@users.noreply.github.com
+          git -c core.hooksPath=/dev/null commit -m 'fix(responses): preserve early steering continuations and bounded body policy'
+          test "$(git rev-parse HEAD^)" = 978b27c2478e5dabc93829a1d920b84a09614fae
+          git show --stat --oneline HEAD
+          printf 'Tested tree: %s\n' "$(git rev-parse HEAD^{tree})"
+      - name: Fast-forward only the user-authorized feature branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git HEAD:refs/heads/codex/astra-native-steering-20260916
+          printf 'Feature commit: `%s`\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
