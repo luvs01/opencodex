@@ -1,0 +1,44 @@
+name: PR177 synchronized full repository suite
+
+on:
+  push:
+    branches: [codex/pr177-validation-20260916]
+    paths: [.github/workflows/pr177-current-full-suite.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  full-suite:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact synchronized PR head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7adf8c6de8dc2df0a472ebde9fc2a1775dd1229f
+          persist-credentials: false
+          fetch-tags: true
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install frozen dependencies and build test assets
+        run: |
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile && bun run build)
+      - name: Run complete test harness without filtering or retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr177-current-full"
+          git rev-parse HEAD > "$RUNNER_TEMP/pr177-current-full/head.txt"
+          bun --version > "$RUNNER_TEMP/pr177-current-full/bun-version.txt"
+          bun run test --parallel=4 --timeout=30000 2>&1 | tee "$RUNNER_TEMP/pr177-current-full/full-suite.txt"
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr177-current-full-suite-results
+          path: ${{ runner.temp }}/pr177-current-full/
+          retention-days: 7
+          if-no-files-found: warn
