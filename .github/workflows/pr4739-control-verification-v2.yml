@@ -1,0 +1,78 @@
+name: PR 4739 corrected native controls
+
+on:
+  push:
+    branches: [verify/pr4739-bun-20260916]
+    paths: [.github/workflows/pr4739-control-verification-v2.yml]
+
+permissions:
+  contents: read
+
+# Fork-only controls. Does not rerun the passing Windows/macOS jobs or change the product PR.
+jobs:
+  controls:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact product head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Isolate homes and verify source
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/pr4739-controls"
+          mkdir -p "$root/home" "$root/opencodex" "$root/codex"
+          printf 'HOME=%s\nOPENCODEX_HOME=%s\nCODEX_HOME=%s\n' "$root/home" "$root/opencodex" "$root/codex" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+      - name: Setup pinned project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install frozen dependencies
+        run: bun install --frozen-lockfile
+      - name: Negative control with deduplicated failure names
+        run: |
+          set -euo pipefail
+          source=src/server/responses/terminal-guard.ts
+          trap 'git restore --source=HEAD -- "$source"' EXIT
+          git show 3070d64d8822c6d8c62989665f82ab665e4d164c:"$source" > "$source"
+          set +e
+          NO_COLOR=1 bun test tests/server/terminal-guard.test.ts > "$RUNNER_TEMP/pr4739-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/pr4739-negative.log"
+          test "$status" -eq 1
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const text = fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'pr4739-negative.log'), 'utf8').replace(/\u001b\[[0-9;]*m/g, '');
+          // Bun prints failing cases once inline and again in its end-of-run summary.
+          // Count distinct test identities rather than both renderings of the same failure.
+          const failures = [...text.matchAll(/^\(fail\) (.+)$/gm)].map(m => m[1].replace(/\s+\[[^\]]+\]$/, ''));
+          const names = [...new Set(failures)];
+          if (!/^\s*46 pass\s*$/m.test(text) || !/^\s*18 fail\s*$/m.test(text)
+              || !text.includes('Ran 64 tests across 1 file') || names.length !== 18
+              || names.some(name => !name.startsWith('terminal guard bounded retention > '))) {
+            throw new Error('Negative-control result did not match the 18 expected unique bounded-retention failures');
+          }
+          console.log(`Verified ${names.length} unique expected failures; 64 tests executed, 46 passed.`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Native baseline control: **46 pass / 18 expected failures**, all 64 tests executed. Only the original production guard was substituted; test code was unchanged.\n');
+          NODE
+      - name: Fetch official upstream release tags into the disposable checkout
+        run: |
+          set -euo pipefail
+          git fetch --no-recurse-submodules --depth=1 https://github.com/lidge-jun/opencodex.git '+refs/tags/*:refs/tags/*'
+          test -n "$(git tag -l 'v*')"
+          git tag -l 'v*' --sort=-version:refname | sed -n '1,8p'
+          test "$(git rev-parse HEAD)" = 469e7ab21689d5cf938ea9cf85ef36f9ff977572
+      - name: Release-version guard with upstream tags rather than stale fork tags
+        run: bun test tests/ci-workflows/release-version-line.test.ts
+      - name: Confirm product source is intact
+        if: always() && !cancelled()
+        run: git diff --exit-code HEAD
