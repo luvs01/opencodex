@@ -18,13 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      TARGET_SHA: c547ca6f81c981367d62e440b919acb22ce4ff48
+      TARGET_SHA: 3aa81f5e7b5fe54c36440fc1c75ef1599987319d
     steps:
       - name: Checkout exact PR head without credentials
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: c547ca6f81c981367d62e440b919acb22ce4ff48
-          fetch-depth: 3
+          ref: 3aa81f5e7b5fe54c36440fc1c75ef1599987319d
+          fetch-depth: 4
           persist-credentials: false
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
