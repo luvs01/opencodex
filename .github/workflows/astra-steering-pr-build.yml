@@ -1,0 +1,153 @@
+name: Verify native steering PR candidate
+
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-pr-build.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: astra-steering-pr-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact upstream base
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          persist-credentials: false
+      - name: Checkout exact locally verified patch bundle
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: f3f926648078c8499627c9542782cd601cfb2f7e
+          path: payload
+          sparse-checkout: .github/steering-bundle
+          persist-credentials: false
+      - name: Apply bounded patch and verify all resulting file hashes
+        run: python3 payload/.github/steering-bundle/apply.py
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install public dependencies without lifecycle scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BUN_BIN=$(command -v bun)" >> "$GITHUB_ENV"
+          bun install --frozen-lockfile --ignore-scripts
+          mkdir -p /tmp/steering-logs
+      - name: Typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUN_BIN" node_modules/typescript/bin/tsc --noEmit 2>&1 | tee /tmp/steering-logs/typecheck.log
+      - name: Focused transport and test-layout regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUN_BIN" test tests/responses/ws-native-steering.test.ts tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts tests/responses/ws-endpoint.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee /tmp/steering-logs/tests.log
+      - name: Privacy and structure gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BUN_BIN" scripts/privacy-scan.ts 2>&1 | tee /tmp/steering-logs/privacy.log
+          "$BUN_BIN" scripts/structure-ssot.ts 2>&1 | tee /tmp/steering-logs/structure.log
+          git diff --cached --check
+          git diff --cached --stat | tee /tmp/steering-logs/diff-stat.log
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-steering-verification
+          path: /tmp/steering-logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # This is the only write-capable job. It executes no dependency install, test,
+  # repository hook or proposed application code. The immutable patch and all
+  # resulting files are hash-checked again. No upstream ref, release or package
+  # is modified; only this user's new fork branch can be created/fast-forwarded.
+  publish-branch:
+    needs: verify
+    if: github.repository == 'luvs01/opencodex'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact upstream base without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          persist-credentials: false
+      - name: Checkout immutable patch bundle without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: f3f926648078c8499627c9542782cd601cfb2f7e
+          path: payload
+          sparse-checkout: .github/steering-bundle
+          persist-credentials: false
+      - name: Recheck integrity and create feature-only commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 payload/.github/steering-bundle/apply.py
+          git config user.name luvs01
+          git config user.email 27862058+luvs01@users.noreply.github.com
+          git commit -m 'feat(responses): add opt-in native WebSocket steering'
+          test "$(git rev-parse HEAD^)" = 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          git show --stat --oneline HEAD
+      - name: Push only new fork feature branch without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git HEAD:refs/heads/codex/astra-native-steering-20260916
+          printf 'Feature commit: `%s`\n' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+  # Documentation build evidence is separate from the source verification job.
+  # A draft PR remains a draft if this fails; it is never called review-ready.
+  docs:
+    needs: verify
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact upstream base
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          persist-credentials: false
+      - name: Checkout immutable patch bundle
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: f3f926648078c8499627c9542782cd601cfb2f7e
+          path: payload
+          sparse-checkout: .github/steering-bundle
+          persist-credentials: false
+      - name: Apply verified patch
+        run: python3 payload/.github/steering-bundle/apply.py
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Build documentation without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUN_BIN="$(command -v bun)"
+          cd docs-site
+          "$BUN_BIN" install --frozen-lockfile --ignore-scripts
+          "$BUN_BIN" --bun run build
