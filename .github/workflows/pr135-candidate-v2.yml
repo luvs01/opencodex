@@ -1,0 +1,217 @@
+name: PR 135 replay-boundary verification
+
+on:
+  push:
+    branches: [work/pr135-verification-env-20260916]
+    paths: [.github/workflows/pr135-candidate-v2.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout immutable upstream source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573
+          persist-credentials: false
+      - name: Read the pinned candidate generator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: luvs01/opencodex
+          ref: f94d480571c27caa940e38d1952dfdaf16629bb7
+          path: .tmp/pr135-generator
+          sparse-checkout: .github/workflows/pr135-candidate.yml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies with the trusted Bun installer
+        run: |
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+      - name: Rebuild and finish the scoped replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr135-evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, yaml
+          generator = yaml.safe_load(Path('.tmp/pr135-generator/.github/workflows/pr135-candidate.yml').read_text())
+          names = ['Build focused regression tests', 'Apply the runtime and compatibility-test changes']
+          for name in names:
+              step = next(s for s in generator['jobs']['verify']['steps'] if s['name'] == name)
+              subprocess.run(['bash', '-euo', 'pipefail', '-c', step['run']], check=True, stdout=subprocess.DEVNULL)
+          p = Path('src/lib/upstream-retry.ts')
+          text = p.read_text()
+          for key in ['type: "upstream_error",', 'code: UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE,', 'message: "The upstream connection closed']:
+              text = text.replace('\n  ' + key, '\n          ' + key)
+          p.write_text(text)
+          p = Path('src/bridge/errors.ts')
+          text = p.read_text()
+          text = 'import { isNonReplayableUpstreamCode, markResponseNonReplayable } from "../lib/upstream-retry";\n' + text
+          old = '  const finalStatus = error.code === CYBER_POLICY_ERROR_CODE ? 400 : status;'
+          assert text.count(old) == 1
+          text = text.replace(old, '''  // Only the allowlisted transport verdicts survive this formatter. Do not forward
+            // arbitrary provider codes, and preserve the existing cyber-policy precedence.
+            const replayBlocked = error.code !== CYBER_POLICY_ERROR_CODE
+              && isNonReplayableUpstreamCode(options?.code);
+            if (replayBlocked) error.code = options!.code!;
+          ''' + old, 1)
+          text = text.replace('  if (error.code !== CYBER_POLICY_ERROR_CODE\n', '  if (error.code !== CYBER_POLICY_ERROR_CODE\n    && !replayBlocked\n', 1)
+          assert text.count('  return new Response(JSON.stringify({ error }), {') == 1
+          text = text.replace('  return new Response(JSON.stringify({ error }), {', '  const response = new Response(JSON.stringify({ error }), {', 1)
+          text = text.replace('    headers,\n  });\n}', '    headers,\n  });\n  if (replayBlocked) markResponseNonReplayable(response);\n  return response;\n}', 1)
+          p.write_text(text)
+          p = Path('tests/lib/upstream-retry.test.ts')
+          text = 'import { formatErrorResponse as formatReplaySafetyError } from "../../src/bridge/errors";\n' + p.read_text()
+          text += '''
+          describe("ambiguous reset safety through error formatting", () => {
+            test("both terminal codes survive formatting without advertising Retry-After", async () => {
+              for (const code of ["upstream_no_response", "upstream_closed_before_response"]) {
+                const response = formatReplaySafetyError(502, "upstream_error", "closed", { code, retryAfter: "2" });
+                expect(isNonReplayableResponse(response)).toBe(true);
+                expect(response.headers.get("retry-after")).toBeNull();
+                expect((await response.json()).error.code).toBe(code);
+              }
+            });
+
+            test("unrecognized upstream codes do not override ordinary error classification", async () => {
+              const response = formatReplaySafetyError(502, "upstream_error", "failed", {
+                code: "untrusted_provider_code", retryAfter: "2",
+              });
+              expect(isNonReplayableResponse(response)).toBe(false);
+              expect(response.headers.get("retry-after")).toBe("2");
+              expect((await response.json()).error.code).not.toBe("untrusted_provider_code");
+            });
+
+            test("the cyber-policy hard block retains precedence", async () => {
+              const response = formatReplaySafetyError(502, "upstream_error", "blocked due to high-risk cybersecurity activity", {
+                code: "upstream_closed_before_response", retryAfter: "2",
+              });
+              expect(response.status).toBe(400);
+              expect(response.headers.get("retry-after")).toBeNull();
+              expect((await response.json()).error.code).toBe("cyber_policy");
+            });
+          });
+          '''
+          p.write_text(text)
+          p = Path('tests/responses/responses-send-budget-counts.test.ts')
+          text = 'import { shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "../../src/server/responses/core-codex-account";\nimport { consumeComboFailure } from "../../src/server/responses/core-combo-failure";\nimport { fetchWithResetRetry, isNonReplayableResponse } from "../../src/lib/upstream-retry";\n' + p.read_text()
+          text += '''
+          describe("ambiguous reset safety after outer recovery", () => {
+            test("a 429 recovery refetch cannot launder a subsequent reset into a combo hop", async () => {
+              const config = comboOverTargets(2);
+              config.providers.t0!.retryOn429 = { attempts: 1 };
+              const authorizations: string[] = [];
+              globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+                authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+                if (authorizations.length === 1) return new Response("rate limited", {
+                  status: 429, headers: { "retry-after": "0" },
+                });
+                throw Object.assign(new Error("connection reset by peer"), { code: "ECONNRESET" });
+              }) as typeof fetch;
+              const logCtx: RequestLogContext = { model: "", provider: "" };
+              const response = await handleResponses(responsesRequest("combo/fan"), config, logCtx);
+              expect(response.status).toBe(502);
+              expect((await response.json()).error.code).toBe("upstream_closed_before_response");
+              expect(authorizations).toEqual(["Bearer sk-t0", "Bearer sk-t0"]);
+              expect(totalSends(logCtx)).toBe(2);
+            });
+
+            test("account and combo recovery retain the no-replay verdict after one body read", async () => {
+              const response = await fetchWithResetRetry(async () => {
+                throw Object.assign(new Error("reset"), { code: "ECONNRESET" });
+              });
+              expect(shouldRetryCodexPoolAccountTransient(response)).toBe(false);
+              expect(await shouldRetryCodexPoolAccountQuota(response)).toBe(false);
+              const failure = await consumeComboFailure(response);
+              expect(failure.upstreamCode).toBe("upstream_closed_before_response");
+              expect(isNonReplayableResponse(failure.response)).toBe(true);
+              expect(shouldRetryCodexPoolAccountTransient(failure.response)).toBe(false);
+              expect(await shouldRetryCodexPoolAccountQuota(failure.response)).toBe(false);
+              expect(failure.response.headers.get("retry-after")).toBeNull();
+              expect((await failure.response.json()).error.code).toBe("upstream_closed_before_response");
+            });
+          });
+          '''
+          p.write_text(text)
+          # The pure 503->reachability test needs no reset opt-in; retain only the reset control.
+          p = Path('tests/codex-integration/issue-914-transport-attribution.test.ts')
+          text = p.read_text()
+          start = text.index('  test("mixed evidence: 503')
+          end = text.find('\n  test(', start + 1)
+          block = text[start:end].replace('}, { replaySafe: true }).catch', '}).catch')
+          p.write_text(text[:start] + block + text[end:])
+          p = Path('structure/transports/responses.md')
+          p.write_text(p.read_text() + '''
+          `src/bridge/errors.ts` retains only the two allowlisted non-replayable transport
+          codes, reapplies the in-process marker, and does not attach `Retry-After` to them.
+          Other upstream codes keep the existing classification; cyber-policy hard blocks
+          retain precedence. The combo, 429-refetch, and account-guard tests cover this boundary.
+          ''')
+          PY
+          git diff --check
+          git diff -- src/lib/upstream-retry.ts src/bridge/errors.ts src/server/responses/adapter-dispatch.ts
+      - name: Focused runtime and regression suites
+        id: focused
+        shell: bash
+        run: |
+          set -o pipefail
+          bun test tests/lib/upstream-retry.test.ts tests/providers/upstream-transient-retry.test.ts tests/responses/responses-send-budget-counts.test.ts tests/codex-integration/issue-914-transport-attribution.test.ts 2>&1 | tee /tmp/pr135-evidence/focused.txt
+      - name: Typecheck
+        id: types
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          bun run typecheck 2>&1 | tee /tmp/pr135-evidence/typecheck.txt
+      - name: Structure, privacy, size, and diff checks
+        id: guards
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add src/lib/upstream-retry.ts src/bridge/errors.ts src/server/responses/adapter-dispatch.ts tests/lib/upstream-retry.test.ts tests/providers/upstream-transient-retry.test.ts tests/responses/responses-send-budget-counts.test.ts tests/codex-integration/issue-914-transport-attribution.test.ts structure/transports/responses.md
+          bun run structure:check
+          bun run privacy:scan
+          bun scripts/file-size-ratchet.ts
+          git diff --cached --check
+      - name: Publish clean candidate branch only after the scoped gates pass
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=fix/pr135-ambiguous-reset-safety-20260916
+          test -z "$(git ls-remote https://github.com/luvs01/opencodex.git "refs/heads/$branch")"
+          git config user.name 'luvs01'
+          git config user.email '27862058+luvs01@users.noreply.github.com'
+          git diff --cached --check
+          git commit -m 'fix(retry): stop ambiguous reset replay across recovery boundaries' -m 'Redesigns luvs01/opencodex#135 on upstream dev. Preserve total-send accounting and provider HTTP retry policy while carrying the terminal verdict through combo recovery and error formatting.'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex.git "HEAD:refs/heads/$branch"
+          git rev-parse HEAD
+          git diff 45cfb04e9757a5a257ab6290d9f24d2ea0bc7573 --stat
+      - name: Bounded full-suite verification
+        if: success()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          (cd gui && bun run build) > /tmp/pr135-evidence/gui-build.txt 2>&1
+          build=$?
+          if [ "$build" -ne 0 ]; then cat /tmp/pr135-evidence/gui-build.txt; exit "$build"; fi
+          timeout 360 bun run test > /tmp/pr135-evidence/full.txt 2>&1
+          result=$?
+          tail -n 120 /tmp/pr135-evidence/full.txt
+          echo "Full-suite exit: $result"
+          exit "$result"
