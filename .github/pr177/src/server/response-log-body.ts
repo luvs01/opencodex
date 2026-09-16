@@ -116,7 +116,7 @@ export function createBoundedResponseLogBody(
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (ended) return;
-      let result: ReadableStreamReadResult<Uint8Array>;
+      let result: Awaited<ReturnType<typeof reader.read>>;
       try {
         result = await reader.read();
       } catch (error) {
