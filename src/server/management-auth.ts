@@ -253,23 +253,35 @@ export interface ManagementSessionControl {
   revokeCurrent(req: Request): boolean;
   /** Revalidate a long-lived request against current authority, without cached admission or renewal. */
   isCurrent(req: Request, config: OcxConfig): boolean;
+  /** Prove that the current browser session came from the operator-mediated pairing flow. */
+  isPaired(req: Request, config: OcxConfig): boolean;
 }
 
 export function createManagementSessionControl(state: ManagementAuthState): ManagementSessionControl {
+  function currentSession(req: Request, config: OcxConfig): GuiSessionRecord | null {
+    if (!state.available) return null;
+    const adminToken = state.token;
+    const credential = requestManagementCredential(req);
+    if (!credential || equalSecret(credential, adminToken)) return null;
+    const session = state.sessions.get(credential);
+    if (!session) return null;
+    // Reuse the full origin/expiry/CSRF predicate against the current record, but
+    // isolate its sliding-expiry mutation: authority checks are not browser activity.
+    return authorizeGuiSessionRequest(req, config, {
+      sessions: new Map([[credential, { ...session }]]),
+      pairingGrants: state.pairingGrants,
+    }).ok ? session : null;
+  }
   return {
     isCurrent(req: Request, config: OcxConfig): boolean {
       if (!state.available) return false;
       const credential = requestManagementCredential(req);
       if (!credential) return false;
       if (equalSecret(credential, state.token)) return true;
-      const session = state.sessions.get(credential);
-      if (!session) return false;
-      // Reuse the full origin/expiry/CSRF predicate against the current record, but
-      // isolate its sliding-expiry mutation: SSE heartbeats are not browser activity.
-      return authorizeGuiSessionRequest(req, config, {
-        sessions: new Map([[credential, { ...session }]]),
-        pairingGrants: state.pairingGrants,
-      }).ok;
+      return currentSession(req, config) !== null;
+    },
+    isPaired(req: Request, config: OcxConfig): boolean {
+      return currentSession(req, config)?.issuance === "pairing";
     },
     revokeCurrent(req: Request): boolean {
       if (!state.available) return false;
