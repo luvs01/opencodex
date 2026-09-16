@@ -1,0 +1,144 @@
+name: Complete Windows validation of integrated native steering
+
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-windows-final.yml]
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  windows:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-depth: 32
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7b9f031efb428a3e694c908526fd313ccb82b26e
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Prepare the same reviewed tree using UTF-8 on Windows
+        run: python payload/.github/steering-followup/prepare-integrated.py
+      - name: Assert exact tested commit and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 5cfc0c8795e128c2876aa20d75dbf3644fe65687
+          test "$(git rev-parse HEAD^{tree})" = d0eb5fbbc84cb87f8304ea5e779d8dc5553b8d9b
+      - uses: ./.github/actions/setup-project-bun
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run typecheck 2>&1 | tee evidence/typecheck.log
+      - name: Focused steering, shared transport and owner coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun test tests/responses/ws-native-steering.test.ts tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts tests/responses/responses-core-modules.test.ts tests/ci-workflows/file-size-ratchet.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee evidence/focused-tests.log
+      - name: Privacy and structure gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          git diff --check b3035fe292168bc598b5d67e77203e2b65404578 HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integrated-steering-windows-utf8
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+
+  existing-linux-macos-docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require successful tests from the exact existing integration run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import json, os, time, urllib.request
+          root = 'https://api.github.com/repos/luvs01/opencodex/actions/runs/35049363442'
+          def get(url):
+              req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+          run = get(root)
+          assert run['head_sha'] == '96ba556b64500483164757be3446c1e7ce30bc5d'
+          assert run['path'] == '.github/workflows/astra-steering-integrated.yml'
+          required = {
+              'docs',
+              'validate (ubuntu-24.04, linux-1, 1/4, true)',
+              'validate (ubuntu-24.04, linux-2, 2/4, false)',
+              'validate (ubuntu-24.04, linux-3, 3/4, false)',
+              'validate (ubuntu-24.04, linux-4, 4/4, false)',
+              'validate (macos-15, macos, true)',
+          }
+          # Only the preparation failure is replaced by this run's Windows
+          # lane. No product test failure is ignored or retried into green.
+          for attempt in range(150):
+              jobs = get(root + '/jobs?per_page=100')['jobs']
+              by_name = {job['name']: job for job in jobs}
+              assert required.issubset(by_name)
+              windows = by_name['validate (windows-latest, windows, true)']
+              assert windows['conclusion'] == 'failure'
+              failures = [s['name'] for s in windows['steps'] if s['conclusion'] == 'failure']
+              assert failures == ['Prepare exact feature and merge pinned current upstream']
+              completed = [by_name[name] for name in required if by_name[name]['status'] == 'completed']
+              assert all(job['conclusion'] == 'success' for job in completed), [(j['name'], j['conclusion']) for j in completed]
+              if len(completed) == len(required):
+                  print('All six existing integration lanes passed on the pinned run.')
+                  break
+              time.sleep(5)
+          else:
+              raise RuntimeError('Existing integration verification did not complete')
+
+  publish:
+    needs: [windows, existing-linux-macos-docs]
+    if: github.repository == 'luvs01/opencodex'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-depth: 32
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7b9f031efb428a3e694c908526fd313ccb82b26e
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Reproduce exactly the validated source without executing it
+        run: python payload/.github/steering-followup/prepare-integrated.py
+      - name: Publish only the validated feature branch without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 5cfc0c8795e128c2876aa20d75dbf3644fe65687
+          test "$(git rev-parse HEAD^{tree})" = d0eb5fbbc84cb87f8304ea5e779d8dc5553b8d9b
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git HEAD:refs/heads/codex/astra-native-steering-20260916
+          printf 'Feature commit: `%s`\nTree: `%s`\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
