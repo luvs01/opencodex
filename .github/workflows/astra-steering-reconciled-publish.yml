@@ -63,16 +63,21 @@ jobs:
       - name: Preserve the maintainer commit and assert identical source tree
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, subprocess
+          import json, os, subprocess
           from pathlib import Path
           parent = '69efec0d56146bc45374560f263b004c031734f9'
+          baseline = '5a2dda715e8e63b5fab24df6183b2fdc5961ec9f'
+          tested = 'e9621393f0cd8b02636bac82b538a7ab419fe283'
           tree = '7f53b35f2a90dccc311cebef7e82dea0ac860d3c'
           head = 'ce26f3ea367cba9e26745be9d70ad13c240f3a3b'
           def git(*args, **kwargs): return subprocess.check_output(['git', *args], **kwargs)
           git('fetch', '--no-tags', '--depth=128', 'https://github.com/luvs01/opencodex.git', parent)
-          assert git('rev-parse', parent + '^{tree}').decode().strip() == '5a2dda715e8e63b5fab24df6183b2fdc5961ec9f'
-          patch = git('diff', '--binary', parent, 'e9621393f0cd8b02636bac82b538a7ab419fe283')
-          assert hashlib.sha256(patch).hexdigest() == '01c1a0171b0686c8e701b9e78d7619e74ebe4932fb0203f1f6027223b35b8ea4'
+          assert git('rev-parse', parent + '^{tree}').decode().strip() == baseline
+          assert git('rev-parse', tested + '^{tree}').decode().strip() == tree
+          # The preparer already validates the immutable input patch's SHA-256.
+          # A regenerated diff uses adaptive object-name abbreviations, so compare
+          # complete-index deltas and exact trees instead of that presentation hash.
+          assert git('diff', '--binary', '--full-index', parent, tested) == git('diff', '--binary', '--full-index', baseline, tree)
           message = 'fix(responses): address native steering review findings\n\nClear unstarted and superseded channel ownership, append bounded replay without argument spreading, and add six red-to-green regressions. Consolidate architecture notes into short links and document native control helpers. Preserve the maintainer-integrated dev branch without rewriting its history.\n'
           env = dict(os.environ, GIT_AUTHOR_NAME='luvs01', GIT_COMMITTER_NAME='luvs01', GIT_AUTHOR_EMAIL='27862058+luvs01@users.noreply.github.com', GIT_COMMITTER_EMAIL='27862058+luvs01@users.noreply.github.com', GIT_AUTHOR_DATE='2026-09-16T09:26:00Z', GIT_COMMITTER_DATE='2026-09-16T09:26:00Z')
           created = git('commit-tree', tree, '-p', parent, input=message.encode(), env=env).decode().strip()
@@ -81,8 +86,8 @@ jobs:
           git('merge-base', '--is-ancestor', parent, head)
           git('merge-base', '--is-ancestor', 'ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa', head)
           git('diff', '--check', 'ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa', head)
-          assert git('diff', '--name-only', 'e9621393f0cd8b02636bac82b538a7ab419fe283', head) == b''
-          Path('evidence/published-identity.json').write_text(json.dumps({'head':head,'tree':tree,'parent':parent,'testedCommit':'e9621393f0cd8b02636bac82b538a7ab419fe283','testedRun':35079135199}, indent=2))
+          assert git('diff', '--name-only', tested, head) == b''
+          Path('evidence/published-identity.json').write_text(json.dumps({'head':head,'tree':tree,'parent':parent,'testedCommit':tested,'testedRun':35079135199}, indent=2))
           PY
       - name: Fast-forward only the unchanged contributor branch
         env:
