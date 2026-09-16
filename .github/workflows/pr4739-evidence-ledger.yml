@@ -1,0 +1,67 @@
+name: PR 4739 native evidence ledger
+
+on:
+  push:
+    branches: [verify/pr4739-bun-20260916]
+    paths: [.github/workflows/pr4739-evidence-ledger.yml]
+
+permissions:
+  actions: read
+
+# Read-only inspection of fixed completed jobs, not another product test run.
+jobs:
+  ledger:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify original job identity, exact source and test summaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const jobs = [
+            ['Linux focused and gates',104636205145,35046125837,76],
+            ['Windows focused and typecheck',104636549527,35046238107,76],
+            ['macOS focused and typecheck',104636549377,35046238107,76],
+            ['Native baseline negative control and release tags',104637242069,35046466695,null],
+            ['Original sandbox file on base',104639474758,35047190499,13],
+            ['Original sandbox file on head',104639474581,35047190499,13],
+          ];
+          async function api(endpoint) {
+            const r = await fetch('https://api.github.com/repos/luvs01/opencodex/actions/jobs/'+endpoint, {
+              headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json'},redirect:'manual',signal:AbortSignal.timeout(30000)
+            });
+            if (r.status === 302) {
+              const url = new URL(r.headers.get('location'));
+              if (url.protocol !== 'https:') throw new Error('Refused non-HTTPS log download');
+              // Signed destination receives no GitHub token, and is never printed.
+              const log = await fetch(url,{signal:AbortSignal.timeout(30000)});
+              if (!log.ok) throw new Error('Archived log request failed: '+log.status);
+              return Buffer.from(await log.arrayBuffer());
+            }
+            if (!r.ok) throw new Error('GitHub job request failed: '+r.status);
+            return Buffer.from(await r.arrayBuffer());
+          }
+          (async()=>{
+            const records=[];
+            for (const [label,id,run,expectedPass] of jobs) {
+              const job=JSON.parse((await api(String(id))).toString('utf8'));
+              if(job.id!==id||job.run_id!==run||job.status!=='completed'||job.conclusion!=='success') throw new Error('Job metadata did not match its claimed success: '+id);
+              const bytes=await api(id+'/logs');
+              const text=bytes.toString('utf8').replace(/\u001b\[[0-9;]*m/g,'').replace(/^\ufeff/,'').replace(/^\d{4}-\d\d-\d\dT\S+ /gm,'');
+              if(!text.includes('469e7ab21689d5cf938ea9cf85ef36f9ff977572')) throw new Error('Missing pinned checkout evidence: '+id);
+              const summaries=text.split('\n').filter(line=>/^\s*\d+ (pass|skip|fail)\s*$/.test(line)||/^Ran \d+ tests? across/.test(line));
+              // The head sandbox diagnostic embeds the original full-run summaries first;
+              // its final summary belongs to the actual isolated sandbox test invocation.
+              if(expectedPass!==null && !new RegExp('^\\s*'+expectedPass+' pass\\s*$','m').test(text)) throw new Error('Expected passing test count absent: '+id);
+              const record={label,id,run,workflowSha:job.head_sha,logSha256:crypto.createHash('sha256').update(bytes).digest('hex'),summaries,steps:job.steps.filter(s=>s.name.includes('typecheck')||s.name.includes('Privacy')||s.name.includes('Structure')||s.name.includes('integrity')).map(s=>({name:s.name,conclusion:s.conclusion}))};
+              console.log('VERIFIED_EVIDENCE '+JSON.stringify(record));
+              records.push(record);
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,'## Original native-job evidence\n\nAll job IDs, run IDs and successful conclusions verified directly. Workflow SHA and the pinned product checkout are distinct. Archived log SHA-256 values identify the inspected source evidence.\n\n```json\n'+JSON.stringify(records,null,2)+'\n```\n');
+          })().catch(error=>{console.error(error.message);process.exitCode=1;});
+          NODE
