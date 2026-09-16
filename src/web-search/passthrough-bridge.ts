@@ -128,6 +128,9 @@ const MAX_QUERIES_PER_CALL = 3;
 const MAX_RETAINED_OUTPUT_ITEMS = 500;
 /** Refuse to buffer an unbounded partial SSE event from a misbehaving upstream. */
 const MAX_SSE_BUFFER_CHARS = 8 * 1024 * 1024;
+/** Bound client-tool events withheld while the bridge determines whether a leg can succeed. */
+const MAX_HELD_CALL_EVENTS = 1_000;
+const MAX_HELD_CALL_CHARS = 8 * 1024 * 1024;
 
 /**
  * Retained for importers that pinned the first slice's contract: a leg mixing the search with
@@ -488,6 +491,7 @@ class BridgeStreamState {
    * failing the turn would let Codex start running a tool for a turn that never completes.
    */
   private heldCalls: HeldCallEvent[] = [];
+  private heldCallChars = 0;
   private heldIndexes = new Set<number>();
   private heldItemIds = new Set<string>();
   private terminalPayload: Record<string, unknown> | undefined;
@@ -498,6 +502,7 @@ class BridgeStreamState {
     this.suppressedItemIds = new Map();
     this.searches = [];
     this.heldCalls = [];
+    this.heldCallChars = 0;
     this.heldIndexes = new Set();
     this.heldItemIds = new Set();
     this.terminalPayload = undefined;
@@ -541,6 +546,15 @@ class BridgeStreamState {
   private render(type: string, data: Record<string, unknown>): string {
     return "event: " + type + "\n"
       + "data: " + JSON.stringify({ ...data, type, sequence_number: this.sequence++ });
+  }
+
+  private holdCall(payload: Record<string, unknown>, dataChars: number, upstreamIndex?: number): void {
+    if (this.heldCalls.length >= MAX_HELD_CALL_EVENTS
+      || dataChars > MAX_HELD_CALL_CHARS - this.heldCallChars) {
+      throw new Error("upstream client tool events exceeded the web-search bridge buffer bound");
+    }
+    this.heldCalls.push({ payload, ...(upstreamIndex === undefined ? {} : { upstreamIndex }) });
+    this.heldCallChars += dataChars;
   }
 
   failureFrames(code: string, message: string): string[] {
@@ -626,7 +640,7 @@ class BridgeStreamState {
       if (isClientExecutedItem(item)) {
         if (upstreamIndex !== undefined) this.heldIndexes.add(upstreamIndex);
         if (typeof item.id === "string") this.heldItemIds.add(item.id);
-        this.heldCalls.push({ payload, ...(upstreamIndex === undefined ? {} : { upstreamIndex }) });
+        this.holdCall(payload, data.length, upstreamIndex);
         return [];
       }
     }
@@ -648,7 +662,7 @@ class BridgeStreamState {
 
     if ((upstreamIndex !== undefined && this.heldIndexes.has(upstreamIndex))
       || (itemId !== undefined && this.heldItemIds.has(itemId))) {
-      this.heldCalls.push({ payload, ...(upstreamIndex === undefined ? {} : { upstreamIndex }) });
+      this.holdCall(payload, data.length, upstreamIndex);
       return [];
     }
 
@@ -659,18 +673,20 @@ class BridgeStreamState {
   }
 
   /** Release the withheld client tool calls once the turn is known to end here. */
-  flushHeldCalls(): string[] {
-    const blocks: string[] = [];
-    for (const held of this.heldCalls) {
-      const rewritten: Record<string, unknown> = { ...held.payload };
-      if (held.upstreamIndex !== undefined) {
-        rewritten.output_index = this.clientIndexFor(held.upstreamIndex);
+  *flushHeldCalls(): Generator<string> {
+    try {
+      for (const held of this.heldCalls) {
+        const rewritten: Record<string, unknown> = { ...held.payload };
+        if (held.upstreamIndex !== undefined) {
+          rewritten.output_index = this.clientIndexFor(held.upstreamIndex);
+        }
+        if (held.payload.type === "response.output_item.done") this.retain(held.payload.item);
+        yield this.render(String(held.payload.type), rewritten);
       }
-      if (held.payload.type === "response.output_item.done") this.retain(held.payload.item);
-      blocks.push(this.render(String(held.payload.type), rewritten));
+    } finally {
+      this.heldCalls = [];
+      this.heldCallChars = 0;
     }
-    this.heldCalls = [];
-    return blocks;
   }
 
   /**
@@ -979,7 +995,7 @@ async function* bridgeStreamBlocks(
   // One continuation leg per allowed search, plus one final leg for the answer itself.
   let legsRemaining = options.plan.maxSearches + 1;
 
-  const emit = function* (blocks: readonly string[]): Generator<string> {
+  const emit = function* (blocks: Iterable<string>): Generator<string> {
     for (const block of blocks) yield block + "\n\n";
   };
 
