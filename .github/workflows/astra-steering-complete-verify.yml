@@ -1,0 +1,115 @@
+name: Complete native steering verification
+
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-complete-verify.yml]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE: 978b27c2478e5dabc93829a1d920b84a09614fae
+
+jobs:
+  evidence:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Collect exact source patch and public protocol reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/steering-evidence
+          git diff --binary HEAD^ HEAD > /tmp/steering-evidence/candidate.patch
+          git rev-parse HEAD HEAD^ HEAD^{tree} > /tmp/steering-evidence/source-identity.txt
+          git diff --check HEAD^ HEAD
+          git diff --stat HEAD^ HEAD > /tmp/steering-evidence/diff-stat.txt
+          curl --proto '=https' --max-time 45 --max-filesize 8000000 -sS -L \
+            -D /tmp/steering-evidence/steering-reference.headers \
+            -o /tmp/steering-evidence/steering-reference.html \
+            -w '%{http_code}\n' https://developers.openai.com/api/docs/guides/steering \
+            > /tmp/steering-evidence/steering-reference.status || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-exact-source-and-reference
+          path: /tmp/steering-evidence
+          retention-days: 2
+          if-no-files-found: error
+
+  transport-platforms:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Verify steering and shared WebSocket transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun test tests/responses/ws-native-steering.test.ts tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts tests/responses/ws-failure-stage.test.ts tests/responses/reserve-dispatch-ws.test.ts
+
+  full-linux:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked runtime and test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+      - name: Run upstream Linux suite shard
+        shell: bash
+        run: bash scripts/ci/run-bun-test-batches.sh '${{ matrix.shard }}/4'
+
+  isolated-linux:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Run worker-heavy tests in isolated processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' file; do
+            timeout 180 bun test "$file" || status=1
+          done < <(find tests -type f \( -name 'api-storage-policy*.test.ts' -o -name 'api-storage.test.ts' -o -name 'api-usage.test.ts' \) -print0)
+          exit "$status"
