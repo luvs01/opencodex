@@ -1,0 +1,161 @@
+name: Verify native steering integrated with current dev
+
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-integrated.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, lane: linux-1, shard: '1/4', focused: true }
+          - { os: ubuntu-24.04, lane: linux-2, shard: '2/4', focused: false }
+          - { os: ubuntu-24.04, lane: linux-3, shard: '3/4', focused: false }
+          - { os: ubuntu-24.04, lane: linux-4, shard: '4/4', focused: false }
+          - { os: windows-latest, lane: windows, shard: '', focused: true }
+          - { os: macos-15, lane: macos, shard: '', focused: true }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-depth: 32
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 98716fb54f2173ef2bf7a6bd0f44547af5f47467
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Prepare exact feature and merge pinned current upstream
+        run: python payload/.github/steering-followup/prepare-integrated.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Install dependencies used by the full suite
+        if: matrix.shard != ''
+        working-directory: gui
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        if: matrix.focused
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run typecheck 2>&1 | tee evidence/typecheck.log
+      - name: Focused steering, shared transport and owner coverage
+        if: matrix.focused
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun test tests/responses/ws-native-steering.test.ts tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts tests/responses/responses-core-modules.test.ts tests/ci-workflows/file-size-ratchet.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee evidence/focused-tests.log
+      - name: Privacy and structure gates
+        if: matrix.focused
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          git diff --check b3035fe292168bc598b5d67e77203e2b65404578 HEAD
+      - name: Full upstream Linux suite shard
+        if: matrix.shard != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/run-bun-test-batches.sh '${{ matrix.shard }}' 2>&1 | tee evidence/full-suite.log
+      - name: Isolated worker-heavy Linux cases
+        if: matrix.lane == 'linux-1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' file; do
+            timeout 180 bun test "$file" > "evidence/$(basename "$file").log" 2>&1 || status=1
+            cat "evidence/$(basename "$file").log"
+          done < <(find tests -type f \( -name 'api-storage-policy*.test.ts' -o -name 'api-storage.test.ts' -o -name 'api-usage.test.ts' \) -print0)
+          exit "$status"
+      - name: Preserve exact-tree evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integrated-steering-${{ matrix.lane }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-depth: 32
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 98716fb54f2173ef2bf7a6bd0f44547af5f47467
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - run: python payload/.github/steering-followup/prepare-integrated.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Build documentation without deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUN_BIN="$(command -v bun)"
+          cd docs-site
+          "$BUN_BIN" install --frozen-lockfile --ignore-scripts
+          "$BUN_BIN" --bun run build 2>&1 | tee ../evidence/docs-build.log
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integrated-steering-docs
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+
+  # Only this non-testing job has write permission. It repeats the exact
+  # integrity checks and deterministic merge; no proposed application code,
+  # dependencies or repository hooks execute with the push credential.
+  publish:
+    needs: [validate, docs]
+    if: github.repository == 'luvs01/opencodex'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 978b27c2478e5dabc93829a1d920b84a09614fae
+          fetch-depth: 32
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 98716fb54f2173ef2bf7a6bd0f44547af5f47467
+          path: payload
+          sparse-checkout: .github/steering-followup
+          persist-credentials: false
+      - name: Reproduce validated feature commit and tree
+        run: python payload/.github/steering-followup/prepare-integrated.py
+      - name: Fast-forward only the feature branch, without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git HEAD:refs/heads/codex/astra-native-steering-20260916
+          printf 'Feature commit: `%s`\nTree: `%s`\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
