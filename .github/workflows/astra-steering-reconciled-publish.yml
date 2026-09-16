@@ -1,0 +1,105 @@
+name: Publish PR 4782 fixes after maintainer reconciliation
+on:
+  push:
+    branches: [codex/astra-steering-workspace-20260916]
+    paths: [.github/workflows/astra-steering-reconciled-publish.yml]
+permissions:
+  contents: read
+jobs:
+  evidence:
+    if: github.repository == 'luvs01/opencodex'
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require all seven exact-source validation jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          expected = {'docs', 'verify (ubuntu-24.04, linux-1, 1/4, true)', 'verify (ubuntu-24.04, linux-2, 2/4, false)', 'verify (ubuntu-24.04, linux-3, 3/4, false)', 'verify (ubuntu-24.04, linux-4, 4/4, false)', 'verify (windows-latest, windows, true)', 'verify (macos-15, macos, true)'}
+          root = 'https://api.github.com/repos/luvs01/opencodex/actions/runs/35079135199'
+          def get(path):
+              req = urllib.request.Request(root + path, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'User-Agent': 'PR4782-author-verification'})
+              with urllib.request.urlopen(req, timeout=30) as response: return json.load(response)
+          run = get('')
+          assert run['head_sha'] == 'd275d6e8ab70c3e972862d7b25d055bcc1530526'
+          assert run['path'] == '.github/workflows/astra-steering-author-followup.yml'
+          for attempt in range(75):
+              jobs = {job['name']: job for job in get('/jobs?per_page=100')['jobs'] if job['name'] in expected}
+              assert set(jobs) == expected
+              failed = [name for name, job in jobs.items() if job['status'] == 'completed' and job['conclusion'] != 'success']
+              assert not failed, failed
+              if all(job['conclusion'] == 'success' for job in jobs.values()):
+                  print(json.dumps({name: job['conclusion'] for name, job in jobs.items()}, indent=2))
+                  break
+              time.sleep(10)
+          else: raise RuntimeError('Required exact-source tests have not completed; publication refused')
+          PY
+  publish:
+    needs: evidence
+    if: github.repository == 'luvs01/opencodex'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 5cfc0c8795e128c2876aa20d75dbf3644fe65687
+          fetch-depth: 128
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: e2a58fc06427733d314abd58be85b3db4e3dc0a3
+          path: payload
+          sparse-checkout: .github/steering-review-fix
+          persist-credentials: false
+      - name: Reproduce the exact source that passed all checks
+        run: python3 payload/.github/steering-review-fix/prepare.py
+      - name: Preserve the maintainer commit and assert identical source tree
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          parent = '69efec0d56146bc45374560f263b004c031734f9'
+          tree = '7f53b35f2a90dccc311cebef7e82dea0ac860d3c'
+          head = 'ce26f3ea367cba9e26745be9d70ad13c240f3a3b'
+          def git(*args, **kwargs): return subprocess.check_output(['git', *args], **kwargs)
+          git('fetch', '--no-tags', '--depth=128', 'https://github.com/luvs01/opencodex.git', parent)
+          assert git('rev-parse', parent + '^{tree}').decode().strip() == '5a2dda715e8e63b5fab24df6183b2fdc5961ec9f'
+          patch = git('diff', '--binary', parent, 'e9621393f0cd8b02636bac82b538a7ab419fe283')
+          assert hashlib.sha256(patch).hexdigest() == '01c1a0171b0686c8e701b9e78d7619e74ebe4932fb0203f1f6027223b35b8ea4'
+          message = 'fix(responses): address native steering review findings\n\nClear unstarted and superseded channel ownership, append bounded replay without argument spreading, and add six red-to-green regressions. Consolidate architecture notes into short links and document native control helpers. Preserve the maintainer-integrated dev branch without rewriting its history.\n'
+          env = dict(os.environ, GIT_AUTHOR_NAME='luvs01', GIT_COMMITTER_NAME='luvs01', GIT_AUTHOR_EMAIL='27862058+luvs01@users.noreply.github.com', GIT_COMMITTER_EMAIL='27862058+luvs01@users.noreply.github.com', GIT_AUTHOR_DATE='2026-09-16T09:26:00Z', GIT_COMMITTER_DATE='2026-09-16T09:26:00Z')
+          created = git('commit-tree', tree, '-p', parent, input=message.encode(), env=env).decode().strip()
+          assert created == head, created
+          git('reset', '--hard', created)
+          git('merge-base', '--is-ancestor', parent, head)
+          git('merge-base', '--is-ancestor', 'ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa', head)
+          git('diff', '--check', 'ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa', head)
+          assert git('diff', '--name-only', 'e9621393f0cd8b02636bac82b538a7ab419fe283', head) == b''
+          Path('evidence/published-identity.json').write_text(json.dumps({'head':head,'tree':tree,'parent':parent,'testedCommit':'e9621393f0cd8b02636bac82b538a7ab419fe283','testedRun':35079135199}, indent=2))
+          PY
+      - name: Fast-forward only the unchanged contributor branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch=refs/heads/codex/astra-native-steering-20260916
+          current="$(git ls-remote https://github.com/luvs01/opencodex.git "$branch" | cut -f1)"
+          test "$current" = 69efec0d56146bc45374560f263b004c031734f9
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git "HEAD:$branch"
+          cat evidence/published-identity.json >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr4782-reconciled-publication
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
