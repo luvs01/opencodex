@@ -1,0 +1,45 @@
+name: Native control development inputs
+on:
+  push:
+    branches: [codex/ws-inject-workspace-20260917]
+    paths: [.github/workflows/ws-inject-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: cfdf5c3795da41ec22bc4b754645f685cdc1d0c6
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle public source delta
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/native-control-inputs
+          git fetch --no-tags https://github.com/luvs01/opencodex.git 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          git update-ref refs/heads/steering-parent 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          git update-ref refs/heads/pinned-dev cfdf5c3795da41ec22bc4b754645f685cdc1d0c6
+          git fetch --no-tags https://github.com/luvs01/opencodex.git 5cfc0c8795e128c2876aa20d75dbf3644fe65687
+          git bundle create /tmp/native-control-inputs/source.bundle refs/heads/steering-parent refs/heads/pinned-dev ^5cfc0c8795e128c2876aa20d75dbf3644fe65687 ^ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa
+      - uses: ./.github/actions/setup-project-bun
+      - name: Include public locked dependencies and runtime only
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile --ignore-scripts
+          cp "$(command -v bun)" /tmp/native-control-inputs/bun
+          bun --version > /tmp/native-control-inputs/bun-version.txt
+          cp package.json bun.lock /tmp/native-control-inputs/
+          tar -czf /tmp/native-control-inputs/dependencies.tar.gz node_modules
+          # No runner home, credentials, environment or Git config in artifacts.
+          sha256sum /tmp/native-control-inputs/* > /tmp/native-control-inputs/SHA256SUMS.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-control-inputs
+          path: /tmp/native-control-inputs
+          retention-days: 2
+          compression-level: 0
+          if-no-files-found: error
