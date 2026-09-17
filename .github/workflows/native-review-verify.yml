@@ -1,0 +1,169 @@
+name: Verify native-control review updates
+on:
+  push:
+    branches: [codex/native-review-validation-20260917]
+    paths: [.github/workflows/native-review-verify.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, stage: '4858', label: '4858-linux' }
+          - { os: ubuntu-24.04, stage: '4861', label: '4861-linux' }
+          - { os: ubuntu-24.04, stage: '4864', label: '4864-linux' }
+          - { os: windows-latest, stage: '4864', label: '4864-windows' }
+          - { os: macos-15, stage: '4864', label: '4864-macos' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7a9a6d28dd8680cce890e06813e4a08796624d0a
+          fetch-depth: 256
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 825edaae2e935d90d6228e5b190cd9ddf700e144
+          path: payload
+          sparse-checkout: .github/native-review-fixes
+          persist-credentials: false
+      - name: Reconstruct exact reviewed source and parent order
+        run: python payload/.github/native-review-fixes/prepare.py ${{ matrix.stage }}
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked project dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --version | tee evidence/bun-version.txt
+          bun run typecheck 2>&1 | tee evidence/typecheck.log
+      - name: Native control and shared transport regressions
+        shell: bash
+        env:
+          REVIEW_STAGE: ${{ matrix.stage }}
+        run: |
+          set -euo pipefail
+          files=(tests/responses/ws-native-attachment-review.test.ts
+            tests/responses/ws-native-injection.test.ts tests/responses/ws-native-steering.test.ts
+            tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts
+            tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts
+            tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts
+            tests/responses/responses-core-modules.test.ts tests/ci-workflows/file-size-ratchet.test.ts
+            tests/test-layout.test.ts tests/test-layout-tooling.test.ts)
+          if [ "$REVIEW_STAGE" != 4858 ]; then files+=(tests/responses/ws-native-result-continuations.test.ts); fi
+          if [ "$REVIEW_STAGE" = 4864 ]; then files+=(tests/responses/ws-steering-stability.test.ts); fi
+          bun test --isolate --timeout 60000 "${files[@]}" 2>&1 | tee evidence/focused.log
+      - name: Privacy, architecture, size and source checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          bun scripts/file-size-ratchet.ts 2>&1 | tee evidence/ratchet.log
+          git diff --exit-code HEAD
+          git diff --check 7a9a6d28dd8680cce890e06813e4a08796624d0a HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-review-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7a9a6d28dd8680cce890e06813e4a08796624d0a
+          fetch-depth: 256
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 825edaae2e935d90d6228e5b190cd9ddf700e144
+          path: payload
+          sparse-checkout: .github/native-review-fixes
+          persist-credentials: false
+      - run: python payload/.github/native-review-fixes/prepare.py 4864
+      - uses: ./.github/actions/setup-project-bun
+      - name: Build integrated documentation without deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd docs-site
+          bun install --frozen-lockfile
+          bun run build 2>&1 | tee ../evidence/docs.log
+          cd ..
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-review-docs
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    if: github.repository == 'luvs01/opencodex'
+    needs: [verify, docs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7a9a6d28dd8680cce890e06813e4a08796624d0a
+          fetch-depth: 256
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 825edaae2e935d90d6228e5b190cd9ddf700e144
+          path: payload
+          sparse-checkout: .github/native-review-fixes
+          persist-credentials: false
+      - name: Reconstruct Git objects only, without application or dependency execution
+        run: python payload/.github/native-review-fixes/prepare.py 4864
+      - name: Publish all three expected heads atomically with explicit leases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url=https://github.com/luvs01/opencodex.git
+          b1=refs/heads/codex/native-response-inject-20260917
+          b2=refs/heads/codex/native-result-continuations-20260917
+          b3=refs/heads/codex/steering-stability-20260917
+          o1=7a9a6d28dd8680cce890e06813e4a08796624d0a
+          o2=59a1d6357e018d44104a50b1126350b72368c81d
+          o3=7b548ad85e8f2a6af313198fa68a4111003cbb05
+          n1=95363c18561a27e4b8fd363be5d6d9e10e74c332
+          n2=c409433615bcb6e107de95293f437c8f296e4310
+          n3=6f522b49d0ce1ec1fff25719d2223d289f2fcd96
+          test "$(git ls-remote "$url" "$b1" | cut -f1)" = "$o1"
+          test "$(git ls-remote "$url" "$b2" | cut -f1)" = "$o2"
+          test "$(git ls-remote "$url" "$b3" | cut -f1)" = "$o3"
+          git merge-base --is-ancestor "$o1" "$n1"
+          git merge-base --is-ancestor "$n1" "$n2"
+          git merge-base --is-ancestor "$n2" "$n3"
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push --atomic \
+            "--force-with-lease=$b1:$o1" "--force-with-lease=$b2:$o2" "--force-with-lease=$b3:$o3" \
+            "$url" "$n1:$b1" "$n2:$b2" "$n3:$b3"
+          git ls-remote "$url" "$b1" "$b2" "$b3" > evidence/published-refs.txt
+          cat evidence/published-refs.txt >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-review-publication
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
