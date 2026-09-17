@@ -308,3 +308,58 @@ compatibility certification. End-to-end live client/backend verification remains
 before promoting this experimental option to a default.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
+
+
+## Experimental native tool-result injection
+
+`src/server/responses/native-response-control.ts` is the internal, connection-owned
+transport interface shared with steering; its destination predicate cannot authorize
+a gateway, translated lane or a caller-selected credential. The new
+`codexNativeInjection` schema flag defaults off and does not change catalog metadata.
+`src/server/responses/native-injection.ts` is a separate state machine: multi-agent
+injection and user steering are not interchangeable and do not share replay rules.
+
+Selection requires explicit multi-agent mode and the caller's
+`responses_multi_agent=v1` beta. Native routes are canonical ChatGPT forward and
+operator-opted official OpenAI API-key Responses WS, never a lookalike origin or
+an overridden non-Responses path. `src/adapters/openai-responses/passthrough.ts`
+forwards the noncredential beta header only to the official API when no provider
+header owns it. Existing provider credentials and all dispatch/admission gates stay
+in charge. A private physical connection, never an idle pooled socket, owns the
+response. API-key admission is unchanged; canonical sends recheck the captured
+account guard. A transport fallback makes injection explicitly unsupported.
+
+Only string-valued saved `function_call_output` input for an observed, declared,
+flat client function is admitted. `multi_agent_call` is server work. A result is
+reserved once per call ID; validation and snapshots precede sending. One physical
+packet is outstanding at a time, because a public success ACK has no per-injection
+ID. The bounded FIFO is original unsent work, not retry. Every upstream ACK must
+match the root and increase the ACK sequence; a rejection must echo the pending
+input. Reentrant sends cannot reorder relayed acknowledgements. Completion is not
+the end of delivery until every injection settles. Already advertised late results
+can still receive the server's real rejection after completion. New creates cannot
+cancel pending injections. No success/rejection ACK, sequence number, tool result
+or model capability is fabricated.
+
+Limits: 32 pending packets, 8 MiB serialized packet data, 1,024 calls / 256 KiB IDs,
+32 MiB replay, a fixed 90-second ACK deadline, existing configured active-response
+idle deadline, and 90 seconds of terminal late-result grace. Output progress cannot
+extend the ACK deadline. Detach/shutdown invalidates timers and queued microtasks.
+Unknown delivery never authorizes an automatic result resend, HTTP retry or account
+rotation. Named multiplexed lanes and wider tool result schemas remain unsupported.
+
+`src/server/responses/native-injection-replay.ts` keeps only acknowledged results in
+completed replay, inserts them once after matching calls, and preserves opaque
+agent output. Missing/conflicting acknowledged call identity is an explicit failure,
+not a truncated history. The original body persistence restriction still governs
+the callback. Failure echoes and generic injection error payloads are not log
+samples; numeric response usage remains available. Unknown/malformed downstream
+control events receive content-free errors without cancelling the active turn;
+`response.processed` is the intentional no-op exception. Live sideband is unchanged.
+
+`tests/responses/ws-native-injection.test.ts` exercises the real handler/dispatch/
+relay boundary; `tests/responses/ws-native-injection-state.test.ts` drives deterministic
+ACK deadlines, FIFO limits, ownership and committed-only replay. These fixtures do
+not certify a real model, ChatGPT account entitlement or Codex UI workflow. The
+public contract is taken from OpenAI's Multi-agent WS guide and Python SDK schema
+`b77076d23b6f3e34453b0fadd8cd2a001627e365`; live qualification is a separate gate.

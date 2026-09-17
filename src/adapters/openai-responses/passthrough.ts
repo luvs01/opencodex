@@ -248,6 +248,11 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // client fingerprint. This is a single non-credential fallback, not broader caller-header
       // forwarding. Static provider headers remain authoritative in either auth mode.
       applyCallerUserAgentFallback(headers, incoming);
+      if (provider.authMode !== "forward" && isOpenAiOperatedResponsesDestination(provider)
+        && !Object.keys(headers).some(name => name.toLowerCase() === "openai-beta")) {
+        const beta = incoming.headers.get("openai-beta");
+        if (beta) headers["openai-beta"] = beta;
+      }
 
       const forward = provider.authMode === "forward";
       let convertedRoutedCustomToolNames: Set<string> | undefined;

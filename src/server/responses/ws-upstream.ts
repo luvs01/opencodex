@@ -1,4 +1,4 @@
-import type { NativeSteeringChannel } from "./native-steering";
+import type { NativeResponseControl } from "./native-response-control";
 // Upstream WebSocket transport for the ChatGPT Codex backend.
 //
 // Why this exists: the Codex backend serves the responses_websockets path from
@@ -130,7 +130,7 @@ export function codexWsUpstreamFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   onQuota?: CodexWsQuotaObserver,
   beforeDispatch?: (headers: Headers) => void,
-  nativeSteering?: NativeSteeringChannel,
+  nativeSteering?: NativeResponseControl,
   beforeContinuation?: () => Promise<void>,
 ): Promise<Response> {
   const prepared = prepareCodexWsRequest(url, init);
@@ -145,6 +145,14 @@ export function codexWsUpstreamFetch(
   }
 
   const { frameText, headers } = prepared;
+  const control = prepared.canonical || (nativeSteering?.kind === "injection" && url === "https://api.openai.com/v1/responses") ? nativeSteering : undefined;
+  if (control?.kind === "injection") {
+    const body = JSON.parse(frameText) as Record<string, unknown>;
+    const multi = body.multi_agent as Record<string, unknown> | undefined;
+    if (multi?.enabled !== true || !headers["openai-beta"]?.split(",").some(value => value.trim() === "responses_multi_agent=v1")) {
+      return Promise.reject(new Error("Native injection requires the unchanged multi-agent mode and responses_multi_agent=v1 beta header."));
+    }
+  }
 
   // Decide before dialing. Once the socket is open the caller already holds a
   // streaming Response, so the oversized close can only be surfaced as a stream
@@ -174,7 +182,7 @@ export function codexWsUpstreamFetch(
   try {
     // Steering keeps a private physical connection across successor responses; it
     // must never enter the idle-socket pool or move to a different credential.
-    const identity = nativeSteering && prepared.canonical ? null : codexWsReuseIdentity(url, headers, frameText, proxy);
+    const identity = control ? null : codexWsReuseIdentity(url, headers, frameText, proxy);
     session = (identity ? codexWsPool.acquire(identity, wsUrl, headers, proxy) : null)
       ?? new CodexWsSession(wsUrl, headers, false, undefined, proxy);
     if (!session.busy && !session.reserve()) {
@@ -186,7 +194,7 @@ export function codexWsUpstreamFetch(
   }
   return codexWsExchange({
     session, url, init, prepared, sseFallback, onQuota, beforeDispatch,
-    nativeSteering: prepared.canonical ? nativeSteering : undefined,
+    nativeSteering: control,
     beforeContinuation,
     bunVersion: typeof runtime === "string" ? runtime : runtime.version,
   });

@@ -187,3 +187,5 @@ translation boundary and verifies that rejection sends no upstream request.
 Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](../transports/byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
+
+Native multi-agent control handling follows the [injection contract](../transports/streaming-health.md#experimental-native-tool-result-injection); this area does not infer backend capability or bypass ordinary routing/authentication.

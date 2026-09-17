@@ -57,7 +57,7 @@ The prefilter is only an optimization, not final process-membership authority.
 | `src/server/audio-live.ts`, `src/server/audio-dictation.ts` | External voice/dictation orchestration using the existing bounded socket relay, server-owned credentials, cancellation and opaque call ownership. See [streaming audio](data-planes/inbound-compat.md#streaming-audio). |
 | `src/config.ts` | Persisted `~/.opencodex/config.json` surface: the facade keeps the load/save/initialize entry points and re-exports, while schema lives in `src/config/schema/` (`config-schema.ts`, `leaf-validators.ts`), defaults in `src/config/proxy-env.ts`, and replace-path persistence in `src/config/persist-unlocked.ts`. |
 | `src/config/paths.ts` | Resolves `OPENCODEX_HOME`, `config.json`, and owner-only directory hardening. |
-| `src/config/atomic-write.ts` | Shared synchronous/asynchronous temp-harden-rename writer and residual-temp failure contract. |
+| `src/config/atomic-write.ts` | Shared synchronous/asynchronous temp-harden-rename writer and residual-temp failure contract. The temp is ACL-hardened before it holds a byte and again before the rename, both `required: true`; the second call is a memo hit rather than a second icacls sequence because the writer re-asserts descriptor/path identity after the content write and re-attributes the harden through `reattributeHardenedSecretPath`. Windows takes no `chmod` on that path — it sets the read-only attribute, not the DACL, and its ChangeTime bump is what used to retire the memo. |
 | `src/config/process-state.ts` | Owns `ocx.pid`, `runtime-port.json`, cheap liveness, full command-line identity verification, and snapshot-guarded cleanup. |
 | `src/server/ports.ts` | Owns bind availability and ephemeral-port selection. Temporary probes dispose accepted peers and wait for listener close before reporting success. |
 | `src/cli/status.ts` / `src/cli/status-probes.ts` | Status snapshot assembly and the shared read-only health/stale-process probes used by status and doctor. Probe evidence keeps recorded-port choice, before/after snapshots and per-call timer cleanup together. |
@@ -110,6 +110,9 @@ described in [OpenAI quota ownership](providers/openai-tiers.md#public-provider-
 until shutdown. Normal shutdown restores native Codex. Service mode sets
 `OCX_SERVICE=1`, so managed restarts do not repeatedly restore/reinject; explicit service stop and
 uninstall still restore.
+
+An explicit Codex integration OFF skips startup cache invalidation before the user-scoped catalog
+serialization lock is resolved. Explicit `sync` and `sync-cache` retain their catalog-only override.
 
 `startServer` composes up to three sockets in one synchronous startup transaction: the public data
 listener, the optional unauthenticated data-loopback listener, and the optional hub-management
@@ -511,3 +514,5 @@ stamps the configured key selected for the physical request. `src/server/request
 retains per-key attempt usage, and `src/usage/log.ts` validates and persists labels. The
 [account attribution contract](gui-and-management-api.md#upstream-key-account-attribution)
 defines identity, unknown records, and aggregation boundaries.
+
+Native multi-agent control handling follows the [injection contract](transports/streaming-health.md#experimental-native-tool-result-injection); this area does not infer backend capability or bypass ordinary routing/authentication.

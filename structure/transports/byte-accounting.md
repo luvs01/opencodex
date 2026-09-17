@@ -98,3 +98,5 @@ invent usage for an unreported failed send, retry a failed factory, or turn fail
 Source-iteration exceptions still propagate to the caller. Returning the guard iterator closes
 its active source; cancellation at an assistant boundary does not start the continuation callback.
 The same focused tests cover these lifecycle paths and Unicode code-unit limit boundaries.
+
+Native multi-agent control handling follows the [injection contract](streaming-health.md#experimental-native-tool-result-injection); this area does not infer backend capability or bypass ordinary routing/authentication.

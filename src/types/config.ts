@@ -751,6 +751,8 @@ export interface OcxConfig {
   websockets?: boolean;
   /** Experimental single-lane native OpenAI WebSocket steering; default off. */
   codexNativeSteering?: boolean;
+  /** Opt-in saved function-result injection for native multi-agent WebSocket turns. */
+  codexNativeInjection?: boolean;
   /**
    * Opt-in auto-cleanup policy for archived Codex sessions (issue #42 Phase 3).
    * Default OFF (`enabled` false / unset). Never enabled implicitly.

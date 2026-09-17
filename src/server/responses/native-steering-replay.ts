@@ -18,6 +18,8 @@ export interface NativeSteeringReplayObserver {
   submitted(frame: Frame): () => void;
   observe(frame: Frame): void;
   dispose(): void;
+  /** Optional final commit after every control acknowledgement has settled. */
+  finish?(): void;
 }
 
 /** Keep bounded, connection-local input until a validated successor commits it. */

@@ -920,3 +920,63 @@ The implementation has synthetic protocol and regression coverage, not live Astr
 certification. Keep the option disabled for production work until your client/model path
 has been verified. Set `codexNativeSteering` to `false` and restart to restore the existing
 single-response relay; no account or conversation files need to be deleted.
+
+
+### Experimental native tool-result injection
+
+The pending native-control follow-up adds `codexNativeInjection` (default off).
+It is distinct from `codexNativeSteering`: injection supplies an already executed
+function result to an active multi-agent response; steering supplies a new user
+instruction. Enabling either option does not grant model or account capabilities.
+The Multi-agent beta is not advertised as an Astra-only or ChatGPT-account entitlement.
+
+Merge `"websockets": true` and `"codexNativeInjection": true` into the existing
+configuration and restart before opening a new connection. The caller must send
+`OpenAI-Beta: responses_multi_agent=v1` and start a `response.create` request with
+`multi_agent: { "enabled": true }` and its declared function tools. Official API-key
+providers additionally need `upstreamWebsocket: true`; the configured API key, not
+the inbound caller bearer, remains the API credential. A configured provider beta
+header remains authoritative. ChatGPT and API-key credentials are never exchanged.
+
+Supported transport routes are the canonical ChatGPT Codex Responses endpoint and
+an explicitly opted-in official `https://api.openai.com/v1/responses` destination.
+Whether a real ChatGPT account/backend accepts this beta is **not live-verified**.
+Gateways, translated/sidecar/Combo routes, HTTP fallback and multiplexed lanes do
+not gain injection support. This first implementation accepts only string-valued
+`function_call_output` items for flat, developer-declared `function` tools whose
+completed calls were observed on that same response. It never executes tools,
+accepts privileged messages, or treats server-owned `multi_agent_call` items as
+client work.
+
+Send saved outputs as `response.inject`, with `response_id` from `response.created`.
+Only the actual upstream `response.inject.created` confirms commitment. A real
+`response.inject.failed` returns the uncommitted input to the same client; the
+proxy neither reruns the tool nor retries the result. If the response already
+completed, the client can supply the returned saved result on its next ordinary
+request. Never resend an accepted result or infer success from a successful send.
+
+A bounded FIFO serializes injection packets because a success acknowledgement has
+no individual injection ID. At most 32 packets and 8 MiB of serialized packet data
+may be queued. The session tracks at most 1,024 calls / 256 KiB of call IDs, and
+replay retains at most 32 MiB. Overflow is explicit, not silent truncation. Each
+physical injection has a fixed 90-second acknowledgement deadline that output
+progress cannot extend. After root completion the connection stays available for
+outstanding confirmations and late results from already advertised calls; a
+90-second terminal wait bounds that state. A new ordinary create may leave this
+state only when no submitted injection awaits its acknowledgement. Disconnects,
+send errors and timeouts leave uncertain delivery; no automatic replay occurs.
+
+Only acknowledged injected results enter completed local replay, immediately after
+their matching calls and exactly once. Opaque agent output and agent tags are kept;
+missing/conflicting replay identity fails explicitly. Non-persistable request-body
+policy is still enforced. Injection failure echoes and generic injection error
+payloads are not sampled into request logs. Numeric terminal usage is retained.
+
+Malformed JSON, invalid event envelopes and unsupported Responses control messages
+now receive content-free errors instead of disappearing. `response.processed`
+remains an intentional no-op acknowledgement. Unknown controls do not cancel an
+active turn, trigger an HTTP retry, or get forwarded speculatively. The separate
+live/realtime relay is unchanged. Turn off `codexNativeInjection` and restart to
+roll back the experimental injection path without deleting accounts or histories.
+
+Protocol: [OpenAI Multi-agent WebSocket guide](https://developers.openai.com/api/docs/guides/responses-multi-agent).

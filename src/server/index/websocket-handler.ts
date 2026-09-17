@@ -1,3 +1,5 @@
+import { NativeInjectionChannel } from "../responses/native-injection";
+import type { NativeResponseControl } from "../responses/native-response-control";
 import { NativeSteeringChannel, NativeSteeringError } from "../responses/native-steering";
 import { createNativeSteeringLogObserver } from "../responses/native-steering-log";
 import type { Server, ServerWebSocket } from "bun";
@@ -188,10 +190,20 @@ export function createWebsocketHandler(ctx: ServeOptionsContext) {
         try {
           frame = JSON.parse(typeof raw === "string" ? raw : raw.toString()) as Record<string, unknown>;
         } catch {
-          return; // text-only contract; ignore unparseable frames
+          sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", code: "invalid_json", message: "Expected valid JSON for a Responses event." }));
+          return;
         }
-        if (frame.type === "response.steer" || (frame.type === "response.create" && ws.data.nativeSteering)) {
+        if (!frame || typeof frame !== "object" || Array.isArray(frame) || typeof frame.type !== "string") {
+          sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", code: "invalid_event", message: "Expected a typed Responses event object." }));
+          return;
+        }
+        if (frame.type === "response.inject" || frame.type === "response.steer" || (frame.type === "response.create" && ws.data.nativeSteering)) {
           try {
+            if (frame.type === "response.inject") {
+              if (!ws.data.nativeSteering?.inject) throw new NativeSteeringError("injection_not_supported", "Native injection is disabled or unavailable on this route.");
+              ws.data.nativeSteering.inject(frame);
+              return;
+            }
             if (frame.type === "response.steer") {
               if (!ws.data.nativeSteering) throw new NativeSteeringError("steering_not_supported", "Native steering is disabled or unavailable on this route.");
               ws.data.nativeSteering.steer(frame);
@@ -208,19 +220,30 @@ export function createWebsocketHandler(ctx: ServeOptionsContext) {
           }
         }
         if (frame.type === "response.processed") return; // ack — no-op
-        if (frame.type !== "response.create") return;
+        if (frame.type !== "response.create") {
+          sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", code: "unsupported_event", message: "This Responses control event is not supported; the current turn was not cancelled." }));
+          return;
+        }
         markActivity("ws response.create");
 
         ws.data.cancel?.();
         // A superseded turn must not keep ownership during warmup or refusal.
         ws.data.nativeSteering = undefined;
-        let nativeSteering: NativeSteeringChannel | undefined;
+        let nativeSteering: NativeResponseControl | undefined;
         try {
           const idleMs = typeof config.stallTimeoutSec === "number" && Number.isFinite(config.stallTimeoutSec)
             ? Math.max(1, config.stallTimeoutSec) * 1000 : 300_000;
-          nativeSteering = config.codexNativeSteering === true ? new NativeSteeringChannel(frame, idleMs) : undefined;
-        } catch {
-          sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", message: "Invalid native steering request settings" }));
+          const multi = frame.multi_agent;
+          const multiAgent = multi !== null && typeof multi === "object" && !Array.isArray(multi) && (multi as Record<string, unknown>).enabled === true;
+          if (config.codexNativeInjection === true && multiAgent
+            && !ws.data.headers?.get("openai-beta")?.split(",").some(value => value.trim() === "responses_multi_agent=v1")) {
+            throw new NativeSteeringError("injection_not_supported", "Native injection requires the responses_multi_agent=v1 beta header.");
+          }
+          nativeSteering = config.codexNativeInjection === true && multiAgent
+            ? new NativeInjectionChannel(frame, idleMs)
+            : config.codexNativeSteering === true && !multiAgent ? new NativeSteeringChannel(frame, idleMs) : undefined;
+        } catch (error) {
+          sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", code: error instanceof NativeSteeringError ? error.code : "invalid_input", message: error instanceof NativeSteeringError ? error.message : "Invalid native response control settings" }));
           return;
         }
         const turnId = (ws.data.turnId ?? 0) + 1;
@@ -312,7 +335,7 @@ export function createWebsocketHandler(ctx: ServeOptionsContext) {
             await sendResponseToWebSocket(ws, response, isCurrent, {
               untilEof: nativeSteering?.relayActive === true,
               onSsePayload: nativeSteering?.relayActive
-                ? createNativeSteeringLogObserver(logCtx, () => recordFirstOutput(logCtx, start))
+                ? createNativeSteeringLogObserver(logCtx, () => recordFirstOutput(logCtx, start), nativeSteering.kind)
                 : payload => inspectResponseLogSsePayload(logCtx, payload),
               onTerminal: status => {
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);

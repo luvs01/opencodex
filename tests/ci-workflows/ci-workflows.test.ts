@@ -55,10 +55,10 @@ function hasExactShellCommand(run: string | undefined, expected: string): boolea
 
 /**
  * Same intent as {@link hasExactShellCommand}, but for a command that is the HEAD of a
- * pipeline. The retry loops capture the suite with `… 2>&1 | tee "$suite_log"`, so an exact
- * whole-line match would reject the very shape the retry requires. Anchoring at the start of
- * the line still rejects an `echo` of the command or a commented-out copy, which is what the
- * exact match was protecting against.
+ * pipeline. Each platform lane captures the suite with `… 2>&1 | tee "$suite_log"` so the
+ * classifier can read what Bun printed, and an exact whole-line match would reject that shape.
+ * Anchoring at the start of the line still rejects an `echo` of the command or a commented-out
+ * copy, which is what the exact match was protecting against.
  */
 function hasShellCommandHead(run: string | undefined, expected: string): boolean {
   return (run ?? "")
@@ -259,24 +259,22 @@ describe("GitHub Actions hardening", () => {
     expect(macosShards?.["fail-fast"]).toBe(false);
     expect(macosShards?.matrix?.shard).toEqual([1, 2]);
 
-    // The macOS leg retries ONLY a Bun runtime crash, and only once. Bun 1.3.14
-    // segfaults reclaiming a Worker at an `--isolate` file boundary with
-    // balanced worker counts, which is a runtime defect rather than a test
-    // result; the Linux shards already absorb that class in
-    // `scripts/ci/run-bun-test-batches.sh`. Two ways to break this silently:
-    // drop the crash-signature guard so an assertion failure gets retried into
-    // green, or let the retry loop swallow a repeated crash. Pin both.
+    // The macOS leg retries NOTHING. It carried a crash-only retry until
+    // 2026-09-17, on the reasoning that a Bun panic is a runtime defect rather than a
+    // test result. Both halves of that are true and the conclusion still does not
+    // follow: a panic is process death a user would have seen, and a second execution
+    // that happens not to die does not un-kill the first. Pin the absence of the loop
+    // and of its vocabulary, so it cannot return in a renamed form.
     const macosTestRun = macosTestStep?.run ?? "";
     // Actions invokes multiline `run:` blocks with `bash -e`. The retry loop
-    // must disable errexit before the crash-prone command or exit 133 aborts
-    // the step before PIPESTATUS can be inspected and the retry can run.
+    // is gone but errexit must still be disabled before the crash-prone command:
+    // otherwise exit 133 aborts the step before PIPESTATUS can be inspected and the
+    // failure is reported without saying what kind it was.
     expect(hasExactShellCommand(macosTestRun, "set +e")).toBe(true);
-    expect(macosTestRun).toContain("Segmentation fault at address");
-    expect(macosTestRun).toContain("oh no: Bun has crashed");
-    expect(macosTestRun).toContain("assertion failures are not retried");
-    expect(macosTestRun).toContain("failing after one retry");
-    // `for attempt in 1 2` — one retry, never an unbounded loop.
-    expect(macosTestRun).toContain("for attempt in 1 2");
+    // The crash signatures themselves moved to scripts/ci/bun-crash-signatures.sh; that one
+    // definition and every lane that sources it are pinned by ci-bun-crash-classifier.test.ts.
+    expect(macosTestRun).toContain("it fails this leg on the first occurrence");
+    expect(macosTestRun).not.toContain("for attempt in");
     expect(macosTestRun).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
@@ -304,10 +302,9 @@ describe("GitHub Actions hardening", () => {
     expect(macosControlSteps.some(step => step.run?.includes("--shard"))).toBe(false);
     const macosControlTestRun = macosControlSteps.find(step => step.run?.includes("bun test --isolate --timeout 60000 tests"))?.run ?? "";
     expect(hasExactShellCommand(macosControlTestRun, "set +e")).toBe(true);
-    expect(macosControlTestRun).toContain("for attempt in 1 2");
+    expect(macosControlTestRun).not.toContain("for attempt in");
     expect(macosControlTestRun).not.toContain("while true");
-    expect(macosControlTestRun).toContain("assertion failures are not retried");
-    expect(macosControlTestRun).toContain("failing after one retry");
+    expect(macosControlTestRun).toContain("it fails this leg on the first occurrence");
 
     // Windows is dispatch-only: it gates nothing, not even the shipping
     // boundary. The sharded promotion run surfaced ~207 Windows-only failures
@@ -355,42 +352,18 @@ describe("GitHub Actions hardening", () => {
     expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
       && step.run?.includes("git clean -xffd"))).toBe(true);
 
-    // The three crash-signature lists must stay identical, and they must not key on
-    // `panic(thread`.
-    //
-    // Bun emits BOTH `panic(thread 2852)` and `panic(main thread)` for the same class of
-    // failure, so a grep anchored on the numbered form silently misses half of them and the
-    // shard fails on a crash it was supposed to retry. This repository already learned that
-    // once — `devlog/_fin/260731_pr_issue_triage_round/050_windows_ci_flake_rca.md` names
-    // `Internal assertion failure` as the stable fingerprint — and #2152 reintroduced it.
-    // Three copies of one list is the real hazard, so pin the sync rather than the text.
-    const crashSignatures = [
-      "oh no: Bun has crashed",
-      "Internal assertion failure",
-      "Segmentation fault at address",
-      "Illegal instruction",
-      "Bus error",
-    ];
+    // The crash-signature list lives in exactly one file now, and every lane sources it.
+    // ci-bun-crash-classifier.test.ts owns that contract, including the rule that no lane may
+    // reintroduce an inline copy and that a runtime crash fails the shard instead of being swept.
     const windowsTestRun = windowsTestSteps[0]?.run ?? "";
-    const batchScript = await readText("scripts/ci/run-bun-test-batches.sh");
-    for (const signature of crashSignatures) {
-      expect(`macos:${signature}:${macosTestRun.includes(signature)}`).toBe(`macos:${signature}:true`);
-      expect(`macos-control:${signature}:${macosControlTestRun.includes(signature)}`).toBe(`macos-control:${signature}:true`);
-      expect(`windows:${signature}:${windowsTestRun.includes(signature)}`).toBe(`windows:${signature}:true`);
-      expect(`script:${signature}:${batchScript.includes(signature)}`).toBe(`script:${signature}:true`);
-    }
-    // The thread-numbered form must not be the anchor anywhere.
-    expect(macosTestRun).not.toContain("panic\\(thread");
-    expect(macosControlTestRun).not.toContain("panic\\(thread");
-    expect(windowsTestRun).not.toContain("panic\\(thread");
-    expect(batchScript).not.toContain("panic\\(thread");
 
-    // Windows carries the same bounded retry as macOS: one attempt, crash-only.
+    // Windows carries the same single-attempt disposition as macOS. It is also the lane
+    // that proved why: it was the only one reporting a Bun panic honestly on both of its
+    // attempts, which is the single reason the 1.4.2 preload segfault was visible at all.
     expect(hasExactShellCommand(windowsTestRun, "set +e")).toBe(true);
-    expect(windowsTestRun).toContain("for attempt in 1 2");
+    expect(windowsTestRun).not.toContain("for attempt in");
     expect(windowsTestRun).not.toContain("while true");
-    expect(windowsTestRun).toContain("assertion failures are not retried");
-    expect(windowsTestRun).toContain("failing after one retry");
+    expect(windowsTestRun).toContain("it fails this shard on the first occurrence");
 
     // Every job that runs the root suite must build the GUI first, unconditionally.
     // Tests that fetch the served dashboard read their session bootstrap out of

@@ -3,13 +3,13 @@ import type { OcxUsage } from "../../types";
 import { MAX_NATIVE_STEERING_RESPONSES } from "./native-steering";
 
 /** Count every terminal once. Control frames may echo user input: never sample them. */
-export function createNativeSteeringLogObserver(logCtx: RequestLogContext, onFirstOutput?: () => void): (payload: string) => void {
+export function createNativeSteeringLogObserver(logCtx: RequestLogContext, onFirstOutput?: () => void, mode: "steering" | "injection" = "steering"): (payload: string) => void {
   let outputSeen = false;
   const usages = new Map<string, OcxUsage>();
   return payload => {
     let event: { type?: string; delta?: unknown; response?: { id?: string; usage?: unknown; incomplete_details?: { reason?: string } } };
     try { event = JSON.parse(payload); } catch { return; }
-    if (event.type?.startsWith("response.steer.")) return;
+    if (event.type?.startsWith("response.steer.") || event.type?.startsWith("response.inject.") || (mode === "injection" && event.type === "error")) return;
     if (!outputSeen && event.type?.endsWith(".delta") && typeof event.delta === "string" && event.delta.length) {
       outputSeen = true; onFirstOutput?.();
     }

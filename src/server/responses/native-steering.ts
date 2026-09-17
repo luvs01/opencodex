@@ -96,6 +96,7 @@ function matchesRequirement(item: Frame, stub: Frame): boolean {
  * but cannot change settings/routing. General new turns still use normal dispatch.
  */
 export class NativeSteeringChannel {
+  readonly kind = "steering" as const;
   relayActive = false;
   replayFactory?: () => NativeSteeringReplayObserver;
   private replay?: NativeSteeringReplayObserver;

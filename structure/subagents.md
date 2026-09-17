@@ -388,3 +388,5 @@ Provider-scoped approval reviewer settings are projected by the [catalog owner](
 Renamed fixed-key providers receive [missing reasoning metadata](catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](transports/byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
+
+Native multi-agent control handling follows the [injection contract](transports/streaming-health.md#experimental-native-tool-result-injection); this area does not infer backend capability or bypass ordinary routing/authentication.

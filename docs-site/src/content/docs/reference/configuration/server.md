@@ -22,6 +22,7 @@ runs helper features around provider requests.
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
 | `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. Complete-input requests may reuse an upstream connection within the same selected credential, account, thread and turn; changed handshake policy or missing identity keeps requests on separate connections. This does not trim HTTP input or create previous-response IDs. |
 | `codexNativeSteering?` | `boolean` | `false` | Experimental, native-only mid-turn steering on the Responses WebSocket endpoint. Requires `websockets: true`, a compatible upstream/client, and unchanged model/settings for saved-tool-result continuations. Does not enable translated models or HTTP fallback. See [native steering](/guides/codex-integration/#experimental-native-mid-turn-steering). |
+| `codexNativeInjection?` | `boolean` | `false` | Experimental saved function-result injection for single-lane native multi-agent Responses WebSocket turns. Requires explicit beta/mode selection and a supported native destination; does not grant account/model capability. See [native injection](#codexnativeinjection). |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
 | `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Dashboard-managed. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
@@ -57,7 +58,8 @@ to send it again and answers HTTP 429 with `upstream_reset_replay_refused`. The 
 deliberate: a 5xx here is an instruction to most clients, including Codex, to send the whole
 turn again, which is the duplicate the refusal exists to prevent. No `Retry-After` is
 attached, and the proxy performs no key rotation, account failover or same-target replay on
-it. Tool-call side requests such as vision and web search are replayed normally, because
+it, nor does it record the refusal as rate-limit or quota evidence against the credential it
+was holding. Tool-call side requests such as vision and web search are replayed normally, because
 repeating them cannot duplicate a turn.
 
 `noProxy` accepts either a comma-separated string or an array. Both forms add entries without
@@ -570,3 +572,15 @@ A hub that serves its own local clients also sets
 [`unauthenticatedLoopbackListener`](#local-clients-that-cannot-receive-the-token). Its port-less
 companion form is what makes a hub a single-port deployment, and it is refused on a loopback or
 wildcard `hostname`, where the public listener already holds `127.0.0.1:<port>`.
+
+
+### `codexNativeInjection`
+
+Optional boolean, default **false**. Enables the experimental, single-lane native
+multi-agent saved-function-result control path; malformed values disable it. It
+requires `websockets`, explicit multi-agent mode and the caller's multi-agent beta
+header. API-key providers also require `upstreamWebsocket: true`. It neither changes
+account entitlements nor enables steering within a multi-agent turn.
+See [native tool-result injection](/guides/codex-integration/#experimental-native-tool-result-injection)
+for supported destinations, acknowledgement/queue limits and rollback. Unsupported
+controls return explicit errors even while this feature is disabled.

@@ -54,6 +54,13 @@ process-wide temp sequence, symlink target resolution, real-home test guard, own
 Windows ACL hardening, scrub-before-unlink failure path, and explicit residual-temp errors. A caller
 must not replace it with a local temp-and-rename shortcut.
 
+Windows hardening there is applied once per write, not once per harden call. Both calls stay
+`required: true` and still fail the write closed, but the pre-rename call resolves through the
+`src/lib/windows-secret-acl.ts` success memo: after the content write the writer re-asserts that the
+path still resolves to the object its descriptor holds, then re-attributes the memo to that same
+object so the freshness the data write moved does not read as a replacement. A different object, or
+one that cannot be observed, retires the memo and the pre-rename call performs the full sequence.
+
 > Decision record: [ADR-0016](decisions/ADR-0016-config-surface.md)
 
 `src/types.ts` is the shape; the load/validate pipeline lives in the split config leaves — schema in `src/config/schema/` (`config-schema.ts`, `leaf-validators.ts`) and replace-path persistence in `src/config/persist-unlocked.ts`, with `src/config.ts` as the compatibility facade — and is not reproduced here. What
@@ -324,3 +331,5 @@ The text-only consumer reads exact inputModalities declarations before legacy hi
 ## Catalog auto-refresh
 
 `catalogAutoRefresh` on `src/types/config.ts` stores an optional `enabled` / `intervalMinutes` section that defaults off: an absent key, an explicit false, and a malformed value all leave the scheduler dormant. `src/config/feature-flags.ts` resolves the cadence; an explicit `intervalMinutes: 0` keeps the unref'd timer idle, and any other value is clamped up to 15 minutes because upstream `/models` caches have not moved below that and a shorter tick only multiplies rate-limit exposure. `src/codex/catalog-auto-refresh.ts` is the module-singleton interval `src/server/background-lifecycle.ts` starts beside the quota reset poller; a tick that is enabled and non-dormant drives the same catalog-only converge funnel management mutations drive. The last-outcome record lives in `src/codex/catalog-refresh-status.ts` (when the tick finished, the normalized `CatalogDisposition`, whether the served model set changed, consecutive failures) and carries no provider or account detail.
+
+Native multi-agent control handling follows the [injection contract](transports/streaming-health.md#experimental-native-tool-result-injection); this area does not infer backend capability or bypass ordinary routing/authentication.

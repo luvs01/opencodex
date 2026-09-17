@@ -10,6 +10,8 @@ export const RESPONSES_CORE_MODULES = [
   "core-options.ts",
   "native-steering.ts",
   "native-steering-replay.ts",
+  "native-response-control.ts",
+  "native-injection-replay.ts",
   "codex-ws-correlation.ts",
   "core-lifetime.ts",
   "core-replay.ts",
