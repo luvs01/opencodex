@@ -1,0 +1,52 @@
+name: Attribute Windows management cleanup
+on:
+  push:
+    branches: [codex/steering-management-attribution-20260917]
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            ref: e18ca246305bd8fc2b266bdb0ff287c6b25f6bd4
+          - label: feature
+            ref: 15a8e715851d53d13d3718b16c8ad4cdc8e6ec32
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies and build the fixture dashboard
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+          bun run build
+      - name: Reproduce the original six-file management batch without retries
+        shell: bash
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/head.txt
+          git rev-parse HEAD^{tree} > evidence/tree.txt
+          bun --version > evidence/bun.txt
+          git ls-tree HEAD tests/server/server-management-auth.test.ts scripts/test-temp.ts tests/helpers/remove-tree.ts > evidence/cleanup-source.txt
+          set -o pipefail
+          bun test --isolate --timeout 60000 \
+            tests/server/ports.test.ts tests/server/retry-after-429.test.ts \
+            tests/server/server-google-antigravity-oauth-401-replay.test.ts \
+            tests/server/server-management-auth.test.ts tests/server/server-xai-oauth-401-replay.test.ts \
+            tests/server/startup-prompt.test.ts 2>&1 | tee evidence/management-batch.log
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-management-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
