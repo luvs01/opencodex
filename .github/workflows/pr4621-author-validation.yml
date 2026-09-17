@@ -1,67 +1,43 @@
 name: PR 4621 isolated author validation snapshot
 
-# Temporary fork-only tooling; this workflow must not be carried into PR #4621.
-# Security review: fixed public source refs, hosted runner, read-only token,
-# no secrets, no persisted credentials, no publication or repository writes.
+# Fork-only scratch tooling, never part of PR #4621.
+# Security review: immutable public source, hosted runner, read-only token,
+# no secrets, no persisted credentials, no repository or release writes.
 on:
   push:
     branches: [agent/pr4621-author-validation-20260917]
-
 permissions:
   contents: read
-
 jobs:
   snapshot:
     if: github.repository == 'luvs01/opencodex'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Checkout the exact original PR head
+      - name: Checkout current dev snapshot
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: 0c1690b17c936b33544942bc0c8ee74af26ef583
-          fetch-depth: 250
+          repository: lidge-jun/opencodex
+          ref: cfdf5c3795da41ec22bc4b754645f685cdc1d0c6
           persist-credentials: false
-      - name: Set up the project's pinned Bun
+      - name: Set up project Bun
         uses: ./.github/actions/setup-project-bun
-      - name: Prepare source snapshots and dependency cache
+      - name: Export current root dependencies and runtime
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/pr4621-validation/source /tmp/pr4621-validation/runtime
-          git fetch --no-tags --depth=250 https://github.com/lidge-jun/opencodex.git dev
-          head=$(git rev-parse HEAD)
-          upstream=$(git rev-parse FETCH_HEAD)
-          base=$(git merge-base HEAD FETCH_HEAD)
-          printf 'head=%s\nupstream=%s\nmerge_base=%s\n' "$head" "$upstream" "$base" > /tmp/pr4621-validation/source/refs.txt
-          git archive --format=tar.gz HEAD -o /tmp/pr4621-validation/source/head.tar.gz
-          git diff --binary "$base" HEAD > /tmp/pr4621-validation/source/pr.diff
-          git diff --binary "$base" "$upstream" > /tmp/pr4621-validation/source/upstream.diff
+          mkdir -p /tmp/pr4621-current-dev
           bun install --frozen-lockfile --ignore-scripts
-          (cd gui && bun install --frozen-lockfile --ignore-scripts)
-          (cd docs-site && bun install --frozen-lockfile --ignore-scripts)
-          cp "$(command -v bun)" /tmp/pr4621-validation/runtime/bun
-          bun --version > /tmp/pr4621-validation/runtime/bun-version.txt
-          tar -czf /tmp/pr4621-validation/runtime/dependencies.tar.gz node_modules gui/node_modules docs-site/node_modules
-          cd /tmp/pr4621-validation
-          find source runtime -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-      - name: Export the public source and Bun runtime
+          cp "$(command -v bun)" /tmp/pr4621-current-dev/bun
+          bun --version > /tmp/pr4621-current-dev/bun-version.txt
+          tar -czf /tmp/pr4621-current-dev/root-dependencies.tar.gz node_modules
+          cd /tmp/pr4621-current-dev
+          sha256sum bun bun-version.txt root-dependencies.tar.gz > SHA256SUMS
+      - name: Upload validation runtime
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pr4621-source-runtime
-          path: |
-            /tmp/pr4621-validation/source/
-            /tmp/pr4621-validation/runtime/bun
-            /tmp/pr4621-validation/runtime/bun-version.txt
-            /tmp/pr4621-validation/SHA256SUMS
+          name: pr4621-current-dev-runtime
+          path: /tmp/pr4621-current-dev/
           retention-days: 1
           compression-level: 6
-          if-no-files-found: error
-      - name: Export installed validation dependencies
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: pr4621-dependencies
-          path: /tmp/pr4621-validation/runtime/dependencies.tar.gz
-          retention-days: 1
-          compression-level: 0
           if-no-files-found: error
