@@ -1,0 +1,40 @@
+name: Capture pinned compatibility sources
+on:
+  push:
+    branches: [codex/astra-compat-workspace-20260917]
+    paths: [.github/workflows/astra-compat-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: lidge-jun/opencodex
+          ref: 7ef3f6745211f4b275098b6cc89f1be5f0439b45
+          fetch-depth: 256
+          persist-credentials: false
+      - name: Capture public Git objects without runner credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git fetch --no-tags --depth=256 https://github.com/luvs01/opencodex.git 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          git branch snapshot-dev 7ef3f6745211f4b275098b6cc89f1be5f0439b45
+          git branch snapshot-steering 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          git cat-file -e ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa^{commit}
+          mkdir -p /tmp/compat-sources
+          git bundle create /tmp/compat-sources/compat.bundle snapshot-dev snapshot-steering ^ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa
+          git bundle list-heads /tmp/compat-sources/compat.bundle > /tmp/compat-sources/refs.txt
+          # Public PR metadata only; no application code or dependencies execute.
+          curl -fsSL https://api.github.com/repos/lidge-jun/opencodex/pulls/4782 > /tmp/compat-sources/pr4782.json
+          curl -fsSL 'https://api.github.com/repos/lidge-jun/opencodex/pulls/4782/comments?per_page=100' > /tmp/compat-sources/review-comments.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: astra-compat-pinned-sources
+          path: /tmp/compat-sources
+          retention-days: 2
+          if-no-files-found: error
