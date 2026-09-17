@@ -1,0 +1,149 @@
+name: Verify native injection follow-up
+on:
+  push:
+    branches: [codex/astra-compat-workspace-20260917]
+    paths: [.github/workflows/native-injection-followup.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux
+          - os: windows-latest
+            label: windows
+          - os: macos-15
+            label: macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          fetch-depth: 256
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7c7abb485e3d3729f00f8024e3ab2db01693e1b5
+          path: payload
+          sparse-checkout: .github/native-injection
+          persist-credentials: false
+      - name: Reproduce pinned source and verify patch and complete tree
+        run: python payload/.github/native-injection/prepare.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install project-locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --version | tee evidence/bun-version.txt
+          bun run typecheck 2>&1 | tee evidence/typecheck.log
+      - name: Injection and shared-transport regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun test --isolate --timeout 60000 \
+            tests/responses/ws-native-injection.test.ts \
+            tests/responses/ws-native-steering.test.ts \
+            tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts \
+            tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts \
+            tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts \
+            tests/responses/responses-core-modules.test.ts \
+            tests/ci-workflows/file-size-ratchet.test.ts \
+            tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee evidence/focused.log
+      - name: Privacy, architecture and whitespace gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          bun scripts/file-size-ratchet.ts 2>&1 | tee evidence/ratchet.log
+          git diff --check 9c411a10480ea04a5d0244024051bae7fa6dbd05 HEAD
+          test "$(git rev-parse HEAD)" = de600be5f351243492256d8651cd4b2035259d7d
+          test "$(git rev-parse HEAD^{tree})" = a8b8bc3421a64aad83c85a0cafad26d0374182f2
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-injection-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          fetch-depth: 256
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7c7abb485e3d3729f00f8024e3ab2db01693e1b5
+          path: payload
+          sparse-checkout: .github/native-injection
+          persist-credentials: false
+      - run: python payload/.github/native-injection/prepare.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Build documentation without deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd docs-site
+          bun install --frozen-lockfile
+          bun run build 2>&1 | tee ../evidence/docs.log
+          cd ..
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-injection-docs
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    if: github.repository == 'luvs01/opencodex'
+    needs: [verify, docs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 76d7452afb38fd7cc5d9ff7fa4d573b06a9507e3
+          fetch-depth: 256
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7c7abb485e3d3729f00f8024e3ab2db01693e1b5
+          path: payload
+          sparse-checkout: .github/native-injection
+          persist-credentials: false
+      - name: Reproduce only Git objects, never execute application or dependency code
+        run: python payload/.github/native-injection/prepare.py
+      - name: Publish only the exact tested feature head without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head=de600be5f351243492256d8651cd4b2035259d7d
+          test "$(git rev-parse HEAD)" = "$head"
+          test "$(git rev-parse HEAD^{tree})" = a8b8bc3421a64aad83c85a0cafad26d0374182f2
+          branch=refs/heads/codex/native-response-inject-20260917
+          current="$(git ls-remote https://github.com/luvs01/opencodex.git "$branch" | cut -f1)"
+          test -z "$current" || test "$current" = "$head"
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git "HEAD:$branch"
+          cat evidence/source-identity.json >> "$GITHUB_STEP_SUMMARY"
