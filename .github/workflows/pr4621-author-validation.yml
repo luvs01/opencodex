@@ -45,11 +45,23 @@ jobs:
           tar -czf /tmp/pr4621-validation/runtime/dependencies.tar.gz node_modules gui/node_modules docs-site/node_modules
           cd /tmp/pr4621-validation
           find source runtime -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-      - name: Export the public source and local-validation runtime
+      - name: Export the public source and Bun runtime
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pr4621-author-validation-snapshot
-          path: /tmp/pr4621-validation/
+          name: pr4621-source-runtime
+          path: |
+            /tmp/pr4621-validation/source/
+            /tmp/pr4621-validation/runtime/bun
+            /tmp/pr4621-validation/runtime/bun-version.txt
+            /tmp/pr4621-validation/SHA256SUMS
+          retention-days: 1
+          compression-level: 6
+          if-no-files-found: error
+      - name: Export installed validation dependencies
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr4621-dependencies
+          path: /tmp/pr4621-validation/runtime/dependencies.tar.gz
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
