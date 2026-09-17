@@ -1,0 +1,76 @@
+name: Verify steering review documentation
+on:
+  push:
+    branches: [codex/steering-doc-review-validation-20260917]
+permissions:
+  contents: read
+jobs:
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: f3dc8eab3b1ac408991f17e0c34503e707f0ce19
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          path: payload
+          sparse-checkout: .github
+          persist-credentials: false
+      - run: python3 payload/.github/steering-doc-review.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Validate the docs-only change on the exact final source
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          cd docs-site
+          bun install --frozen-lockfile
+          bun run build 2>&1 | tee ../evidence/docs.log
+          cd ..
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: steering-doc-review
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    needs: docs
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: f3dc8eab3b1ac408991f17e0c34503e707f0ce19
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          path: payload
+          sparse-checkout: .github
+          persist-credentials: false
+      - name: Reproduce only the immutable Git objects, without application execution
+        run: python3 payload/.github/steering-doc-review.py
+      - name: Preserve branch changes and fast-forward only the verified documentation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=refs/heads/codex/steering-completion-20260917
+          current="$(git ls-remote https://github.com/luvs01/opencodex.git "$branch" | cut -f1)"
+          test "$current" = f3dc8eab3b1ac408991f17e0c34503e707f0ce19 || test "$current" = 15a8e715851d53d13d3718b16c8ad4cdc8e6ec32
+          test "$(git rev-parse HEAD)" = 15a8e715851d53d13d3718b16c8ad4cdc8e6ec32
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git "HEAD:$branch"
