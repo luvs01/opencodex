@@ -1,4 +1,4 @@
-import { nativeResponseControlMode, type NativeResponseControl } from "../responses/native-response-control";
+import { nativeSteeringUnavailableReason, nativeResponseControlMode, type NativeResponseControl } from "../responses/native-response-control";
 import { NativeInjectionChannel } from "../responses/native-injection";
 import { NativeSteeringChannel, NativeSteeringError } from "../responses/native-steering";
 import { createNativeSteeringLogObserver } from "../responses/native-steering-log";
@@ -200,7 +200,7 @@ export function createWebsocketHandler(ctx: ServeOptionsContext) {
               return;
             }
             if (frame.type === "response.steer") {
-              if (!ws.data.nativeSteering) throw new NativeSteeringError("steering_not_supported", "Native steering is disabled or unavailable on this route.");
+              if (!ws.data.nativeSteering) throw new NativeSteeringError("steering_not_supported", ws.data.nativeSteeringUnavailable ?? "Native steering transport is unavailable; the route may be unsupported or using HTTP fallback.");
               ws.data.nativeSteering.steer(frame);
               return;
             }
@@ -221,6 +221,7 @@ export function createWebsocketHandler(ctx: ServeOptionsContext) {
         ws.data.cancel?.();
         // A superseded turn must not keep ownership during warmup or refusal.
         ws.data.nativeSteering = undefined;
+        ws.data.nativeSteeringUnavailable = nativeSteeringUnavailableReason(frame, config.codexNativeSteering);
         let nativeSteering: NativeResponseControl | undefined;
         try {
           const idleMs = typeof config.stallTimeoutSec === "number" && Number.isFinite(config.stallTimeoutSec)
