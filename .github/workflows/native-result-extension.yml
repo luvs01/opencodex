@@ -1,0 +1,145 @@
+name: Verify native result continuations
+on:
+  push:
+    branches: [codex/native-result-extension-validation-20260917]
+    paths: [.github/workflows/native-result-extension.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux
+          - os: windows-latest
+            label: windows
+          - os: macos-15
+            label: macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: de600be5f351243492256d8651cd4b2035259d7d
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: payload
+          sparse-checkout: .github/native-result-extension
+          persist-credentials: false
+      - name: Reproduce checked patch and exact source identity
+        run: python payload/.github/native-result-extension/prepare.py
+      - uses: ./.github/actions/setup-project-bun
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --version | tee evidence/bun-version.txt
+          bun run typecheck 2>&1 | tee evidence/typecheck.log
+      - name: Result, execution-mode and shared-transport regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun test --isolate --timeout 60000 \
+            tests/responses/ws-native-result-continuations.test.ts \
+            tests/responses/ws-native-injection.test.ts tests/responses/ws-native-steering.test.ts \
+            tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts \
+            tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts \
+            tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts \
+            tests/responses/responses-core-modules.test.ts \
+            tests/ci-workflows/file-size-ratchet.test.ts \
+            tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee evidence/focused.log
+      - name: Privacy, ownership, size and diff gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          bun scripts/file-size-ratchet.ts 2>&1 | tee evidence/ratchet.log
+          git diff --check de600be5f351243492256d8651cd4b2035259d7d HEAD
+          test "$(git rev-parse HEAD)" = b00654b368772f08c3bc68ce84b57fafc6305bc8
+          test "$(git rev-parse HEAD^{tree})" = 91ddb6c20a267d0027ba7187c7dc92ccd130051d
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-result-extension-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: de600be5f351243492256d8651cd4b2035259d7d
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: payload
+          sparse-checkout: .github/native-result-extension
+          persist-credentials: false
+      - run: python payload/.github/native-result-extension/prepare.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Documentation build without deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd docs-site
+          bun install --frozen-lockfile
+          bun run build 2>&1 | tee ../evidence/docs.log
+          cd ..
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-result-extension-docs
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    if: github.repository == 'luvs01/opencodex'
+    needs: [verify, docs]
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: de600be5f351243492256d8651cd4b2035259d7d
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: payload
+          sparse-checkout: .github/native-result-extension
+          persist-credentials: false
+      - name: Reproduce Git objects without running application or dependency code
+        run: python payload/.github/native-result-extension/prepare.py
+      - name: Publish only the verified new feature branch without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head=b00654b368772f08c3bc68ce84b57fafc6305bc8
+          test "$(git rev-parse HEAD)" = "$head"
+          test "$(git rev-parse HEAD^{tree})" = 91ddb6c20a267d0027ba7187c7dc92ccd130051d
+          branch=refs/heads/codex/native-result-continuations-20260917
+          current="$(git ls-remote https://github.com/luvs01/opencodex.git "$branch" | cut -f1)"
+          test -z "$current" || test "$current" = "$head"
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git "HEAD:$branch"
+          cat evidence/source-identity.json >> "$GITHUB_STEP_SUMMARY"
