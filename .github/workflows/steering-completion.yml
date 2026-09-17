@@ -1,0 +1,203 @@
+name: Verify steering completion
+on:
+  push:
+    branches: [codex/steering-completion-workspace-20260917]
+    paths: [.github/workflows/steering-completion.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux
+          - os: windows-latest
+            label: windows
+          - os: macos-15
+            label: macos
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7b548ad85e8f2a6af313198fa68a4111003cbb05
+          fetch-depth: 512
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 62f698b54c43074fb15f31342c1d268a33b48828
+          path: payload
+          sparse-checkout: .github/steering-completion
+          persist-credentials: false
+      - name: Reproduce exact current-dev integration and reviewed source
+        run: python payload/.github/steering-completion/prepare.py
+      - uses: ./.github/actions/setup-project-bun
+      - run: bun install --frozen-lockfile
+      - name: Typecheck production and executable probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --version | tee evidence/bun-version.txt
+          bun run typecheck 2>&1 | tee evidence/typecheck.log
+          bun x tsc --ignoreConfig --noEmit --target ESNext --module ESNext --moduleResolution Bundler --strict --skipLibCheck --types bun-types --esModuleInterop --resolveJsonModule scripts/steering-smoke.ts scripts/steering-probe.ts 2>&1 | tee evidence/probe-typecheck.log
+      - name: Complete focused steering and shared-transport regression set
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun test --isolate --timeout 60000 \
+            tests/responses/ws-steering-completion.test.ts tests/responses/ws-steering-smoke.test.ts \
+            tests/responses/ws-steering-stability.test.ts tests/responses/ws-native-steering.test.ts \
+            tests/responses/ws-native-injection.test.ts tests/responses/ws-native-result-continuations.test.ts \
+            tests/responses/ws-upstream.test.ts tests/responses/ws-upstream-reuse.test.ts \
+            tests/responses/ws-endpoint.test.ts tests/responses/ws-failure-stage.test.ts \
+            tests/responses/reserve-dispatch-ws.test.ts tests/responses/responses-state.test.ts \
+            tests/responses/responses-core-modules.test.ts tests/ci-workflows/file-size-ratchet.test.ts \
+            tests/test-layout.test.ts tests/test-layout-tooling.test.ts 2>&1 | tee evidence/focused.log
+      - name: No-credential offline and plan-only executable checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun scripts/steering-smoke.ts --self-test | tee evidence/probe-self-test.json
+          bun scripts/steering-smoke.ts --direct wss://api.openai.com/v1/responses --proxy ws://127.0.0.1:1455/v1/responses --model fixture | tee evidence/probe-plan.json
+      - name: Privacy, architecture, size and exact-source gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run privacy:scan 2>&1 | tee evidence/privacy.log
+          bun run structure:check 2>&1 | tee evidence/structure.log
+          bun scripts/file-size-ratchet.ts 2>&1 | tee evidence/ratchet.log
+          git diff --check 607fae7ad4074405db08cb4242c92819a27b6d6a HEAD
+          test "$(git rev-parse HEAD)" = f3dc8eab3b1ac408991f17e0c34503e707f0ce19
+          test "$(git rev-parse HEAD^{tree})" = bfbb6e9131cd574d70affeff8575c320f52348d2
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-completion-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  docs:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7b548ad85e8f2a6af313198fa68a4111003cbb05
+          fetch-depth: 512
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 62f698b54c43074fb15f31342c1d268a33b48828
+          path: payload
+          sparse-checkout: .github/steering-completion
+          persist-credentials: false
+      - run: python payload/.github/steering-completion/prepare.py
+      - uses: ./.github/actions/setup-project-bun
+      - name: Build docs without deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd docs-site
+          bun install --frozen-lockfile
+          bun run build 2>&1 | tee ../evidence/docs.log
+          cd ..
+          git diff --exit-code HEAD
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-completion-docs
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    if: github.repository == 'luvs01/opencodex'
+    needs: [verify, docs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7b548ad85e8f2a6af313198fa68a4111003cbb05
+          fetch-depth: 512
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 62f698b54c43074fb15f31342c1d268a33b48828
+          path: payload
+          sparse-checkout: .github/steering-completion
+          persist-credentials: false
+      - name: Reproduce only Git data; do not run application or dependency code
+        run: python payload/.github/steering-completion/prepare.py
+      - name: Publish only the immutable verified new branch without force
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head=f3dc8eab3b1ac408991f17e0c34503e707f0ce19
+          branch=refs/heads/codex/steering-completion-20260917
+          test "$(git rev-parse HEAD)" = "$head"
+          current="$(git ls-remote https://github.com/luvs01/opencodex.git "$branch" | cut -f1)"
+          test -z "$current" || test "$current" = "$head"
+          header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" push https://github.com/luvs01/opencodex.git "HEAD:$branch"
+          cat evidence/source-identity.json >> "$GITHUB_STEP_SUMMARY"
+  full-ci:
+    if: github.repository == 'luvs01/opencodex'
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Dispatch the existing full CI once on the exact tested feature head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINDOWS_SELECTION: ${{ vars.OCX_SELF_HOSTED_WINDOWS }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          from pathlib import Path
+          assert os.environ.get('WINDOWS_SELECTION') != '1', 'Refusing to dispatch application tests to a configured self-hosted machine'
+          root = 'https://api.github.com/repos/luvs01/opencodex'
+          branch = 'codex/steering-completion-20260917'
+          head = 'f3dc8eab3b1ac408991f17e0c34503e707f0ce19'
+          def request(path, data=None):
+              body = None if data is None else json.dumps(data).encode()
+              req = urllib.request.Request(root + path, data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'User-Agent': 'steering-author-validation', 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  content = response.read()
+                  return json.loads(content) if content else None
+          assert request('/git/ref/heads/' + branch)['object']['sha'] == head
+          # One POST only. Never retry an uncertain dispatch or change upstream approval settings.
+          request('/actions/workflows/ci.yml/dispatches', {'ref': branch, 'inputs': {'lane': 'all'}})
+          for attempt in range(15):
+              runs = request('/actions/runs?event=workflow_dispatch&branch=codex%2Fsteering-completion-20260917&per_page=10')['workflow_runs']
+              matching = [r for r in runs if r['head_sha'] == head and r['path'] == '.github/workflows/ci.yml']
+              if matching:
+                  run = matching[0]
+                  record = {k: run[k] for k in ['id', 'html_url', 'head_sha', 'status', 'conclusion', 'event']}
+                  Path('full-ci-dispatch.json').write_text(json.dumps(record, indent=2))
+                  print(json.dumps(record, indent=2))
+                  break
+              time.sleep(2)
+          else: raise RuntimeError('Dispatch submitted once but run identity was not yet visible; inspect before any further dispatch')
+          PY
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-completion-full-ci-dispatch
+          path: full-ci-dispatch.json
+          retention-days: 7
+          if-no-files-found: warn
