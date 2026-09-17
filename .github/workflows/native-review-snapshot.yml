@@ -1,0 +1,45 @@
+name: Capture native-control review inputs
+on:
+  push:
+    branches: [codex/native-review-followup-20260917]
+    paths: [.github/workflows/native-review-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7a9a6d28dd8680cce890e06813e4a08796624d0a
+          fetch-depth: 256
+          persist-credentials: false
+      - name: Capture public Git objects and review metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git branch review-4858 7a9a6d28dd8680cce890e06813e4a08796624d0a
+          git fetch --no-tags --depth=256 https://github.com/luvs01/opencodex.git 59a1d6357e018d44104a50b1126350b72368c81d
+          git branch review-4861 FETCH_HEAD
+          git fetch --no-tags --depth=256 https://github.com/luvs01/opencodex.git 7b548ad85e8f2a6af313198fa68a4111003cbb05
+          git branch review-4864 FETCH_HEAD
+          git fetch --no-tags --depth=256 https://github.com/lidge-jun/opencodex.git b25e449cb3c4432397f3792f673307bec5ddae51
+          git branch review-dev FETCH_HEAD
+          git cat-file -e ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa^{commit}
+          mkdir -p /tmp/native-review-inputs
+          git bundle create /tmp/native-review-inputs/review.bundle review-4858 review-4861 review-4864 review-dev ^ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa
+          git bundle list-heads /tmp/native-review-inputs/review.bundle > /tmp/native-review-inputs/refs.txt
+          for pr in 4858 4861 4864; do
+            curl -fsSL "https://api.github.com/repos/lidge-jun/opencodex/pulls/$pr" > "/tmp/native-review-inputs/pr-$pr.json"
+            curl -fsSL "https://api.github.com/repos/lidge-jun/opencodex/issues/$pr/comments?per_page=100" > "/tmp/native-review-inputs/comments-$pr.json"
+            curl -fsSL "https://api.github.com/repos/lidge-jun/opencodex/pulls/$pr/reviews?per_page=100" > "/tmp/native-review-inputs/reviews-$pr.json"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-review-inputs
+          path: /tmp/native-review-inputs
+          retention-days: 2
+          if-no-files-found: error
