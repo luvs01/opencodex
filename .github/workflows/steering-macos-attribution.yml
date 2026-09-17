@@ -1,0 +1,50 @@
+name: Attribute macOS steering control failures
+on:
+  push:
+    branches: [codex/steering-macos-attribution-20260917]
+permissions:
+  contents: read
+jobs:
+  compare:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            ref: e18ca246305bd8fc2b266bdb0ff287c6b25f6bd4
+          - label: feature
+            ref: 15a8e715851d53d13d3718b16c8ad4cdc8e6ec32
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies and fixture assets
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+          bun run build
+      - name: Run the affected tests and version controls once, without changing timeouts or assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/head.txt
+          git rev-parse HEAD^{tree} > evidence/tree.txt
+          bun --version > evidence/bun.txt
+          git ls-tree HEAD tests/server/server-combo-failover-e2e.test.ts tests/cli/cli-status-json.test.ts src/cli/status.ts src/cli/status-probes.ts > evidence/source-blobs.txt
+          bun test --isolate --timeout 60000 \
+            tests/server/server-combo-failover-e2e.test.ts tests/cli/cli-status-json.test.ts \
+            -t 'connect cancellation wins with 499|projects proxy' 2>&1 | tee evidence/macos-affected.log
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-macos-attribution-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
