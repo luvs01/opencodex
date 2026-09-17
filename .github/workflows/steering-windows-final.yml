@@ -1,0 +1,92 @@
+name: Finish steering Windows attribution
+on:
+  push:
+    branches: [codex/steering-windows-final-20260917]
+permissions:
+  contents: read
+jobs:
+  windows-three:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: f3dc8eab3b1ac408991f17e0c34503e707f0ce19
+          fetch-tags: true
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked project and dashboard dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+          bun run build
+      - name: Run original shard 3/9 once with the unchanged batch runner
+        shell: bash
+        env:
+          TEST_SHARD: '3/9'
+          BUN_TEST_FILE_SCOPE: all
+          BUN_TEST_BATCH_SIZE: '6'
+          BUN_TEST_BATCH_TIMEOUT_SECONDS: '480'
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/head.txt
+          git rev-parse HEAD^{tree} > evidence/tree.txt
+          bun --version > evidence/bun.txt
+          bash scripts/ci/run-bun-test-batches.sh "$TEST_SHARD" 2>&1 | tee evidence/windows-three.log
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-windows-three-final
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  original-control:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Archive original unsharded control without rerunning or changing its failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          from pathlib import Path
+          out=Path('evidence'); out.mkdir()
+          root='https://api.github.com/repos/luvs01/opencodex'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'User-Agent':'steering-control-evidence','Accept':'application/vnd.github+json'}
+          def get(path):
+              with urllib.request.urlopen(urllib.request.Request(root+path,headers=headers),timeout=30) as r: return json.load(r)
+          jobs=get('/actions/runs/35190205238/attempts/1/jobs?per_page=100')
+          (out/'original-attempt-jobs.json').write_text(json.dumps(jobs,indent=2))
+          job=next(j for j in jobs['jobs'] if j['id']==105100941347)
+          assert job['head_sha']=='f3dc8eab3b1ac408991f17e0c34503e707f0ce19'
+          (out/'control-job.json').write_text(json.dumps(job,indent=2))
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,hdrs,newurl): return None
+          try:
+              r=urllib.request.build_opener(NoRedirect).open(urllib.request.Request(root+'/actions/jobs/105100941347/logs',headers=headers),timeout=30)
+          except urllib.error.HTTPError as e:
+              if e.code not in (301,302,303,307,308): raise
+              location=e.headers['Location']; assert location.startswith('https://')
+              r=urllib.request.urlopen(location,timeout=30)
+          with r: data=r.read(50*1024*1024+1)
+          assert len(data)<=50*1024*1024
+          (out/'macos-control-original.log').write_bytes(data)
+          lines=data.decode('utf-8-sig',errors='replace').splitlines()
+          (out/'macos-control-tail.txt').write_text('\n'.join(lines[-180:]))
+          print(json.dumps({k:job.get(k) for k in ['id','name','status','conclusion','started_at','completed_at','head_sha']},indent=2))
+          PY
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-original-control-evidence
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
