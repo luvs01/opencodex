@@ -1,0 +1,36 @@
+name: Snapshot steering completion integration
+on:
+  push:
+    branches: [codex/steering-completion-workspace-20260917]
+    paths: [.github/workflows/steering-completion-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 7b548ad85e8f2a6af313198fa68a4111003cbb05
+          fetch-depth: 512
+          persist-credentials: false
+      - name: Capture only public Git objects and protocol reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git fetch --no-tags --depth=512 https://github.com/lidge-jun/opencodex.git e18ca246305bd8fc2b266bdb0ff287c6b25f6bd4
+          git branch completion-parent 7b548ad85e8f2a6af313198fa68a4111003cbb05
+          git branch completion-dev e18ca246305bd8fc2b266bdb0ff287c6b25f6bd4
+          mkdir -p /tmp/steering-completion
+          git bundle create /tmp/steering-completion/source.bundle completion-parent completion-dev ^ada3a9b1b5fdac1fd47dfede0bbab4ef3ca4c6aa
+          git bundle list-heads /tmp/steering-completion/source.bundle > /tmp/steering-completion/refs.txt
+          curl -fsSL https://developers.openai.com/api/reference/cli/resources/beta/subresources/responses > /tmp/steering-completion/protocol.html
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-completion-source
+          path: /tmp/steering-completion
+          retention-days: 2
+          if-no-files-found: error
