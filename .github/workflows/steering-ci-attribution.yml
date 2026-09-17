@@ -1,0 +1,124 @@
+name: Attribute steering full CI failures
+on:
+  push:
+    branches: [codex/steering-ci-attribution-20260917]
+permissions:
+  contents: read
+jobs:
+  windows-lock:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: baseline
+            ref: e18ca246305bd8fc2b266bdb0ff287c6b25f6bd4
+          - label: feature
+            ref: 15a8e715851d53d13d3718b16c8ad4cdc8e6ec32
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+          bun run build
+      - name: Capture source identity and original failing six-file batch
+        shell: bash
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/head.txt
+          git rev-parse HEAD^{tree} > evidence/tree.txt
+          bun --version > evidence/bun.txt
+          git ls-tree -r --name-only HEAD > evidence/tracked-files.txt
+          git ls-tree HEAD tests/codex-integration/codex-write-lock.test.ts src/codex/codex-write-lock.ts src/codex/user-identity.ts tests/helpers/codex-write-lock-child.ts > evidence/lock-source.txt
+          set -o pipefail
+          bun test --isolate --timeout 60000 \
+            tests/codex-integration/codex-tool-mode.test.ts \
+            tests/codex-integration/codex-write-lock.test.ts \
+            tests/codex-integration/gather-routed-models-single-flight.test.ts \
+            tests/codex-integration/main-account-hard-lock-recovery.test.ts \
+            tests/codex-integration/model-metadata-sync.test.ts \
+            tests/codex-integration/native-grok-toggle.test.ts 2>&1 | tee evidence/lock-batch.log
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-ci-attribution-${{ matrix.label }}
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
+  collect:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Archive exact run metadata and completed failing-job logs without changing runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request, urllib.error
+          from pathlib import Path
+          out = Path('evidence'); out.mkdir()
+          root = 'https://api.github.com/repos/luvs01/opencodex'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'User-Agent': 'steering-ci-attribution', 'Accept': 'application/vnd.github+json'}
+          def get(path):
+              with urllib.request.urlopen(urllib.request.Request(root + path, headers=headers), timeout=30) as r:
+                  return json.load(r)
+          run = get('/actions/runs/35190205238')
+          assert run['head_sha'] == 'f3dc8eab3b1ac408991f17e0c34503e707f0ce19'
+          jobs = get('/actions/runs/35190205238/jobs?per_page=100')
+          (out/'run.json').write_text(json.dumps(run,indent=2))
+          (out/'jobs.json').write_text(json.dumps(jobs,indent=2))
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, hdrs, newurl): return None
+          opener = urllib.request.build_opener(NoRedirect)
+          summaries = []
+          for job in jobs['jobs']:
+              if job['status'] != 'completed' or job['conclusion'] == 'success': continue
+              try:
+                  req = urllib.request.Request(root + '/actions/jobs/' + str(job['id']) + '/logs', headers=headers)
+                  try:
+                      response = opener.open(req, timeout=30)
+                  except urllib.error.HTTPError as e:
+                      if e.code not in (301,302,303,307,308): raise
+                      location = e.headers['Location']
+                      assert location.startswith('https://')
+                      # Signed download: no GitHub token or other headers follow the redirect.
+                      response = urllib.request.urlopen(location, timeout=30)
+                  with response:
+                      data = response.read(25*1024*1024+1)
+                  assert len(data) <= 25*1024*1024
+                  (out/(str(job['id'])+'.log')).write_bytes(data)
+                  text = data.decode('utf-8-sig', errors='replace')
+                  lines = text.splitlines()
+                  indices = [i for i,line in enumerate(lines) if '(fail)' in line or 'error: expect' in line or '::error::' in line or 'Timed out' in line or 'HEAD is now at' in line]
+                  selected=set()
+                  for i in indices:
+                      selected.update(range(max(0,i-6),min(len(lines),i+12)))
+                  excerpts='\n'.join(lines[i] for i in sorted(selected))
+                  (out/(str(job['id'])+'-excerpt.txt')).write_text(excerpts)
+                  summaries.append({'id':job['id'],'name':job['name'],'head_sha':job.get('head_sha'),'conclusion':job['conclusion'],'logBytes':len(data)})
+              except Exception as e:
+                  summaries.append({'id':job['id'],'name':job['name'],'errorType':type(e).__name__})
+          (out/'failure-summary.json').write_text(json.dumps(summaries,indent=2))
+          print(json.dumps(summaries,indent=2))
+          PY
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: steering-full-ci-attribution-logs
+          path: evidence
+          retention-days: 7
+          if-no-files-found: error
