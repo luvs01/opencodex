@@ -1,0 +1,246 @@
+name: Issue 4956 scoped fixture validation
+
+on:
+  push:
+    branches: [agent/4956-fixture-validation-20260918]
+    paths: [.github/workflows/agent-4956-fixture-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  assemble:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.patch.outputs.sha }}
+    steps:
+      - name: Checkout the reviewed upstream revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: c9fd114cfac61570f249886a954800bd7dfa689e
+          persist-credentials: true
+      # This write-enabled job executes only the fixed patch below, not repository
+      # scripts or dependency hooks. All executable tests run in read-only jobs.
+      - name: Create a test-only branch without this disposable workflow
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout -b agent/4956-release-connect-fixture-20260918
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import subprocess
+
+          path = Path('tests/server/server-combo-failover-e2e.test.ts')
+          original = path.read_text()
+          blob = subprocess.check_output(['git', 'hash-object', str(path)], text=True).strip()
+          if blob != 'a47a5b83dd9d3ae02f277f91c315cf67b6d29e1e':
+              raise SystemExit('Reviewed fixture blob changed; refusing an unreviewed replacement')
+          start = original.index('  test("connect cancellation wins with 499, no backup, warning, or cooldown", async () => {')
+          end = original.index('  test("failure-body cancellation wins before cooldown or backup", async () => {', start)
+          before = original[start:end]
+          after = before
+          replacements = [
+              ('    const aStarted = deferred();\n    const a = serve(() => {\n      aStarted.resolve();\n      return new Promise<Response>(() => {});\n    });',
+               '    const a = heldResponse(serve);'),
+              ('baseUrl(a)', 'baseUrl(a.server)'),
+              ('await aStarted.promise;', 'await within(a.started, 10_000);'),
+              ('const response = await pending;', 'const response = await within(pending, 10_000);'),
+              ('    } finally {\n      console.warn = originalWarn;',
+               '    } finally {\n      abort.abort();\n      a.release();\n      console.warn = originalWarn;'),
+          ]
+          for old, new in replacements:
+              if after.count(old) != 1:
+                  raise SystemExit('Expected one exact match in the scoped test: ' + repr(old))
+              after = after.replace(old, new, 1)
+          # The cancellation assertions are unchanged. Only fixture lifecycle and
+          # bounded waits change, and release remains after every assertion.
+          import_anchor = 'import { removeTreeWithRetry } from "../helpers/remove-tree";\n'
+          if original.count(import_anchor) != 1:
+              raise SystemExit('Import anchor is not unique')
+          result = (original[:start] + after + original[end:]).replace(
+              import_anchor, import_anchor + 'import { heldResponse } from "../helpers/held-response";\n', 1)
+          if len(result.splitlines()) > len(original.splitlines()):
+              raise SystemExit('The existing oversized test file must not grow')
+          path.write_text(result)
+
+          helper = '''/** A header-stalling fixture with a test-owned release path. Release only after
+           * cancellation assertions, and always from finally so server teardown can finish. */
+          export function heldResponse<Server>(
+            serve: (handler: () => Promise<Response>) => Server,
+          ): { server: Server; started: Promise<void>; release: () => void } {
+            let markStarted!: () => void;
+            const started = new Promise<void>(resolve => { markStarted = resolve; });
+            let release!: () => void;
+            const released = new Promise<void>(resolve => { release = resolve; });
+            const server = serve(async () => {
+              markStarted();
+              await released;
+              return new Response(null, { status: 204 });
+            });
+            return { server, started, release };
+          }
+          '''
+          helper_path = Path('tests/helpers/held-response.ts')
+          if helper_path.exists():
+              raise SystemExit('Helper path already exists')
+          helper_path.write_text(helper)
+
+          tests = '''import { expect, test } from "bun:test";
+          import { heldResponse } from "../helpers/held-response";
+
+          // Return the real handler so the fixture contract needs no sockets or timing sleeps.
+          const fixture = () => heldResponse(handler => handler);
+
+          test("held response stays pending until its owner releases it", async () => {
+            const held = fixture();
+            let settled = false;
+            const pending = held.server().then(response => { settled = true; return response; });
+            try {
+              await held.started;
+              await Promise.resolve();
+              expect(settled).toBe(false);
+            } finally {
+              held.release();
+            }
+            expect((await pending).status).toBe(204);
+          });
+
+          test("finally releases the held handler even when the test body throws", async () => {
+            const held = fixture();
+            const pending = held.server();
+            await held.started;
+            expect(() => {
+              try {
+                throw new Error("simulated assertion failure");
+              } finally {
+                held.release();
+              }
+            }).toThrow("simulated assertion failure");
+            expect((await pending).status).toBe(204);
+          });
+
+          test("cleanup may release a held response before the handler starts", async () => {
+            const held = fixture();
+            held.release();
+            expect((await held.server()).status).toBe(204);
+            await held.started;
+          });
+
+          test("releasing a held response more than once is harmless", async () => {
+            const held = fixture();
+            const pending = held.server();
+            try {
+              await held.started;
+              held.release();
+              held.release();
+              expect((await pending).status).toBe(204);
+            } finally {
+              held.release();
+            }
+          });
+
+          test("one held response cannot release another fixture", async () => {
+            const first = fixture();
+            const second = fixture();
+            const firstPending = first.server();
+            let secondSettled = false;
+            const secondPending = second.server().then(response => { secondSettled = true; return response; });
+            try {
+              await Promise.all([first.started, second.started]);
+              first.release();
+              expect((await firstPending).status).toBe(204);
+              expect(secondSettled).toBe(false);
+            } finally {
+              first.release();
+              second.release();
+            }
+            expect((await secondPending).status).toBe(204);
+          });
+          '''
+          test_path = Path('tests/server/server-combo-held-response.test.ts')
+          if test_path.exists():
+              raise SystemExit('Regression path already exists')
+          test_path.write_text(tests)
+          name = test_path.name
+          for filename, nested, anchor, indent in [
+              ('scripts/test-layout/layout.json', 'explicit', '  "explicit": {\n', '    '),
+              ('tests/fixtures/test-layout-expected.json', None, '{\n', '  '),
+          ]:
+              manifest = Path(filename)
+              text = manifest.read_text()
+              data = json.loads(text)
+              mapping = data[nested] if nested else data
+              if mapping.get('server-combo-failover-e2e.test.ts') != 'server' or name in mapping:
+                  raise SystemExit('Unexpected test-layout schema or duplicate registration')
+              if text.count(anchor) != 1:
+                  raise SystemExit('Layout insertion anchor is not unique')
+              updated = text.replace(anchor, anchor + indent + json.dumps(name) + ': "server",\n', 1)
+              parsed = json.loads(updated)
+              registered = parsed[nested] if nested else parsed
+              if registered.get(name) != 'server':
+                  raise SystemExit('Registration validation failed')
+              manifest.write_text(updated)
+          PY
+          git add tests/server/server-combo-failover-e2e.test.ts tests/helpers/held-response.ts tests/server/server-combo-held-response.test.ts scripts/test-layout/layout.json tests/fixtures/test-layout-expected.json
+          git diff --cached --check
+          git diff --cached --stat
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' -c core.hooksPath=/dev/null commit -m 'test(server): release the combo connect-cancellation fixture during cleanup'
+          git push origin HEAD:refs/heads/agent/4956-release-connect-fixture-20260918
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git show --format=fuller --stat HEAD
+
+  verify:
+    needs: assemble
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.assemble.outputs.sha }}
+          persist-credentials: false
+          fetch-tags: true
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install locked dependencies and build test assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          bun --version
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+          bun run build:gui
+      - name: Fixture contracts and test registration
+        timeout-minutes: 3
+        shell: bash
+        run: bun test --isolate --timeout 60000 tests/server/server-combo-held-response.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - name: Exact cancellation regression
+        timeout-minutes: 3
+        shell: bash
+        run: bun test --isolate --timeout 60000 tests/server/server-combo-failover-e2e.test.ts -t 'connect cancellation wins with 499, no backup, warning, or cooldown'
+      - name: Entire combo failover test file
+        timeout-minutes: 8
+        shell: bash
+        run: bun test --isolate --timeout 60000 tests/server/server-combo-failover-e2e.test.ts
+      - name: Type and repository gates
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run typecheck
+          bun run structure:check
+          bun run privacy:scan
+          bun scripts/file-size-ratchet.ts
