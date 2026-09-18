@@ -269,7 +269,12 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       // Same one-time marker and same guards (TTY, gh auth, agent deferral) apply.
       await maybeShowStarPrompt();
       break;
-    case "start":
+   case "start":
+      // The installed launcher preserves the recorded CODEX_SQLITE_HOME: a
+      // changed sqlite_home/CODEX_SQLITE_HOME/CODEX_HOME would start the service
+      // on the recorded database while this shell resolves another, splitting
+      // native Codex history between databases. Same guard `stop` already runs.
+      assertServiceEnvironmentMatchesInstall();
       ops.start();
       await reportServiceServing("started");
       break;
