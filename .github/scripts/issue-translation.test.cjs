@@ -1177,22 +1177,38 @@ describe("bot-owned control state", () => {
     assert.match(out, /\[@\u200buser\]/);
     assert.match(out, />@\u200borg\/team/);
     assert.match(out, /Status:@\u200bmaintainer/);
-    assert.ok(out.includes("user@example.com"));
+    assert.ok(out.includes("`user@example.com`"));
     assert.ok(out.includes("npm:@scope"));
   });
 
   it("preserves punctuation-bearing email local parts while defusing mentions", () => {
     const out = sanitizeTranslationBody(
-      "mail x!@example.com, a=b@example.com, or a/b@example.com; end!@octocat key=@value path/@handle user.name@example.com user+tag@example.com",
+      "mail x!@example.com, a=b@example.com, or a/b@example.com; end!@octocat key=@value path/@handle user.name@example.com user+tag@example.com end!@octocat.com",
     );
-    assert.ok(out.includes("x!@example.com"));
-    assert.ok(out.includes("a=b@example.com"));
-    assert.ok(out.includes("a/b@example.com"));
-    assert.ok(out.includes("user.name@example.com"));
-    assert.ok(out.includes("user+tag@example.com"));
+    assert.ok(out.includes("`x!@example.com`"));
+    assert.ok(out.includes("`a=b@example.com`"));
+    assert.ok(out.includes("`a/b@example.com`"));
+    assert.ok(out.includes("`user.name@example.com`"));
+    assert.ok(out.includes("`user+tag@example.com`"));
+    assert.ok(out.includes("`end!@octocat.com`"));
     assert.match(out, /end!@\u200boctocat/);
     assert.match(out, /key=@\u200bvalue/);
     assert.match(out, /path\/@\u200bhandle/);
+  });
+
+  it("emits preserved addresses inside backticks so no live @-mention remains", () => {
+    const out = sanitizeTranslationBody(
+      "ping end!@octocat.com and user@octocat.com, keep `pre@wrapped.com` and span `see end!@x.com`",
+    );
+    assert.ok(out.includes("`end!@octocat.com`"));
+    assert.ok(out.includes("`user@octocat.com`"));
+    assert.ok(out.includes("`pre@wrapped.com`"));
+    assert.ok(!out.includes("``pre@wrapped.com``"));
+    assert.ok(out.includes("`see end!@x.com`"));
+    // Outside code spans no live @-mention may remain.
+    const outsideCode = out.replace(/`[^`]*`/g, "");
+    assert.ok(!outsideCode.includes("@octocat"));
+    assert.ok(!out.includes("@\u200boctocat"));
   });
 
   it("ignores forged body-embedded legacy state", () => {

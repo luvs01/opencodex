@@ -808,11 +808,26 @@ function sanitizeTranslationBody(raw, maxChars = 60000) {
     // Mask the @ inside email addresses first: punctuation-bearing local
     // parts (x!@example.com, a=b@example.com, a/b@example.com) must not be
     // read as mention boundaries. Requiring a dotted domain keeps
-    // "end!@octocat"-style mentions defused. \u0001 cannot appear in the
-    // input (control chars were stripped above), so it is a safe sentinel.
+    // "end!@octocat"-style mentions defused. Preserved addresses are emitted
+    // inside backticks so the text survives without a live @-notification —
+    // unless the address already sits inside a code span, where the existing
+    // backticks already block the ping. \u0001 cannot appear in the input
+    // (control chars were stripped above), so it is a safe sentinel.
     .replace(
       /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/g,
-      (email) => email.replace("@", "\u0001"),
+      (email, offset, text) => {
+        // The local-part class includes "`", so a match can swallow the
+        // opening backtick of a surrounding code span — exclude it when
+        // locating the address inside the original text.
+        const lead = email.startsWith("`") ? 1 : 0;
+        const addrOffset = offset + lead;
+        const addr = email.slice(lead);
+        const insideCode =
+          (text.slice(0, addrOffset).match(/`/g) || []).length % 2 === 1 &&
+          text.indexOf("`", addrOffset + addr.length) !== -1;
+        if (insideCode) return email.replace("@", "\u0001");
+        return email.slice(0, lead) + `\`${addr.replace("@", "\u0001")}\``;
+      },
     )
     // Defuse pings at Markdown/punctuation boundaries — a colon is a boundary
     // too — but not emails, npm: scopes, or other mid-token at-signs.
