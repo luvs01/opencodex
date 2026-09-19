@@ -41,13 +41,26 @@ async function waitForOwnedChildReady(child: ReturnType<typeof Bun.spawn>, path:
       child.exited.then(code => code as number | null),
     ]);
     if (exit !== null) {
-      const stderr = await new Response(child.stderr).text().catch(() => "");
-      throw new Error(`config-lock child exited ${exit} before writing marker ${path}\nchild stderr: ${stderr}`);
+      throw new Error(`config-lock child exited ${exit} before writing marker ${path}`);
     }
   }
   if (existsSync(path)) return;
   throw new Error(`Timed out waiting ${budgetMs}ms for child marker ${path}`);
 }
+
+test("readiness failure leaves child stderr available to its caller", async () => {
+  const markerPath = join(testRoot, "never-written-ready-marker");
+  const child = Bun.spawn([process.execPath, "-e", `console.error("readiness failure detail"); process.exit(23);`], {
+    cwd: repoRoot(),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const readinessError = await waitForOwnedChildReady(child, markerPath).catch(error => error as Error);
+  expect(readinessError.message).toContain(`config-lock child exited 23 before writing marker ${markerPath}`);
+  expect(await new Response(child.stderr).text()).toContain("readiness failure detail");
+});
 
 async function waitForOwnedChild(child: ReturnType<typeof Bun.spawn>): Promise<number> {
   // The child polls for the release marker on a 10 ms sleep, so its exit is bounded by the
