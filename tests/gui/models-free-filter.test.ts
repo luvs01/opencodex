@@ -114,6 +114,7 @@ describe("free-only runs before the page slice (#3666)", () => {
     const group = modelsPage.slice(start, end);
     expect(group).toContain('t("models.active", { active: activeCount, total: scoped.length })');
     expect(group).toContain("const activeCount = scoped.filter(isVisible).length");
+    expect(group).toContain('freeOnlyActive ? "models" : "provider"');
     expect(group).toContain("scoped.map(m => ({ id: m.id, native: m.native === true }))");
     expect(group).not.toContain('total: rows.length })');
   });

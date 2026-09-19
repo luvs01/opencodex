@@ -1466,7 +1466,7 @@ export default function Models({ apiBase, restartEpoch = 0, catalogSyncedAt }: {
      const bulkToggle = (enable: boolean) => {
        if (!hasRows || selectionPending) return;
        void applyVisibility(
-         "provider",
+         freeOnlyActive ? "models" : "provider",
          provider,
          scoped.map(m => ({ id: m.id, native: m.native === true })),
          enable,
