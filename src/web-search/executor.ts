@@ -49,8 +49,8 @@ export type SidecarOutcome = WebSearchResult & { error?: string };
  * The forward backend throttles burst sidecar traffic, and without a replay the 429 becomes a
  * failed tool result that poisons the query for the whole turn (see failedQueries in loop.ts).
  * 1 initial send + 2 replays; Retry-After is honored as a lower bound and capped by
- * RETRY_AFTER_CEILING_MS (an instruction past the ceiling ends with the 429 instead of
- * parking the search). Each wait releases the unread 429 body first so sockets do not
+ * RETRY_AFTER_CEILING_MS and the remaining sidecar deadline (an instruction past either
+ * ends with the 429 instead of parking the search). Each wait releases the unread 429 body first so sockets do not
  * accumulate under a rate-limit storm. Abort or timeout ends the wait through the existing
  * catch, exactly like an abort during the SSE parse.
  */
@@ -129,7 +129,7 @@ export async function runWebSearch(
       });
       // A deadline, not a clamp: an instruction past the ceiling ends the search with the
       // 429 instead of parking it at a provider that already said it would refuse.
-      if (delay > RETRY_AFTER_CEILING_MS) break;
+      if (delay > RETRY_AFTER_CEILING_MS || delay >= settings.timeoutMs - (Date.now() - t0)) break;
       console.warn(`[web-search] sidecar HTTP 429 — retrying (${attempt + 2}/${SIDECAR_429_MAX_ATTEMPTS}) after ${delay}ms`);
       await releaseResponseBodyBestEffort(res.body, linkedSignal.signal);
       await sleepWithAbort(delay, linkedSignal.signal);

@@ -152,6 +152,7 @@ turn show the destination one consistent conversation. The rewrite runs only for
 `call_id` the body already carries — leaves the replayed item untouched. Re-running the search or
 synthesizing result text is not a permitted recovery. The bridge finalizes request-scoped OpenAI sidecar authority on completion, failure, and client cancellation — cancellation releases immediately rather than waiting on an abandoned upstream read — so a recovery probe lease no search consumed is always returned.
 `tests/web-search/web-search-bridge-replay.test.ts` pins the restore and each of those refusals.
+A forward OpenAI search sidecar retries a 429 only when the requested delay fits both its retry ceiling and the remaining overall sidecar deadline. A delay that cannot fit returns and records the original 429 so pool routing retains quota evidence.
 A leg whose
 upstream terminal is `response.failed` or `response.incomplete` runs no search at all and closes
 any cell it opened rather than leaving it in progress. Assistant text is not treated as a search

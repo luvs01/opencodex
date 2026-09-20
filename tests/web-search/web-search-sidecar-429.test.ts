@@ -31,14 +31,20 @@ describe("web-search sidecar 429 replays", () => {
     return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
   }
 
-  function searchWith(fetchImpl: () => Promise<Response>) {
+  function searchWith(
+    fetchImpl: () => Promise<Response>,
+    timeoutMs = 30_000,
+    recordOutcome?: (outcome: number | "connect_error" | "connect_neutral" | "timeout") => void,
+  ) {
     globalThis.fetch = fetchImpl as unknown as typeof fetch;
     return runOpenAiWebSearch(
       "current docs",
       { type: "web_search" },
       sidecarProvider(),
       new Headers({ authorization: "Bearer selected-token" }),
-      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs },
+      undefined,
+      recordOutcome,
     );
   }
 
@@ -71,5 +77,17 @@ describe("web-search sidecar 429 replays", () => {
     });
     expect(calls).toBe(1);
     expect(outcome.error).toContain("429");
+  });
+
+  test("a Retry-After that cannot fit the sidecar deadline preserves the 429", async () => {
+    let calls = 0;
+    const recorded: Array<number | string> = [];
+    const outcome = await searchWith(async () => {
+      calls += 1;
+      return new Response("slow down", { status: 429, headers: { "retry-after": "0.1" } });
+    }, 50, value => recorded.push(value));
+    expect(calls).toBe(1);
+    expect(outcome.error).toContain("429");
+    expect(recorded).toEqual([429]);
   });
 });
