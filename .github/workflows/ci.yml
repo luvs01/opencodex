@@ -607,12 +607,52 @@ jobs:
           source scripts/ci/bun-crash-signatures.sh
 
           run_macos_suite() {
-            local suite_log suite_status
+            local suite_log suite_status watchdog_pid
             suite_log="$(mktemp -t ocx-macos-suite.XXXXXX)" || return $?
+
+            # --timeout 60000 bounds a test that is awaiting work; it cannot bound a
+            # wedged runner. A Bun isolate on this lane has been observed wedged
+            # inside spawnSync: the spawned child is already dead but the worker's
+            # private wait loop never polls its exit again, so the suite writes
+            # nothing further, the per-test ceiling fires inside the spin without
+            # breaking it, and only the job's timeout-minutes ends it -- twenty
+            # silent minutes later, on whichever file happened to be running.
+            # A suite making progress emits a result line inside every per-test
+            # window, so silence several times that window is a wedge, not slow
+            # work: kill Bun so the leg fails inside minutes, at the file the log
+            # last grouped. macOS has no timeout(1), so the bound is a growth poll
+            # on the log the suite already tees into.
+            (
+              last_size=-1
+              silent_for=0
+              while sleep 15; do
+                size="$(wc -c < "$suite_log" 2>/dev/null || echo 0)"
+                if [ "$size" -le "$last_size" ]; then
+                  silent_for=$((silent_for + 15))
+                else
+                  silent_for=0
+                  last_size=$size
+                fi
+                if [ "$silent_for" -ge "${OCX_MACOS_SUITE_SILENCE_SECONDS:-300}" ]; then
+                  echo "::error::macOS suite produced no output for ${silent_for}s -- a wedged isolate, not slow work (several times the 60s per-test ceiling). Killing Bun; the last ##[group] in this log names the file it stalled inside."
+                  pkill -KILL -x bun 2>/dev/null || true
+                  # tee's read ends only when every descendant that inherited the
+                  # merged stream is dead; a lingering grandchild must not hang the
+                  # leg a second time, so give EOF a moment, then reap tee itself.
+                  sleep 5
+                  pkill -KILL -f "tee $suite_log" 2>/dev/null || true
+                  exit 0
+                fi
+              done
+            ) &
+            watchdog_pid=$!
+
             # The per-test ceiling applies to every invocation, including each isolated
             # serial file. One attempt, whatever the outcome.
             bun test --isolate --timeout 60000 "$@" 2>&1 | tee "$suite_log"
             suite_status="${PIPESTATUS[0]}"
+            kill "$watchdog_pid" 2>/dev/null
+            wait "$watchdog_pid" 2>/dev/null
             if [ "$suite_status" -eq 0 ]; then
               rm -f "$suite_log"
               return 0
