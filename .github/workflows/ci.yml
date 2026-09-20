@@ -1201,6 +1201,7 @@ jobs:
       - name: Verify WidgetKit appex and desktop app
         run: |
           app=desktop/src-tauri/target/release/bundle/macos/OpenCodex.app
+          find "$app/Contents" -type f | sort
           test -x "$app/Contents/MacOS/OpenCodex"
           test -x "$app/Contents/PlugIns/OpenCodexWidget.appex/Contents/MacOS/OpenCodexWidget"
           test -x "$app/Contents/MacOS/ocx"
