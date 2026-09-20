@@ -12,8 +12,9 @@ const provider: OcxProviderConfig = {
   baseUrl: "https://example.test/v1",
   apiKey: "sk-test",
   authMode: "key",
-  // These cases assert which slot the deferred barrier lands in, and the wire role folds
-  // to `system` unless a destination is recorded as accepting `developer`.
+  // The wire role folds to `system` unless a destination is recorded as accepting
+  // `developer`; this suite is about tool-result repair ordering, so it declares the
+  // destination rather than asserting the default.
   foldDeveloperRoleToSystem: false,
 };
 
