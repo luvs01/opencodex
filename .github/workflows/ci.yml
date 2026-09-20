@@ -1193,7 +1193,9 @@ jobs:
 
       - name: Build unsigned desktop app
         working-directory: desktop
-        run: bunx tauri build --ci --bundles app
+        # No TAURI_SIGNING_PRIVATE_KEY in this job: disable updater artifacts so
+        # tauri build does not emit a signed updater tarball and demand the key.
+        run: bunx tauri build --ci --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Verify WidgetKit appex and desktop app
         run: |
