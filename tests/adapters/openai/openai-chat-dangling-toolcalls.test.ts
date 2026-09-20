@@ -12,6 +12,10 @@ const provider: OcxProviderConfig = {
   baseUrl: "https://example.test/v1",
   apiKey: "sk-test",
   authMode: "key",
+  // The wire role folds to `system` unless a destination is recorded as accepting
+  // `developer`; these cases are about where the barrier lands, so the destination
+  // declares the role rather than asserting the unrecorded default.
+  foldDeveloperRoleToSystem: false,
 };
 
 interface ChatMsg {
