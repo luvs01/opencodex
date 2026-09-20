@@ -12,6 +12,10 @@ const provider: OcxProviderConfig = {
   baseUrl: "https://example.test/v1",
   apiKey: "sk-test",
   authMode: "key",
+  // These cases assert where a barrier lands relative to repaired tool calls, not which role
+  // carries it. The wire role folds to `system` unless a destination is recorded as accepting
+  // `developer`, so the destination is declared here to keep the assertions on their own role.
+  foldDeveloperRoleToSystem: false,
 };
 
 interface ChatMsg {
