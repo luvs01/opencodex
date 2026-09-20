@@ -1094,12 +1094,11 @@ can follow a completed multi-agent turn as a new explicit request using ordinary
 routing. Client support and backend entitlement still require live verification.
 
 
-## Steering continuation settings and public API
+## Steering continuation settings
 
 An explicit saved-result `response.create` may override `reasoning` (effort and
 summary), `text` (verbosity and supported structured-output format), and
-`stream_options`. On an explicitly configured public API route it may also
-change `max_output_tokens`. Subscription routes refuse that token-limit override
+`stream_options`. Subscription routes refuse a `max_output_tokens` override
 instead of silently ignoring it. Normal provider pins, subagent caps, effort
 mapping and summary/verbosity capability exclusions still apply.
 
@@ -1111,14 +1110,11 @@ corrected request can be submitted without rerunning its tool. The server still
 decides which settings the chosen model accepts. Changes to model, account,
 provider, tools, instructions or service tier require a separate ordinary turn.
 
-For public API steering, configure an `openai-responses` provider with exactly
-`https://api.openai.com/v1`, its API key and `upstreamWebsocket: true`, then use its
-normal prefixed model selector with `websockets: true` and
-`codexNativeSteering: true`. This does not buy API credit or redirect a ChatGPT
-subscription to separately billed usage. A supporting single-agent model/execution
-mode is still required. Conversation-bound responses and API automatic compaction
-are not steerable; their ordinary responses are preserved and a steering attempt
-receives an explanatory error. The multi-agent injection path stays separate.
+Native steering is restricted to the canonical ChatGPT subscription route. Public
+API-key and gateway routes are not steerable; their ordinary responses are preserved
+and a steering attempt receives an explanatory error. This prevents successor
+generations on a retained socket from bypassing normal per-request admission. The
+separately gated public API multi-agent injection path remains available.
 
 ### Executable direct-versus-proxy wire probe
 

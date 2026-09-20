@@ -475,7 +475,7 @@ Injection retains its existing helper export names and comparison semantics.
 
 `native-steering-settings.ts` validates a bounded allowlist for explicit saved-result
 continuations: `reasoning`, `text` (including structured-output format),
-`stream_options` and public-API `max_output_tokens`. Unknown/malformed overrides
+`stream_options` and a validated `max_output_tokens` field. Unknown/malformed overrides
 fail before result reservation. Null resets the supplied setting; omission keeps
 the current authorized wire value. Models, tools, instructions, account, lane,
 service tier, execution mode and other settings remain pinned. The schema uses
@@ -489,10 +489,10 @@ current wire base, retaining new values across later explicit continuations.
 Normal pacing and captured account/dispatch guards still run before physical send.
 No tool results are transformed by generation normalization or rerun on rejection.
 
-Public API steering requires `openai-responses`, key-mode authentication,
-`upstreamWebsocket: true` and exactly `https://api.openai.com/v1`. It uses its own
-configured API key; subscription traffic is never migrated there. Injection-only
-beta metadata is not attached to steering. Initial mode selection explains disabled,
+Steering is restricted to the canonical ChatGPT forward route. In particular, an
+API-key Responses WebSocket cannot retain a steering channel because its successor
+generations do not pass through ordinary per-request send and spend admission. Public
+API WebSockets remain available for multi-agent injection. Initial mode selection explains disabled,
 multi-agent, conversation-bound and automatic-compaction exclusions without breaking
 ordinary creates or inventing model entitlement. HTTP fallback remains non-steerable.
 
