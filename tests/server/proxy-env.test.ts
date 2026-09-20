@@ -215,6 +215,13 @@ describe("applyProxyEnv with values the schema does not constrain", () => {
 });
 
 describe("applyProxyEnv", () => {
+  test("writes no proxy state into an environment that has none", () => {
+    applyProxyEnv(configWithProxy());
+    for (const key of PROXY_ENV_KEYS) {
+      expect(process.env[key]).toBeUndefined();
+    }
+  });
+
   test("keeps mandatory loopback exclusions when config.proxy is unset", () => {
     process.env.NO_PROXY = "operator-owned.example";
     applyProxyEnv(configWithProxy(undefined, "internal.example"));

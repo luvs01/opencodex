@@ -98,6 +98,23 @@ function warnProxyConfigDiscardOnce(kind: "proxy" | "noProxy" | "noProxyElements
   }
 }
 
+// Loopback only has a proxy to bypass when the environment already carries proxy state.
+// Writing NO_PROXY into a proxy-free process is itself a proxy-env mutation that callers
+// observe (the lab sandbox rejects any of these keys as a forbidden leak), so the
+// early-return merge runs only when one is already present.
+const PROXY_STATE_ENV_KEYS = [
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+] as const;
+
+function ambientProxyStateExists(): boolean {
+  for (const key of PROXY_STATE_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined && value !== "") return true;
+  }
+  return false;
+}
+
 function mergeNoProxyEntries(configured: string[] = []): void {
   const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
   const entries = existing.split(",").map(s => s.trim()).filter(Boolean);
@@ -144,7 +161,7 @@ export function applyProxyEnvWith(
   let proxy = typeof rawProxy === "string" ? resolveEnvValue(rawProxy) : undefined;
   if (!proxy) {
     if (rawProxy !== undefined) warnProxyConfigDiscardOnce("proxy");
-    mergeNoProxyEntries();
+    if (ambientProxyStateExists()) mergeNoProxyEntries();
     configureSocks5Fetch();
     return;
   }
