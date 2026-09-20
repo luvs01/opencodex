@@ -30,9 +30,10 @@ OAuth refresh coordination follows the [refresh-lock identity contract](catalog.
 The configuration-only [plaintext V2 contract](subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged. Cursor's localized native-shell names follow the [routing-commentary guard contract](providers/cursor.md#cursor-native-exec).
 
-Chat request serialization owns the destination-scoped
-[OpenCode Go instruction ordering](providers/chat-compat.md#opencode-go-chronological-instructions);
-it requires no runtime lifecycle change or new configuration option.
+Chat request serialization owns
+[chronological instruction ordering](providers/chat-compat.md#chronological-in-conversation-instructions)
+and the developer wire role; it requires no runtime lifecycle change, and its one
+configuration option is a per-provider role opt-out.
 
 Shared parsing and streaming follow the [request-copy](transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](transports/byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](transports/responses.md#passthrough-sse-stream-shapes-314).
 
@@ -103,6 +104,7 @@ does not perform OAuth, and runtime credential resolution rereads the owned sour
 | --- | --- |
 | `bin/ocx.mjs` | Published npm `bin` entry (Node shim). Resolves the bundled or explicit Bun binary before project dotenv can load, stamps its runtime provenance plus a proof-bound Anthropic parent-env snapshot, lazy-runs `bun/install.js` if only the placeholder stub is present, then execs `src/cli/index.ts` under Bun. Lets `npm install -g` work without a separately-installed Bun. The exact `system codex-cli-update` inspection namespace skips both boot repair and lazy Bun installation; missing runtime support fails closed instead of mutating state. |
 | `src/lib/bun-runtime.ts` | Bundled-Bun resolution: `isRealBunBinary()` (size gate vs the ~450-byte placeholder stub), `bundledBunPath()`, and `durableBunPath()` (path baked into service/shim artifacts). Durable selection accepts only the source/path pair already stamped for the running executable; it never re-reads a project-dotenv `OPENCODEX_BUN_PATH`. |
+| `src/lib/plain-data.ts` | Detached copies for a consumer that must not observe later edits. Descriptor-based reads, including array elements, so an accessor is refused rather than invoked; refuses cycles, functions, class instances and anything else JSON could not have produced, and returns a copy-or-refusal union rather than degrading silently. Symbol-keyed process bookkeeping is skipped. |
 | `src/cli/index.ts` | `ocx` / `opencodex` CLI. Lifecycle: init, start, stop, restart, status, sync, restore/eject, gui, service, update. `restart` refuses an in-place restart requested by a CLI whose version differs from the attested `/healthz` version, because the replacement respawns from the live installation; placeholder versions (unknown/0.0.0) stay incomparable and keep the restart path. Configuration: provider, account, models, combo/route, access, integrations, v2. Client launchers: Claude, OpenCode, MiniMax Code, and MiniMax CLI text. The MMX launcher owns a child-lifetime loopback path bridge from the client's hard-coded `/anthropic/v1/messages` path to the canonical `/v1/messages` data plane; the server does not expose an extra auth surface. Diagnostics: doctor, debug, observe, health. Windows adds tray. The full command surface is `src/cli/help.ts`; this table names the groups, not every verb. After help/version early exits, ordinary commands run the bounded best-effort Codex-shim auto-restore policy before dispatch. `system codex-cli-update` is the deliberate read-only exception and suppresses auto-restore for its whole namespace, including malformed invocations. Keeps the `#!/usr/bin/env bun` shebang for from-source dev (`bun run src/cli/index.ts`). |
 | `src/server/index.ts` | Bun server entrypoint: `startServer`, `/v1/responses` HTTP + WebSocket routing (compact handled before generic Responses), exact `POST /v1/images/generations` and `POST /v1/images/edits` routing, `/v1/models`, the Anthropic-shaped `/v1/messages` and OpenAI-shaped `/v1/chat/completions` compatibility surfaces, the Live/Realtime surface, the hosted-search relay, artifact serving, `/healthz`, the `/api/*` auth gate, the `/v1/*` JSON 404 guard, GUI fallback, the opt-in loopback-only hub-management listener, and facade re-exports for split server modules. The route table itself is built by `src/server/index/serve-options.ts`; this entry file owns the listener and the startup transaction. |
 | `src/server/images.ts` | Standalone Images data plane: default OpenAI or explicit custom-provider selection, Codex account affinity, bounded opaque request relay, single-attempt upstream fetch, pool health recording, and safe response/cancellation relay. |
@@ -112,6 +114,7 @@ does not perform OAuth, and runtime credential resolution rereads the owned sour
 | `src/config/paths.ts` | Resolves `OPENCODEX_HOME`, `config.json`, and owner-only directory hardening. |
 | `src/config/atomic-write.ts` | Shared synchronous/asynchronous temp-harden-rename writer and residual-temp failure contract. The temp is ACL-hardened before it holds a byte and again before the rename, both `required: true`; the second call is a memo hit rather than a second icacls sequence because the writer re-asserts descriptor/path identity after the content write and re-attributes the harden through `reattributeHardenedSecretPath`. Windows takes no `chmod` on that path — it sets the read-only attribute, not the DACL, and its ChangeTime bump is what used to retire the memo. |
 | `src/config/process-state.ts` | Owns `ocx.pid`, `runtime-port.json`, cheap liveness, full command-line identity verification, and snapshot-guarded cleanup. |
+| `src/config/admitted-identity.ts` | Which configuration a derived artifact was built from. Detaches the resident configuration as plain data so one pass cannot gather under one state and project under another, and records the complete structure beside the configuration file's bytes. Refuses an accessor, a cycle, a value JSON could not produce, an unreadable file and a file the loader would have had to salvage; a callable `providers[name].fetch` is the one non-data field, held and compared by reference, while a written one is ordinary data on both sides, as the outbound transport also reads it. It does NOT require the resident configuration to equal the file: the proxy routes by what it holds, and live reconciliation retains live changes and the active listener binding on purpose. Evidence stays in a module WeakMap, never on the config and never in a response. |
 | `src/server/ports.ts` | Owns bind availability and ephemeral-port selection. Temporary probes dispose accepted peers and wait for listener close before reporting success. |
 | `src/cli/status.ts` / `src/cli/status-probes.ts` | Status snapshot assembly and the shared read-only health/stale-process probes used by status and doctor. Probe evidence keeps recorded-port choice, before/after snapshots and per-call timer cleanup together. |
 | `src/cli/doctor.ts` | Read-only environment diagnostics. Sections print through `console.log`; each is a `collect*` helper above `runDoctor` so it is testable without the command. Only a `FAIL`-level condition records a doctor failure — a degraded-but-working install must not break a green pipeline. `collectDefaultModelExposure` compares Codex's root `model` pin against the exposed set, which it READS rather than recomputes: the running proxy's `/v1/models` when one answers, otherwise the on-disk catalog's `visibility: "list"` slugs. It reports exposed, not exposed, or undeterminable, and never the second when it could not read either surface. |
@@ -211,6 +214,27 @@ surface with a management credential.
 The hub-management socket is enabled only by `runtimeRole: "hub"` plus
 `hub.managementIngress.enabled`, always binds `127.0.0.1`, and default-denies everything except
 GUI, session bootstrap/exchange, and `/api/*`.
+
+### Claude intercept pair
+
+At the end of the startup transaction, `startServer` also starts the optional Claude intercept pair
+through `src/server/index/claude-intercept-lifecycle.ts` (fire-and-forget start, `ownsListener` for
+the ingress decision, `stop` joined into the listener shutdown) from `src/claude/intercept/runtime.ts`: a loopback HTTP CONNECT proxy (`src/claude/intercept/connect-proxy.ts`)
+and a loopback TLS listener (`src/claude/intercept/listener.ts`) that presents a leaf for
+`api.anthropic.com` signed by a per-install authority (`src/claude/intercept/local-ca.ts`, persisted
+under `<OPENCODEX_HOME>/claude-intercept/` with a 0600 key; never installed into an OS trust store).
+Claude Code reaches the pair through `HTTPS_PROXY` plus `NODE_EXTRA_CA_CERTS` in its settings env
+(`src/claude/intercept/settings.ts`), so no `ANTHROPIC_BASE_URL` rewrite is involved and the client
+still believes it talks to Anthropic. The proxy splices `CONNECT api.anthropic.com:443` onto the TLS
+listener, relays every other CONNECT target blind, and refuses plain proxied HTTP and loopback targets.
+The TLS listener rewrites `POST /v1/messages` and `POST /v1/messages/count_tokens` onto a loopback
+origin and dispatches them to the same route table under the `claude-intercept` ingress, which takes
+the loopback request policy; every other path on the intercepted host is relayed verbatim to the
+configured Anthropic upstream. The pair is on by default on a hub (`claudeCode.intercept.enabled`),
+its proxy port defaults to the public port + 100 (`claudeCode.intercept.port`), and a bind failure
+degrades to a startup warning rather than a startup failure; stop joins both sockets. A server asked
+for an ephemeral public port (`startServer(0)`, the shape every in-process test fixture uses) has no
+stable port to derive from, so the pair stays off unless `claudeCode.intercept.port` is explicit.
 
 Auxiliary listener bind failures carry the listener key and effective address through `AuxiliaryListenerBindError` in `src/server/ports.ts`. `src/cli/index.ts` reports them without retrying the public port. Startup still rolls back every earlier socket synchronously.
 
@@ -399,6 +423,8 @@ privately to final dispatch; preliminary route selection does not inject Go-only
 Private pool credential metadata follows the [quota-history publication identity contract](providers/openai-tiers.md#quota-history-publication-identity); credential-only and account DTO projections omit it.
 
 Cline CLI joins the existing export/client integration registries. Explicit CLI sync and POST /api/sync refresh its owned pair; unattended catalog refresh excludes it. See [Cline paired files](clients/integrations.md#cline-paired-files).
+Its paired-file writer uses the config atomic-write primitive that replaces the named entry without
+following a final symlink, so an exchange during a mutation cannot redirect the write.
 
 `claudeCode.stabilizePromptCache` is a default-off operator setting for
 [translated instruction stabilization](data-planes/inbound-compat.md#opt-in-claude-instruction-stabilization).
@@ -428,7 +454,7 @@ declare `modelInputModalities: ["text", "image"]` per model for the nine Claude 
 explicit operator overrides; unknown models receive no new declaration. Client eligibility filters
 and Anthropic image wire handling remain unchanged.
 
-`src/vision/plan.ts` prevents raw image bytes from reaching any target whose effective capability is positively known to exclude image input. Evidence from the resolved runtime provider and explicit operator declarations takes precedence, followed by backend-specific/registry/vendor metadata. A proven text-only target is preprocessed through the configured Vision Sidecar; a positively image-capable target receives the image directly. Genuinely unknown custom models retain the existing compatibility path rather than being guessed text-only.
+`src/vision/plan.ts` prevents raw image bytes from reaching any target whose effective capability is positively known to exclude image input. Evidence is consulted highest-first: `modelCapabilities`, an explicit custom row for the same routed identity, `noVisionModels`, an explicit per-model modality list without `image`, then backend-specific/registry/vendor metadata. A proven text-only target is preprocessed through the configured Vision Sidecar; a positively image-capable target receives the image directly. Genuinely unknown custom models retain the existing compatibility path rather than being guessed text-only.
 
 Canonical ChatGPT Codex forwarding uses the generated `openai-codex` capability bundle rather than the public `openai` bundle. This matters when the two backends differ: for example, the vendored metadata records `gpt-5.3-codex-spark` as text-only on `openai-codex` while the public OpenAI row lists image input. The native Chat fast path and web-search image verbalization consume the same effective-capability decision.
 

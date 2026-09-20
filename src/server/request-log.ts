@@ -12,6 +12,7 @@ import {
   isCyberPolicyCode,
   isCyberPolicyMessage,
   isRateLimitOrQuotaFailureMessage,
+  isUpstreamResetReplayRefusedMessage,
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
@@ -22,6 +23,7 @@ import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routi
 import type { AdapterRequest } from "../adapters/base";
 import type { RequestSpendSettlement } from "./responses/request-spend";
 import type { AdapterTierMetadata } from "../providers/fastwire";
+import { UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../lib/upstream-retry";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import {
   appendUsageEntry,
@@ -68,6 +70,21 @@ import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/k
 import { DEVIN_MODEL_CONTEXT_WINDOWS } from "../adapters/devin/live-models";
 import { modelRecordValue } from "../reasoning-effort";
 import type { RequestMetricsRecorder } from "./request-metrics";
+import type {
+  CacheDiagnosticDraft,
+  CacheDiagnosticFinalFacts,
+  PromptCacheKeySource,
+} from "../usage/cache-diagnostic";
+
+const CACHE_DIAGNOSTIC_HOOK = Symbol.for("opencodex.cache-diagnostic.v1");
+interface CacheDiagnosticHooks {
+  observeInbound(body: unknown, headers: Headers, source: PromptCacheKeySource): CacheDiagnosticDraft;
+  rebind(body: unknown, draft: CacheDiagnosticDraft | undefined): void;
+  finalize(facts: CacheDiagnosticFinalFacts): void;
+}
+function cacheDiagnosticHooks(): CacheDiagnosticHooks | undefined {
+  return (globalThis as Record<symbol, CacheDiagnosticHooks | undefined>)[CACHE_DIAGNOSTIC_HOOK];
+}
 
 export interface RequestLogContext {
   model: string;
@@ -81,6 +98,8 @@ export interface RequestLogContext {
    * budget minted at ingress; a retry leg, a repair refetch and a combo child share it.
    */
   logicalRequestId?: string;
+  /** Process-local privacy-bounded cache diagnostic; never persisted with request logs. */
+  cacheDiagnosticDraft?: CacheDiagnosticDraft;
   /**
    * Internal live reference to this request's execution budget; omitted from RequestLogEntry and
    * JSONL. Read at final-log time so the row reports the budget's FINAL state rather than a
@@ -205,6 +224,24 @@ export interface RequestLogContext {
   routeDecision?: RouteDecisionTraceV1;
   /** Opt-in shadow evidence, normalized again at the logging boundary. */
   claudeCompatibility?: PersistedClaudeCompatibilityLog;
+}
+
+export function observeCacheDiagnosticInbound(
+  logCtx: RequestLogContext,
+  body: unknown,
+  headers: Headers,
+  source: PromptCacheKeySource,
+): void {
+  const draft = cacheDiagnosticHooks()?.observeInbound(body, headers, source);
+  if (draft) logCtx.cacheDiagnosticDraft = draft;
+}
+
+/** Alias a rebuilt form of the request body to the request's diagnostic draft. */
+export function rebindCacheDiagnosticBody(
+  body: unknown,
+  draft: CacheDiagnosticDraft | undefined,
+): void {
+  cacheDiagnosticHooks()?.rebind(body, draft);
 }
 
 export interface RequestLogEntry {
@@ -729,7 +766,15 @@ export function requestLogErrorCode(
     }
     return "permission_denied";
   }
-  if (status === 429) return "rate_limit_exceeded";
+  if (status === 429) {
+    // A refused ambiguous reset answers 429 by design (it must not invite a client
+    // retry that could duplicate inference); classify it by its message so the log
+    // distinguishes a proxy refusal from provider throttling.
+    if (upstreamError?.trim() && isUpstreamResetReplayRefusedMessage(upstreamError)) {
+      return UPSTREAM_RESET_REPLAY_REFUSED_CODE;
+    }
+    return "rate_limit_exceeded";
+  }
   if (status === 503) return "server_is_overloaded";
   if (status >= 500) return "upstream_server_error";
   return `http_${status}`;
@@ -1363,6 +1408,24 @@ export function addFinalRequestLog(
     wireParsed: logCtx.usageWireParsed === true,
   });
   const logicalRequestId = logCtx.logicalRequestId ?? logCtx.executionBudget?.logicalRequestId;
+  const normalizedCacheValue = loggedUsage?.cacheReadInputTokens ?? loggedUsage?.cachedInputTokens;
+  cacheDiagnosticHooks()?.finalize({
+    requestId,
+    ...(isLogicalRequestId(logicalRequestId) ? { logicalRequestId } : {}),
+    protocol: logCtx.inboundProtocol ?? "responses",
+    provider: logCtx.provider,
+    model: logCtx.model,
+    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel) ? { accountLogLabel: logCtx.accountLogLabel } : {}),
+    ...(logCtx.affinity ? { affinityMove: logCtx.affinity } : {}),
+    ...(logCtx.affinityReason ? { affinityReason: logCtx.affinityReason } : {}),
+    // loggedUsage carries the upstream cache counter by reference all the way from the
+    // adapter extraction for the native Responses route, so an undefined read here is a
+    // genuinely absent counter rather than a defaulted one.
+    ...(normalizedCacheValue !== undefined ? { rawCacheCounterValue: normalizedCacheValue } : {}),
+    ...(normalizedCacheValue !== undefined ? { normalizedCacheValue } : {}),
+    cacheProvenance,
+    ...(logCtx.cacheDiagnosticDraft ? { draft: logCtx.cacheDiagnosticDraft } : {}),
+  });
   // Sanitize at the logging layer, not only at the one call site that populates this today.
   // The value originates in an upstream-supplied model id, so an unsanitized newline would
   // let a single field forge a record boundary in any line-oriented log viewer. Doing it here
