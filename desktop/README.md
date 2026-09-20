@@ -45,6 +45,13 @@ bun run prepare-widget
 bunx tauri build --ci --bundles app,dmg
 ```
 
+Without the signing key, disable updater artifacts or the bundler errors out
+(`A public key has been found, but no private key`):
+
+```sh
+bunx tauri build --ci --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
 Release signing is supplied through environment variables:
 
 ```sh

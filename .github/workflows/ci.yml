@@ -1193,7 +1193,10 @@ jobs:
 
       - name: Build unsigned desktop app
         working-directory: desktop
-        run: bunx tauri build --ci --bundles app
+        # Updater artifacts stay disabled here: with the pubkey configured in
+        # tauri.conf.json they require TAURI_SIGNING_PRIVATE_KEY, which only
+        # exists as a release-workflow secret.
+        run: bunx tauri build --ci --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Verify WidgetKit appex and desktop app
         run: |
