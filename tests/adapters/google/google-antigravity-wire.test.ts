@@ -492,16 +492,11 @@ describe("antigravity CCA envelope", () => {
       .toBe(antigravitySessionId(child("summary of earlier turns", "child-1", "parent-a")));
   });
 
-  test("#5058: a parentless root keeps the anchor it had before #5054", () => {
-    // `src/server/context-history.ts` is explicit that a root uses (session-id=root,
-    // thread-id=root) and does not fabricate a parent key, so a root carries an own thread and no
-    // parent. #5054 gave it an own-thread anchor on that basis and was wrong to.
-    //
-    // Durable Antigravity replay state is keyed by model plus session id, so moving a root's
-    // anchor on upgrade strands every signature stored under the old session. Asserted against
-    // the no-header form rather than a literal: what matters is that the value did not move.
-    expect(antigravitySessionId(child("hi", "root-thread", undefined)))
-      .toBe(antigravitySessionId(threaded("hi", undefined)));
+  test("parentless roots isolate replay state even when their initial text matches", () => {
+    expect(antigravitySessionId(child("hi", "root-a", undefined)))
+      .not.toBe(antigravitySessionId(child("hi", "root-b", undefined)));
+    expect(antigravitySessionId(child("original", "root-a", undefined)))
+      .toBe(antigravitySessionId(child("compacted", "root-a", undefined)));
   });
 
   test("#5033: a client that sends no own-thread header is unchanged", () => {

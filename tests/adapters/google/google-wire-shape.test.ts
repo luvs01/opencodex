@@ -539,8 +539,9 @@ describe("google wire upstream error classification", () => {
 // upstream session diverged from what the proxy replays. The anchor class says which stability
 // regime a request is in without naming the conversation.
 describe("antigravity session anchor classification", () => {
-  test("the four anchor classes are distinguished", () => {
+  test("the five anchor classes are distinguished", () => {
     expect(antigravitySessionAnchor(parsedWithThreads({ parent: "p1", own: "c1" }))).toBe("parent-and-own");
+    expect(antigravitySessionAnchor(parsedWithThreads({ own: "root" }))).toBe("own-only");
     expect(antigravitySessionAnchor(parsedWithThreads({ parent: "p1" }))).toBe("parent-only");
     expect(antigravitySessionAnchor(parsedWithThreads({}))).toBe("text");
     expect(antigravitySessionAnchor(parsedWithThreads({}, ""))).toBe("none");
@@ -585,7 +586,7 @@ describe("antigravity session anchor classification", () => {
   test("a restarted proxy re-derives the same class and the same id", () => {
     // Both values come from Codex ids and message text alone; nothing process-random enters,
     // which is what lets durable replay state survive a restart.
-    for (const threads of [{ parent: "p1", own: "c1" }, { parent: "p1" }, {}]) {
+    for (const threads of [{ parent: "p1", own: "c1" }, { own: "root" }, { parent: "p1" }, {}]) {
       const first = parsedWithThreads(threads);
       const second = parsedWithThreads(threads);
       expect(antigravitySessionAnchor(first)).toBe(antigravitySessionAnchor(second));
@@ -607,6 +608,7 @@ describe("antigravity session anchor classification", () => {
       setDebugSettings({ debug: true });
       for (const [threads, expected] of [
         [{ parent: "p1", own: "c1" }, "parent-and-own"],
+        [{ own: "root" }, "own-only"],
         [{ parent: "p1" }, "parent-only"],
         [{}, "text"],
       ] as const) {

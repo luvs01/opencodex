@@ -88,16 +88,11 @@ export function antigravitySessionId(parsed: OcxParsedRequest): string {
  * Codex's stable client thread id, prefixed before hashing so it does not collide with a first
  * user message equal to the bare thread id.
  *
- * This is a prefix, not full domain separation: a textless-anchor request whose first message is
- * literally `codex-thread:<id>` still hashes the same preimage. Tagging BOTH anchor classes would
- * separate them completely, but it would also change every existing text-derived id — a
- * Google-visible wire value for live conversations — which is a larger blast radius than the
- * collision it removes. A collision is harmless here anyway: the replay cache keys signatures on
- * functionCall identity (name+args), so a shared id does not misattribute them. Instability, not
- * collision, is the failure mode this function exists to prevent.
+ * Existing parent and text anchors retain their wire values. New parentless-root anchors use a
+ * distinct prefix so they cannot collide with parent-only identities carrying the same value.
  */
 function codexThreadAnchor(parsed: OcxParsedRequest): {
-  kind: "parent-and-own" | "parent-only" | "absent";
+  kind: "parent-and-own" | "own-only" | "parent-only" | "absent";
   preimage?: string;
 } {
   // `_clientThreadId` carries `x-codex-parent-thread-id`, which every parallel child of one
@@ -117,17 +112,11 @@ function codexThreadAnchor(parsed: OcxParsedRequest): {
   const own = parsed._codexOwnThreadId?.trim();
   const parent = parsed._clientThreadId?.trim();
   if (own && parent) return { kind: "parent-and-own", preimage: `codex-thread:${parent}\u0000${own}` };
+  // A parentless root still has a conversation identity. Keep it in a separate domain from a
+  // parent-only request so equal header values cannot join their upstream or local replay state.
+  if (own) return { kind: "own-only", preimage: `codex-root:${own}` };
   // Parent-only clients keep the anchor they already had.
   if (parent) return { kind: "parent-only", preimage: `codex-thread:${parent}` };
-  // A parentless ROOT deliberately omits the parent header. `src/server/context-history.ts` says
-  // so in as many words: root model requests use (session-id=root, thread-id=root) and do not
-  // fabricate a parent key. It has no pair to key on, and #5054's claim that a root presents
-  // `thread-id` equal to its parent was simply wrong.
-  //
-  // So it keeps the pre-#5054 anchor rather than gaining an own-thread one. That is not a
-  // preference: durable Antigravity replay state is keyed by model plus session id, and moving a
-  // root's anchor on upgrade strands every signature stored under the old session — the exact
-  // instability this derivation exists to avoid, introduced while fixing sharing.
   return { kind: "absent" };
 }
 
@@ -135,16 +124,16 @@ function codexThreadAnchor(parsed: OcxParsedRequest): {
  * Which class of anchor {@link antigravitySessionId} derives this request's session id from.
  *
  * The id itself identifies a live conversation and is a Google-visible wire value, so it is not
- * something a user can paste into a public bug report. The class is: it distinguishes the four
- * stability regimes above — a Codex parent/child pair, a parent-only client, the content-derived
- * text anchor that compaction can move, and the random fallback that changes every turn — while
- * carrying no identity at all.
+ * something a user can paste into a public bug report. The class is: it distinguishes the five
+ * stability regimes above — a Codex parent/child pair, a parentless root, a parent-only client,
+ * the content-derived text anchor that compaction can move, and the random fallback that changes
+ * every turn — while carrying no identity at all.
  *
  * It reads the SAME decision the id derivation reads, so the two cannot disagree about which
  * regime a request is in. What it does not do is change how the id itself is derived: nothing
  * about a Google-visible wire value moves because a diagnostic wants to describe it.
  */
-export type AntigravitySessionAnchor = "parent-and-own" | "parent-only" | "text" | "none";
+export type AntigravitySessionAnchor = "parent-and-own" | "own-only" | "parent-only" | "text" | "none";
 
 export function antigravitySessionAnchor(parsed: OcxParsedRequest): AntigravitySessionAnchor {
   const anchor = codexThreadAnchor(parsed);
