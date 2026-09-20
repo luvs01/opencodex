@@ -146,9 +146,10 @@ they only unwrap as the single string field, so no prefix decides them. Classifi
 bounded to `MAX_FREEFORM_WRAPPER_SCAN_CHARS`, which keeps the work per delta from growing with
 the arguments. Past the bound nothing is previewed at all: the authoritative parse still
 unwraps the wrapper at completion, so the bound costs preview and never agreement. The parse
-that releases a held object therefore runs only where the scan SAW the object close, which is
-what keeps a buffer whose deltas happen to end on a brace from being re-read on every one of
-them.
+that releases a held object therefore runs only where the scan saw the object close as the final
+character of a bounded prefix. Trailing JSON whitespace stays held, so fragmented whitespace
+cannot repeatedly parse a growing provider-controlled buffer; buffers whose deltas happen to
+end on a brace stay bounded for the same reason.
 
 What that policy costs is worth stating plainly, because it is a real narrowing. A body that IS
 a parseable JSON object but not a wrapper — `{"code":1}` or `{"code":"a","script":"b"}` — now

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { unwrapFreeformToolInput } from "../../src/responses/apply-patch-envelope";
 import { MAX_FREEFORM_WRAPPER_SCAN_CHARS } from "../../src/responses/freeform-wrapper-scan";
 import { progressiveFreeformInput } from "../../src/responses/progressive-freeform-input";
@@ -109,6 +109,19 @@ describe("freeform wrapper keys the literal matcher could not see", () => {
     const program = "{ let x = 1; return x; }";
     expect(published(program, "exec")).toBe(program);
     expect(emissions(program, "exec").length).toBeGreaterThan(1);
+  });
+
+  test("does not repeatedly parse trailing whitespace after an object closes", () => {
+    const parse = spyOn(JSON, "parse");
+    try {
+      const body = "{}" + " ".repeat(MAX_FREEFORM_WRAPPER_SCAN_CHARS + 1);
+      expect(published(body, "exec")).toBe("{}");
+      // The closing brace resolves the object once. Every later prefix is legal JSON, but none
+      // can change that decision, so provider-controlled whitespace must not reparse it.
+      expect(parse).toHaveBeenCalledTimes(2);
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   test("canonical input and plain bodies stay progressive", () => {

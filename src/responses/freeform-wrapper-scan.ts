@@ -197,6 +197,7 @@ function scanValue(text: string, from: number): number {
  * them indistinguishable from any other undecided object and lets one HOLD cover both.
  */
 export function scanFreeformWrapper(text: string): FreeformWrapperScan {
+  const parseFitsBudget = text.length <= MAX_FREEFORM_WRAPPER_SCAN_CHARS;
   // One clamp rather than a budget threaded through every helper. Every helper already holds
   // when it runs off the end of what it can see, so a buffer whose classification needs more
   // than this holds for exactly the right reason, and no scan can cost more than this many
@@ -223,7 +224,7 @@ export function scanFreeformWrapper(text: string): FreeformWrapperScan {
   for (;;) {
     const at = skipWhitespace(bounded, i);
     if (at === HOLD) return hold();
-    if (bounded[at] === "}") return afterTopLevelClose(bounded, at + 1);
+    if (bounded[at] === "}") return afterTopLevelClose(bounded, at + 1, parseFitsBudget);
     if (bounded[at] !== '"') return { kind: "raw" };
 
     const nameEnd = scanString(bounded, at);
@@ -264,7 +265,7 @@ export function scanFreeformWrapper(text: string): FreeformWrapperScan {
       i = next + 1;
       continue;
     }
-    if (bounded[next] === "}") return afterTopLevelClose(bounded, next + 1);
+    if (bounded[next] === "}") return afterTopLevelClose(bounded, next + 1, parseFitsBudget);
     return { kind: "raw" };
   }
 }
@@ -274,6 +275,11 @@ export function scanFreeformWrapper(text: string): FreeformWrapperScan {
  * anything else makes the text raw; otherwise the completed parse decides between a fallback
  * wrapper and no wrapper at all.
  */
-function afterTopLevelClose(text: string, from: number): FreeformWrapperScan {
-  return skipWhitespace(text, from) === HOLD ? { kind: "hold", parse: true } : { kind: "raw" };
+function afterTopLevelClose(text: string, from: number, parseFitsBudget: boolean): FreeformWrapperScan {
+  const trailing = skipWhitespace(text, from);
+  if (trailing !== HOLD) return { kind: "raw" };
+  // Parse only when the close is the final character in the complete, bounded prefix. Legal
+  // trailing whitespace cannot change the wrapper decision, but parsing the growing full buffer
+  // after every whitespace delta would turn provider-controlled fragmentation into quadratic work.
+  return { kind: "hold", parse: parseFitsBudget && from === text.length };
 }
