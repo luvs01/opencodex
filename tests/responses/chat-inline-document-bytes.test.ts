@@ -28,6 +28,8 @@ const chatProvider: OcxProviderConfig = {
   adapter: "openai-chat",
   baseUrl: "https://gateway.example.internal/v1",
   apiKey: "k",
+  // The destination on record accepts `developer`, so the role is forwarded rather than folded.
+  foldDeveloperRoleToSystem: false,
 };
 const anthropicProvider = {
   adapter: "anthropic",
