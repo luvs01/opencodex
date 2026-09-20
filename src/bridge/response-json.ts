@@ -68,8 +68,6 @@ function buildResponseJSONWithBudget(
     toolNsMap?: Map<string, { namespace: string; name: string; freeform?: true }>;
     /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
     declaredToolNames?: ReadonlySet<string>;
-    /** See `bridgeToResponsesSSE`: enforcement is separate from normalization (#4735). */
-    enforceDeclaredToolNames?: boolean;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     freeformToolNames?: Set<string>;
@@ -436,7 +434,6 @@ function buildResponseJSONWithBudget(
         const effectiveName = normalizeDeclaredToolName(e.name, options?.declaredToolNames);
         if (
           options?.declaredToolNames
-          && options.enforceDeclaredToolNames !== false
           && !options.declaredToolNames.has(effectiveName)
         ) {
           errorEvent = {

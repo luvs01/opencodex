@@ -79,17 +79,11 @@ restoration retains the existing lowered-kind handling because custom tools are 
 functions before the adapter constructs its alias map; ordinary argument repair independently
 checks the original declaration kind.
 
-## Undeclared-tool refusal is an inbound-protocol claim
+## Undeclared-tool refusal is request-scoped
 
-Whether a routed provider's call to an undeclared tool is refused depends on the inbound protocol,
-not on the adapter or the upstream protocol. The `responses` inbound protocol refuses it and ends
-the turn, which is the #1700 contract. The `chat` and `anthropic` inbound protocols relay it,
-because those specs place validation and execution with the client's own tool runner.
-
-A manifest claiming a disposition for tool-call delivery therefore names its inbound protocol. The
-same provider, base URL, adapter, and authentication mode produce `passthrough` on `chat` and
-`anthropic` and `unsupported` on `responses` for the identical undeclared call, which is exactly
-the inference the narrow-subject rule above exists to prevent.
+A routed provider's call to an undeclared tool is refused on every inbound protocol, independently
+of the adapter or upstream protocol. Client-side validation remains useful defense in depth, but
+does not replace the proxy's request-local authorization boundary.
 
 Tool-name normalization is not scoped this way and runs on every inbound protocol, so a
 provider-invented `default.` namespace resolves back to the declared tool regardless of subject.
