@@ -29,7 +29,7 @@ const chatProvider: OcxProviderConfig = {
   baseUrl: "https://gateway.example.internal/v1",
   apiKey: "k",
   // The wire role folds to `system` unless a destination is recorded as accepting
-  // `developer`; the document-turn case asserts the role is kept, so it declares the
+  // `developer`; the document test asserts the role a turn keeps, so it declares the
   // destination rather than asserting the default.
   foldDeveloperRoleToSystem: false,
 };
