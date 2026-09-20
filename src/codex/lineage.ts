@@ -157,6 +157,14 @@ export function codexConversationKeyFor(familyId: string, threadId: string): str
     .digest("base64url")}`;
 }
 
+/** A per-thread identity for consumers whose state must not be shared by a cache cohort. */
+export function codexThreadConversationKey(headers: Headers): string | undefined {
+  const sessionId = boundedLineageComponent(headers.get("session-id"));
+  const threadId = boundedLineageComponent(headers.get("thread-id"));
+  if (sessionId === undefined || threadId === undefined) return undefined;
+  return codexConversationKeyFor(sessionId, threadId);
+}
+
 /**
  * The cohort anchor's key: the same string on both sides of the derivation.
  *

@@ -34,6 +34,7 @@ import {
   codexLineageScopeKey,
   codexLineageWorkflowLane,
   codexThreadLineageLookup,
+  codexThreadConversationKey,
   recordCodexThreadLineage,
 } from "../../src/codex/lineage";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
@@ -568,6 +569,14 @@ describe("cohort pool affinity (#4780)", () => {
     expect(bareGrandchild.conversationKey).toBe(bareChild.conversationKey);
     // ...and it is a cohort of its own, not folded into the session-keyed tree above.
     expect(bareChild.conversationKey).not.toBe(root.conversationKey);
+  });
+
+  test("thread conversation identity stays distinct inside a shared cache cohort", () => {
+    const first = rootHeaders();
+    const second = new Headers({ "session-id": "sess", "thread-id": "sibling" });
+
+    expect(codexPoolAffinityKey(first)).toBe(codexPoolAffinityKey(second));
+    expect(codexThreadConversationKey(first)).not.toBe(codexThreadConversationKey(second));
   });
 
   test("which requests bind at all is unchanged", () => {

@@ -89,8 +89,9 @@ a process-local store and reuses that snapshot on the next validated linear cont
 rebuilding rootPromptMessagesJson and conversationTurns. Tool-result turns reuse the last completed
 checkpoint plus only the uncovered suffix. A request without checkpointRef may use the prefix index
 only when a remembered Cursor conversation or stable client thread owns the resolved conversation id.
-The stable owner may be the Codex parent-thread header or the existing bounded process-local HMAC of
-the complete Desktop session-id/thread-id pair. The request must also have a covered message prefix
+The stable owner may be the Codex parent-thread header or the bounded process-local HMAC of the
+complete Desktop session-id/thread-id pair, never its session-wide pool-affinity cohort. The request
+must also have a covered message prefix
 and system/developer digest that match exactly one snapshot for that same
 conversation. Headerless requests without a stable owner full-replay. Isolated helper/shadow turns
 never join the parent or sibling conversation. An explicit missing checkpointRef full-replays. Compaction, account or model mismatch, missing refs, decode failures, and

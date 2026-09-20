@@ -38,6 +38,7 @@ import {
   hasCallerCodexBearer,
   requestOwnedMainPinState,
 } from "../../codex/auth-context";
+import { codexThreadConversationKey } from "../../codex/lineage";
 import {
   copyPreviousResponseReplayProvenance,
   expandPreviousResponseInput,
@@ -245,7 +246,7 @@ export async function prepareResponsesRequest(
   // parent all present the same parent id. `codexConversationIdentity` already reads this header
   // for the same reason, and a surface that must tell siblings apart needs it too (#5033).
   const inboundOwnThreadId = req.headers.get("thread-id")?.trim() || undefined;
-  const cursorClientThreadId = codexPoolAffinityKey(req.headers);
+  const cursorClientThreadId = codexThreadConversationKey(req.headers);
   const originalBody = body;
   if (options.comboReplaySnapshot) {
     copyPreviousResponseReplayProvenance(options.comboReplaySnapshot.sourceBody, body);
