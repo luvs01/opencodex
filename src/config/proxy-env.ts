@@ -98,6 +98,20 @@ function warnProxyConfigDiscardOnce(kind: "proxy" | "noProxy" | "noProxyElements
   }
 }
 
+function mergeNoProxyEntries(configured: string[] = []): void {
+  const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
+  const entries = existing.split(",").map(s => s.trim()).filter(Boolean);
+  const seen = new Set(entries.map(entry => entry.toLowerCase()));
+  for (const host of [...configured, "localhost", "127.0.0.1", "::1", "[::1]"]) {
+    const key = host.toLowerCase();
+    if (!seen.has(key)) {
+      entries.push(host);
+      seen.add(key);
+    }
+  }
+  process.env.NO_PROXY = entries.join(",");
+}
+
 /**
  * Mirror `config.proxy` into HTTP(S)_PROXY env vars. Bun fetch consumes them natively; transports
  * such as the ChatGPT upstream WebSocket select the same environment explicitly. User-set HTTP(S)_PROXY
@@ -130,6 +144,7 @@ export function applyProxyEnvWith(
   let proxy = typeof rawProxy === "string" ? resolveEnvValue(rawProxy) : undefined;
   if (!proxy) {
     if (rawProxy !== undefined) warnProxyConfigDiscardOnce("proxy");
+    mergeNoProxyEntries();
     configureSocks5Fetch();
     return;
   }
@@ -172,9 +187,6 @@ export function applyProxyEnvWith(
       if (!process.env.HTTPS_PROXY?.trim() && !process.env.https_proxy?.trim()) process.env.HTTPS_PROXY = proxy;
     }
   }
-  const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
-  const entries = existing.split(",").map(s => s.trim()).filter(Boolean);
-  const seen = new Set(entries.map(e => e.toLowerCase()));
   // Configured entries first, then loopback: loopback is unconditional, so appending it last
   // keeps it present even when the operator lists a loopback host themselves.
   const raw = config.noProxy;
@@ -194,13 +206,6 @@ export function applyProxyEnvWith(
   const configured = configuredEntries
     .map(entry => entry.trim())
     .filter(Boolean);
-  for (const host of [...configured, "localhost", "127.0.0.1", "::1", "[::1]"]) {
-    const key = host.toLowerCase();
-    if (!seen.has(key)) {
-      entries.push(host);
-      seen.add(key);
-    }
-  }
-  process.env.NO_PROXY = entries.join(",");
+  mergeNoProxyEntries(configured);
   configureSocks5Fetch();
 }
