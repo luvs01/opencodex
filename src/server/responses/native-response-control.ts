@@ -17,6 +17,8 @@ export interface NativeResponseControl {
   steer(frame: Record<string, unknown>): void;
   inject?(frame: Record<string, unknown>): void;
   continue(frame: Record<string, unknown>): boolean;
+  /** Apply operator-configured limits to the exact reconstructed upstream frame. */
+  assertOutboundFrame?(text: string): void;
 }
 
 export const OPENAI_API_RESPONSES_URL = "https://api.openai.com/v1/responses";

@@ -86,6 +86,7 @@ import {
 } from "../live";
 import type { ServeOptionsContext } from "./serve-options";
 import type { RequestMetricsRecorder } from "../request-metrics";
+import { resolveInboundBodyLimitBytes } from "../request-decompress";
 
 /**
  * The WebSocket half of the Bun.serve options, split out of serve-options.ts to keep that file
@@ -196,6 +197,16 @@ export function createWebsocketHandler(
         } catch {
           return; // text-only contract; ignore unparseable frames
         }
+        if ((frame.type === "response.inject" || frame.type === "response.steer"
+          || (frame.type === "response.create" && ws.data.nativeControl))
+          && rawBytes > resolveInboundBodyLimitBytes(config.maxInboundBodyBytes)) {
+          sendJsonFrame(ws, buildWsErrorFrame(413, {
+            type: "invalid_request_error",
+            code: "request_body_too_large",
+            message: "Native response control frame exceeds the configured inbound body limit.",
+          }));
+          return;
+        }
         if (frame.type === "response.inject" || frame.type === "response.steer" || (frame.type === "response.create" && ws.data.nativeControl)) {
           try {
             if (frame.type === "response.inject") {
@@ -228,7 +239,7 @@ export function createWebsocketHandler(
             ? Math.max(1, config.stallTimeoutSec) * 1000 : 300_000;
           const mode = nativeResponseControlMode(frame, config);
           nativeControl = mode === "injection" ? new NativeInjectionChannel(frame, idleMs)
-            : mode === "steering" ? new NativeSteeringChannel(frame, idleMs) : undefined;
+            : mode === "steering" ? new NativeSteeringChannel(frame, idleMs, config.maxUpstreamBodyBytes) : undefined;
         } catch {
           sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", message: "Invalid native steering request settings" }));
           return;

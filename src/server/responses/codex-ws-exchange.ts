@@ -361,6 +361,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
                   : { ...continuationBase, input: frame.input, previous_response_id: frame.previous_response_id };
               }
               const text = JSON.stringify(outgoing);
+              nativeControl.assertOutboundFrame?.(text);
               if (codexWsCreateFrameExceedsLimit(text)) {
                 throw new Error("Native steering frame exceeds the transport byte limit");
               }

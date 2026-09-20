@@ -1,4 +1,5 @@
 import { nativeResponseOutput } from "./native-response-output";
+import { appOwnedBytesSnapshot, type RetainedStoreSnapshot } from "../../lib/app-owned-memory";
 
 /**
  * Connection-local replay journal. Only input committed by response.created enters
@@ -6,6 +7,14 @@ import { nativeResponseOutput } from "./native-response-output";
  * continuation cache. Bodies are bounded and discarded at connection teardown.
  */
 export const MAX_NATIVE_STEERING_REPLAY_BYTES = 32 * 1024 * 1024;
+const activeReplays = new Set<NativeSteeringReplay>();
+
+/** Account active journals as pinned state: protocol safety forbids evicting pending input. */
+export function nativeSteeringReplayRetainedStoreSnapshot(): RetainedStoreSnapshot {
+  let bytes = 0;
+  for (const replay of activeReplays) bytes += replay.retainedBytes;
+  return { count: activeReplays.size, bytes, evictableBytes: 0, pinnedBytes: bytes, oldestAt: null };
+}
 type Frame = Record<string, unknown>;
 /** Accept JSON object envelopes without treating arrays as records. */
 function record(value: unknown): value is Frame {
@@ -32,16 +41,25 @@ export class NativeSteeringReplay implements NativeSteeringReplayObserver {
   private submissions: Array<{ parent: string; input: unknown[]; id?: string; bytes: number }> = [];
   private explicitInput: unknown[] = [];
   private explicitBytes = 0;
+  private disposed = false;
+
+  get retainedBytes(): number { return this.bytes; }
 
   /** Capture the initial prefix and reject over-budget history before dispatch. */
   constructor(input: unknown, private readonly remember: (input: unknown[], response: Frame) => void) {
     this.prefix = [...inputItems(input)];
     this.bytes = Buffer.byteLength(JSON.stringify(this.prefix));
     this.check();
+    activeReplays.add(this);
   }
   /** Reject overflow rather than silently truncating retained conversation input. */
   private check(): void {
     if (this.bytes > MAX_NATIVE_STEERING_REPLAY_BYTES) throw new Error("Native steering replay exceeded its bounded history budget; input was not silently truncated.");
+    const memory = appOwnedBytesSnapshot();
+    const registeredBytes = memory.stores.native_steering_replay?.bytes ?? 0;
+    const projected = memory.retainedBytes - registeredBytes
+      + nativeSteeringReplayRetainedStoreSnapshot().bytes + (activeReplays.has(this) ? 0 : this.bytes);
+    if (projected > memory.budgetBytes) throw new Error("Native steering replay exceeded the application-owned memory budget.");
   }
   /** Reserve replay bytes before send and return a rollback for synchronous failure. */
   submitted(frame: Frame): () => void {
@@ -116,6 +134,9 @@ export class NativeSteeringReplay implements NativeSteeringReplayObserver {
   }
   /** Release retained input, output and queued submissions when the owner detaches. */
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    activeReplays.delete(this);
     this.prefix = [];
     this.previousOutput = [];
     this.submissions = [];

@@ -11,6 +11,8 @@ import { runOptionalShutdownHooks } from "../../src/lib/optional-shutdown-hooks"
 import { MAX_ACTIVE_TURNS, tryAdmitTurn } from "../../src/server/lifecycle";
 import { configSchema } from "../../src/config/schema/config-schema";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+import { configureAppOwnedMemoryBudget, resetAppOwnedMemoryForTests } from "../../src/lib/app-owned-memory";
+import { registerDefaultAppOwnedMemoryStores } from "../../src/lib/app-owned-memory-stores";
 
 // The websocket handler dispatches through the real request path, so it reaches the shared spend
 // journal and needs the writer lease startServer would have taken. Without it the turn is refused
@@ -281,6 +283,30 @@ test("foreign lane or successor parent is a non-replayable protocol failure", ()
 
 test("replay budget refuses overflow instead of silently losing context", () => {
   expect(() => new NativeSteeringReplay("x".repeat(MAX_NATIVE_STEERING_REPLAY_BYTES), () => {})).toThrow("budget");
+});
+
+test("native controls obey configured inbound and reconstructed outbound body limits", () => {
+  const settings = config();
+  settings.maxInboundBodyBytes = 1024 * 1024;
+  const handler = createWebsocketHandler({ config: settings, deps: {} } as ServeOptionsContext);
+  const sent: Frame[] = [];
+  const ws = { readyState: 1, data: { nativeControl: {} }, send: (text: string) => sent.push(JSON.parse(text)) } as unknown as ServerWebSocket<WsData>;
+  handler.message(ws, JSON.stringify({ type: "response.steer", previous_response_id: "r", input: "x".repeat(1024 * 1024) }));
+  expect(sent.at(-1)?.error.code).toBe("request_body_too_large");
+
+  const channel = new NativeSteeringChannel({}, 300_000, 256);
+  expect(() => channel.assertOutboundFrame(JSON.stringify({ type: "response.create", input: "x".repeat(1024) })))
+    .toThrow("configured upstream body limit");
+});
+
+test("replay journals share the application-owned memory budget", () => {
+  resetAppOwnedMemoryForTests();
+  configureAppOwnedMemoryBudget(500);
+  registerDefaultAppOwnedMemoryStores();
+  const first = new NativeSteeringReplay("x".repeat(200), () => {});
+  expect(() => new NativeSteeringReplay("y".repeat(200), () => {})).toThrow("application-owned memory budget");
+  first.dispose();
+  resetAppOwnedMemoryForTests();
 });
 
 test("HTTP upgrade fallback keeps ordinary streaming and rejects steering explicitly", async () => {
