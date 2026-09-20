@@ -12,6 +12,9 @@ const provider: OcxProviderConfig = {
   baseUrl: "https://example.test/v1",
   apiKey: "sk-test",
   authMode: "key",
+  // These cases assert which slot the deferred barrier lands in, and the wire role folds
+  // to `system` unless a destination is recorded as accepting `developer`.
+  foldDeveloperRoleToSystem: false,
 };
 
 interface ChatMsg {
