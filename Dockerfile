@@ -52,6 +52,7 @@ RUN --mount=type=bind,target=/build-context set -eu; \
 FROM ${BUN_IMAGE} AS build
 WORKDIR /home/bun/app
 
+COPY --from=manifest --chown=bun:bun /manifest/src/generated/compatibility-version.json ./src/generated/compatibility-version.json
 COPY --chown=bun:bun package.json bun.lock tsconfig.json ./
 RUN bun install --frozen-lockfile
 
@@ -59,7 +60,6 @@ COPY --chown=bun:bun gui/package.json gui/bun.lock ./gui/
 RUN cd gui && bun install --frozen-lockfile
 
 COPY --chown=bun:bun src ./src
-COPY --from=manifest --chown=bun:bun /manifest/src/generated/compatibility-version.json ./src/generated/compatibility-version.json
 COPY --chown=bun:bun scripts/model-metadata.source.json ./scripts/model-metadata.source.json
 COPY --chown=bun:bun docker ./docker
 COPY --chown=bun:bun gui ./gui

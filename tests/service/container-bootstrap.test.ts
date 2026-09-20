@@ -118,6 +118,7 @@ describe("container deployment contract", () => {
       expect(line).not.toContain(".git");
     }
     expect(dockerfile).toContain("COPY --from=manifest --chown=bun:bun /manifest/src/generated/compatibility-version.json ./src/generated/compatibility-version.json");
+    expect(dockerfile.indexOf("COPY --from=manifest")).toBeLessThan(dockerfile.indexOf("RUN bun install --frozen-lockfile"));
     expect(dockerfile).toContain("COPY --chown=bun:bun scripts/model-metadata.source.json ./scripts/model-metadata.source.json");
     expect(runtime).toContain("COPY --from=build --chown=bun:bun /home/bun/app/scripts/model-metadata.source.json ./scripts/model-metadata.source.json");
     // The manifest now rides in on the build stage's src tree; the copied-runtime checks
