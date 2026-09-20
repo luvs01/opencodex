@@ -1229,6 +1229,10 @@ test("chat-native preserves caller Chat fields on the upstream wire", async () =
   saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`, {
     chatServiceTier: true,
     parallelToolCalls: true,
+    // The wire role folds to `system` unless a destination is recorded as accepting
+    // `developer`; this case asserts caller fields are preserved verbatim, so it declares
+    // the destination rather than asserting the default.
+    foldDeveloperRoleToSystem: false,
   }));
   const server = startServer(0);
   const messages = [

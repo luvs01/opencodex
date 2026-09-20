@@ -28,6 +28,10 @@ const chatProvider: OcxProviderConfig = {
   adapter: "openai-chat",
   baseUrl: "https://gateway.example.internal/v1",
   apiKey: "k",
+  // The wire role folds to `system` unless a destination is recorded as accepting
+  // `developer`; the document-turn case asserts the role is kept, so it declares the
+  // destination rather than asserting the default.
+  foldDeveloperRoleToSystem: false,
 };
 const anthropicProvider = {
   adapter: "anthropic",
