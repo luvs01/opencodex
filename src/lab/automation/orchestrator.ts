@@ -1,6 +1,9 @@
 import { readConfigDiagnostics } from "../../config";
 import { registerCurrentServerResourceCleanup } from "../../lib/server-resource-ownership";
-import { registerOptionalShutdownHook } from "../../lib/optional-shutdown-hooks";
+import {
+  didRunOptionalShutdownHooks,
+  registerOptionalShutdownHook,
+} from "../../lib/optional-shutdown-hooks";
 import { queryLabStatus } from "../query";
 import { rebuildLabProjection } from "../projection/rebuild";
 import { planLabAutomationRuns } from "./planner";
@@ -464,6 +467,14 @@ export async function enqueueManualLabRun(
   configDir?: string,
   abortSignal?: AbortSignal,
 ): Promise<LabAutomationRunRecordV1 | null> {
+  // The management route is not covered by the data-plane drain gate, so a request accepted
+  // before listener teardown can reach this point after the shutdown sweep already ran. A
+  // hook registered then is never invoked; run its teardown inline instead of letting the
+  // dispatch escape shutdown.
+  if (didRunOptionalShutdownHooks()) {
+    requestLabAutomationShutdown();
+    return null;
+  }
   const now = Date.now();
   const created = mutateLabAutomationState(configDir, (state) => {
     const next = enqueuePlannedRuns(state, [planned], "manual", now);
@@ -479,6 +490,9 @@ export async function enqueueManualLabRun(
     `lab-automation-manual:${created.runId}`,
     requestLabAutomationShutdown,
   );
+  // The sweep may have run in the gap between the entry check and this registration; it
+  // snapshots the registry once, so a hook that landed afterwards is orphaned.
+  if (didRunOptionalShutdownHooks()) requestLabAutomationShutdown();
   try {
     // Manual execution is independent of automation enablement/layer toggles.
     await runDispatchBatch(configDir, { manualRunId: created.runId, abortSignal });

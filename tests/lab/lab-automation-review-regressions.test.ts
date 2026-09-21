@@ -282,6 +282,27 @@ describe("CL-08 independent review regressions", () => {
     expect(result?.terminalCode).toBe("cancelled");
   });
 
+  // Regression: the management route is outside the data-plane drain gate, so a manual run
+  // accepted while drainAndShutdown is in flight could register its per-run hook AFTER the
+  // hooks snapshot ran — orphaned, never invoked, and free to dispatch past shutdown (the
+  // Lab was never activated in that scenario, so no scheduler hook had set
+  // shutdownRequested either). The enqueue path now treats a completed sweep as already
+  // fired and refuses to queue or dispatch.
+  test("a manual run arriving after the shutdown sweep does not queue or dispatch", async () => {
+    const home = tempHome();
+    prepareHome(home);
+    saveLabAutomationPolicy(defaultLabAutomationPolicyV1(), home);
+    const plan = planManualLabRun({
+      evidenceLayer: "protocol_conformance",
+      scenarioId: "responses-core.protocol.request-shape",
+      configDir: home,
+    });
+    runOptionalShutdownHooks();
+    const result = await enqueueManualLabRun(plan, home);
+    expect(result).toBeNull();
+    expect(loadLabAutomationState(home).runs).toHaveLength(0);
+  });
+
   test("disabling the live layer cancels previously queued scheduled live work", async () => {
     const home = tempHome();
     prepareHome(home);
