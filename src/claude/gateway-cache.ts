@@ -13,10 +13,30 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { localAdmissionToken, localInferenceDestination } from "../lib/local-destinations";
+import type { OcxConfig } from "../types";
 
 export interface GatewayModelRow {
   id: string;
   display_name?: string;
+}
+
+export interface GatewayModelCacheRefreshOptions {
+  timeoutMs?: number;
+  configDir?: string;
+  /**
+   * Admission credential source AND local destination source: the cache file's `baseUrl` must
+   * equal the `ANTHROPIC_BASE_URL` the CLI is launched with or Claude Code ignores the whole
+   * cache, so this has to resolve the same loopback listener `buildClaudeEnv` resolves (#4236).
+   */
+  admissionConfig?: Pick<OcxConfig, "apiKeys" | "hostname" | "unauthenticatedLoopbackListener">;
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+}
+
+export interface GatewayModelTarget {
+  baseUrl: string;
+  admissionToken: string;
 }
 
 /** Claude Code config dir (CLAUDE_CONFIG_DIR override honored, like the CLI). */
@@ -46,13 +66,41 @@ export function writeGatewayModelCache(baseUrl: string, models: readonly Gateway
 }
 
 /** Fetch the anthropic-flavor /v1/models from the local proxy and write the cache. */
-export async function refreshGatewayModelCacheFromProxy(port: number, timeoutMs = 3_000, configDir?: string): Promise<string | null> {
+export async function refreshGatewayModelCacheFromProxy(
+  port: number,
+  options?: GatewayModelCacheRefreshOptions,
+): Promise<string | null>;
+export async function refreshGatewayModelCacheFromProxy(
+  target: GatewayModelTarget,
+  options?: GatewayModelCacheRefreshOptions,
+): Promise<string | null>;
+export async function refreshGatewayModelCacheFromProxy(
+  portOrTarget: number | GatewayModelTarget,
+  options: GatewayModelCacheRefreshOptions = {},
+): Promise<string | null> {
   try {
+    const headers = new Headers({ "anthropic-version": "2023-06-01" });
+    // A wildcard/non-loopback listener requires data-plane admission even for a
+    // request sent to its local 127.0.0.1 address. Reuse the same dedicated
+    // credential domain as /v1/models admission; never place it in Authorization,
+    // which can belong to an upstream provider on other data-plane surfaces.
+    // Env token, then the hardened service token file (a service install writes the admission
+    // token to disk rather than the interactive environment), then a configured key — one
+    // shared ladder, so this cannot drift from what `buildClaudeEnv` puts in the launch env.
+    const admissionToken = typeof portOrTarget === "number"
+      ? localAdmissionToken(options.admissionConfig, options.env ?? process.env)
+      : portOrTarget.admissionToken;
+    if (admissionToken) headers.set("x-opencodex-api-key", admissionToken);
+
+    const baseUrl = typeof portOrTarget === "number"
+      ? localInferenceDestination(options.admissionConfig, portOrTarget).origin
+      : new URL(portOrTarget.baseUrl).origin;
+
     // ?ids=cli pins the readable claude-ocx id family deterministically (audit 051
     // #5): the cache prewrite must not depend on UA sniffing.
-    const res = await fetch(`http://127.0.0.1:${port}/v1/models?limit=1000&ids=cli`, {
-      headers: { "anthropic-version": "2023-06-01" },
-      signal: AbortSignal.timeout(timeoutMs),
+    const res = await (options.fetchImpl ?? fetch)(`${baseUrl}/v1/models?limit=1000&ids=cli`, {
+      headers,
+      signal: AbortSignal.timeout(options.timeoutMs ?? 3_000),
     });
     if (!res.ok) return null;
     const body = await res.json() as { data?: unknown };
@@ -63,7 +111,7 @@ export async function refreshGatewayModelCacheFromProxy(port: number, timeoutMs 
         id: m.id as string,
         display_name: typeof m.display_name === "string" ? m.display_name : undefined,
       }));
-    return writeGatewayModelCache(`http://127.0.0.1:${port}`, models, configDir);
+    return writeGatewayModelCache(baseUrl, models, options.configDir);
   } catch {
     return null;
   }

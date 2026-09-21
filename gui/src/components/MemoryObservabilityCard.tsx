@@ -3,6 +3,7 @@ import { formatUptime } from "../formatUptime";
 import { IconActivity } from "../icons";
 import { useI18n, type Locale, type TFn } from "../i18n/shared";
 import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
+import { startVisibilityPoll } from "../visibility-poll";
 
 /**
  * Memory observability card. Polls GET /api/system/memory (#314 WP3) every 5s
@@ -274,12 +275,16 @@ export default function MemoryObservabilityCard({ apiBase }: { apiBase: string }
       }
     };
     void fetchMemory();
-    const interval = setInterval(() => void fetchMemory(), 5000);
+    // Hidden tabs show no one the paint: no timer, no /api/system/memory traffic.
+    // The restart-reconnect loop below is the deliberate exception — it exists to
+    // notice the server coming back while nobody watches, is bounded, and only runs
+    // while a restart is actually in progress.
+    const stop = startVisibilityPoll(() => void fetchMemory(), 5000);
     return () => {
       cancelled = true;
       active?.controller.abort();
       active?.clear();
-      clearInterval(interval);
+      stop();
     };
   }, [apiBase, restartPhase, restartFromPid]);
 
@@ -294,7 +299,9 @@ export default function MemoryObservabilityCard({ apiBase }: { apiBase: string }
       inFlight = true;
       const bounded = createBoundedFetch(5_000);
       active = bounded;
-      void fetch(`${apiBase}/healthz`, { cache: "no-store", signal: bounded.signal })
+      // Restart is a shared-plane action, so reconnect through its authenticated management
+      // health route. Remote Hub intentionally does not expose /healthz on management ingress.
+      void fetch(`${apiBase}/api/system/health`, { cache: "no-store", signal: bounded.signal })
         .then(async (res) => {
           if (cancelled) return;
           if (!res.ok) {

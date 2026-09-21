@@ -22,6 +22,11 @@ describe("i18n locale contracts", () => {
     }
   });
 
+  test("Vietnamese locale is registered", () => {
+    expect(LOCALES.some(locale => locale.code === "vi")).toBe(true);
+    expect(DICTS.vi["lang.nativeName"]).toBe("Tiếng Việt");
+  });
+
   test("every locale has a catalog-backed display name", () => {
     for (const { code } of LOCALES) {
       const displayName = DICTS[code]["lang.nativeName"];
@@ -158,6 +163,31 @@ describe("i18n locale contracts", () => {
       } else {
         Reflect.deleteProperty(globalThis, "localStorage");
       }
+    }
+  });
+
+  test("detectInitial maps French regional navigator locales to French", () => {
+    const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+
+    try {
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: () => null },
+        configurable: true,
+      });
+
+      for (const language of ["fr", "fr-FR", "fr-CA", "fr-BE", "fr-CH"]) {
+        Object.defineProperty(globalThis, "navigator", {
+          value: { language },
+          configurable: true,
+        });
+        expect(detectInitial()).toBe("fr");
+      }
+    } finally {
+      if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+      else Reflect.deleteProperty(globalThis, "navigator");
+      if (originalStorage) Object.defineProperty(globalThis, "localStorage", originalStorage);
+      else Reflect.deleteProperty(globalThis, "localStorage");
     }
   });
 

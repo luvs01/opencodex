@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
-import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import { catalogModelSlug, filterCatalogVisibleModels, invalidateCodexModelsCache, nativeContextLimits, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import { mergeModelPinnedEfforts, modelPinnedEffortsConfigError } from "../../config/provider-validation";
+import { MULTI_AGENT_SURFACE_ADVISORY_VERSION, multiAgentSurfaceAdvisory, resolveMultiAgentMode } from "../../config/multi-agent-surface";
+import { captureConfigTopLevelRollback, parsedConfigRebaseDeletionKeys, projectConfigRebaseProvenance } from "../../config/rebase-provenance";
 import {
   DEFAULT_SUBAGENT_MODELS,
   codexAutoStartEnabled,
+  deleteConfigTopLevelKey,
   hasOwnProvider,
   isValidProviderName,
   loadConfig,
@@ -14,6 +18,7 @@ import {
   providerHeadersConfigError,
   saveConfigPreservingClaudeCode,
   subagentDefaultSyncEffective,
+  validateConfigCandidate,
 } from "../../config";
 import {
   clearLoginState,
@@ -31,11 +36,12 @@ import { deriveProviderPresets } from "../../providers/derive";
 import { providerCodexAccountMode } from "../../providers/registry";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
-import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
+import { MULTI_AGENT_MODE_HINT_RECOMMENDATION } from "../../codex/multi-agent-mode-policy";
 import { readUsageEntries } from "../../usage/log";
 import { getUsageDebugLogEntries } from "../../usage/debug";
 import { parseRange, parseUsageSurface, summarizeUsage } from "../../usage/summary";
@@ -56,6 +62,12 @@ import {
   visionDescriberIsProvablyBlind,
   visionDescriberRejection,
 } from "./vision-sidecar-options";
+import {
+  webSearchCandidateRows,
+  webSearchModelIsRejected,
+  webSearchModelRejection,
+  type WebSearchBackend,
+} from "./web-search-sidecar-options";
 import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
@@ -63,7 +75,7 @@ import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
 
-import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
+import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchInitializedModels as fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import { readManagementJsonBody, readOptionalManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
@@ -89,7 +101,7 @@ function mirrorDesiredEnabledOntoSnapshot(config: OcxConfig, client: "claude-des
   const integrations = { ...(config.clientIntegrations ?? {}) };
   if (enabled) delete integrations[client];
   else integrations[client] = false;
-  if (Object.keys(integrations).length === 0) delete config.clientIntegrations;
+  if (Object.keys(integrations).length === 0) deleteConfigTopLevelKey(config, "clientIntegrations");
   else config.clientIntegrations = integrations;
 }
 
@@ -119,6 +131,17 @@ function persistDesktopProfileField(
   return { ok: true };
 }
 
+async function persistDesktopModeField(
+  config: OcxConfig,
+  desktopMode: "first-party" | "gateway",
+): Promise<{ ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" }> {
+  const { recordClaudeDesktopMode } = await import("../../claude/desktop-first-party");
+  const outcome = mutatePersistedConfig(persisted => recordClaudeDesktopMode(persisted, desktopMode));
+  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
+  recordClaudeDesktopMode(config, desktopMode);
+  return { ok: true };
+}
+
 export function grokApplyFlightSnapshot(): { currentBytes: number; highWaterBytes: number; active: number } {
   return {
     currentBytes: grokApplyFlight?.bytes ?? 0,
@@ -143,7 +166,7 @@ function runGrokApplyFlight(): Promise<unknown> {
   flight.promise = (grokApplyTestHooks?.run ?? (async () => {
     const [{ syncGrokConfig }, { readRuntimePort }] = await Promise.all([
       import("../../grok/sync"),
-      import("../../config"),
+      import("../../config/process-state"),
     ]);
     const currentConfig = loadConfig();
     const runtime = readRuntimePort(process.pid);
@@ -207,6 +230,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         current.apiKeys?.[0]?.key,
         "static",
         current.claudeCode.desktopProfile,
+        nativeContextLimits(current),
       );
       if (result.written && result.fingerprint) {
         current.claudeCode = { ...current.claudeCode, desktopProfile: { ...current.claudeCode.desktopProfile, appliedFingerprint: result.fingerprint, appliedAt: new Date().toISOString() } };
@@ -224,16 +248,23 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const {
       isMultiAgentV2Enabled, hasAgentsMaxThreads, getLogicalMaxThreads,
       getAgentsEnabled, getAgentsMaxDepth, getSubagentDeveloperInstructions,
+      getMultiAgentModeHintText,
     } = await import("../../codex/features");
     const enabled = isMultiAgentV2Enabled();
     return jsonResponse({
       enabled,
       agentsMaxThreadsConflict: enabled && hasAgentsMaxThreads(),
       maxConcurrentThreadsPerSession: getLogicalMaxThreads(),
-      multiAgentMode: config.multiAgentMode ?? "default",
+      // Resolved, not raw: a hand-edited unsupported value survives config parsing, and the
+      // advisory below already reports the resolved surface. Two answers would disagree.
+      multiAgentMode: resolveMultiAgentMode(config),
+      multiAgentSurfaceAdvisory: multiAgentSurfaceAdvisory(config),
+      keepNativeChatGptOnV1: config.keepNativeChatGptOnV1 === true,
       agentsEnabled: getAgentsEnabled(),
       agentsMaxDepth: getAgentsMaxDepth(),
       subagentDeveloperInstructions: getSubagentDeveloperInstructions(),
+      multiAgentModeHintText: getMultiAgentModeHintText(),
+      multiAgentModeHintRecommendation: MULTI_AGENT_MODE_HINT_RECOMMENDATION,
       // max_depth is V1-only upstream; this is the global-flag statement, derived
       // server-side so no client can present it as an effective V2 limit.
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
@@ -244,23 +275,32 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       enabled?: unknown;
       maxConcurrentThreadsPerSession?: unknown;
       multiAgentMode?: unknown;
+      keepNativeChatGptOnV1?: unknown;
       agentsEnabled?: unknown;
       agentsMaxDepth?: unknown;
       subagentDeveloperInstructions?: unknown;
+      multiAgentModeHintText?: unknown;
+      multiAgentSurfaceAdvisoryAcknowledged?: unknown;
     };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const wantsFlag = body.enabled !== undefined;
     const wantsThreads = body.maxConcurrentThreadsPerSession !== undefined;
     const wantsMode = body.multiAgentMode !== undefined;
+    const wantsKeepNative = body.keepNativeChatGptOnV1 !== undefined;
     const wantsAgentsEnabled = body.agentsEnabled !== undefined;
     const wantsMaxDepth = body.agentsMaxDepth !== undefined;
     const wantsSubagentInstructions = body.subagentDeveloperInstructions !== undefined;
-    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions) {
-      return jsonResponse({ error: "body must set enabled, multiAgentMode, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, and/or subagentDeveloperInstructions" }, 400);
+    const wantsModeHintText = body.multiAgentModeHintText !== undefined;
+    const wantsAdvisoryAck = body.multiAgentSurfaceAdvisoryAcknowledged !== undefined;
+    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsAdvisoryAck) {
+      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, and/or multiAgentSurfaceAdvisoryAcknowledged" }, 400);
     }
     if (wantsFlag && typeof body.enabled !== "boolean") return jsonResponse({ error: "body.enabled must be a boolean" }, 400);
     if (wantsMode && body.multiAgentMode !== "v1" && body.multiAgentMode !== "default" && body.multiAgentMode !== "v2") {
       return jsonResponse({ error: "body.multiAgentMode must be 'v1', 'default', or 'v2'" }, 400);
+    }
+    if (wantsKeepNative && typeof body.keepNativeChatGptOnV1 !== "boolean") {
+      return jsonResponse({ error: "body.keepNativeChatGptOnV1 must be a boolean" }, 400);
     }
     if (wantsThreads && (typeof body.maxConcurrentThreadsPerSession !== "number" || !Number.isInteger(body.maxConcurrentThreadsPerSession) || body.maxConcurrentThreadsPerSession < 1)) {
       return jsonResponse({ error: "body.maxConcurrentThreadsPerSession must be an integer >= 1" }, 400);
@@ -280,18 +320,57 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (wantsSubagentInstructions && body.subagentDeveloperInstructions !== null && typeof body.subagentDeveloperInstructions !== "string") {
       return jsonResponse({ error: "body.subagentDeveloperInstructions must be a string or null" }, 400);
     }
+    // null unsets the upstream key (effort-derived policy resumes); an empty/whitespace
+    // string is rejected because codex-rs treats any present hint as an override that
+    // suppresses even the Ultra-derived Proactive message (Option<String>, no blank
+    // special-case in effective_multi_agent_mode).
+    if (wantsModeHintText && body.multiAgentModeHintText !== null
+        && (typeof body.multiAgentModeHintText !== "string" || body.multiAgentModeHintText.trim().length === 0)) {
+      return jsonResponse({ error: "body.multiAgentModeHintText must be a non-empty string or null" }, 400);
+    }
+    // A boolean, and only `true` acknowledges. `false` is an explicit no-op so a client
+    // that always sends the field cannot un-answer an advisory it already dismissed.
+    if (wantsAdvisoryAck && typeof body.multiAgentSurfaceAdvisoryAcknowledged !== "boolean") {
+      return jsonResponse({ error: "body.multiAgentSurfaceAdvisoryAcknowledged must be a boolean" }, 400);
+    }
     const mode = wantsMode ? body.multiAgentMode as "v1" | "default" | "v2" : undefined;
-    const modeFlag = mode === "v2" ? true : mode === "v1" ? false : undefined;
+    const effectiveMode = mode ?? config.multiAgentMode ?? "default";
+    const effectiveKeepNative = wantsKeepNative
+      ? body.keepNativeChatGptOnV1 === true
+      : config.keepNativeChatGptOnV1 === true;
+    const hybridPinActive = effectiveMode === "v2" && effectiveKeepNative;
+    const modeFlag = mode === "v2" ? !hybridPinActive : mode === "v1" ? false : undefined;
     if (wantsFlag && modeFlag !== undefined && body.enabled !== modeFlag) {
-      return jsonResponse({ error: `body.enabled conflicts with multiAgentMode '${mode}'` }, 400);
+      return jsonResponse({
+        error: hybridPinActive
+          ? "body.enabled=true conflicts with keepNativeChatGptOnV1: Codex's global multi_agent_v2 override outranks catalog pins"
+          : `body.enabled conflicts with multiAgentMode '${mode}'`,
+      }, 400);
     }
     const {
       isMultiAgentV2Enabled, hasAgentsMaxThreads, getLogicalMaxThreads, transitionMultiAgentV2,
       getAgentsEnabled, getAgentsMaxDepth, getSubagentDeveloperInstructions,
-      setAgentsEnabled, setAgentsMaxDepth, setSubagentDeveloperInstructions,
+      getMultiAgentModeHintText, probeCodexSupportsModeHint, setAgentsEnabled, setAgentsMaxDepth,
+      setSubagentDeveloperInstructions, setMultiAgentModeHintText, MODE_HINT_UNSUPPORTED_ERROR,
     } = await import("../../codex/features");
+    // Probe the capability before any combined-request mutation. The scalar writer
+    // repeats this check, but doing it here prevents an earlier flag/mode/agents
+    // write from landing before an unsupported runtime returns 502.
+    if (wantsModeHintText && body.multiAgentModeHintText !== null
+        && probeCodexSupportsModeHint() === false) {
+      return jsonResponse({
+        error: `writing multiAgentModeHintText failed: ${MODE_HINT_UNSUPPORTED_ERROR}`,
+      }, 502);
+    }
     const warnings: string[] = [];
-    const requestedFlag = wantsFlag ? body.enabled as boolean : modeFlag;
+    if (wantsFlag && body.enabled === true && hybridPinActive) {
+      return jsonResponse({
+        error: "body.enabled=true conflicts with keepNativeChatGptOnV1: Codex's global multi_agent_v2 override outranks catalog pins",
+      }, 400);
+    }
+    const requestedFlag = wantsFlag
+      ? body.enabled as boolean
+      : modeFlag ?? (wantsKeepNative && hybridPinActive ? false : undefined);
     if (requestedFlag !== undefined || wantsThreads) {
     const targetFlag = requestedFlag ?? isMultiAgentV2Enabled();
     let toggle = deps.toggleCodexMultiAgentV2;
@@ -306,22 +385,42 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       if (result.changed && result.threadLimit !== null) warnings.push(`Thread limit ${result.threadLimit} preserved for ${targetFlag ? "v2" : "v1"}.`);
     }
     if (wantsMode) {
-      if (mode === "default") delete config.multiAgentMode;
+      if (mode === "default") deleteConfigTopLevelKey(config, "multiAgentMode");
       else config.multiAgentMode = mode;
       saveConfigPreservingClaudeCode(config);
       warnings.push(`Multi-agent mode set to '${mode}'. Applies to new sessions.`);
+    }
+    if (wantsKeepNative) {
+      if (body.keepNativeChatGptOnV1 === true) config.keepNativeChatGptOnV1 = true;
+      else deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
+      saveConfigPreservingClaudeCode(config);
+      warnings.push(body.keepNativeChatGptOnV1 === true
+        ? (effectiveMode === "v2"
+          ? "ChatGPT-native models stay on v1 while other models use v2. Applies to new sessions."
+          : "keepNativeChatGptOnV1 is stored but inactive until multi-agent mode is v2. Applies to new sessions.")
+        : "ChatGPT-native models follow the selected v1/v2/base surface. Applies to new sessions.");
+    }
+    // Written after the mode, so a landed acknowledgement implies the mode write it was
+    // sent with already landed. The converse does not hold: this writer throws rather than
+    // reporting, exactly as the mode write above it does, so a failure here surfaces the
+    // mode change with the advisory still raised. That is the benign direction — the
+    // operator is asked again — and it is why this is not claimed as a transaction.
+    if (wantsAdvisoryAck && body.multiAgentSurfaceAdvisoryAcknowledged === true) {
+      config.multiAgentSurfaceAdvisoryVersion = MULTI_AGENT_SURFACE_ADVISORY_VERSION;
+      saveConfigPreservingClaudeCode(config);
     }
     // New-key scalar writes: each writer is individually atomic, so apply them in
     // sequence after the transition. A failure here is a persistence failure (the
     // writers' ok:false result or a throw from the underlying atomic write helper),
     // reported as 502 naming the failed key plus the writes that already landed.
-    // NOTE: do not name that helper literally here — tests/grok-writer-boundary.test.ts
+    // NOTE: do not name that helper literally here — tests/providers/xai/grok-writer-boundary.test.ts
     // asserts this route file contains no direct write primitive, and matches on the
     // symbol name even inside a comment.
     const scalarWrites: Array<{ field: string; run: () => { ok: true; changed: boolean } | { ok: false; error: string } }> = [];
     if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => setAgentsEnabled(body.agentsEnabled as boolean | null) });
     if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => setAgentsMaxDepth(body.agentsMaxDepth as number | null) });
     if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => setSubagentDeveloperInstructions(body.subagentDeveloperInstructions as string | null) });
+    if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => setMultiAgentModeHintText(body.multiAgentModeHintText as string | null) });
     const landed: string[] = [];
     for (const write of scalarWrites) {
       try {
@@ -349,10 +448,14 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       enabled,
       agentsMaxThreadsConflict: enabled && hasAgentsMaxThreads(),
       maxConcurrentThreadsPerSession: getLogicalMaxThreads(),
-      multiAgentMode: config.multiAgentMode ?? "default",
+      multiAgentMode: resolveMultiAgentMode(config),
+      multiAgentSurfaceAdvisory: multiAgentSurfaceAdvisory(config),
+      keepNativeChatGptOnV1: config.keepNativeChatGptOnV1 === true,
       agentsEnabled: getAgentsEnabled(),
       agentsMaxDepth: getAgentsMaxDepth(),
       subagentDeveloperInstructions: getSubagentDeveloperInstructions(),
+      multiAgentModeHintText: getMultiAgentModeHintText(),
+      multiAgentModeHintRecommendation: MULTI_AGENT_MODE_HINT_RECOMMENDATION,
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
       warnings,
       catalogRefresh,
@@ -510,13 +613,13 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
 
     config.multiAgentGuidanceEnabled = nextEnabled;
     if (nextSyncCodexSubagentDefaults) config.syncCodexSubagentDefaults = true;
-    else delete config.syncCodexSubagentDefaults;
+    else deleteConfigTopLevelKey(config, "syncCodexSubagentDefaults");
     if (nextModel) config.injectionModel = nextModel;
-    else delete config.injectionModel;
+    else deleteConfigTopLevelKey(config, "injectionModel");
     if (nextEffort) config.injectionEffort = nextEffort;
-    else delete config.injectionEffort;
+    else deleteConfigTopLevelKey(config, "injectionEffort");
     if (nextPrompt) config.injectionPrompt = nextPrompt;
-    else delete config.injectionPrompt;
+    else deleteConfigTopLevelKey(config, "injectionPrompt");
 
     saveConfigPreservingClaudeCode(config);
     return jsonResponse({
@@ -537,30 +640,69 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     return jsonResponse({
       effortCap: config.effortCap ?? null,
       subagentEffortCap: config.subagentEffortCap ?? null,
+      modelPinnedEfforts: config.modelPinnedEfforts ?? {},
       efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
     });
   }
   if (url.pathname === "/api/effort-caps" && req.method === "PUT") {
-    let body: { effortCap?: unknown; subagentEffortCap?: unknown };
+    let body: unknown;
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
-    const { isCodexReasoningEffort } = await import("../../reasoning-effort");
-    for (const key of ["effortCap", "subagentEffortCap"] as const) {
-      if (!(key in body)) continue;
-      const value = body[key];
-      if (value === null || value === "") { delete config[key]; continue; }
-      if (typeof value !== "string" || !isCodexReasoningEffort(value)) {
-        return jsonResponse({ error: `unknown reasoning effort "${String(value)}"` }, 400);
-      }
-      config[key] = value;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return jsonResponse({ error: "effort caps body must be a plain object" }, 400);
     }
-    saveConfigPreservingClaudeCode(config);
-    return jsonResponse({ ok: true, effortCap: config.effortCap ?? null, subagentEffortCap: config.subagentEffortCap ?? null });
+    const patch = body as Record<string, unknown>;
+    const { isCodexReasoningEffort } = await import("../../reasoning-effort");
+    const draft = { ...projectConfigRebaseProvenance(config) };
+    const touched: (keyof OcxConfig)[] = [];
+    for (const key of ["effortCap", "subagentEffortCap"] as const) {
+      if (!Object.hasOwn(patch, key)) continue;
+      const value = patch[key];
+      if (value === null || value === "") deleteConfigTopLevelKey(draft, key);
+      else if (typeof value === "string" && isCodexReasoningEffort(value)) draft[key] = value;
+      else return jsonResponse({ error: "caps must be valid reasoning efforts or null" }, 400);
+      touched.push(key);
+    }
+    if (Object.hasOwn(patch, "modelPinnedEfforts")) {
+      const error = modelPinnedEffortsConfigError(patch.modelPinnedEfforts, "modelPinnedEfforts", true);
+      if (error) return jsonResponse({ error }, 400);
+      const pins = mergeModelPinnedEfforts(config.modelPinnedEfforts, patch.modelPinnedEfforts);
+      if (pins) draft.modelPinnedEfforts = pins;
+      else deleteConfigTopLevelKey(draft, "modelPinnedEfforts");
+      touched.push("modelPinnedEfforts");
+    }
+    const validation = validateConfigCandidate(draft);
+    if (!validation.ok) return jsonResponse({ error: validation.error }, 400);
+    if (touched.some(key => !Object.hasOwn(draft, key)) && config.configRebaseProvenance !== undefined
+      && parsedConfigRebaseDeletionKeys(config) === null) {
+      return jsonResponse({ error: "unsupported config deletion provenance" }, 409);
+    }
+    const projected = projectConfigRebaseProvenance(draft);
+    touched.push("configRebaseProvenance");
+    const rollback = captureConfigTopLevelRollback(config, touched);
+    try {
+      for (const key of touched) {
+        if (Object.hasOwn(projected, key)) Object.defineProperty(config, key, {
+          value: projected[key], writable: true, enumerable: true, configurable: true,
+        });
+        else deleteConfigTopLevelKey(config, key);
+      }
+      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+    return jsonResponse({
+      ok: true,
+      effortCap: config.effortCap ?? null,
+      subagentEffortCap: config.subagentEffortCap ?? null,
+      ...(config.modelPinnedEfforts ? { modelPinnedEfforts: config.modelPinnedEfforts } : {}),
+    });
   }
 
-  // Subagent model picker: which ≤5 routed models Codex's spawn_agent advertises (it shows the
-  // first 5 routed catalog entries). PUT reorders the injected catalog so the chosen ones lead.
+  // Featured roster and saved picker order are separate settings. Native Codex advertises
+  // the first five eligible visible rows by display priority; OCX guidance uses natural ranks.
   if (url.pathname === "/api/subagent-models" && req.method === "GET") {
-    const models = await fetchAllModels(config);
+    const models = await (deps.fetchAllModels ?? fetchAllModels)(config);
     const disabled = new Set(config.disabledModels ?? []);
     // Native gpt (passthrough) are also valid subagent picks — they're picker-visible models in the
     // catalog, just buried by priority. List them first so the user can feature them over routed.
@@ -570,27 +712,127 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         stored === catalogModelSlug(m) || slugEquals(stored, m.provider, m.id)
       ))
       .map(catalogModelSlug))];
-    const available = [
+    const chosen = config.subagentModels ?? [];
+    const selectable = [
       ...listCatalogNativeSlugs().filter(ns => !disabled.has(ns)),
       ...visibleRouted,
+    ];
+    // A saved roster slot must stay representable even after its model is disabled
+    // elsewhere (Models page, provider allowlist, a provider row going away). The
+    // dashboard treats `available` as the set of rows it can render, so a chosen id
+    // missing from it disappears from the roster UI and the next Save — which PUTs
+    // exactly what the UI holds — silently truncates the persisted list. Losing a
+    // deliberate 5-model roster to an unrelated visibility toggle is data loss, not a
+    // filter. Same reasoning as `fetchGrokCandidateModels`, which deliberately lists a
+    // model the user already excluded so its switch remains reachable.
+    const selectableSet = new Set(selectable);
+    const available = [
+      ...selectable,
+      ...[...new Set(chosen)].filter(model => !selectableSet.has(model)),
     ];
     // #857: let CLI/GUI show when a running Codex app-server keeps an older
     // in-memory catalog than the one on disk.
     const { collectCodexAppServerCatalogState } = await import("../../codex/app-server-processes");
     const catalogState = collectCodexAppServerCatalogState();
-    return jsonResponse({ chosen: config.subagentModels ?? [], available, catalogState });
+    return jsonResponse({
+      chosen, available, catalogState,
+      pickerAvailable: [...new Set(filterCatalogVisibleModels(models, config).map(catalogModelSlug).filter(slug => slug.includes("/")))],
+      pickerOrder: config.modelPickerOrder ?? [],
+      pickerOrderMode: config.modelPickerOrderMode ?? null,
+    });
   }
   if (url.pathname === "/api/subagent-models" && req.method === "PUT") {
-    let body: { models?: unknown };
-    try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
-    const chosen = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === "string").slice(0, 5) : [];
-    config.subagentModels = chosen;
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
-    save(config);
+    let rawBody: unknown;
+    try { rawBody = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
+    if (!isPlainRecord(rawBody)) return jsonResponse({ error: "JSON body must be an object" }, 400);
+    const body = rawBody as { models?: unknown; pickerOrder?: unknown; pickerOrderMode?: unknown };
+    const updatesRoster = body.models !== undefined;
+    const updatesPicker = body.pickerOrder !== undefined;
+    if (!updatesRoster && !updatesPicker) return jsonResponse({ error: "models or pickerOrder is required" }, 400);
+    let chosen: string[] | undefined;
+    if (updatesRoster) {
+      if (!Array.isArray(body.models) || body.models.some(model => typeof model !== "string")) {
+        return jsonResponse({ error: "models must be an array of strings" }, 400);
+      }
+      // Keep the original valid roster contract: no discovery validation, trimming or deduping.
+      chosen = body.models.slice(0, 5);
+    }
+    const mode = body.pickerOrderMode;
+    if (mode !== undefined && (!updatesPicker || (mode !== null
+      && mode !== "alphabetical" && mode !== "provider" && mode !== "most-used"))) {
+      return jsonResponse({ error: "pickerOrderMode requires pickerOrder and must be alphabetical, provider, most-used, or null" }, 400);
+    }
+    let pickerOrder: string[] | undefined;
+    if (updatesPicker) {
+      if (body.pickerOrder !== null && (!Array.isArray(body.pickerOrder)
+        || body.pickerOrder.some(model => typeof model !== "string" || model.trim() === ""))) {
+        return jsonResponse({ error: "pickerOrder must be an array of non-empty routed model ids, or null" }, 400);
+      }
+      pickerOrder = body.pickerOrder === null ? [] : (body.pickerOrder as string[]).map(model => model.trim());
+      if (new Set(pickerOrder).size !== pickerOrder.length) {
+        return jsonResponse({ error: "pickerOrder must not contain duplicate ids" }, 400);
+      }
+      if (pickerOrder.length > 0) {
+        const models = await (deps.fetchAllModels ?? fetchAllModels)(config);
+        // Evaluate visibility AFTER discovery: a concurrent visibility write may have completed.
+        const visible = new Set(filterCatalogVisibleModels(models, config).map(catalogModelSlug).filter(slug => slug.includes("/")));
+        if (pickerOrder.some(model => !visible.has(model))) {
+          return jsonResponse({ error: "pickerOrder must contain each visible routed model at most once" }, 400);
+        }
+      }
+    }
+
+    // Everything above can await. From this snapshot through persistence there is no yield.
+    // Stage deletion intent before adopting the touched fields through the canonical
+    // live deletion owner. A failed save restores both fields and pending intent.
+    if (updatesPicker && config.configRebaseProvenance !== undefined
+      && parsedConfigRebaseDeletionKeys(config) === null) {
+      // A newer provenance format must not silently discard this clear's intent on rebase.
+      return jsonResponse({ error: "unsupported config deletion provenance" }, 409);
+    }
+    const draft = { ...projectConfigRebaseProvenance(config) };
+    if (chosen !== undefined) draft.subagentModels = chosen;
+    if (pickerOrder !== undefined) {
+      if (pickerOrder.length === 0) {
+        deleteConfigTopLevelKey(draft, "modelPickerOrder");
+        deleteConfigTopLevelKey(draft, "modelPickerOrderMode");
+      } else {
+        draft.modelPickerOrder = pickerOrder;
+        if (mode === "alphabetical" || mode === "provider" || mode === "most-used") draft.modelPickerOrderMode = mode;
+        else deleteConfigTopLevelKey(draft, "modelPickerOrderMode");
+      }
+    }
+    const projected = projectConfigRebaseProvenance(draft);
+    const touched = [
+      ...(updatesRoster ? ["subagentModels" as const] : []),
+      ...(updatesPicker ? ["modelPickerOrder" as const, "modelPickerOrderMode" as const] : []),
+      "configRebaseProvenance" as const,
+    ];
+    const rollback = captureConfigTopLevelRollback(config, touched);
+    try {
+      for (const key of touched) {
+        if (Object.hasOwn(projected, key)) Object.defineProperty(config, key, {
+          value: projected[key], writable: true, enumerable: true, configurable: true,
+        });
+        else deleteConfigTopLevelKey(config, key);
+      }
+      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+    // Capture the result before convergence yields to another settings mutation.
+    const saved = {
+      applied: [...(config.subagentModels ?? [])],
+      pickerOrder: [...(config.modelPickerOrder ?? [])],
+      pickerOrderMode: config.modelPickerOrderMode ?? null,
+    };
     const catalogRefresh = await convergeCodexCatalog();
-    await syncClaudeAgentDefsBestEffort();
-    await autoApplyDesktopBestEffort();
-    return jsonResponse({ ok: true, applied: chosen, catalogRefresh });
+    if (updatesRoster) {
+      await syncClaudeAgentDefsBestEffort();
+      await autoApplyDesktopBestEffort();
+    }
+    return jsonResponse({ ok: true, ...saved, catalogRefresh });
   }
 
   // Priority-ordered subagent model fallback chain for quota-aware spawn routing.
@@ -652,9 +894,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
     }
     if (nextModels !== undefined) config.subagentModelFallback = nextModels;
-    else delete config.subagentModelFallback;
+    else deleteConfigTopLevelKey(config, "subagentModelFallback");
     if (nextPollMs !== undefined) config.subagentModelFallbackPollMs = nextPollMs;
-    else delete config.subagentModelFallbackPollMs;
+    else deleteConfigTopLevelKey(config, "subagentModelFallbackPollMs");
     saveConfigPreservingClaudeCode(config);
     return jsonResponse({
       ok: true,
@@ -695,7 +937,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // cannot grow config.json without bound.
     const excluded = [...new Set(raw as string[])].sort();
     if (excluded.length > 2000) return jsonResponse({ error: "excluded list is too large" }, 400);
-    if (excluded.length === 0) delete config.grokExcludedModels;
+    if (excluded.length === 0) deleteConfigTopLevelKey(config, "grokExcludedModels");
     else config.grokExcludedModels = excluded;
     saveConfigPreservingClaudeCode(config);
     return jsonResponse({ ok: true, excluded });
@@ -738,10 +980,16 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const { parseDesktopProfile, reconcileDesktopProfile } = await import("../../claude/desktop-profile");
       const parsed = parseDesktopProfile(body.profile);
       const current = await buildClaudeDesktopState(config);
+      const availableRoutes = new Set(current.models.filter(item => item.available).map(item => item.route));
+      for (const route of Object.keys(parsed.assignments)) {
+        if (!current.profile.assignments[route] && !availableRoutes.has(route)) {
+          throw new Error(`현재 사용할 수 없는 모델은 추가할 수 없습니다: ${route}`);
+        }
+      }
       for (const model of current.models.filter(item => !item.available)) {
         const before = current.profile.assignments[model.route];
         const after = parsed.assignments[model.route];
-        if (JSON.stringify(before) !== JSON.stringify(after)) {
+        if (after !== undefined && JSON.stringify(before) !== JSON.stringify(after)) {
           throw new Error(`현재 사용할 수 없는 모델은 옮길 수 없습니다: ${model.route}`);
         }
       }
@@ -765,7 +1013,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
   if (url.pathname === "/api/claude-desktop/apply" && req.method === "POST") {
     try {
       // #859: the CLI delegates here so the registry is built in the serving
-      // process. Accept an optional mode; default stays static for back-compat.
+      // process. `mode` selects the Desktop mode: `first-party` (default when the
+      // install has no gateway profile) or `gateway`; the legacy gateway shapes
+      // (static/hybrid/discovery) still select gateway with that library layout.
       let mode: "static" | "hybrid" | "discovery" = "static";
       let parsed: unknown;
       try {
@@ -774,12 +1024,17 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         rethrowManagementBodyTooLarge(error);
         return jsonResponse({ error: "invalid JSON body" }, 400);
       }
+      const { resolveClaudeDesktopApplyMode, applyDesktopFirstParty, removeDesktopFirstParty } = await import("../../claude/desktop-first-party");
       const requested = (parsed as { mode?: unknown } | null)?.mode;
+      let desktopMode: "first-party" | "gateway" = resolveClaudeDesktopApplyMode(config);
       if (requested !== undefined) {
         if (requested === "static" || requested === "hybrid" || requested === "discovery") {
           mode = requested;
+          desktopMode = "gateway";
+        } else if (requested === "gateway" || requested === "first-party") {
+          desktopMode = requested;
         } else {
-          return jsonResponse({ error: "mode must be static, hybrid, or discovery" }, 400);
+          return jsonResponse({ error: "mode must be first-party, gateway, static, hybrid, or discovery" }, 400);
         }
       }
       // #859: a delegated CLI apply carries the profile it just saved — the
@@ -794,6 +1049,63 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         } catch (error) {
           return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
         }
+      }
+      if (desktopMode === "first-party") {
+        const { setIntegrationEnabled } = await import("../../codex/desired-state");
+        const desired = setIntegrationEnabled("claude-desktop", true);
+        if (!desired.ok) return jsonResponse({ error: desired.message }, desired.retryable ? 409 : 500);
+        mirrorDesiredEnabledOntoSnapshot(config, "claude-desktop", true);
+        // First-party replaces gateway: the two must never be active together.
+        const { inspectDesktop3pConfigLibrary, removeDesktop3pStandardPivot } = await import("../../claude/desktop-3p");
+        const appliedFingerprint = config.claudeCode?.desktopProfile?.appliedFingerprint ?? null;
+        const library = inspectDesktop3pConfigLibrary({ appliedFingerprint });
+        let gatewayRemoved = false;
+        if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
+          const removed = (deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint, replaceWhileEnabled: true });
+          if (!removed.ok) {
+            return jsonResponse({
+              error: removed.kind === "cleanup_incomplete"
+                ? "Claude Desktop now points at standard mode, but gateway credential cleanup is incomplete; first-party env was not applied."
+                : "The gateway profile could not be removed safely, so first-party mode was not applied.",
+              code: "claude_desktop_gateway_removal_failed",
+              reason: removed.reason ?? removed.kind,
+              ...(removed.residualPaths ? { residualPaths: removed.residualPaths } : {}),
+            }, removed.kind === "cleanup_incomplete" ? 500 : 409);
+          }
+          gatewayRemoved = removed.changed;
+        }
+        const applied = applyDesktopFirstParty(config);
+        if (!applied.ok) {
+          const { firstPartyRefusalMessage } = await import("./native-integration-routes");
+          return jsonResponse({
+            error: firstPartyRefusalMessage(applied.reason, applied.path),
+            code: "claude_desktop_first_party_refused",
+            reason: applied.reason,
+            path: applied.path,
+          }, applied.reason === "foreign_env" || applied.reason === "intercept_disabled" ? 409 : 500);
+        }
+        const modeSaved = await persistDesktopModeField(config, "first-party");
+        return jsonResponse({
+          ok: true,
+          mode: "first-party",
+          saved: modeSaved.ok,
+          applied: true,
+          changed: applied.changed || gatewayRemoved,
+          gatewayRemoved,
+          path: applied.path,
+          proxyPort: applied.proxyPort,
+          caCertPath: applied.env.NODE_EXTRA_CA_CERTS,
+          ...(modeSaved.ok ? {} : { warning: `First-party env was applied, but the mode marker was not saved (${modeSaved.reason}).` }),
+        });
+      }
+      // Gateway mode replaces first-party: the two must never be active together.
+      const firstPartyRemoved = removeDesktopFirstParty();
+      if (!firstPartyRemoved.ok) {
+        return jsonResponse({
+          error: `Claude Code settings could not be parsed (${firstPartyRemoved.path}); the first-party proxy env could not be removed before switching to gateway mode.`,
+          code: "claude_desktop_first_party_refused",
+          reason: firstPartyRemoved.reason,
+        }, 500);
       }
       const { setIntegrationEnabled, claudeDesktopIntegrationEnabled } = await import("../../codex/desired-state");
       const desired = setIntegrationEnabled("claude-desktop", true);
@@ -843,8 +1155,16 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         latest.apiKeys?.[0]?.key,
         mode,
         state.profile,
+        nativeContextLimits(latest),
       );
       if (!result.written) return jsonResponse({ error: result.reason ?? "Claude Desktop apply failed", saved: true, path: result.path }, 500);
+      const modeSaved = await persistDesktopModeField(config, "gateway");
+      const modeWarning = modeSaved.ok ? undefined : `Claude Desktop was applied, but the gateway mode marker was not saved (${modeSaved.reason}).`;
+      const { claudeDesktopPolicyWarning, probeClaudeDesktopPolicy } = await import("../../claude/desktop-policy");
+      const policyState = (deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)({
+        platform: deps.platform ?? process.platform,
+      });
+      const policyWarning = claudeDesktopPolicyWarning(policyState);
       // Persist applied fingerprint + timestamp so GUI can show saved-vs-applied state.
       if (result.fingerprint) {
         // The Desktop write already landed, so a failed bookkeeping save is not
@@ -861,11 +1181,25 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
             saved: false,
             path: result.path,
             fingerprint: result.fingerprint,
-            warning: `Claude Desktop was applied, but the applied marker was not saved (${marked.reason}).`,
+            warning: [
+              `Claude Desktop was applied, but the applied marker was not saved (${marked.reason}).`,
+              modeWarning,
+              policyWarning,
+            ].filter(Boolean).join(" "),
           });
         }
       }
-      return jsonResponse({ ok: true, saved: true, applied: true, path: result.path, fingerprint: result.fingerprint });
+      const warning = [modeWarning, policyWarning].filter(Boolean).join(" ");
+      return jsonResponse({
+        ok: true,
+        mode: "gateway",
+        saved: modeSaved.ok,
+        applied: true,
+        path: result.path,
+        fingerprint: result.fingerprint,
+        policyState,
+        ...(warning ? { warning } : {}),
+      });
     } catch (error) {
       rethrowManagementBodyTooLarge(error);
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
@@ -877,16 +1211,59 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     try {
       const { claudeDesktopIntegrationEnabled } = await import("../../codex/desired-state");
       const { inspectDesktop3pConfigLibrary } = await import("../../claude/desktop-3p");
+      const { resolveClaudeDesktopApplyMode, inspectDesktopFirstParty } = await import("../../claude/desktop-first-party");
+      const { getClaudeInterceptState } = await import("../../claude/intercept/runtime");
       const persisted = loadConfig();
       const savedFingerprint = persisted.claudeCode?.desktopProfile?.appliedFingerprint ?? null;
       const observed = inspectDesktop3pConfigLibrary({ appliedFingerprint: savedFingerprint });
       const desiredEnabled = claudeDesktopIntegrationEnabled(persisted);
-      const applied = observed.kind === "gateway_ours" || observed.kind === "gateway_drifted";
-      const stale = observed.kind === "gateway_drifted";
+      const gatewayApplied = observed.kind === "gateway_ours" || observed.kind === "gateway_drifted";
+      // A gateway profile on disk is what Desktop actually runs, whatever the saved mode says.
+      const mode = gatewayApplied ? "gateway" : resolveClaudeDesktopApplyMode(persisted);
+      const firstPartySeen = inspectDesktopFirstParty(persisted);
+      const intercept = getClaudeInterceptState();
+      const firstParty = {
+        settingsState: firstPartySeen.settings.kind,
+        applied: firstPartySeen.applied,
+        stale: firstPartySeen.stale,
+        interceptEnabled: firstPartySeen.interceptEnabled,
+        interceptRunning: intercept !== null,
+        proxyPort: intercept?.proxyPort ?? firstPartySeen.proxyPort,
+        caCertPath: firstPartySeen.caCertPath,
+      };
+      const applied = mode === "first-party" ? firstPartySeen.applied : gatewayApplied;
+      // "Needs update" is only meaningful while the integration is wanted. When the
+      // durable switch is OFF, a leftover drifted profile is residue to clear — not
+      // a stale apply the operator should refresh.
+      const stale = desiredEnabled && (mode === "first-party" ? firstPartySeen.stale : observed.kind === "gateway_drifted");
       const { getDesktopHealth } = await import("../../claude/desktop-health");
-      const health = getDesktopHealth();
+      const { claudeDesktopPolicyHealth, probeClaudeDesktopPolicy } = await import("../../claude/desktop-policy");
+      const policyState = (deps.probeClaudeDesktopPolicy ?? probeClaudeDesktopPolicy)({
+        platform: deps.platform ?? process.platform,
+      });
+      // Managed-policy conflicts only matter for the gateway profile; first-party mode never
+      // touches Desktop's own configuration.
+      const policy = claudeDesktopPolicyHealth(mode === "first-party" ? "absent" : policyState);
+      const health = {
+        ...getDesktopHealth(),
+        ok: policy.ok,
+        status: policy.status,
+        policy,
+      };
+      const policyConflict = desiredEnabled && !policy.ok;
+      const firstPartyResidue = mode === "gateway" && (firstPartySeen.applied || firstPartySeen.stale);
+      const baseDrift = desiredEnabled
+        ? !applied || stale || firstPartyResidue
+        : applied || gatewayApplied || firstPartySeen.applied || firstPartySeen.stale || observed.kind === "unsafe";
+      const driftReason = policyConflict
+        ? policy.state === "present" ? "managed_policy_present" : "managed_policy_unknown"
+        : desiredEnabled
+          ? !applied ? "desired_on_not_current" : stale ? "profile_drift" : firstPartyResidue ? "first_party_residue" : null
+          : gatewayApplied ? "desired_off_gateway_selected" : firstPartySeen.applied || firstPartySeen.stale ? "desired_off_first_party_env" : null;
       return jsonResponse({
         desiredEnabled,
+        mode,
+        firstParty,
         installed: observed.kind !== "not_installed",
         observedKind: observed.kind,
         applied,
@@ -899,8 +1276,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         // undeterminable (no/unreadable metadata or no appliedId); a readable
         // appliedId with no owned entry is a KNOWN false. Predates the inspector.
         activeProfile: observed.ownedProfileActive,
-        drift: desiredEnabled ? !applied || stale : applied || observed.kind === "unsafe",
-        driftReason: desiredEnabled ? (!applied ? "desired_on_not_current" : stale ? "profile_drift" : null) : (applied ? "desired_off_gateway_selected" : null),
+        drift: baseDrift || policyConflict,
+        driftReason,
         health,
       });
     } catch (error) {
@@ -925,6 +1302,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       ...models.filter(m => !isDisabled(m.provider, m.id)).map(m => `${m.provider}/${m.id}`),
     ];
     const aliases: { id: string; display_name: string }[] = [];
+    // Resolved once, not per model: with the global fast switch on, Claude Code discovers the
+    // fast identity, so the dashboard must list the same id rather than the umbrella one.
+    const cursorFastIdFor = config.fastMode === true
+      ? (await import("../../adapters/cursor/catalog")).cursorFastIdFor
+      : undefined;
     for (const slug of listCatalogNativeSlugs()) {
       // Readable CLI-surface alias with hash fallback (devlog 050 / audit 051 #2) —
       // the same shared helper the /v1/models ?ids=cli path uses.
@@ -932,9 +1314,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
     for (const m of models) {
       if (isDisabled(m.provider, m.id)) continue;
-      aliases.push({ id: claudeCodeAlias(m.provider, m.id), display_name: `${m.id} (${m.provider})` });
+      const listedId = (m.provider === "cursor" ? cursorFastIdFor?.(m.id) : undefined) ?? m.id;
+      aliases.push({ id: claudeCodeAlias(m.provider, listedId), display_name: `${listedId} (${m.provider})` });
     }
-    const contextWindows = buildClaudeContextWindows([...visibleNativeSlugs(config)], models);
+    const contextWindows = buildClaudeContextWindows([...visibleNativeSlugs(config)], models, nativeContextLimits(config));
     const webSearchOverride = config.claudeCode?.webSearchSidecar;
     const visionOverride = config.claudeCode?.visionSidecar;
     // Auto is a RESOLUTION, recomputed per request — never stored state. Detection is
@@ -963,8 +1346,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       smallFastModel: config.claudeCode?.smallFastModel ?? "",
       tierModels: config.claudeCode?.tierModels ?? {},
       modelMap: config.claudeCode?.modelMap ?? {},
+      classifierModel: config.claudeCode?.classifierModel ?? "",
+      classifierFallbacks: config.claudeCode?.classifierFallbacks ?? [],
       systemEnv: config.claudeCode?.systemEnv === true,
-      autoConnectSupported: process.platform === "darwin",
+      autoConnectSupported: (ctx.deps.platform ?? process.platform) === "darwin",
       maxContextTokens: config.claudeCode?.maxContextTokens ?? null,
       alwaysEnableEffort: config.claudeCode?.alwaysEnableEffort === true,
       autoContext: config.claudeCode?.autoContext !== false,
@@ -1000,29 +1385,81 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       return prototype === Object.prototype || prototype === null;
     };
     if (!isPlainObject(parsedBody)) return jsonResponse({ error: "body must be an object" }, 400);
-    const body = parsedBody as { enabled?: unknown; authMode?: unknown; model?: unknown; smallFastModel?: unknown; modelMap?: unknown; systemEnv?: unknown; fastMode?: unknown; maxContextTokens?: unknown; alwaysEnableEffort?: unknown; tierModels?: unknown; autoContext?: unknown; autoCompactWindow?: unknown; blockedSkills?: unknown; injectAgents?: unknown; webSearchSidecar?: unknown; visionSidecar?: unknown };
+    const body = parsedBody as { enabled?: unknown; authMode?: unknown; model?: unknown; smallFastModel?: unknown; modelMap?: unknown; classifierModel?: unknown; classifierFallbacks?: unknown; systemEnv?: unknown; fastMode?: unknown; maxContextTokens?: unknown; alwaysEnableEffort?: unknown; tierModels?: unknown; autoContext?: unknown; autoCompactWindow?: unknown; blockedSkills?: unknown; injectAgents?: unknown; webSearchSidecar?: unknown; visionSidecar?: unknown };
     for (const field of ["webSearchSidecar", "visionSidecar"] as const) {
       const section = body[field];
       if (section === undefined || section === null) continue;
       if (!isPlainObject(section)) return jsonResponse({ error: `${field} must be an object or null` }, 400);
+      // Both overrides now speak their full unions (roadmap 060 web, 170
+      // vision revised). Vision's third arm is "routed" (loopback through the
+      // proxy's own router), never exa: exa is not an LLM, and accepting an
+      // unknown literal would persist a backend the vision resolver reads as
+      // unset (review F1's failure mode).
+      const allowedBackends = field === "webSearchSidecar"
+        ? ["openai", "anthropic", "xai", "gemini", "exa"]
+        : ["openai", "anthropic", "routed"];
       if (section.backend !== undefined && section.backend !== null
-        && section.backend !== "openai" && section.backend !== "anthropic") {
-        return jsonResponse({ error: `${field}.backend must be openai, anthropic, or null` }, 400);
+        && !allowedBackends.includes(section.backend as string)) {
+        return jsonResponse({ error: `${field}.backend must be ${allowedBackends.join(", ")}, or null` }, 400);
       }
       if (section.model !== undefined && typeof section.model !== "string") {
         return jsonResponse({ error: `${field}.model must be a string` }, 400);
       }
       // Vision override only: reject a model we can prove is blind. Unknown ids stay
-      // allowed; webSearchSidecar has no vision requirement and is left alone. Shares
-      // one policy module with /api/sidecar-settings so the two gates cannot drift.
+      // allowed. Shares one policy module with /api/sidecar-settings so the two
+      // gates cannot drift.
       if (field === "visionSidecar" && typeof section.model === "string" && section.model !== "") {
         const requested = section.model;
         const candidates = await visionCandidateRows(config);
         const hint = section.backend === "anthropic" || section.backend === "openai"
+          || section.backend === "routed"
           ? section.backend
           : config.claudeCode?.visionSidecar?.backend;
+        // Same coherence rule as /api/sidecar-settings (roadmap 170 r2).
+        const effectiveBackend = hint ?? "openai";
+        const namespaced = requested.includes("/");
+        if (namespaced && effectiveBackend !== "routed") {
+          return jsonResponse({ error: `visionSidecar.model "${requested}" is provider-namespaced; it requires backend "routed"` }, 400);
+        }
+        if (!namespaced && effectiveBackend === "routed") {
+          return jsonResponse({ error: `visionSidecar.backend "routed" requires a provider-namespaced model ("provider/model"); got "${requested}"` }, 400);
+        }
         if (visionDescriberIsProvablyBlind(config, requested, candidates, hint)) {
           return jsonResponse(visionDescriberRejection("visionSidecar.model", requested, config, candidates), 400);
+        }
+      }
+      // Web-search override: membership gate (#2188). The executor set is closed,
+      // so an id outside (runnable candidates ∪ auth slots) can never run. Same
+      // module as /api/sidecar-settings — a gate on one route and a stale copy on
+      // the other is no gate at all.
+      if (field === "webSearchSidecar"
+        && (section.model !== undefined || section.backend !== undefined)) {
+        const stored = config.claudeCode?.webSearchSidecar;
+        // Validate against the SUBMITTED backend across the whole union, not
+        // just openai/anthropic (#2457). allowedBackends above already refused
+        // unknown literals; Array.includes does not narrow, hence the cast.
+        // null keeps its own meaning here — drop the override and inherit the
+        // global backend — which is deliberately NOT the sidecar-settings rule.
+        const submittedBackend = section.backend;
+        const effectiveBackend = typeof submittedBackend === "string"
+          && allowedBackends.includes(submittedBackend)
+          ? submittedBackend as WebSearchBackend
+          : submittedBackend === null
+            ? config.webSearchSidecar?.backend ?? "openai"
+            : stored?.backend ?? config.webSearchSidecar?.backend ?? "openai";
+        const effectiveModel = section.model === ""
+          ? config.webSearchSidecar?.model
+          : typeof section.model === "string"
+            ? section.model
+            : stored?.model ?? config.webSearchSidecar?.model;
+        const candidates = await webSearchCandidateRows(config);
+        if (effectiveModel && webSearchModelIsRejected(effectiveBackend, effectiveModel, candidates)) {
+          return jsonResponse(webSearchModelRejection(
+            "webSearchSidecar.model",
+            effectiveBackend,
+            effectiveModel,
+            candidates,
+          ), 400);
         }
       }
     }
@@ -1034,13 +1471,17 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         delete next[field];
         continue;
       }
-      const requested = section as { backend?: "openai" | "anthropic" | null; model?: string };
-      const override: NonNullable<OcxClaudeCodeConfig[typeof field]> = { ...next[field] };
+      // The per-field validation above guarantees vision only ever carries the two-member
+      // union; the cast is the loop's shared-shape compromise, not a wider write path.
+      const requested = section as { backend?: "openai" | "anthropic" | "xai" | "gemini" | "exa" | null; model?: string };
+      const override = { ...next[field] } as NonNullable<OcxClaudeCodeConfig[typeof field]>;
       if (requested.backend === null) delete override.backend;
-      else if (requested.backend !== undefined) override.backend = requested.backend;
+      else if (requested.backend !== undefined) override.backend = requested.backend as never;
       if (requested.model === "") delete override.model;
       else if (requested.model !== undefined) override.model = requested.model;
-      if (Object.keys(override).length > 0) next[field] = override;
+      // Indexed write across the field union collapses to an intersection; runtime
+      // validation above already guarantees the per-field shape.
+      if (Object.keys(override).length > 0) next[field] = override as never;
       else delete next[field];
     }
     if (body.enabled !== undefined) {
@@ -1140,12 +1581,30 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
       nextFastMode = body.fastMode === null ? undefined : body.fastMode;
     }
-    for (const field of ["model", "smallFastModel"] as const) {
+    for (const field of ["model", "smallFastModel", "classifierModel"] as const) {
       const value = body[field];
       if (value === undefined) continue;
       if (typeof value !== "string") return jsonResponse({ error: `${field} must be a string` }, 400);
       if (value.trim() === "") delete next[field];
       else next[field] = value.trim();
+    }
+    if (body.classifierFallbacks !== undefined) {
+      if (body.classifierFallbacks === null) {
+        delete next.classifierFallbacks;
+      } else {
+        if (!Array.isArray(body.classifierFallbacks)) {
+          return jsonResponse({ error: "classifierFallbacks must be an array of strings, or null" }, 400);
+        }
+        const list: string[] = [];
+        for (const entry of body.classifierFallbacks) {
+          if (typeof entry !== "string" || entry.trim() === "") {
+            return jsonResponse({ error: "classifierFallbacks entries must be non-empty strings" }, 400);
+          }
+          list.push(entry.trim());
+        }
+        if (list.length > 0) next.classifierFallbacks = list;
+        else delete next.classifierFallbacks;
+      }
     }
     if (body.modelMap !== undefined) {
       if (body.modelMap === null) {
