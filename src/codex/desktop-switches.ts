@@ -1,5 +1,6 @@
 import type { OcxConfig } from "../types";
 import { shouldSyncCodexOnStart } from "./desired-state";
+import { tomlString } from "./paths";
 import {
   isEffectiveCodexClientCompaction,
   isEffectiveCodexDesktopAuthless,
@@ -93,6 +94,26 @@ export function describeCodexDesktopSwitches(
           presentsCodexAccount: true,
           summary: "The Codex app will require its own account sign-in.",
         },
+  };
+}
+
+/**
+ * The apply record for a report that attempted no rewrite. `not_requested` alone would have
+ * the report claiming OpenCodex's stored-versus-effective state as live, so the read path
+ * consults the same ownership predicate the injector does and reports external ownership
+ * instead — a settings GET and a switch-free PUT then agree with an attempted apply.
+ */
+export async function observedCodexDesktopSwitchApply(): Promise<CodexDesktopSwitchApply> {
+  // Same lazy boundary as applyCodexDesktopSwitches: the ownership predicate lives in the
+  // injection graph, which the settings read path must not pull in at module scope.
+  const { currentExternalCodexModelProvider } = await import("./inject/config-toml");
+  const provider = currentExternalCodexModelProvider();
+  if (!provider) return { applied: false, reason: "not_requested", retryable: false };
+  return {
+    applied: false,
+    reason: "external_provider",
+    retryable: false,
+    detail: `config.toml selects the external model_provider ${tomlString(provider)}.`,
   };
 }
 

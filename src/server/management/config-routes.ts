@@ -8,6 +8,7 @@ import { catalogModelSlug, invalidateCodexModelsCache, nativeContextLimits, nati
 import {
   applyCodexDesktopSwitches,
   describeCodexDesktopSwitches,
+  observedCodexDesktopSwitchApply,
   type CodexDesktopSwitchApply,
 } from "../../codex/desktop-switches";
 import {
@@ -339,11 +340,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexDesktopAuthless: config.codexDesktopAuthless === true,
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
       codexClientCompaction: config.codexClientCompaction === true,
-      codexDesktopSwitches: describeCodexDesktopSwitches(config, {
-        applied: false,
-        reason: "not_requested",
-        retryable: false,
-      }),
+      codexDesktopSwitches: describeCodexDesktopSwitches(config, await observedCodexDesktopSwitchApply()),
       compactionRouting: config.compactionRouting ?? null,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
@@ -664,7 +661,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     // lock C — awaiting N while still holding C would invert that order.
     const desktopSwitchApply: CodexDesktopSwitchApply = desktopSwitchesChanged
       ? await applyCodexDesktopSwitches(config)
-      : { applied: false, reason: "not_requested", retryable: false };
+      : await observedCodexDesktopSwitchApply();
     const codexDesktopSwitches = describeCodexDesktopSwitches(config, desktopSwitchApply);
     const catalogRefreshPending = catalogRefresh
       ? catalogRefreshIsPending(catalogRefresh)
