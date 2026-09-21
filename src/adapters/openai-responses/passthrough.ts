@@ -81,13 +81,18 @@ export const FORWARD_HEADERS = [
   CODEX_RESPONSES_LITE_HEADER,
 ];
 
-/** Preserve the caller fingerprint unless the provider explicitly owns that header. */
-function applyCallerUserAgentFallback(
+/**
+ * Preserve the caller fingerprint unless the provider explicitly owns that header. The one
+ * non-credential caller header this adapter forwards is applied here rather than in the
+ * FORWARD_HEADERS overlay loops so a configured provider header always wins case-insensitively.
+ * Exported so the web-search and vision sidecars apply the same precedence on their replays.
+ */
+export function applyCallerUserAgentFallback(
   headers: Record<string, string>,
-  incoming: IncomingMeta,
+  callerHeaders: Headers,
 ): void {
   if (Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) return;
-  const userAgent = incoming.headers.get("user-agent");
+  const userAgent = callerHeaders.get("user-agent");
   if (userAgent) headers["User-Agent"] = userAgent;
 }
 
@@ -229,7 +234,9 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
                   if (name.toLowerCase() === h) delete headers[name];
                 }
               }
-              headers[h] = v; // …so genuine forwarded fields win.
+              // user-agent stays available through auth materialization but is fallback-only
+              // here: applyCallerUserAgentFallback below keeps a configured header authoritative.
+              if (h !== "user-agent") headers[h] = v; // …so genuine forwarded fields win.
             }
           }
         }
@@ -251,7 +258,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // Some Responses-compatible gateways select their Codex compatibility path from the real
       // client fingerprint. This is a single non-credential fallback, not broader caller-header
       // forwarding. Static provider headers remain authoritative in either auth mode.
-      applyCallerUserAgentFallback(headers, incoming);
+      applyCallerUserAgentFallback(headers, incoming.headers);
 
       const forward = provider.authMode === "forward";
       let convertedRoutedCustomToolNames: Set<string> | undefined;

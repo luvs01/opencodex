@@ -1,6 +1,6 @@
 import type { OcxProviderConfig } from "../types";
 import type { VisionReasoningEffort } from "../reasoning-effort";
-import { FORWARD_HEADERS } from "../adapters/openai-responses";
+import { applyCallerUserAgentFallback, FORWARD_HEADERS } from "../adapters/openai-responses";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { sidecarEnter } from "../lib/sidecar-tracker";
@@ -70,9 +70,13 @@ export async function describeImage(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (forwardProvider.headers) Object.assign(headers, forwardProvider.headers);
   for (const h of FORWARD_HEADERS) {
+    if (h === "user-agent") continue;
     const v = selectedForwardHeaders.get(h);
     if (v) headers[h] = v;
   }
+  // Same precedence as the forward adapter: a configured provider User-Agent stays
+  // authoritative and the caller fingerprint only fills the name when unconfigured.
+  applyCallerUserAgentFallback(headers, selectedForwardHeaders);
   const content: unknown[] = [];
   if (contextText) content.push({ type: "input_text", text: `The user's request about this image: ${contextText}` });
   content.push({ type: "input_image", image_url: imageUrl, detail: detail ?? "high" });

@@ -208,6 +208,22 @@ describe("Codex metadata integrity", () => {
     expect(new Headers(absent.headers).has("user-agent")).toBe(false);
   });
 
+  test("canonical forward mode keeps a configured User-Agent over the caller value", async () => {
+    const selected = headersForCodexAuthContext(
+      new Headers({ "User-Agent": "codex_cli_rs/0.154.0" }),
+      poolAuthContext,
+    );
+    const request = await createResponsesPassthroughAdapter({
+      adapter: "openai-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      authMode: "forward",
+      headers: { "uSeR-aGeNt": "operator-agent/1" },
+    }).buildRequest(minimalParsed(), { headers: selected });
+    expect(new Headers(request.headers).get("user-agent")).toBe("operator-agent/1");
+    expect(Object.keys(request.headers)
+      .filter(name => name.toLowerCase() === "user-agent")).toHaveLength(1);
+  });
+
   test("the preserved User-Agent is the value received by the HTTP upstream", async () => {
     let resolveObserved!: (value: string | null) => void;
     const observed = new Promise<string | null>(resolve => { resolveObserved = resolve; });

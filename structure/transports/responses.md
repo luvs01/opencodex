@@ -19,6 +19,8 @@ The `openai-responses` adapter preserves the incoming `User-Agent` as a non-cred
 both key and forward modes. A configured provider header with that name wins case-insensitively;
 when the caller omits it, the adapter invents no client identity. This does not widen the canonical
 forward credential/metadata allowlist beyond that single header or copy any other caller header.
+The web-search and vision sidecar replays apply the same precedence: the caller fingerprint fills
+the name only when the provider's configured headers do not already carry it.
 
 Retired Codex Spark has no model-specific tool or Responses Lite override; general Lite handling and
 namespace scrubbing remain shared compatibility behavior. Codex quota/reset evidence follows the
