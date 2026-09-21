@@ -8,6 +8,7 @@ import { useT, useI18n, type Locale } from "../../i18n/shared";
 import {
   accountQuotaFromReport,
   capacityAggregationFromReport,
+  observedAtFromReport,
   type CapacityWindowView,
   type ProviderQuotaReportView,
 } from "../../provider-workspace/report";
@@ -25,6 +26,7 @@ function bcp47(locale: Locale): string {
     case "ru": return "ru-RU";
     case "ja": return "ja-JP";
     case "tr": return "tr-TR";
+    case "vi": return "vi-VN";
     default: {
       const _exhaustive: never = locale;
       return _exhaustive;
@@ -45,6 +47,8 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
   const { locale } = useI18n();
   const aggregation = capacityAggregationFromReport(report);
   const primaryQuota = accountQuotaFromReport(report);
+  // Only a passively observed row carries this; see ProviderUsage for the same rule.
+  const observedAt = observedAtFromReport(report);
   const credits = primaryQuota?.creditsUsd;
   const showsAggregate = aggregation?.presentation === "aggregate";
   const incompleteWindowKeys = new Set<QuotaWindowKey>();
@@ -92,6 +96,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
           t={t}
           layout="stacked"
           pending={pending}
+          {...(observedAt !== undefined ? { observedAt } : {})}
           incompleteWindowKeys={showsAggregate ? incompleteWindowKeys : undefined}
           incompleteCustomWindowLabels={showsAggregate ? incompleteCustomWindowLabels : undefined}
         />
@@ -131,8 +136,18 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
             <div className="pws-capacity-incomplete">
               {t("pws.capacity.incomplete", {
                 excluded: aggregation.excludedAccounts,
-                unknown: aggregation.unknownPlanAccounts,
               })}
+            </div>
+          )}
+          {/*
+            Separate from the exclusion notice on purpose (#3155). An uncalibrated plan is
+            COUNTED, at the baseline seat weight, so folding it into "excluded" told an
+            operator their Premium seat was missing from a report that in fact included it.
+            What is true is narrower: the estimate is conservative for that seat.
+          */}
+          {aggregation && aggregation.unknownPlanAccounts > 0 && (
+            <div className="pws-capacity-incomplete">
+              {t("pws.capacity.uncalibratedPlan", { count: aggregation.unknownPlanAccounts })}
             </div>
           )}
           {aggregation && aggregation.partialWindowAccounts > 0 && (

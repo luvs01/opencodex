@@ -10,10 +10,37 @@ export interface CodexHistoryBackupEntry {
   modelProvider: string;
   source: string;
   hasUserEvent: 0 | 1;
+  /**
+   * Whether the row had a non-empty `first_user_message` when the snapshot was taken.
+   *
+   * Routing derives the post-image `has_user_event` from the message AT SNAPSHOT TIME
+   * (`history-provider.ts` `routeOpenai`), so a restore that recomputes it from the
+   * message as it is NOW will mistake the user's first message for OpenCodex's own write
+   * and erase it. Only the emptiness is recorded, never the text: this manifest is a file
+   * on disk and the message is user content.
+   *
+   * Optional because manifests written before this field exists cannot be given one. An
+   * entry without it falls back to the current-row reading, which is exactly as imprecise
+   * as the behaviour it replaces and no worse.
+   */
+  hadFirstUserMessage?: boolean;
+  /**
+   * Whether OpenCodex's routing relabel is known to have landed for this entry.
+   *
+   * `pending` is written before the routing write and resolved after it, so a crash
+   * between the two leaves an honest "unknown" rather than a confident wrong answer. The
+   * observed row resolves it: the recorded original means the write did not land, the
+   * expected post-image means it did.
+   *
+   * Absent on entries written before the field existed. Those refuse only in the one
+   * genuinely undecidable case — original tuple with `has_user_event` moved 0 to 1 —
+   * which `dev` already refuses today.
+   */
+  relabel?: "pending" | "committed" | "none";
 }
 
 export interface CodexHistoryBackupManifest {
-  version: 1;
+  version: 1 | 2;
   stateDbPath: string;
   entries: Record<string, CodexHistoryBackupEntry>;
 }
@@ -27,7 +54,32 @@ export type CodexHistoryManifestValidation =
       readonly scope: "manifest" | "entry-shape" | "entry-provenance";
     };
 
+/**
+ * Strip the Win32 extended-length prefix: `\\?\C:\...` becomes `C:\...` and
+ * `\\?\UNC\server\share\...` becomes `\\server\share\...` (forward-slash spellings
+ * included). Codex records some rollout paths with the prefix and others without, and
+ * both spellings name the same file — comparing them literally failed the history
+ * integrity check for intact sessions (#4442). Stripping happens before resolve() so
+ * the identity converges regardless of host path semantics.
+ */
+function withoutWindowsExtendedLengthPrefix(path: string): string {
+  const match = /^(?:[\\/]{2}\?[\\/])(unc[\\/])?/i.exec(path);
+  if (!match) return path;
+  return match[1] ? `\\\\${path.slice(match[0].length)}` : path.slice(match[0].length);
+}
+
 function codexHistoryPathIdentity(path: string): string {
+  if (process.platform !== "win32") return resolve(path);
+  return resolve(withoutWindowsExtendedLengthPrefix(path)).toLowerCase();
+}
+
+/**
+ * Identity as computed before the extended-length prefix was normalized (#4442). A
+ * state database path spelled `\\?\C:\...` hashed to a DIFFERENT backup filename
+ * before the fix; readers still check that name so an existing manifest keeps
+ * shadowing its database instead of reading as absent.
+ */
+function legacyCodexHistoryPathIdentity(path: string): string {
   const canonical = resolve(path);
   return process.platform === "win32" ? canonical.toLowerCase() : canonical;
 }
@@ -45,6 +97,17 @@ export function codexHistoryStateDbIdentity(path: string): string {
 export function codexHistoryBackupId(stateDbPath: string): string {
   return createHash("sha256")
     .update(codexHistoryStateDbIdentity(stateDbPath))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/**
+ * Backup filename id under the pre-#4442 identity. Differs from codexHistoryBackupId
+ * only for extended-length-prefixed database paths; identical everywhere else.
+ */
+export function legacyCodexHistoryBackupId(stateDbPath: string): string {
+  return createHash("sha256")
+    .update(legacyCodexHistoryPathIdentity(stateDbPath))
     .digest("hex")
     .slice(0, 16);
 }
@@ -76,7 +139,7 @@ export function validateCodexHistoryBackupManifest(
   expectedStateDbPath: string,
 ): CodexHistoryManifestValidation {
   if (!isRecord(raw)
-    || raw.version !== 1
+    || (raw.version !== 1 && raw.version !== 2)
     || typeof raw.stateDbPath !== "string"
     || !raw.stateDbPath.trim()
     || !isAbsolute(raw.stateDbPath)
@@ -103,6 +166,12 @@ export function validateCodexHistoryBackupManifest(
       || typeof value.hasUserEvent !== "number"
       || !Number.isSafeInteger(value.hasUserEvent)
       || (value.hasUserEvent !== 0 && value.hasUserEvent !== 1)
+      // Optional, but not unvalidated: a truthy `hadFirstUserMessage: "false"` would select
+      // the wrong restore verdict, and an unrecognized `relabel` would be read as a state
+      // the classifier does not have.
+      || (value.hadFirstUserMessage !== undefined && typeof value.hadFirstUserMessage !== "boolean")
+      || (value.relabel !== undefined
+        && value.relabel !== "pending" && value.relabel !== "committed" && value.relabel !== "none")
       || !hasAllowedProvenance(value)) {
       return { ok: false, reason: "schema", scope: "entry-provenance" };
     }
