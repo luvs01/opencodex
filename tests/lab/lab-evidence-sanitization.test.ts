@@ -237,6 +237,8 @@ describe("SEC-02 sanitizer boundary", () => {
     expect(sanitizeDiagnostic("dial tcp localhost:11434: connect: refused"))
       .toBe("dial tcp [host]:11434: connect: refused");
     expect(sanitizeDiagnostic("getaddrinfo ENOTFOUND redis")).toBe("getaddrinfo ENOTFOUND [host]");
+    // Even a destination spelled like the marker resolves to the tail token.
+    expect(sanitizeDiagnostic("host host")).toBe("host [host]");
     // `connect to` reads as English too often to license a bare word on its own
     // (`Unable to connect to your account`); a failure term disambiguates it.
     // WEAK markers appear in prose, so a dotted namespace after one survives.
@@ -289,6 +291,9 @@ describe("SEC-02 sanitizer boundary", () => {
       .toBe("Unable to connect to [host] on port 443: timed out");
     expect(sanitizeDiagnostic("connect to gateway port 8080 failed"))
       .toBe("connect to [host] port 8080 failed");
+    // Marker repetition does not move the redaction off the destination.
+    expect(sanitizeDiagnostic("connect to connect:443 refused"))
+      .toBe("connect to [host]:443 refused");
   });
 
   test("connect-to failures redact destinations without consuming prose", () => {
@@ -301,6 +306,11 @@ describe("SEC-02 sanitizer boundary", () => {
       .toBe("failed to connect to the upstream service");
     expect(sanitizeDiagnostic("connect to gateway failed")).toBe("connect to [host] failed");
     expect(sanitizeDiagnostic("connecting to redis timed out")).toBe("connecting to [host] timed out");
+    // A destination that repeats the marker word is still the thing redacted:
+    // replacing across the whole match took the marker's `connect` instead.
+    expect(sanitizeDiagnostic("connect to connect failed")).toBe("connect to [host] failed");
+    expect(sanitizeDiagnostic("connecting to connecting timed out"))
+      .toBe("connecting to [host] timed out");
   });
 
   test("an internationalized domain does not preserve the address", () => {

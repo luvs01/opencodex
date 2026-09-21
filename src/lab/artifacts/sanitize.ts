@@ -507,11 +507,18 @@ function scrubString(value: string): string {
     // `dial tcp redis:6379` needs no other evidence. Both notations count —
     // adjacent `host:443` and spelled-out `gateway on port 443` — because the
     // port is the evidence, not the punctuation.
+    // The destination sits inside `tail`, so the rewrite is spliced at an
+    // offset in it — replacing against the whole match lets a marker word
+    // that repeats the destination (`connect to connect failed`) take the
+    // `[host]` instead.
+    const head = m.slice(0, m.length - tail.length);
+    const redact = (at: number, token: string) =>
+      head + tail.slice(0, at) + "[host]" + tail.slice(at + token.length);
     const ported =
       tail.match(/(?<![\w.-])([A-Za-z0-9_.-]{1,255}):\d{1,5}(?![\w.])/) ??
       tail.match(/(?<![\w.-])([A-Za-z0-9_.-]{1,255})\s+(?:on\s+)?port\s+\d{1,5}\b/i);
     if (ported?.[1] && !PROSE_AFTER_MARKER.has(ported[1].toLowerCase())) {
-      return m.replace(ported[1], "[host]");
+      return redact(ported.index ?? 0, ported[1]);
     }
     // A failure immediately following an unported connect-to target supplies
     // the missing network context without making ordinary connective prose
@@ -520,13 +527,17 @@ function scrubString(value: string): string {
       ? tail.match(/^([A-Za-z][A-Za-z0-9]{0,254})\s+(?:failed|refused|unreachable|reset|timed\s+out)\b/i)
       : null;
     if (failedConnectTarget?.[1]) {
-      return m.replace(failedConnectTarget[1], "[host]");
+      return redact(failedConnectTarget.index ?? 0, failedConnectTarget[1]);
     }
     // Otherwise only a resolver marker licenses a bare name. Natural-language
     // `connect to` alone does not: `Unable to connect to your account` is prose.
     const resolver = /ENOTFOUND|EAI_AGAIN|lookup|host/i.test(m);
+    let cursor = 0;
     for (const token of tail.split(/[\s:]+/)) {
-      if (token && isHostCandidate(token, resolver)) return m.replace(token, "[host]");
+      if (!token) continue;
+      const at = tail.indexOf(token, cursor);
+      cursor = at + token.length;
+      if (isHostCandidate(token, resolver)) return redact(at, token);
     }
     return m;
   });
