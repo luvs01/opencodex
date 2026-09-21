@@ -15,7 +15,7 @@ import { dirname } from "node:path";
 import { activeCodexConfigPath, getAgentsEnabled, getAgentsMaxDepth, getLogicalMaxThreads, getMultiAgentModeHintText, getSubagentDeveloperInstructions, hasAgentsMaxThreads, isMultiAgentV2Enabled, setMultiAgentModeHintText, transitionMultiAgentV2 } from "../codex/features";
 
 import { commandInvocation, type SpawnInvocation } from "../lib/win-exec";
-import { loadConfig, saveConfig } from "../config";
+import { deleteConfigTopLevelKey, loadConfig, saveConfig } from "../config";
 import { resolveAndPersistCodexRuntime, type ResolveCodexRuntimeDeps } from "../codex/runtime";
 
 export interface V2CliDeps {
@@ -88,16 +88,22 @@ function runCodexFeatures(action: "enable" | "disable", deps: V2CliDeps): void {
 
 export function v2StatusLine(enabled: boolean): string {
   return enabled
-    ? "multi_agent_v2: ON — v2 multi-agent surface active"
-    : "multi_agent_v2: OFF — v1 multi-agent surface (default install)";
+    ? "multi_agent_v2: ON — global V2 override active"
+    : "multi_agent_v2: OFF — model catalog pins and defaults decide the surface";
 }
 
-export function multiAgentModeLine(mode: string): string {
+export function multiAgentModeLine(mode: string, keepNativeChatGptOnV1 = false): string {
   switch (mode) {
     case "v1": return "multi_agent_mode: v1 — ALL models forced to v1 surface (upstream pins overridden)";
-    case "v2": return "multi_agent_mode: v2 — ALL models forced to v2 surface (upstream pins overridden)";
+    case "v2": return keepNativeChatGptOnV1
+      ? "multi_agent_mode: v2 hybrid — ChatGPT-native models use v1; routed models use v2"
+      : "multi_agent_mode: v2 — ALL models forced to v2 surface (upstream pins overridden)";
     default: return "multi_agent_mode: default — upstream model pins respected (sol/terra=v2, luna=v1, rest=codex flag)";
   }
+}
+
+function requiresGlobalV2Disabled(multiAgentMode: string | undefined, keepNativeChatGptOnV1: boolean): boolean {
+  return multiAgentMode === "v2" && keepNativeChatGptOnV1;
 }
 
 export async function cmdV2(args: string[], deps: V2CliDeps = {}, findPort?: () => Promise<number | undefined>): Promise<number> {
@@ -109,7 +115,14 @@ export async function cmdV2(args: string[], deps: V2CliDeps = {}, findPort?: () 
   if (verb === "status") {
     log.log(v2StatusLine(isEnabled()));
     const cfg = loadConfig();
-    log.log(multiAgentModeLine(cfg.multiAgentMode ?? "default"));
+    const mode = cfg.multiAgentMode ?? "default";
+    const keepNativeV1 = cfg.keepNativeChatGptOnV1 === true;
+    log.log(multiAgentModeLine(mode, keepNativeV1));
+    log.log(cfg.keepNativeChatGptOnV1 === true
+      ? requiresGlobalV2Disabled(mode, keepNativeV1) && isEnabled()
+        ? "keep_native_chatgpt_on_v1: CONFLICT — global multi_agent_v2 overrides the native v1 catalog pin; run 'ocx v2 keep-native-v1 on' to reconcile"
+        : "keep_native_chatgpt_on_v1: ON — global V2 override is off; ChatGPT-native rows use v1 and routed rows use v2 when mode is v2"
+      : "keep_native_chatgpt_on_v1: OFF");
     const threads = getLogicalMaxThreads();
     log.log(`max_threads: ${threads ?? "(unset — codex default)"}`);
     const v2Active = isEnabled();
@@ -183,14 +196,14 @@ export async function cmdV2(args: string[], deps: V2CliDeps = {}, findPort?: () 
     }
     const cfg = loadConfig();
     if (modeArg !== "default") {
-      const target = modeArg === "v2";
+      const target = modeArg === "v2" && cfg.keepNativeChatGptOnV1 !== true;
       const transition = transitionMultiAgentV2(target, enabled => runCodexFeatures(enabled ? "enable" : "disable", deps));
       if (!transition.ok) {
         log.error(`multi-agent mode transition failed: ${transition.error}`);
         return 1;
       }
     }
-    if (modeArg === "default") delete cfg.multiAgentMode;
+    if (modeArg === "default") deleteConfigTopLevelKey(cfg, "multiAgentMode");
     else cfg.multiAgentMode = modeArg as "v1" | "v2";
     saveConfig(cfg);
     try {
@@ -204,12 +217,56 @@ export async function cmdV2(args: string[], deps: V2CliDeps = {}, findPort?: () 
     log.log("Applies to NEW sessions; running sessions keep their pinned multi-agent version.");
     return 0;
   }
+  if (verb === "keep-native-v1") {
+    const flag = (args[1] ?? "").trim().toLowerCase();
+    if (flag !== "on" && flag !== "off") {
+      log.error("v2 keep-native-v1: expected on|off");
+      return 1;
+    }
+    const cfg = loadConfig();
+    const next = flag === "on";
+    const already = cfg.keepNativeChatGptOnV1 === true === next;
+    if (next && requiresGlobalV2Disabled(cfg.multiAgentMode, true)) {
+      const transition = transitionMultiAgentV2(false, enabled => runCodexFeatures(enabled ? "enable" : "disable", deps));
+      if (!transition.ok) {
+        log.error(`keep-native-v1 transition failed: ${transition.error}`);
+        return 1;
+      }
+    }
+    if (next) cfg.keepNativeChatGptOnV1 = true;
+    else deleteConfigTopLevelKey(cfg, "keepNativeChatGptOnV1");
+    saveConfig(cfg);
+    try {
+      const sync = deps.sync ?? (await import("../codex/sync")).syncModelsToCodex;
+      await sync(findPort ? await findPort() : undefined);
+    } catch (err) {
+      log.error(`catalog resync failed: ${err instanceof Error ? err.message : String(err)} — run 'ocx sync' manually.`);
+      return 1;
+    }
+    if (already) {
+      log.log(next
+        ? "keep_native_chatgpt_on_v1 already ON — catalog re-synced."
+        : "keep_native_chatgpt_on_v1 already OFF — catalog re-synced.");
+      return 0;
+    }
+    log.log(next
+      ? "keep_native_chatgpt_on_v1: ON — ChatGPT-native rows stay v1 when mode is v2 (new sessions)."
+      : "keep_native_chatgpt_on_v1: OFF — ChatGPT-native rows follow v1/base/v2 (new sessions).");
+    return 0;
+  }
   if (verb !== "on" && verb !== "off") {
-    log.error(`v2: unknown verb '${verb}' (expected status|on|off|mode <v1|default|v2>|threads <n>|mode-hint <text|--clear>)`);
+    log.error(`v2: unknown verb '${verb}' (expected status|on|off|mode <v1|default|v2>|keep-native-v1 <on|off>|threads <n>|mode-hint <text|--clear>)`);
     return 1;
   }
 
   const want = verb === "on";
+  if (want) {
+    const cfg = loadConfig();
+    if (requiresGlobalV2Disabled(cfg.multiAgentMode, cfg.keepNativeChatGptOnV1 === true)) {
+      log.error("v2 on: incompatible with keep-native-v1 while mode is v2 — Codex's global multi_agent_v2 overrides the native v1 catalog pin. Run 'ocx v2 keep-native-v1 off' first.");
+      return 1;
+    }
+  }
   const transition = transitionMultiAgentV2(want, enabled => runCodexFeatures(enabled ? "enable" : "disable", deps));
   if (!transition.ok) {
     log.error(`codex features ${want ? "enable" : "disable"} multi_agent_v2 failed: ${transition.error}`);

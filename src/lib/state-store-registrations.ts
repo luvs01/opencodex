@@ -9,6 +9,7 @@ import { reconcileProviderFetchWarnings } from "../codex/catalog/provider-fetch"
 import { reconcileModelCacheGeneration } from "../codex/model-cache";
 import { reconcilePoolRotationState } from "../codex/pool-rotation";
 import { reconcileCodexQuotaAccounts } from "../codex/quota";
+import { reconcileQuotaRecovery, sweepExpiredQuotaRecovery } from "../codex/quota-401-recovery";
 import {
   listLiveCodexAccountIds,
   reconcileCodexRoutingHealth,
@@ -20,6 +21,7 @@ import {
 } from "../combos/failover";
 import { reconcileComboWarningMemos } from "../combos/request";
 import { reconcileComboRotationState } from "../combos/resolve";
+import { reconcileComboRecall, sweepExpiredComboRecall } from "../server/responses/combo-session-recall";
 import { listLiveComboTargetKeys } from "../combos/types";
 import {
   listLiveConfigOwnershipRoots,
@@ -34,7 +36,8 @@ import { sweepExpiredAnthropicRoutingHealth } from "../oauth/anthropic-routing";
 import { listLiveOAuthAccountKeys, reconcileOAuthReauthState } from "../oauth/store";
 import { reconcileGuardianBackoff } from "../oauth/token-guardian";
 import { sweepExpiredApiKeyCooldowns } from "../providers/key-failover";
-import { sweepExpiredResponseStates } from "../responses/state";
+import { reconcileProviderRequestPacing } from "../providers/request-pacing";
+import { sweepAbandonedResponseStateTemps, sweepExpiredResponseStates } from "../responses/state";
 import { sweepExpiredAntigravityReplay } from "../adapters/google-antigravity-replay";
 import { reconcileProviderAccountQuotaRows } from "../providers/quota";
 import { reconcileRouterWarningMemos } from "../router";
@@ -75,6 +78,7 @@ export function buildGenerationContext(): GenerationContext {
 export const STATE_STORE_REGISTRATIONS = [
   { name: "subagent-model-health", sweepExpired: sweepExpiredSubagentModelHealth },
   { name: "api-key-cooldowns", sweepExpired: sweepExpiredApiKeyCooldowns },
+  { name: "provider-request-pacing", reconcileGeneration: reconcileProviderRequestPacing },
   {
     name: "combo-target-cooldowns",
     sweepExpired: sweepExpiredComboTargetCooldowns,
@@ -82,7 +86,20 @@ export const STATE_STORE_REGISTRATIONS = [
   },
   { name: "anthropic-routing-health", sweepExpired: sweepExpiredAnthropicRoutingHealth },
   { name: "xai-refresh-verdicts", sweepExpired: sweepExpiredXaiPermanentFailureVerdicts },
-  { name: "responses-continuation", sweepExpired: sweepExpiredResponseStates },
+  {
+    name: "codex-quota-401-recovery",
+    // Only backoff windows and abandoned leases expire. A spent fence is durable: expiring
+    // it would grant the same credential lineage a second refresh (#3019).
+    sweepExpired: sweepExpiredQuotaRecovery,
+    reconcileGeneration: context => reconcileQuotaRecovery(context.codexAccountIds),
+  },
+  {
+    name: "responses-continuation",
+    sweepExpired: sweepExpiredResponseStates,
+    // Disk reclaim rides the liveness tick, not the TTL tick: sweepExpiredOnWrite puts
+    // sweepExpired on hot write paths, where a directory scan does not belong.
+    sweepLiveness: sweepAbandonedResponseStateTemps,
+  },
   { name: "antigravity-replay", sweepExpired: sweepExpiredAntigravityReplay },
   { name: "config-warning-memos", reconcileGeneration: (context: GenerationContext) => reconcileConfigWarningMemos(context.generation) },
   { name: "catalog-warning-memos", reconcileGeneration: (context: GenerationContext) => reconcileCatalogWarningMemos(context.generation) },
@@ -95,6 +112,11 @@ export const STATE_STORE_REGISTRATIONS = [
   { name: "model-cache-history", reconcileGeneration: reconcileModelCacheGeneration },
   { name: "pool-rotation", reconcileGeneration: reconcilePoolRotationState },
   { name: "combo-rotation", reconcileGeneration: reconcileComboRotationState },
+  {
+    name: "combo-session-recall",
+    sweepExpired: sweepExpiredComboRecall,
+    reconcileGeneration: reconcileComboRecall,
+  },
   { name: "guardian-backoff", reconcileGeneration: reconcileGuardianBackoff },
   { name: "codex-reauth", reconcileGeneration: reconcileCodexReauthState },
   { name: "oauth-reauth", reconcileGeneration: reconcileOAuthReauthState },

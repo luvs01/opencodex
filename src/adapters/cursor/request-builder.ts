@@ -9,8 +9,10 @@ import type {
 } from "../../types";
 import { isAllowedToolChoice, namespacedToolName, toolChoiceAliases, type OcxTool, type OcxToolChoice } from "../../types";
 import type { CursorRequestMessage, CursorRequestedModelParameter, CursorRunRequest } from "./types";
-import { cursorWireModelSelection, type CursorRoutingLevel } from "./discovery";
-import { cursorEffortSuffix, cursorRequestWireModelIdWithEffort } from "./effort-map";
+import { cursorCheckpointModelAffinityId, cursorWireModelSelection, type CursorRoutingLevel } from "./discovery";
+import { cursorUltraBaseModelId } from "./discovery";
+import { decodeCursorCallId } from "./call-id";
+import { cursorGrokFastSelection, resolveCursorSelection } from "./catalog";
 import {
   cursorMcpToolEncodedSize,
   cursorMcpToolsEncodedSize,
@@ -21,8 +23,17 @@ import {
   cursorToolsForActivePrompt,
   isCursorStructuredEditToolName,
   isBareCodexShellBridgeTool,
+  isCursorExecutionPathTool,
+  isCursorWaitTool,
 } from "./tool-definitions";
 import { lookupCursorThreadConversation } from "./thread-continuity";
+import {
+  getCursorCheckpoint,
+  getCursorCheckpointForPrefix,
+  type CursorCheckpointInvalidationReason,
+  type CursorCheckpointSnapshot,
+} from "./checkpoint-store";
+import { extractCursorImageUrls } from "./images";
 
 /** Probe-verified Cursor Connect boundaries, with byte headroom for the enclosing field. */
 export const CURSOR_TOOL_COUNT_LIMIT = 330;
@@ -39,21 +50,25 @@ function explicitlySelectedNames(choice: OcxToolChoice | undefined): Set<string>
 }
 
 function toolPriority(tool: OcxTool, selectedNames: ReadonlySet<string>): number {
-  // Shell bridge and apply_patch outrank unrelated allowed_tools entries so a large
-  // selected filler cannot starve the Codex execution path during truncation (#399).
+  // Execution path (bare or opencodex-responses `exec` / `exec_command` / `shell_command`)
+  // outranks filler so a crowded catalog cannot drop the Codex shell bridge (#399).
+  if (isCursorExecutionPathTool(tool)) return 0;
   if (isBareCodexShellBridgeTool(tool)) return 0;
-  if (!tool.namespace && tool.name === "apply_patch") return 1;
+  // `wait` only resumes a yielded exec cell. Keep it with the execution path, but after
+  // `exec` itself so a large wait schema cannot starve the tool that creates the cell.
+  if (isCursorWaitTool(tool)) return 1;
+  if (!tool.namespace && tool.name === "apply_patch") return 2;
   // Structured edit tools convert to apply_patch on the return path, so they must survive the
   // same byte/count truncation as the freeform tool they stand in for (#1017).
-  if (!tool.namespace && isCursorStructuredEditToolName(tool.name)) return 1;
-  if (cursorToolChoiceAliases(tool).some(name => selectedNames.has(name))) return 2;
-  if (tool.loadedFromToolSearch) return 3;
-  if (!tool.namespace) return 4;
-  return 5;
+  if (!tool.namespace && isCursorStructuredEditToolName(tool.name)) return 2;
+  if (cursorToolChoiceAliases(tool).some(name => selectedNames.has(name))) return 3;
+  if (tool.loadedFromToolSearch) return 4;
+  if (!tool.namespace) return 5;
+  return 6;
 }
 
 function isPinnedCursorTool(tool: OcxTool, selectedNames: ReadonlySet<string>): boolean {
-  return toolPriority(tool, selectedNames) <= 2;
+  return toolPriority(tool, selectedNames) <= 3;
 }
 
 /**
@@ -96,7 +111,7 @@ export function applyCursorToolBudget(
     return true;
   };
 
-  // Phase 1: selected tools + shell bridge + apply_patch (priority <= 2).
+  // Phase 1: selected tools + execution path + apply_patch (priority <= 3).
   // Pins are admitted before filler so a crowded catalog cannot drop the Codex execution path (#399).
   for (const candidate of candidates) {
     if (!isPinnedCursorTool(candidate.tool, selectedNames)) continue;
@@ -106,6 +121,44 @@ export function applyCursorToolBudget(
   // Phase 2: remaining tools by priority.
   for (const candidate of candidates) {
     tryKeep(candidate.tool);
+  }
+
+  const evictNonExecutionPath = (needBytes: number): void => {
+    for (let i = kept.length - 1; i >= 0; i--) {
+      const occupant = kept[i];
+      if (!occupant || isCursorExecutionPathTool(occupant)) continue;
+      kept.splice(i, 1);
+      keptSet.delete(occupant);
+      keptBytes -= cursorMcpToolEncodedSize(occupant, toolChoice);
+      if (kept.length < CURSOR_TOOL_COUNT_LIMIT && keptBytes + needBytes <= CURSOR_TOOL_BYTES_LIMIT) {
+        return;
+      }
+    }
+  };
+
+  // Force-admit at least one execution-path tool when one was eligible. Priority-0
+  // admission can still fail if the tool itself is larger than leftover room after
+  // earlier same-priority pins; evict wait/patch/filler rather than ship wait-only.
+  for (const tool of eligible) {
+    if (!isCursorExecutionPathTool(tool) || keptSet.has(tool)) continue;
+    const need = cursorMcpToolEncodedSize(tool, toolChoice);
+    if (need > CURSOR_TOOL_BYTES_LIMIT) continue;
+    evictNonExecutionPath(need);
+    tryKeep(tool);
+    if (keptSet.has(tool)) break;
+  }
+
+  const eligibleHasExecutionPath = eligible.some(isCursorExecutionPathTool);
+  const keptHasExecutionPath = eligible.some(tool => keptSet.has(tool) && isCursorExecutionPathTool(tool));
+  // Never advertise `wait` after dropping the tool that creates the exec cell.
+  if (eligibleHasExecutionPath && !keptHasExecutionPath) {
+    for (const tool of eligible) {
+      if (!isCursorWaitTool(tool) || !keptSet.has(tool)) continue;
+      keptSet.delete(tool);
+      const index = kept.indexOf(tool);
+      if (index >= 0) kept.splice(index, 1);
+      keptBytes -= cursorMcpToolEncodedSize(tool, toolChoice);
+    }
   }
 
   return {
@@ -128,40 +181,84 @@ function catalogLimitNote(kept: readonly OcxTool[], omitted: readonly OcxTool[])
 }
 
 /**
+ * True when this turn should take Cursor's fast variant.
+ *
+ * Reads the tier DECISION rather than the raw caller field so one authority owns precedence:
+ * `decideTier` has already applied config `fastMode`, the caller's `service_tier`, and the
+ * route's eligibility, so `fastMode: false` correctly suppresses a caller's Fast request.
+ * A `{kind:"set"}` decision on a Cursor route means canonical Fast survived that gate.
+ */
+export function cursorFastRequested(parsed: OcxParsedRequest): boolean {
+  return parsed.options.tierDecision?.kind === "set";
+}
+
+/**
+ * Whether the wire this request will carry expresses the fast variant, for tier telemetry.
+ *
+ * Recomputed from the same pure inputs the builder uses rather than read off a built
+ * request: `tierLogForRunTurn` runs BEFORE `runTurn` (server/responses/core.ts), and
+ * `createCursorRequest` is not pure — it mints conversation ids — so rebuilding there would
+ * report a request that was never sent.
+ */
+export function cursorRequestEmitsFastVariant(parsed: OcxParsedRequest): boolean {
+  if (!cursorFastRequested(parsed)) return false;
+  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning, true);
+  return model.modelId.endsWith("-fast")
+    || (model.requestedModelParameters ?? []).some(p => p.id === "fast" && p.value === "true");
+}
+
+/**
  * Resolve a `cursor/<model>` selection + Codex reasoning effort to Cursor's requested model shape.
  * Most models encode effort in a flat id (`claude-4.6-opus-high`). Grok Fast is parameterized
- * instead: current Cursor clients send the `grok-4.5` base id plus `effort` and `fast` parameters.
+ * instead: current Cursor clients send the matching Grok base id plus `effort` and `fast` parameters.
  * A fully-qualified id (one that is not a known effort base) passes through unchanged.
  */
-function normalizeCursorModelId(modelId: string, reasoning?: string): {
+function normalizeCursorModelId(modelId: string, reasoning?: string, fast?: boolean, liveRosterScope?: string): {
   modelId: string;
   requestedModelParameters?: readonly CursorRequestedModelParameter[];
   routingLevel?: CursorRoutingLevel;
+  maxMode?: boolean;
 } {
+  // Router ids (auto / auto-<level>) keep their dedicated wire selection.
   const selection = cursorWireModelSelection(modelId);
+  if (selection.routingLevel !== undefined || selection.modelId === "default") return selection;
+  // Umbrella catalog resolution (devlog 260828_cursor_umbrella_catalog): one
+  // resolver owns effort composition, variant dimensions, the synthetic -1m
+  // marker (ultra -> Max Mode, evidence-gated), and the cursor- wire prefix.
   const id = selection.modelId;
-  const suffix = cursorEffortSuffix(id, reasoning);
-  if ((id === "grok-4.5-fast" || id === "grok-4.6-fast") && suffix) {
+  // Grok Fast stays parameterized: current Cursor clients send the base id
+  // plus effort/fast parameters instead of the flattened -fast id.
+  const grokFast = cursorGrokFastSelection(id, reasoning, fast);
+  if (grokFast) {
     return {
       ...selection,
-      modelId: id.slice(0, -"-fast".length),
+      modelId: grokFast.wireBaseId,
       requestedModelParameters: [
-        { id: "effort", value: suffix },
+        { id: "effort", value: grokFast.effort },
         { id: "fast", value: "true" },
       ],
     };
   }
-  return { ...selection, modelId: suffix ? cursorRequestWireModelIdWithEffort(id, suffix) : id };
+  const resolved = resolveCursorSelection(id, reasoning, undefined, { fast, liveRosterScope });
+  return {
+    ...selection,
+    ...(resolved.maxMode ? { maxMode: true } : {}),
+    modelId: resolved.wireId,
+  };
 }
 
 function contentPartToText(part: OcxContentPart | OcxAssistantContentPart): string | undefined {
   switch (part.type) {
     case "text":
       return part.text;
+    case "document":
+      // Cursor has no document carrier; the marker keeps the turn from serializing to nothing.
+      return part.text;
     case "thinking":
       return part.thinking;
     case "image":
-      return `[image input unsupported by Cursor adapter phase 3: ${part.detail ?? "auto"}]`;
+      // Images ride UserMessage.selected_context (SelectedImage) instead of text.
+      return undefined;
     case "toolCall":
       // Cursor does not accept OpenAI Responses assistant tool-call parts as native history here.
       // Rendering them as visible "[tool_call]" text leaks synthetic protocol markers back into
@@ -174,7 +271,7 @@ function contentPartToText(part: OcxContentPart | OcxAssistantContentPart): stri
 function toolResultToText(message: OcxToolResultMessage): string {
   return [
     "[tool_result]",
-    `call_id: ${message.toolCallId}`,
+    `call_id: ${decodeCursorCallId(message.toolCallId)}`,
     `name: ${namespacedToolName(message.toolNamespace, message.toolName)}`,
     `is_error: ${message.isError}`,
     "output:",
@@ -194,15 +291,38 @@ function requestMessage(message: OcxMessage): CursorRequestMessage | undefined {
   switch (message.role) {
     case "user":
     case "developer":
-      return { role: message.role, content: contentToText(message.content) };
+      {
+        const content = contentToText(message.content);
+        // Image-only turns survive as empty content; the encoder keeps them userMessageAction.
+        if (content.length === 0 && extractCursorImageUrls(message.content).length === 0) {
+          return undefined;
+        }
+        return { role: message.role, content };
+      }
     case "assistant":
-      return { role: "assistant", content: contentToText(message.content) };
+      {
+        const content = contentToText(message.content);
+        return content.length > 0 ? { role: "assistant", content } : undefined;
+      }
     case "toolResult":
       return {
         role: "tool",
         content: toolResultToText(message),
       };
   }
+}
+
+/**
+ * Rebuild the text `messages` channel from prepared `rawMessages` so omission markers
+ * and JPEG-rewritten parts stay visible to activePromptText after image preparation.
+ */
+export function cursorRequestMessagesFromRaw(
+  messages: readonly OcxMessage[] | undefined,
+): CursorRequestMessage[] {
+  if (!messages?.length) return [];
+  return messages
+    .map(requestMessage)
+    .filter((message): message is CursorRequestMessage => !!message);
 }
 
 export function generatedCursorConversationId(): string {
@@ -223,7 +343,13 @@ export function cursorConversationIdFromClientThread(threadId: string, identityS
 
 /**
  * Resolve the Cursor conversation id for this turn.
- * Priority: force-fresh → isolate helper → remembered → thread override → client thread → random.
+ * Priority: force-fresh → isolate helper → thread remint override → stored conversation id
+ * → client thread hash → random.
+ *
+ * The remint override must beat a stored `_cursorConversationId`. Only the remint path writes
+ * the thread store (cursor.ts), so a stored id that disagrees with it is the pre-remint value,
+ * and preferring it let a second Responses chain in the same Codex thread keep resuming the
+ * conversation the previous turn just rotated away from.
  * Never use OpenAI Responses `previous_response_id` (resp_*) or shared `prompt_cache_key`
  * (cache-cohort fingerprint, not conversation ownership).
  */
@@ -233,40 +359,162 @@ export function resolveCursorConversationId(
   options: CreateCursorRequestOptions = {},
 ): string {
   if (options.forceFreshConversation === true) return generatedCursorConversationId();
-  // Helper/shadow/compaction turns must not append into the parent's Cursor conversation,
-  // even when previous_response_id restored the parent's remembered id.
   if (parsed._cursorIsolateConversation === true) return generatedCursorConversationId();
-  if (parsed._cursorConversationId) return parsed._cursorConversationId;
-  const threadId = parsed._clientThreadId?.trim();
-  if (threadId) {
+  const threadId = cursorClientThreadOwner(parsed);
+  // A compaction turn carries its own conversation id and must not be pulled onto the parent's
+  // thread override. It is isolated in effect without ever setting the isolate flag, which is why
+  // the override check has to exclude it explicitly rather than rely on that flag.
+  if (threadId && parsed._compactionRequest !== true) {
     const recovered = lookupCursorThreadConversation(threadId, parsed._cursorIdentityScope);
     if (recovered) return recovered;
-    return cursorConversationIdFromClientThread(threadId, parsed._cursorIdentityScope);
+  }
+  if (parsed._cursorConversationId) return parsed._cursorConversationId;
+  if (threadId) {
+    return cursorConversationIdFromClientThread(`thread:${threadId}`, parsed._cursorIdentityScope);
   }
   return generatedCursorConversationId();
+}
+
+export function cursorClientThreadOwner(parsed: OcxParsedRequest): string | undefined {
+  return parsed._clientThreadId?.trim() || parsed._cursorClientThreadId?.trim() || undefined;
+}
+
+function updateFramed(hash: ReturnType<typeof createHash>, value: string): void {
+  const bytes = Buffer.from(value, "utf8");
+  const length = Buffer.allocUnsafe(4);
+  length.writeUInt32BE(bytes.byteLength);
+  hash.update(length);
+  hash.update(bytes);
+}
+
+export function cursorInstructionDigest(parsed: OcxParsedRequest): string {
+  const hash = createHash("sha256").update("ocx:cursor:sys:");
+  for (const line of parsed.context.systemPrompt ?? []) updateFramed(hash, line);
+  for (const message of parsed.context.messages) {
+    if (message.role !== "developer") continue;
+    updateFramed(hash, contentToText(message.content));
+  }
+  return hash.digest("hex");
+}
+
+export function cursorCoveredPrefixDigest(parsed: OcxParsedRequest, coveredMessageCount: number): string {
+  const hash = createHash("sha256").update("ocx:cursor:prefix:");
+  updateFramed(hash, cursorInstructionDigest(parsed));
+  for (const message of parsed.context.messages.slice(0, coveredMessageCount)) {
+    updateFramed(hash, message.role);
+    updateFramed(hash, contentToText(message.content));
+  }
+  return hash.digest("hex");
 }
 
 export interface CreateCursorRequestOptions {
   /** Force a brand-new Cursor conversation id even when remembered state exists. */
   forceFreshConversation?: boolean;
+  /** Credential-bound scope for live Cursor model spelling and Max-Mode evidence. */
+  liveRosterScope?: string;
+}
+
+function lookupPrefixSnapshot(
+  parsed: OcxParsedRequest,
+  request: CursorRunRequest,
+  identityScope: string,
+): CursorCheckpointSnapshot | undefined {
+  const systemDigest = cursorInstructionDigest(parsed);
+  const modelId = cursorCheckpointModelAffinityId(request.modelId);
+  for (let covered = parsed.context.messages.length; covered >= 1; covered--) {
+    const snapshot = getCursorCheckpointForPrefix({
+      conversationId: request.conversationId,
+      prefixDigest: cursorCoveredPrefixDigest(parsed, covered),
+      systemDigest,
+      coveredMessageCount: covered,
+      identityScope,
+      modelId,
+    });
+    if (snapshot) return snapshot;
+  }
+  return undefined;
+}
+
+function lineageMismatch(
+  parsed: OcxParsedRequest,
+  snapshot: CursorCheckpointSnapshot,
+): CursorCheckpointInvalidationReason | undefined {
+  const covered = snapshot.coveredMessageCount;
+  if (covered === undefined || covered < 0 || covered > parsed.context.messages.length) {
+    return "lineage_mismatch";
+  }
+  if (!snapshot.prefixDigest || !snapshot.systemDigest) return "lineage_mismatch";
+  if (snapshot.systemDigest !== cursorInstructionDigest(parsed)) return "lineage_mismatch";
+  if (snapshot.prefixDigest !== cursorCoveredPrefixDigest(parsed, covered)) return "lineage_mismatch";
+  const lastRole = parsed.context.messages.at(-1)?.role;
+  if (lastRole === "toolResult" && covered >= parsed.context.messages.length) return "trailing_tool_result";
+  return undefined;
+}
+
+function resolveCursorCheckpoint(
+  parsed: OcxParsedRequest,
+  request: CursorRunRequest,
+  options: CreateCursorRequestOptions,
+): { snapshot: CursorCheckpointSnapshot } | { reason: CursorCheckpointInvalidationReason } {
+  if (options.forceFreshConversation === true) return { reason: "force_fresh" };
+  if (parsed._compactionRequest === true || parsed._contextCompactionBoundary === true) return { reason: "compaction" };
+  const isolated = parsed._cursorIsolateConversation === true;
+  const cursorState = parsed._providerContinuation?.cursor;
+  const ref = isolated ? undefined : cursorState?.checkpointRef;
+  const identityScope = parsed._cursorIdentityScope?.trim() || "local";
+  let snapshot: CursorCheckpointSnapshot | undefined;
+  if (ref) {
+    snapshot = getCursorCheckpoint(ref);
+    if (!snapshot) return { reason: "expired" };
+  } else {
+    if (
+      isolated
+      || (!parsed._cursorConversationId && !cursorClientThreadOwner(parsed))
+    ) return { reason: "missing_ref" };
+    snapshot = lookupPrefixSnapshot(parsed, request, identityScope);
+    if (!snapshot) return { reason: "missing_ref" };
+  }
+  if (snapshot.conversationId !== request.conversationId) {
+    return { reason: "conversation_changed" };
+  }
+  if (snapshot.identityScope !== identityScope) return { reason: "identity_changed" };
+  if (cursorCheckpointModelAffinityId(snapshot.modelId) !== cursorCheckpointModelAffinityId(request.modelId)) {
+    return { reason: "model_changed" };
+  }
+  // The continuation state only exists on the ref path; a ref-less prefix hit carries
+  // the suspension on the snapshot itself, or a non-toolResult request could resume
+  // bytes upstream serialized mid-tool-call.
+  if (
+    parsed.context.messages.at(-1)?.role !== "toolResult"
+    && (snapshot.toolSuspended === true || cursorState?.checkpointUsable === false)
+  ) {
+    return { reason: "trailing_tool_result" };
+  }
+  const lineage = lineageMismatch(parsed, snapshot);
+  if (lineage) return { reason: lineage };
+  return { snapshot };
 }
 
 export function createCursorRequest(
   parsed: OcxParsedRequest,
   options: CreateCursorRequestOptions = {},
 ): CursorRunRequest {
-  const messages = parsed.context.messages
-    .map(requestMessage)
-    .filter((message): message is CursorRequestMessage => !!message && message.content.length > 0);
+  const messages = cursorRequestMessagesFromRaw(parsed.context.messages);
   const activeText = [...messages].reverse().find(message => message.role === "user" || message.role === "developer")?.content ?? "";
   const visibleTools = cursorToolsForActivePrompt(parsed.context.tools, activeText, parsed.options.toolChoice);
   const budget = applyCursorToolBudget(visibleTools, parsed.options.toolChoice);
   const limitNote = catalogLimitNote(budget.tools, budget.omitted);
-  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning);
-  return {
+  const model = normalizeCursorModelId(
+    parsed.modelId,
+    parsed.options.reasoning,
+    cursorFastRequested(parsed),
+    options.liveRosterScope,
+  );
+  const request: CursorRunRequest = {
     modelId: model.modelId,
     ...(model.requestedModelParameters ? { requestedModelParameters: model.requestedModelParameters } : {}),
     ...(model.routingLevel ? { routingLevel: model.routingLevel } : {}),
+    ...(model.maxMode ? { maxMode: true } : {}),
     conversationId: resolveCursorConversationId(parsed, model.modelId, options),
     system: [...(parsed.context.systemPrompt ?? []), ...(limitNote ? [limitNote] : [])],
     messages,
@@ -274,7 +522,24 @@ export function createCursorRequest(
     ...(parsed._compactionRequest === true || parsed._contextCompactionBoundary === true ? { contextUsageReset: true } : {}),
     ...(parsed._compactionRequest === true ? { contextUsageStoreCheckpoints: false } : {}),
     ...(budget.tools.length ? { tools: budget.tools } : {}),
+    // Bare API caller (no tools, no Codex thread identity): suppress Cursor's default
+    // native tool catalog instead of paying its ~10-15K token preamble (devlog 260826 040).
+    ...(budget.tools.length === 0 && !cursorClientThreadOwner(parsed)
+      ? { suppressDefaultCursorToolCatalog: true }
+      : {}),
     ...(parsed.options.toolChoice ? { toolChoice: parsed.options.toolChoice } : {}),
     ...(parsed.options.parallelToolCalls !== undefined ? { parallelToolCalls: parsed.options.parallelToolCalls } : {}),
   };
+  const resolved = resolveCursorCheckpoint(parsed, request, options);
+  if ("reason" in resolved) {
+    request.continuationMode = "full-replay";
+    request.checkpointInvalidationReason = resolved.reason;
+    return request;
+  }
+  request.checkpointBytes = resolved.snapshot.checkpointBytes;
+  request.continuationMode = "checkpoint";
+  if (parsed.context.messages.at(-1)?.role === "toolResult" && resolved.snapshot.coveredMessageCount !== undefined) {
+    request.checkpointSuffixStart = resolved.snapshot.coveredMessageCount;
+  }
+  return request;
 }
