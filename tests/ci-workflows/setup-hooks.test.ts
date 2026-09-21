@@ -2,9 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { repoRoot } from "../helpers/repo-root";
 
-const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
@@ -25,7 +24,7 @@ describe("setup-hooks", () => {
     writeFileSync(existingHook, "#!/bin/sh\necho existing-policy\n");
 
     const result = Bun.spawnSync(["bun", "scripts/setup-hooks.ts"], {
-      cwd: repoRoot,
+      cwd: repoRoot(),
       env: {
         ...process.env,
         GIT_CONFIG_GLOBAL: configPath,
