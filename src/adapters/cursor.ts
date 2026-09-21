@@ -332,7 +332,29 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             guardHeld = [];
             guardHeldBytes = 0;
           };
+          // A single frame can carry a multi-megabyte payload (the transport accepts up to the
+          // 16 MiB Cursor message bound), so the serialized size is projected — object overhead
+          // plus raw payload length — BEFORE any encoded copy exists. Escapes only inflate the
+          // exact figure, making the raw length a safe lower bound for the overflow decision.
+          const GUARD_EVENT_OVERHEAD_BYTES = 64;
+          const projectedGuardEventBytes = (event: AdapterEvent): number =>
+            GUARD_EVENT_OVERHEAD_BYTES
+            + (event.type === "text_delta"
+              ? Buffer.byteLength(event.text, "utf8")
+              : event.type === "thinking_delta"
+                ? Buffer.byteLength(event.thinking, "utf8")
+                : 0);
           const holdGuardEvent = (event: AdapterEvent) => {
+            if (guardHeldBytes + projectedGuardEventBytes(event) > CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES) {
+              // Too large to retain even unescaped: settle the sniffers, release what was held,
+              // and pass this event through without ever encoding it.
+              echoSniffer?.finish();
+              routingCommentarySniffer?.finish();
+              releaseGuardHeld();
+              if (event.type !== "heartbeat") emittedOutput = true;
+              emitTextObserved(event);
+              return false;
+            }
             guardHeld.push(event);
             // Count the complete retained representation, including per-event overhead, so an
             // upstream cannot evade the cap with empty or non-text reasoning frames.
@@ -343,6 +365,14 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             releaseGuardHeld();
             return false;
           };
+          // Each sniffer settles from a bounded leading window (40 B / 512 B respectively), so
+          // feeding an oversized delta whole would retain megabytes it never inspects. The
+          // bounded prefix still covers every decision path — including marker prefixes and
+          // routing claims — while the tail falls through to the aggregate cap.
+          const ECHO_SNIFF_FEED_MAX_CHARS = 512;
+          const ROUTING_SNIFF_FEED_MAX_CHARS = 2048;
+          const boundedSniffText = (text: string, maxChars: number): string =>
+            text.length > maxChars ? text.slice(0, maxChars) : text;
           const guardsSettled = () =>
             (!echoSniffer || echoSniffer.settled)
             && (!routingCommentarySniffer || routingCommentarySniffer.settled);
@@ -383,21 +413,24 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
                 }
                 if (!guardsSettled()) {
                   if (event.type === "text_delta") {
-                    if (!holdGuardEvent(event)) continue;
+                    // Classify the delta before the aggregate-cap check: an oversized first
+                    // delta must still pass the armed sniffers (echo/hallucination detection is
+                    // prefix-based), so the cap cannot disarm them before they see the text.
                     if (echoSniffer && !echoSniffer.settled) {
-                      const decision = echoSniffer.feed(event.text);
+                      const decision = echoSniffer.feed(boundedSniffText(event.text, ECHO_SNIFF_FEED_MAX_CHARS));
                       if (decision.kind === "echo") {
                         guardHeld = [];
                         throw new CursorToolResultEchoError(decision.marker);
                       }
                     }
                     if (routingCommentarySniffer && !routingCommentarySniffer.settled) {
-                      const decision = routingCommentarySniffer.feed(event.text);
+                      const decision = routingCommentarySniffer.feed(boundedSniffText(event.text, ROUTING_SNIFF_FEED_MAX_CHARS));
                       if (decision.kind === "hallucination") {
                         guardHeld = [];
                         throw new CursorRoutingCommentaryError();
                       }
                     }
+                    if (!holdGuardEvent(event)) continue;
                     if (guardsSettled()) releaseGuardHeld();
                     continue;
                   } else if (event.type === "thinking_delta" || event.type === "heartbeat") {
