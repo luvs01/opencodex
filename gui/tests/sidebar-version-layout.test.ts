@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 const css = await Bun.file(new URL("../src/styles/sidebar-brand.css", import.meta.url)).text();
 const entry = await Bun.file(new URL("../src/main.tsx", import.meta.url)).text();
+const browserHarness = await Bun.file(new URL("./sidebar-version-browser.ts", import.meta.url)).text();
 
 function block(selector: string): string {
   const start = css.indexOf(`${selector} {`);
@@ -48,4 +49,10 @@ test("the fix stays scoped to the drawer and leaves compact topbar policies inta
   const selectors = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{/g)]
     .map(match => match[1].trim());
   expect(selectors).toEqual([".drawer-head .brand", ".drawer-head .brand .ver"]);
+});
+
+test("the opt-in browser harness keeps DevTools on a private process pipe", () => {
+  expect(browserHarness).toContain('"--remote-debugging-pipe"');
+  expect(browserHarness).not.toContain("--remote-debugging-port");
+  expect(browserHarness).not.toContain("--remote-debugging-address");
 });

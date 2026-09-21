@@ -2,7 +2,8 @@
  * when Chrome/Chromium is not on PATH. No browser package or downloads required.
  * The fixture uses the real bundled stylesheet and the App drawer/topbar markup;
  * it intentionally does not connect to a user's proxy or credentials. */
-import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
@@ -21,50 +22,47 @@ const css = await readFile(cssFile, "utf8");
 const logo = `data:image/png;base64,${(await readFile(join(dist, "logo.png"))).toString("base64")}`;
 const brand = `<button type="button" class="brand brand-home" aria-label="Home"><span class="brand-logo"></span><span class="name">opencodex</span><span class="ver">v2.56.0</span></button>`;
 const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style><style>.brand-logo { mask-image:url("${logo}"); -webkit-mask-image:url("${logo}"); }</style></head><body><div class="app"><header class="mobile-topbar"><button class="menu-toggle" aria-label="Menu">☰</button>${brand}<div class="mobile-topbar-actions"><button class="sidebar-orb" aria-label="Stop">⏻</button><button class="sidebar-orb" aria-label="Restart">↻</button></div></header><aside class="sidebar open"><div class="drawer-head">${brand}<button class="menu-toggle drawer-close" aria-label="Close">×</button></div></aside><main class="main"></main></div></body></html>`;
-const profile = await mkdtemp(join(tmpdir(), "ocx-sidebar-chrome-"));
-const browser = Bun.spawn([chrome, "--headless", "--disable-gpu", "--disable-background-networking",
-  "--no-first-run", "--no-default-browser-check", "--remote-debugging-address=127.0.0.1",
-  "--remote-debugging-port=0", `--user-data-dir=${profile}`,
+const profile = join(tmpdir(), `ocx-sidebar-chrome-${crypto.randomUUID()}`);
+const browser = spawn(chrome, ["--headless", "--disable-gpu", "--disable-background-networking",
+  "--no-first-run", "--no-default-browser-check", "--remote-debugging-pipe",
+  `--user-data-dir=${profile}`,
   ...(process.env.CHROME_NO_SANDBOX === "1" ? ["--no-sandbox"] : []), "about:blank"],
-{ stdout: "ignore", stderr: "ignore" });
-let socket: WebSocket | undefined;
+{ stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+const pipeWrite = browser.stdio[3];
+const pipeRead = browser.stdio[4];
+if (!pipeWrite || !pipeRead) throw new Error("Chrome did not create its private debugging pipe.");
+const exited = new Promise<void>((done, fail) => {
+  browser.once("exit", () => done());
+  browser.once("error", fail);
+});
 const delay = (ms: number) => new Promise<void>(done => setTimeout(done, ms));
 try {
-  let debugPort = "";
-  const deadline = Date.now() + 10_000;
-  while (!debugPort && Date.now() < deadline) {
-    try { debugPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]; }
-    catch { await delay(50); }
-  }
-  if (!/^\d+$/.test(debugPort)) throw new Error("Chrome did not expose its local debugging port within 10 seconds.");
-  const response = await fetch(`http://127.0.0.1:${debugPort}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(5_000) });
-  if (!response.ok) throw new Error(`Cannot create browser target: ${response.status}`);
-  const target = await response.json() as { webSocketDebuggerUrl: string };
-  socket = new WebSocket(target.webSocketDebuggerUrl);
-  const ws = socket;
-  await new Promise<void>((done, fail) => {
-    const timer = setTimeout(() => fail(new Error("CDP connection timed out")), 5_000);
-    ws.addEventListener("open", () => { clearTimeout(timer); done(); }, { once: true });
-    ws.addEventListener("error", () => { clearTimeout(timer); fail(new Error("CDP connection failed")); }, { once: true });
-  });
   let id = 0;
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
-  ws.addEventListener("message", event => {
-    const message = JSON.parse(String(event.data)) as { id?: number; result?: unknown; error?: { message: string } };
-    if (message.id === undefined) return;
-    const call = pending.get(message.id);
-    if (!call) return;
-    pending.delete(message.id);
-    if (message.error) call.reject(new Error(message.error.message)); else call.resolve(message.result);
+  let buffered = Buffer.alloc(0);
+  pipeRead.on("data", (chunk: Buffer) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    for (let boundary = buffered.indexOf(0); boundary >= 0; boundary = buffered.indexOf(0)) {
+      const message = JSON.parse(buffered.subarray(0, boundary).toString()) as { id?: number; result?: unknown; error?: { message: string } };
+      buffered = buffered.subarray(boundary + 1);
+      if (message.id === undefined) continue;
+      const call = pending.get(message.id);
+      if (!call) continue;
+      pending.delete(message.id);
+      if (message.error) call.reject(new Error(message.error.message)); else call.resolve(message.result);
+    }
   });
-  function cdp<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  function callCdp<T = unknown>(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<T> {
     return new Promise<T>((done, fail) => {
       const next = ++id;
       const timer = setTimeout(() => { pending.delete(next); fail(new Error(`CDP timeout: ${method}`)); }, 5_000);
       pending.set(next, { resolve: value => { clearTimeout(timer); done(value as T); }, reject: error => { clearTimeout(timer); fail(error); } });
-      ws.send(JSON.stringify({ id: next, method, params }));
+      pipeWrite.write(`${JSON.stringify({ id: next, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
     });
   }
+  const { targetId } = await callCdp<{ targetId: string }>("Target.createTarget", { url: "about:blank" });
+  const { sessionId } = await callCdp<{ sessionId: string }>("Target.attachToTarget", { targetId, flatten: true });
+  const cdp = <T = unknown>(method: string, params: Record<string, unknown> = {}) => callCdp<T>(method, params, sessionId);
   async function evaluate<T>(expression: string): Promise<T> {
     const result = await cdp<{ result: { value: T }; exceptionDetails?: unknown }>("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error(`Browser evaluation failed: ${JSON.stringify(result.exceptionDetails)}`);
@@ -128,13 +126,12 @@ try {
       }
     }
   }
-  const version = await cdp("Browser.getVersion");
+  const version = await callCdp("Browser.getVersion");
   await writeFile(join(output, "results.json"), JSON.stringify({ scope: "Real Chromium geometry with built production CSS; isolated App header markup, no live proxy", browser: version, cssPath, cssSha256: new Bun.CryptoHasher("sha256").update(css).digest("hex"), cases }, null, 2));
   console.log(`PASS: ${cases.length} built-CSS browser cases; full version visible, badge bounded, no drawer-close overlap.`);
 } finally {
-  socket?.close();
   browser.kill();
-  await Promise.race([browser.exited, delay(2_000)]);
-  if (browser.exitCode === null) { browser.kill("SIGKILL"); await browser.exited; }
+  await Promise.race([exited, delay(2_000)]);
+  if (browser.exitCode === null) { browser.kill("SIGKILL"); await exited; }
   await rm(profile, { recursive: true, force: true });
 }
