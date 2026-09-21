@@ -65,11 +65,15 @@ async function tick(): Promise<void> {
   const entryGeneration = generation;
   try {
     const {
+      armClaudeCodeBaseline,
       loadConfig,
       isCatalogAutoRefreshEnabled,
       resolveCatalogAutoRefreshIntervalMs,
     } = await import("../config");
     const config = loadConfig();
+    // Convergence can persist model-discovery fields after awaiting provider /models.
+    // Arm this independently loaded snapshot so that save rebases concurrent hand edits.
+    armClaudeCodeBaseline(config);
     if (!isCatalogAutoRefreshEnabled(config)) return;
     const configured = resolveCatalogAutoRefreshIntervalMs(config);
     // 0 is dormant: the section stays configured but this tick must not converge,
