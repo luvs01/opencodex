@@ -936,13 +936,28 @@ test("a detached snapshot save adopts concurrent listener and disk-only hand edi
   expect(disk.disabledModels).toEqual(["test/retired"]);
 });
 
-test("a detached snapshot save keeps its own mutation in a same-leaf conflict", () => {
+test("a detached snapshot save merges concurrent disabledModels edits by member", () => {
+  writeDiskConfig({ disabledModels: ["test/seeded"] });
   const snapshot = loadConfig();
   armDetachedConfigBaseline(snapshot);
-  snapshot.disabledModels = ["test/retired"];
+  // Discovery only appends, so the snapshot's extra slug is its arrival.
+  snapshot.disabledModels = ["test/seeded", "test/discovered"];
+  // The operator's mid-flight edit both hides a new slug and un-hides the seeded one.
   writeDiskConfig({ disabledModels: ["test/hand-hidden"] });
 
   saveConfigPreservingClaudeCode(snapshot);
 
-  expect(diskConfig().disabledModels).toEqual(["test/retired"]);
+  expect(diskConfig().disabledModels).toEqual(["test/discovered", "test/hand-hidden"]);
+});
+
+test("a live save merges concurrent disabledModels edits by member", () => {
+  writeDiskConfig({ disabledModels: ["test/seeded"] });
+  const live = loadConfig();
+  armClaudeCodeBaseline(live);
+  live.disabledModels = ["test/seeded", "test/live-hidden"];
+  writeDiskConfig({ disabledModels: ["test/seeded", "test/hand-hidden"] });
+
+  saveConfigPreservingClaudeCode(live);
+
+  expect(diskConfig().disabledModels).toEqual(["test/seeded", "test/live-hidden", "test/hand-hidden"]);
 });

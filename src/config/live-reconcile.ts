@@ -145,6 +145,42 @@ type IndexedCustomModels = {
   byId: Map<string, Record<string, unknown>>;
 };
 
+function indexDisabledModels(value: ConfigMergeValue): { order: string[]; members: Set<string> } | null {
+  if (value === MISSING_CONFIG_VALUE) return { order: [], members: new Set() };
+  if (!Array.isArray(value)) return null;
+  const members = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || members.has(item)) return null;
+    members.add(item);
+  }
+  return { order: value as string[], members };
+}
+
+/**
+ * Merge disabled-model lists by membership instead of treating the array as one
+ * opaque leaf: a slug either side deleted stays deleted (deletion wins over the
+ * other side's unchanged retention) while slugs added on either side are kept.
+ * Discovery only appends, so live additions are its arrivals; a hand edit that
+ * hid or un-hid a model mid-refresh survives the discovery save.
+ */
+function reconcileDisabledModels(
+  baseline: ConfigMergeValue,
+  live: ConfigMergeValue,
+  persisted: ConfigMergeValue,
+): ConfigMergeValue | null {
+  const baselineSet = indexDisabledModels(baseline);
+  const liveSet = indexDisabledModels(live);
+  const persistedSet = indexDisabledModels(persisted);
+  if (!baselineSet || !liveSet || !persistedSet) return null;
+  const order = [...liveSet.order, ...persistedSet.order.filter(id => !liveSet.members.has(id))];
+  const merged: string[] = [];
+  for (const id of order) {
+    if (baselineSet.members.has(id) && (!liveSet.members.has(id) || !persistedSet.members.has(id))) continue;
+    merged.push(id);
+  }
+  return merged;
+}
+
 function indexCustomModels(value: ConfigMergeValue): IndexedCustomModels | null {
   if (!Array.isArray(value)) return null;
   const order: string[] = [];
@@ -213,7 +249,10 @@ function reconcileConfigRecord(
       : key === "customModels"
         ? reconcileCustomModels(baselineValue, liveValue, persistedValue)
           ?? reconcileConfigValue(baselineValue, liveValue, persistedValue)
-        : reconcileConfigValue(baselineValue, liveValue, persistedValue, key === "providers");
+        : key === "disabledModels"
+          ? reconcileDisabledModels(baselineValue, liveValue, persistedValue)
+            ?? reconcileConfigValue(baselineValue, liveValue, persistedValue)
+          : reconcileConfigValue(baselineValue, liveValue, persistedValue, key === "providers");
     if (merged === MISSING_CONFIG_VALUE) delete live[key];
     else live[key] = merged;
   }
@@ -337,8 +376,9 @@ function readPersistedServerBinding(
  *   live state edited that same row;
  * - file missing/unreadable → save what we have, no throw.
  *
- * Custom-model rows are merged by their stable `id`, preserving independent
- * edits and deletions across stale whole-config saves.
+ * Custom-model rows are merged by their stable `id`, and `disabledModels` by
+ * member, preserving independent edits and deletions across stale whole-config
+ * saves.
  */
 export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
   const pinError = configReasoningPinsConfigError(config);
