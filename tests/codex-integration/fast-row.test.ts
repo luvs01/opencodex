@@ -445,7 +445,7 @@ describe("once-observed fast-id evidence", () => {
     // `--fast` spelling under it counts as a possibly-real id — while sibling providers
     // keep normal grammar behaviour.
     const config = configWith({
-      fixture: provider({ models: ["base"] }),
+      fixture: provider({ models: ["base"], alias: "fx" }),
       other: provider({ models: ["base", "solo"] }),
     });
     const churn = Array.from(
@@ -454,9 +454,12 @@ describe("once-observed fast-id evidence", () => {
     );
     setCached("fixture", churn);
     expect(isFastRowNamespaceAmbiguous("fixture")).toBe(true);
-    // Enumerated ids stay exact, and anything else under fixture's namespace is refused too.
+    // Enumerated ids stay exact, and anything else under fixture's namespace is refused too —
+    // including the case-insensitive alias spellings routing would accept.
     expect(parseSyntheticRowId("fixture/churn-0--fast", config).fastRow).toBeNull();
     expect(parseSyntheticRowId("fixture/base--fast", config).fastRow).toBeNull();
+    expect(parseSyntheticRowId("fx/base--fast", config).fastRow).toBeNull();
+    expect(parseSyntheticRowId("FX/base--fast", config).fastRow).toBeNull();
     expect(parseSyntheticRowId("base--fast", config).fastRow).toBeNull();
     // A sibling provider's namespace still resolves normally.
     expect(parseSyntheticRowId("other/base--fast", config).fastRow)

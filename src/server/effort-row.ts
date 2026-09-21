@@ -76,7 +76,9 @@ export function knownEffortRowIds(config: OcxConfig): EffortRowKnownIds {
     }
     if (isFastRowNamespaceAmbiguous(providerName)) {
       ambiguousFastRows.push({
-        prefixes: namespaces.map(namespace => `${namespace}/`),
+        // Lowercased: provider namespaces and aliases resolve case-insensitively
+        // downstream, so the ambiguity guard must match every casing of them.
+        prefixes: namespaces.map(namespace => `${namespace.toLowerCase()}/`),
         bareBases: new Set(
           [...known, ...Object.values(provider.modelAliases ?? {})].map(id => id.toLowerCase()),
         ),
@@ -96,10 +98,11 @@ export function knownEffortRowIds(config: OcxConfig): EffortRowKnownIds {
     if (ids.has(id) || ids.has(id.toLowerCase())) return true;
     if (!id.endsWith(FAST_ROW_ID_SUFFIX)) return false;
     const baseId = id.slice(0, -FAST_ROW_ID_SUFFIX.length).toLowerCase();
+    const lowerId = id.toLowerCase();
     for (const { prefixes, bareBases } of ambiguousFastRows) {
       // `provider/…` and `alias/…` spellings — routed-slug encodings included — pin the
       // selector to this provider, so any suffixed id under them may be a real model.
-      if (prefixes.some(prefix => id.startsWith(prefix))) return true;
+      if (prefixes.some(prefix => lowerId.startsWith(prefix))) return true;
       // A bare `x--fast` may be this provider's unrecorded real id only while `x` is
       // still one of its known bases; otherwise the grammar stays usable for it.
       if (bareBases.has(baseId)) return true;
