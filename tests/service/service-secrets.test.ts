@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as nodeFs from "node:fs";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
+  readFileSync,
   renameSync,
   readdirSync,
   rmSync,
@@ -99,6 +101,25 @@ describe("service API token ownership", () => {
     expect(state).toMatchObject({ kind: "present", token: "ocx_data_original" });
     expect(statSync(openedToken).mode & 0o777).toBe(0o600);
     expect(statSync(victim).mode & 0o777).toBe(0o755);
+    // Identity at return: the swap during validation is replaced, so the path
+    // the caller reports names a hardened file holding the validated token —
+    // never the substituted symlink.
+    expect(lstatSync(path).isSymbolicLink()).toBe(false);
+    expect(lstatSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, "utf8").trim()).toBe("ocx_data_original");
+  });
+
+  test("a non-regular token path is unsafe rather than blocking the open", () => {
+    if (process.platform === "win32") return;
+    const path = serviceApiTokenFilePath();
+    execFileSync("mkfifo", [path]);
+
+    const state = hardenReusedServiceApiToken(() => {
+      throw new Error("validation must not run for a non-regular token path");
+    });
+
+    expect(state.kind).toBe("unsafe");
+    if (state.kind === "unsafe") expect(state.reason).toContain("regular file");
   });
 
   test("writes only the exact owner path through an atomic owner-only replacement", () => {

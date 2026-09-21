@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync } from "node:fs";
+import { closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
-import { atomicWriteFile } from "../config/atomic-write";
+import { atomicWriteFile, atomicWriteFileNoFollow } from "../config/atomic-write";
 
 const MAX_SERVICE_API_TOKEN_BYTES = 4096;
 
@@ -52,46 +52,87 @@ export function readServiceApiTokenState(): ServiceApiTokenState {
 /**
  * Validate and tighten a reused service token without applying permissions to a
  * pathname that may have been replaced since validation.
+ *
+ * The token is read off the opened descriptor — never off the path a second
+ * time — and once it validates, it is REPUBLISHED through the no-follow atomic
+ * writer rather than hardened in place. Windows ACL tooling is pathname-based,
+ * so an in-place harden there could still land on a substituted entry; the
+ * republish instead replaces whatever entry sits at the path with a freshly
+ * hardened owner-only file holding the same token. On return the path names
+ * that file, which is the contract `origin: "file"` reports. On POSIX the
+ * opened descriptor is also fchmod'd first, so a token-bearing inode a race
+ * moved aside is still tightened wherever its entry ended up.
  */
 export function hardenReusedServiceApiToken(
   validate: (token: string) => void,
 ): ServiceApiTokenState {
-  // Windows ACL tooling is pathname-based. Do not mutate that pathname after a
-  // separate validation; newly written token files are still hardened by their
-  // atomic writer and a reused file remains readable as before.
-  if (process.platform === "win32") {
-    const state = readServiceApiTokenState();
-    if (state.kind === "present") validate(state.token);
-    return state;
-  }
-
   const path = serviceApiTokenFilePath();
-  let fd: number;
+  // O_NOFOLLOW refuses a symlinked entry and O_NONBLOCK keeps a FIFO (or other
+  // blocking node) from stalling the open before fstat can reject it. Windows
+  // omits both flags, so there the descriptor is bound to its entry by the
+  // lstat/fstat identity comparison below.
+  const flags = process.platform === "win32"
+    ? constants.O_RDONLY
+    : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  let fd: number | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(path, flags);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "absent" };
+    if (code === "ELOOP") return { kind: "unsafe", reason: "service token path is not a bounded regular file" };
     return { kind: "unsafe", reason: "service token path could not be inspected" };
   }
   try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_BYTES) {
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(MAX_SERVICE_API_TOKEN_BYTES)) {
       return { kind: "unsafe", reason: "service token path is not a bounded regular file" };
     }
-    let token: string;
+    if (process.platform === "win32") {
+      let entry;
+      try {
+        entry = lstatSync(path, { bigint: true });
+      } catch {
+        return { kind: "unsafe", reason: "service token path could not be inspected" };
+      }
+      if (entry.isSymbolicLink() || !entry.isFile() || entry.dev !== stat.dev || entry.ino !== stat.ino) {
+        return { kind: "unsafe", reason: "service token path is not a bounded regular file" };
+      }
+    }
+    // Bound the read as well as the stat: a file that grows past the cap after
+    // fstat is unsafe, not something to buffer whole.
+    const bytes = Buffer.alloc(MAX_SERVICE_API_TOKEN_BYTES + 1);
+    let length = 0;
     try {
-      token = readFileSync(fd, "utf8").trim();
+      while (length < bytes.length) {
+        const count = readSync(fd, bytes, length, bytes.length - length, null);
+        if (!count) break;
+        length += count;
+      }
     } catch {
       return { kind: "unsafe", reason: "service token file could not be read" };
     }
+    if (length > MAX_SERVICE_API_TOKEN_BYTES) {
+      return { kind: "unsafe", reason: "service token path is not a bounded regular file" };
+    }
+    const token = bytes.subarray(0, length).toString("utf8").trim();
     if (!token) return { kind: "unsafe", reason: "service token file is empty" };
     validate(token);
-    // Best-effort matches the previous repair behavior, but the descriptor binds
-    // the chmod to the regular file opened above even if its directory entry moves.
-    try { fchmodSync(fd, 0o600); } catch { /* best-effort */ }
+    if (process.platform !== "win32") {
+      // Best-effort matches the previous repair behavior: the descriptor binds
+      // the chmod to the regular file opened above even if its directory entry
+      // moved, so the validated inode is never left loose under another name.
+      try { fchmodSync(fd, 0o600); } catch { /* best-effort */ }
+    }
+    // The descriptor's work ends here — and must: Windows refuses to rename over
+    // a file this process still holds open, so the republish cannot run while it
+    // is held.
+    closeSync(fd);
+    fd = undefined;
+    atomicWriteFileNoFollow(path, `${token}\n`);
     return { kind: "present", token, fingerprint: serviceApiTokenFingerprint(token) };
   } finally {
-    closeSync(fd);
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
