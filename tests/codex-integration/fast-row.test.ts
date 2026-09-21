@@ -375,6 +375,50 @@ describe("review findings from PR #3457", () => {
     expect(parseSyntheticRowId("x", config, () => "m--fast").fastRow).toEqual({ baseId: "m" });
   });
 });
+describe("once-observed fast-id evidence", () => {
+  test("a stale real fast-suffixed id keeps its identity while its base survives", () => {
+    // Devin Review on #451: discovery advertised real `foo` and `foo--fast`, then dropped
+    // only `foo--fast`. The retained base alone cannot tell the stale real id from a
+    // synthetic selector; the tombstone keeps the exact-id guard armed so the request
+    // cannot be rewritten to `foo`.
+    const config = configWith({ fixture: provider({ models: ["declared"] }) });
+    setCached("fixture", [
+      { provider: "fixture", id: "foo" } as never,
+      { provider: "fixture", id: "foo--fast" } as never,
+      { provider: "fixture", id: "bar" } as never,
+    ]);
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    expect(parseSyntheticRowId("foo--fast", config).fastRow).toBeNull();
+    // The next discovery retains the base and drops the real fast-suffixed model.
+    setCached("fixture", [
+      { provider: "fixture", id: "foo" } as never,
+      { provider: "fixture", id: "bar" } as never,
+    ]);
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    expect(parseSyntheticRowId("foo--fast", config).fastRow).toBeNull();
+    // Eviction is not an authority reset: the evidence survives losing every row.
+    clearModelCache("fixture", "eviction");
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    // A selector that was never a real id on a surviving live base still parses.
+    setCached("fixture", [{ provider: "fixture", id: "bar" } as never]);
+    expect(parseSyntheticRowId("fixture/bar--fast", config).fastRow)
+      .toEqual({ baseId: "fixture/bar" });
+    clearModelCache("fixture");
+  });
+
+  test("observed fast-id evidence dies with the provider's authority", () => {
+    // Tombstones are scoped to the catalog authority that produced them: a credential or
+    // config reset retires the observation, so a selector the replacement catalog never
+    // advertised parses normally again.
+    const config = configWith({ fixture: provider({ models: ["foo"] }) });
+    setCached("fixture", [{ provider: "fixture", id: "foo--fast" } as never]);
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    clearModelCache("fixture");
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow)
+      .toEqual({ baseId: "fixture/foo" });
+    clearModelCache("fixture");
+  });
+});
 
 
 

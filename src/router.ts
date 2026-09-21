@@ -36,7 +36,7 @@ import {
 import { decodeRoutedModelIdOrThrow, encodeRoutedModelId } from "./providers/slug-codec";
 import { effectiveProviderAliasDecision, resolveModelAlias } from "./providers/default-aliases";
 import { resolveBlockedModelRedirect } from "./lib/shadow-call";
-import { getStaleCached } from "./codex/model-cache";
+import { getObservedFastRowIds, getStaleCached } from "./codex/model-cache";
 import { codexAccountNamespaceEntries } from "./codex/account-namespaces";
 import {
   buildRouteDecisionTrace,
@@ -127,9 +127,11 @@ const MODEL_PROVIDER_PATTERNS: Array<{ providerNames: string[]; prefixes: string
 
 /**
  * Known native model ids for a provider — the decode source for the Codex slug codec
- * (src/providers/slug-codec.ts). Union of static config ids, registry seeds, and the
+ * (src/providers/slug-codec.ts). Union of static config ids, registry seeds, the
  * last-known-good live /models cache (may be empty on a cold start; decode then passes
- * unknown ids through unchanged for an honest upstream error).
+ * unknown ids through unchanged for an honest upstream error), and the `--fast` ids that
+ * cache once published: a real fast-suffixed model keeps its exact-id precedence after its
+ * row churns out, or the fast-row grammar would rewrite it to whatever base survives.
  */
 export function knownModelIdsForProvider(
   provName: string,
@@ -150,6 +152,7 @@ export function knownModelIdsForProvider(
   // fails typecheck until its keys are given a meaning.
   for (const id of registry ? registryModelIdKeys(registry) : []) ids.add(id);
   for (const cached of getStaleCached(provName) ?? []) ids.add(cached.id);
+  for (const observed of getObservedFastRowIds(provName) ?? []) ids.add(observed);
   for (const model of config?.customModels ?? []) {
     if (model.provider === provName && model.modelId) ids.add(model.modelId);
   }

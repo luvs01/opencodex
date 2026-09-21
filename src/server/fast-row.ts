@@ -97,12 +97,14 @@ export function catalogFastRowEligible(
  * Membership must be conservative here: routing can serve arbitrary qualified ids, but
  * accepting that entire namespace would let the parser change an unknown real model id.
  *
- * Live-discovered bases are proved separately by `knownIds` in `parseFastRowId`. Keeping
- * structural provider-namespace acceptance here would make a stale real
- * `provider/model--fast` indistinguishable from a synthetic selector after its catalog entry
- * disappears: stripping the marker would silently select a different model. Static/config
- * membership remains stable across cache churn; a live-only selector is accepted while its
- * base is discoverable and otherwise fails honestly rather than being reinterpreted.
+ * Live-discovered bases are proved separately by `knownIds` in `parseFastRowId`, and that
+ * set also carries the model-cache tombstones: a real `provider/model--fast` observed by an
+ * accepted discovery keeps its exact-id precedence after its own row churns out, so the
+ * guard above — never this base evidence — decides it. Keeping structural provider-namespace
+ * acceptance here would instead rewrite every stale or never-observed `--fast` id to whatever
+ * base survives. Static/config membership remains stable across cache churn; a live-only
+ * selector is accepted while its base is discoverable and otherwise fails honestly rather
+ * than being reinterpreted.
  *
  * A base is RECOGNIZED here and then judged by routing, which is the component that actually
  * knows whether it can serve it.

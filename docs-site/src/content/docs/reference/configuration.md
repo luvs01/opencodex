@@ -82,6 +82,14 @@ it, or supports it on a wire the route cannot use, gets no row. `fastMode: false
 Fast globally and takes precedence over a selected row, and a selector whose model later loses
 eligibility degrades to an ordinary request instead of failing.
 
+Selectors over live-only models are catalog-bound: a `<base-id>--fast` selector whose base exists
+only in the provider's discovered catalog resolves while that catalog lists the base and stops
+resolving once the base disappears, instead of silently routing another model. The same evidence
+rule protects real ids in the other direction — a model id a provider has actually advertised with
+the `--fast` suffix keeps that identity even after the listing drops it, so a stale saved selection
+fails honestly rather than being rewritten to the surviving base. Changing a provider's credential
+or configuration resets this evidence.
+
 Native models carry one extra condition: as well as an eligible policy, upstream must advertise the
 Fast tier for that model. This is the same evidence the Codex picker's own toggle is built from, so
 the two surfaces cannot disagree about which natives have Fast.

@@ -102,6 +102,35 @@ const discoveryStatus = new Map<string, ProviderModelDiscoveryStatus>();
 const liveModelCounts = new Map<string, number>();
 let lastReconciledGeneration = 0;
 
+/**
+ * Native ids ending in the synthetic Fast row marker that a provider's ACCEPTED catalog
+ * has published at least once — "once a real `foo--fast`, always evidence against the
+ * synthetic grammar".
+ *
+ * The live cache REPLACES rows on every successful discovery, so a real `--fast`-suffixed
+ * model that a provider stops advertising leaves no current-row evidence behind. The
+ * fast-row grammar would then strip the marker whenever the bare base is still known and
+ * silently route a different model than the client selected. Tombstones keep that negative
+ * precedence evidence for exactly as long as the authority that produced it: they survive
+ * row churn and budget eviction (they are why an evicted `foo--fast` stays a real id), and
+ * they die with the provider's authority — a credential or config change resets the
+ * catalog ground truth, and the old authority's observations must not poison the new one.
+ *
+ * The suffix literal mirrors `FAST_ROW_SUFFIX` in src/server/fast-row.ts; importing it
+ * would close a module cycle (fast-row → effort-row → router → this module).
+ */
+const FAST_ROW_ID_SUFFIX = "--fast";
+const fastRowTombstones = new Map<string, Set<string>>();
+
+/**
+ * `--fast`-suffixed ids this provider's catalog has published under the current authority.
+ * The exact-id guard consumes them like cache membership, so an observed real id keeps its
+ * identity after its row churns out instead of being rewritten to its base.
+ */
+export function getObservedFastRowIds(provider: string): ReadonlySet<string> | undefined {
+  return fastRowTombstones.get(provider);
+}
+
 export function markModelsFetchFailure(
   provider: string,
   now = Date.now(),
@@ -260,6 +289,18 @@ export function setCached(
     oldestCachedProvider = provider;
     oldestCachedAt = now;
   }
+  // Tombstones accumulate on ACCEPTED publications only: a rejected write carries evidence
+  // from a revoked authority, and a real `--fast` id must be recorded the moment it is
+  // advertised, not after the next fetch decides whether to keep it.
+  let tombstones: Set<string> | undefined;
+  for (const model of models) {
+    if (!model.id.endsWith(FAST_ROW_ID_SUFFIX)) continue;
+    if (!tombstones) {
+      tombstones = fastRowTombstones.get(provider) ?? new Set<string>();
+      fastRowTombstones.set(provider, tombstones);
+    }
+    tombstones.add(model.id);
+  }
   enforceAppOwnedMemoryBudget();
   // Published and accepted, so anything derived from this provider's rows is now out of date.
   bumpProviderCacheRevision(provider);
@@ -276,6 +317,9 @@ export function clearModelCache(
   if (provider) {
     if (revokesInFlightDiscovery) {
       providerCacheGenerations.set(provider, (providerCacheGenerations.get(provider) ?? 0) + 1);
+      // The authority that observed this provider's `--fast` ids is gone; its tombstones are
+      // evidence about the old catalog, not the one a new credential or config will publish.
+      fastRowTombstones.delete(provider);
     }
     deleteCachedProvider(provider);
     failureAt.delete(provider);
@@ -295,6 +339,7 @@ export function clearModelCache(
     failureAt.clear();
     discoveryStatus.clear();
     liveModelCounts.clear();
+    if (revokesInFlightDiscovery) fastRowTombstones.clear();
   }
 }
 
@@ -310,6 +355,7 @@ export function reconcileModelCacheProviders(
     ...failureAt.keys(),
     ...discoveryStatus.keys(),
     ...liveModelCounts.keys(),
+    ...fastRowTombstones.keys(),
     ...cache.keys(),
   ]);
   let revokedRemovedProviderAuthority = false;
@@ -334,6 +380,7 @@ export function reconcileModelCacheProviders(
     // longer has must not keep an entry alive for the life of the process merely because nothing
     // cleared the whole cache. The global epoch advanced above, so the removal is not an ABA.
     providerCacheRevisions.delete(provider);
+    fastRowTombstones.delete(provider);
     removedProviders.add(provider);
   }
   lastReconciledGeneration = generation;
