@@ -164,10 +164,17 @@ function runCliInstall(
   const cli = join(import.meta.dir, "..", "cli", "index.ts");
   const argv = [cli, ...startupInstallArgv(action, options)];
   return new Promise((resolve, reject) => {
+    const timeout = process.platform === "win32" && action === "install-service"
+      ? 0
+      : 60_000;
     execFile(bun, argv, {
       encoding: "utf8",
       env: process.env,
-      timeout: 60_000,
+      // A fresh Windows scheduler install now owns its UAC prompt inside this CLI
+      // transaction. Killing only the CLI at 60s can orphan its elevated schtasks child,
+      // which may register the task after the Dashboard has reported failure. Keep the
+      // async request/attempt lock alive until Windows returns approval or cancellation.
+      timeout,
       windowsHide: true,
       maxBuffer: 256 * 1024,
     }, (error, stdout, stderr) => {
@@ -226,8 +233,9 @@ function applyReconciliationOutcome(
 /**
  * Execute the existing fixed CLI installer outside the proxy event loop.
  *
- * Repair mode (`options.repair`) runs `ocx service repair` — asset rewrite + restart
- * without Task Scheduler re-registration, so it must not enter the UAC elevation path.
+ * Repair mode (`options.repair`) runs `ocx service repair`. A stale definition may be
+ * re-registered and elevate inside repair; this wrapper must not retry it through the separate
+ * fresh-install UAC path.
  *
  * After an elevation request timeout the lock becomes `indeterminate` until the
  * original elevated transaction completes and is reconciled. A process restart

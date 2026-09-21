@@ -33,8 +33,10 @@ import {
   stopServerListener,
 } from "../lifecycle";
 import { isServiceViable } from "../../service";
-import { readRuntimePort } from "../../config";
+import { readRuntimePort } from "../../config/process-state";
 import { withProcessRuntimeProvenance } from "../../lib/bun-runtime";
+import { selfLaunchArgv } from "../../lib/self-launch-argv";
+import { spendLedgerRestartEnvironment } from "../../lib/spend-ledger-owner";
 import {
   MEMORY_DRAIN_RESTART_MS,
   REPLACEMENT_READY_TIMEOUT_MS,
@@ -77,11 +79,11 @@ let restartIo: SystemRestartIo = {};
 /** Prevents double-scheduling in the 200ms window before drainAndShutdown sets draining. */
 let restartAccepted = false;
 
-type RestartDrainOutcome = "completed" | "rejected" | "deadline";
+type RestartDrainOutcome = "completed" | "failed" | "rejected" | "deadline";
 type BoundedSettlementOutcome = "completed" | "rejected" | "deadline";
 
 function waitForRestartDrain(
-  drainPromise: Promise<void>,
+  drainPromise: Promise<boolean | void>,
   deadlineMs: number,
   now: () => number,
   scheduleDeadline: NonNullable<SystemRestartIo["scheduleDeadline"]>,
@@ -104,7 +106,7 @@ function waitForRestartDrain(
     cancelDeadline = scheduleDeadline(() => finish("deadline"), remainingMs);
     if (settled) cancelDeadline();
     void drainPromise.then(
-      () => finish("completed"),
+      succeeded => finish(succeeded === false ? "failed" : "completed"),
       () => finish("rejected"),
     );
   });
@@ -213,19 +215,24 @@ function spawnDetachedStart(
   port?: number,
   waitForHealthBeforeParentExit = true,
 ): Promise<void> {
-  const args = [process.argv[1], "start"];
+  const args = ["start"];
   const expectedPort = typeof port === "number" && Number.isFinite(port) && port > 0 && port <= 65535
     ? Math.trunc(port)
     : undefined;
   if (expectedPort !== undefined) {
     args.push("--port", String(expectedPort));
   }
+  const launchArgs = selfLaunchArgv(args);
   return new Promise<void>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      const env: NodeJS.ProcessEnv = { ...process.env };
-      delete env.OCX_SERVICE;
-      child = spawn(process.execPath, args, {
+      const sourceEnv: NodeJS.ProcessEnv = { ...process.env };
+      delete sourceEnv.OCX_SERVICE;
+      const env = spendLedgerRestartEnvironment(
+        sourceEnv,
+        waitForHealthBeforeParentExit ? undefined : process.pid,
+      );
+      child = spawn(process.execPath, launchArgs, {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
@@ -380,7 +387,7 @@ export function acceptSystemRestart(io: SystemRestartIo = restartIo): {
         await completeDeadlineRestartHandoff(io, exitProcess, restartPort, scheduleDeadline);
         return;
       }
-      if (drainOutcome === "rejected") {
+      if (drainOutcome === "failed" || drainOutcome === "rejected") {
         // drainAndShutdown stops the listener in finally. Even if ancillary cleanup
         // rejects, an accepted restart must still reach replacement or terminal exit.
         console.warn("Drain-and-restart cleanup failed; continuing terminal restart handoff");
@@ -420,7 +427,7 @@ export function acceptSystemRestart(io: SystemRestartIo = restartIo): {
         return;
       }
       (io.markRecycling ?? markRecyclingForExit)();
-      exitProcess(0);
+      exitProcess(drainOutcome === "failed" || drainOutcome === "rejected" ? 1 : 0);
     }, 200);
   }
 

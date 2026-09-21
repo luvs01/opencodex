@@ -5,7 +5,6 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
@@ -13,6 +12,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { GenerationContext } from "./state-store-sweeper";
+import { renameAtomicFile } from "./windows-atomic-replace";
 
 export const CONFIG_OWNER_FILE = ".opencodex-owner.json";
 export const CONFIG_UNINSTALL_MANIFEST = ".opencodex-uninstall.json";
@@ -40,6 +40,7 @@ const INITIAL_OWNED_PATHS = [
   "artifacts",
   "auth.json",
   "auth.store.lock",
+  "admin-api-token",
   "catalog-backup.json",
   "claude-env.sh",
   "codex-accounts.json",
@@ -69,6 +70,7 @@ const INITIAL_OWNED_PATHS = [
   "service-state.json",
   "service.log",
   "system-env-port",
+  "thought-signature-replay.json",
   "tray-heartbeat.json",
   "tray-state.json",
   "update-job.json",
@@ -231,7 +233,10 @@ function writeManifest(configDir: string, manifest: ConfigUninstallManifest): vo
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temp, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   try {
-    renameSync(temp, path);
+    // Same Windows sharing-violation tolerance the config writer has: a
+    // scanner holding the manifest must not turn uninstall bookkeeping into a
+    // hard failure.
+    renameAtomicFile(temp, path, undefined, "config-ownership");
   } catch (error) {
     try { unlinkSync(temp); } catch { /* best effort */ }
     throw error;
@@ -324,6 +329,25 @@ export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
       return {
         status: "partial",
         reason: `could not remove owned path ${rel}: ${error instanceof Error ? error.message : String(error)}`,
+        residualPaths: [path],
+      };
+    }
+  }
+
+  // Per-catalog backups are named `catalog-backup-<16 hex>.json` (catalogBackupPathFor), one per
+  // CODEX_HOME, so they cannot be enumerated as literal manifest entries the way every other
+  // owned file can. Without this, `ocx uninstall` always reported "unowned files remain" and
+  // refused to remove a home OpenCodex created itself — the file is unambiguously ours, produced
+  // by our own writer, and the strict hex shape keeps the match from widening.
+  for (const name of readdirSync(configDir)) {
+    if (!/^catalog-backup-[0-9a-f]{16}\.json$/.test(name)) continue;
+    const path = join(configDir, name);
+    try {
+      removeOwnedEntry(rootPath, path);
+    } catch (error) {
+      return {
+        status: "partial",
+        reason: `could not remove owned path ${name}: ${error instanceof Error ? error.message : String(error)}`,
         residualPaths: [path],
       };
     }

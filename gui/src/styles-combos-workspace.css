@@ -322,6 +322,34 @@
   overflow-wrap: anywhere;
 }
 
+.cwi-capabilities {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.cwi-capability-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cwi-capability-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.cwi-capability-hint {
+  margin: 3px 0 0;
+  font-size: 12px;
+}
+
+
 .cwi-target-list {
   display: flex;
   flex-direction: column;
@@ -330,13 +358,13 @@
 
 .cwi-target-row {
   display: grid;
-  grid-template-columns: 28px auto minmax(0, 1fr) minmax(0, 1.2fr) 4.5rem auto;
+  grid-template-columns: 28px auto minmax(0, 1fr) minmax(0, 1.2fr) 4.5rem auto auto;
   gap: 8px;
   align-items: center;
 }
 
 .cwi-target-row--failover {
-  grid-template-columns: 28px auto minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  grid-template-columns: 28px auto minmax(0, 1fr) minmax(0, 1.2fr) auto auto;
 }
 
 .cwi-target-row--dragging {
@@ -389,6 +417,47 @@
   display: flex;
   gap: 2px;
   flex-shrink: 0;
+}
+
+.cwi-quota-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.cwi-quota-badge--available {
+  border-color: color-mix(in srgb, var(--green) 36%, var(--border));
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.cwi-quota-badge--exhausted {
+  border-color: color-mix(in srgb, var(--red) 36%, var(--border));
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.cwi-quota-banner {
+  max-width: 720px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--red) 36%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: var(--text-control);
+  font-weight: 550;
+  line-height: 1.4;
 }
 
 .cwi-strategy-seg {
@@ -489,6 +558,10 @@
     border-bottom: 1px solid var(--border);
   }
 
+  .cwi-capability-row {
+    align-items: flex-start;
+  }
+
   .cwi-target-row,
   .cwi-target-row--failover {
     grid-template-columns: 28px auto 1fr auto;
@@ -498,6 +571,12 @@
   .cwi-target-row > .input:nth-child(4) {
     grid-column: 3 / -1;
   }
+
+  .cwi-target-row > .cwi-quota-badge {
+    grid-column: 3;
+    justify-self: start;
+  }
+
 }
 
 /* Narrow compatibility for pwi-* classes consumed by ComboWorkspace only. */

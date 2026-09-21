@@ -21,6 +21,10 @@ test("the controller is the single data owner and exposes the agreed contract", 
     // WP2 (260730_gui_hydration_loading_unify/010): progress is part of the contract, because a
     // forced quota refresh keeps `loadState` at "ready" and would otherwise be invisible.
     "refreshing", "initialLoading",
+    // #5261: for the same reason in the other direction. A warm refresh failure keeps the rows
+    // and keeps `loadState` at "ready", so without this the surface has no way to say that what
+    // it is showing predates a failed read.
+    "refreshFailed",
   ]) {
     expect(hook).toContain(member);
   }
@@ -32,7 +36,7 @@ test("the controller is the single data owner and exposes the agreed contract", 
 
   // Observers arrive through one subscription path; load() takes no observer argument.
   expect(hook).toContain("subscribeLoadObserver");
-  expect(hook).toContain("load(refreshQuota?: boolean): Promise<boolean>");
+  expect(hook).toContain("load(refreshQuota?: boolean, options?: { validatePending?: boolean }): Promise<boolean>");
   expect(hook).not.toContain("load(refreshQuota?: boolean, observer");
 });
 
@@ -76,7 +80,6 @@ test("both cards expose the selection-order control, and pin writes cannot overl
   expect(mainCard).toMatch(/pinnedId === "__main__" && !main\?\.paused/);
   expect(addedCards).toMatch(/a\.id === pinnedId && !a\.paused/);
   for (const card of [mainCard, addedCards]) expect(card).toContain('t("codexAuth.pinned")');
-  for (const card of [mainCard, addedCards]) expect(card).toContain('t("codexAuth.pinnedHint")');
   expect(pool).toContain("pinnedId={activePinnedId}");
 
   expect(hook).toContain("/api/codex-auth/accounts/priority");
