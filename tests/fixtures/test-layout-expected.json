@@ -838,6 +838,7 @@
   "native-profile-route-security.test.ts": "codex-integration",
   "native-profile-stage-lifecycle.test.ts": "codex-integration",
   "native-profile-startup.test.ts": "codex-integration",
+  "native-profile-startup-publication.test.ts": "codex-integration",
   "native-profile-store.test.ts": "codex-integration",
   "new-model-policy.test.ts": "providers",
   "nous-oauth-live.test.ts": "providers",

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 
 import { NativeProfileManager } from "../../src/codex/native-profile-manager";
 import { isCodexAccountUsable } from "../../src/codex/account-usability";
@@ -10,6 +10,7 @@ import {
 } from "../../src/codex/native-profile-startup";
 import type { NativeProfileKey, NativeProfileKeyProvider } from "../../src/codex/native-profile-types";
 import { startServer } from "../../src/server";
+import { publishFixtureFile } from "./fixture-file-publisher";
 
 const launchedAt = Number(process.env.NATIVE_STARTUP_LAUNCHED_AT ?? Date.now());
 
@@ -24,23 +25,6 @@ const phase = (name: string): void => {
 };
 
 phase("child-entry");
-
-/**
- * A disposable port number is not a secret, so it must not travel through the production
- * secret writer. On Windows `atomicWriteFile` runs `hardenSecretPath(..., required: true)`
- * twice (`src/config/atomic-write.ts`), each of which can spawn PowerShell for SID resolution
- * and several `icacls` passes budgeted at 30s apiece — an ACL ceremony performed inside the
- * window the parent measures as "time to reach a port".
- *
- * The parent's actual contract is narrower (#1061): it treats existence as readiness and parses
- * immediately, so it must never observe the file between create and write. A rename within the
- * same directory gives exactly that — a reader sees either nothing or the whole document.
- */
-function publishFixtureFile(path: string, content: string): void {
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, content, "utf8");
-  renameSync(tmp, path);
-}
 
 const required = (name: string): string => {
   const value = process.env[name];
