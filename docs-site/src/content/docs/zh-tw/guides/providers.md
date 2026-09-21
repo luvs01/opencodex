@@ -97,7 +97,7 @@ ocx login kiro         # 匯入 kiro-cli credential（或 token fallback）
 ocx login google-antigravity
 ocx login cursor       # 獨立 Cursor PKCE 登入
 ocx login command-code # Command Code browser OAuth（或匯入 ~/.commandcode/auth.json）
-ocx login devin       # Cognition/Devin 的 Auth0 瀏覽器登入
+ocx login devin       # Cognition/Devin：優先匯入 Devin CLI 憑證，否則走 Auth0 瀏覽器登入
 ocx login github-copilot  # GitHub device flow → Copilot token（Copilot Pro/Business）
 ocx login codex        # Codex 帳號池（別名：chatgpt、openai；需要 proxy 正在執行）
 ocx logout <provider>
@@ -112,11 +112,24 @@ ocx logout <provider>
 | `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | 初次登入會匯入已安裝且已登入的 `kiro-cli` session。Unix 可用 `curl -fsSL https://cli.kiro.dev/install` &#124; `bash` 安裝；Windows PowerShell 使用 `irm 'https://cli.kiro.dev/install.ps1'` &#124; `iex`，再執行 `kiro-cli login`。**Add account** 會先登出 `kiro-cli`、啟動新的 browser login，切換 `kiro-cli` 所使用的帳號並保存 account-scoped profile metadata。既有 OpenCodex 帳號會保留；取消或失敗時會恢復先前的 `kiro-cli` session。 |
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | 透過 Cloud Code Assist wire 使用 Google OAuth。即時探索使用 CCA 經認證的 `v1internal:fetchAvailableModels` 端點，發布目前登入帳號可用的 agent 模型；維護中的 catalog 作為 fallback。 |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | 實驗性 PKCE 登入、即時 HTTP/2 transport 與按帳號篩選的模型探索。 |
-| `devin` | `devin` | `https://server.codeium.com` | 實驗性的非官方 Cognition/Devin 橋接。登入會開啟 Auth0 瀏覽器頁面，再以 `RegisterUser` 將權杖換成長期 API 金鑰。模型清單依帳號透過 `GetCascadeModelConfigs` 即時取得，串流僅走 Connect-RPC 上的 `runTurn` 路徑。預設不在儀表板預設集內，需手動啟用。 |
-| `devin-cli` | `devin` | `https://server.codeium.com` | 匯入本機已安裝 Devin CLI 已持有的憑證（`devin auth login` 會寫入它自己的 `credentials.toml`），接著與 `devin` 提供者一樣透過 Cognition 的 Connect-RPC api-server 串流。不需瀏覽器登入，也不需貼上金鑰。模型清單與內容視窗來自帳號自身的目錄。若要改用 CLI 自帶的本機 agent 迴圈（ACP stdio），請使用另取名稱的項目並設定 `"adapter": "devin-cli"`。|
+| `devin` | `devin` | `https://server.codeium.com` | 實驗性的非官方 Cognition/Devin 橋接。登入會先匯入已安裝 Devin CLI 已持有的憑證（`devin auth login` 會把 `devin-session-token` 寫入它自己的 `credentials.toml`）；沒有則開啟 Auth0 瀏覽器頁面，再以 `RegisterUser` 將貼上的權杖換成長期 API 金鑰。`ocx login devin-cli` 仍作為已棄用別名可用。模型清單依帳號透過 `GetCascadeModelConfigs` 即時取得，串流僅走 Connect-RPC 上的 `runTurn` 路徑。預設不在儀表板預設集內，需手動啟用。 |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | 實驗性。GitHub device flow + `copilot_internal` exchange（VS Code OAuth client）。需要有效 Copilot 訂閱；不是官方第三方 API。 |
 
 Google Antigravity 帳戶與供應商的配額查詢（包括模型清單備援）使用固定的 Google 計量端點。這些目標支援透明 Fake-IP DNS，同時保留 TLS 驗證、重新導向拒絕與私有位址檢查。自訂 base URL 只改變模型請求，不改變配額目標；`NO_PROXY` 仍使用直連政策。
+
+### Google 工具結構描述損失診斷
+
+Google 工具宣告會依所選端點類別進行編譯。透過 `ocx debug provider on`、儀表板 Logs 開關或
+`OCX_DEBUG=1` 啟用供應商偵錯後，在省略政策或使用 `compatible` 的路徑上，相容性轉換中的結構描述損失會輸出一筆
+`[ocx:google:google-tool-schema-loss]` 記錄（可用 `ocx debug provider logs -f` 持續查看），
+其中只包含報告版本、端點類別、`lossy` 指標、有上限的不確定比較計數、帶有上限計數的固定損失類別與截斷旗標，
+絕不包含工具名稱、屬性名稱、路徑、值或結構描述文字。省略政策或使用 `compatible` 時只觀察
+轉換。在 `reject-lossy` 下，若初始編譯有損或有界比較結果不確定，會在傳送前拒絕；被拒絕的
+請求不會另外輸出損失記錄。在 `reject-lossy` 下，會移除限制的
+Vertex 或 Cloud Code Assist 修復會輸出同樣不含內容的 `google-tool-schema-repair` 記錄，並在不傳送
+修改請求的情況下回傳原始 400；省略政策或使用 `compatible` 時，會像以前一樣重播修復後的請求。
+直接 AI Studio 不執行此修復。原生輸出結構描述不屬於這兩條政策路徑。請參閱
+[偵錯命令參考](/zh-tw/reference/cli/agents/)。
 
 
 終端 Nous refresh 失敗後，執行 `ocx login nous` 重新認證。
@@ -170,8 +183,8 @@ opencodex 協調 token refresh 與 Codex pool 路由，避免並行請求競爭 
 **Cooldown（Codex pool）。** 上游 `429`／quota response 會依 `Retry-After`、quota `reset` header
 （有上限）或短預設 backoff 設定 hard cooldown。明確 `Retry-After` cooldown 中的帳號不會被提前 probe；
 reset 衍生 cooldown 可能取得節流後的 probe lease，在不淹沒 provider 的情況下偵測恢復。由 reset 衍生的
-native-model cooldown 也會保留已知獨立 quota group：`gpt-5.3-codex-spark` 不會阻止同一帳號嘗試共享的
-GPT-5.6 Terra/Luna quota，而共享群組內的模型仍會互相保護。明確 `Retry-After` 與預設 cooldown 始終為
+native-model cooldown 會將共享原生 quota（含 GPT-5.6 Terra/Luna）與 `gpt-reserve` 分開。
+共享群組內的模型仍會互相保護；一般請求成功不會清除 Reserve cooldown。明確 `Retry-After` 與預設 cooldown 始終為
 account-wide。
 
 **Session affinity。** Codex thread→account affinity 只存在目前 process 記憶體，不會跨 proxy restart
@@ -226,7 +239,7 @@ database 並移除目前的 WAL、SHM 與 journal sidecar，再發布先前的 s
 
 ## 3. API 金鑰目錄
 
-opencodex 內建 79 個 preset：67 個 key-based、8 個 OAuth、3 個 local，以及 1 個預設 ChatGPT-forward
+opencodex 內建 96 個 preset：80 個 key-based、12 個 OAuth、3 個 local，以及 1 個預設 ChatGPT-forward
 preset。儀表板的 **Add provider** picker 會開啟 key provider 的 dashboard、驗證金鑰並儲存；驗證方式
 依 provider 而異。主要條目如下。
 
@@ -267,6 +280,7 @@ IDE／CLI，不透過 API；`minimax/minimax-m2.5` 是文件列出的 API 免費
 | Command Code | `https://api.commandcode.ai/provider/v1` |
 | SambaNova Cloud | `https://api.sambanova.ai/v1` |
 | Nebius Token Factory | `https://api.tokenfactory.nebius.com/v1` |
+| Crusoe | `https://api.inference.crusoecloud.com/v1` |
 | DigitalOcean Serverless Inference | `https://inference.do-ai.run/v1` |
 | Scaleway Generative APIs | `https://api.scaleway.ai/v1` |
 | Featherless AI | `https://api.featherless.ai/v1` |
@@ -311,11 +325,15 @@ key，走帶 key 的 **`opencode-zen`** preset。若 OpenCode 日後公布 keyle
 跟進；在此之前，這個 preset 的作用是記錄該限制。上游條款：[opencode.ai/docs/zen](https://opencode.ai/docs/zen/)。
 
 大多數 provider 使用帶 bearer key 的 `openai-chat` adapter；少數只提供 Anthropic-compatible endpoint 的
-provider，例如 **Xiaomi MiMo**，使用 `anthropic` adapter（`x-api-key`）。Volcengine Agent Plan 透過
+provider，例如 **Xiaomi MiMo**，使用 `anthropic` adapter（`x-api-key`）。在已驗證的 Ark Coding Plan 工具 continuation 中，把上一輪 Responses 回傳的 `reasoning` item 原樣送回會得到 `400 InvalidParameter`，因此 Coding Plan preset 會在轉送 continuation input 前移除這類 item；該輪的 reasoning 狀態會因此遺失，可用 `dropResponsesReasoningItems: false` 關閉。已經以 `openai-chat` 儲存的 Coding Plan 設定不會被改寫，仍走 Chat；要切換請手動把 `adapter` 改成 `openai-responses`、`responsesPath` 設為 `/responses`，或刪除後重新加入該 preset。Volcengine Coding Plan 與 Agent Plan 透過
 `openai-responses` 使用原生 Responses endpoint。內建 DeepSeek preset 也會把 `deepseek-v4-flash` 路由到
 原生 Responses endpoint，並保持上游 SSE streaming。若該模型完成所有 output item 卻省略最後的
 Responses event，opencodex 會套用 5 秒、model-scoped 的 grace repair；malformed 或 partial stream 會以
 incomplete 關閉，不會被誤報為成功。
+第一方 `deepseek-flash` 模型原生宣告支援 `text` 與 `image` 輸入，因此圖片請求預設會直接送往
+DeepSeek，不經過 vision sidecar。明確的 `noVisionModels` 或純文字宣告仍然優先。第一方
+`deepseek-chat`、`deepseek-reasoner` 與 `deepseek-v4-flash` 預設仍使用 sidecar；Zen 路由維持不變，
+本次更新未進行探測。
 
 > **三條 Volcengine 計費路徑：** `volcengine` 是 pay-as-you-go Ark API，
 > `volcengine-coding-plan` 消耗 Coding Plan quota，`volcengine-agent-plan` 消耗 Agent Plan quota。請使用
@@ -364,6 +382,11 @@ endpoint 取得。Chat request 使用設定的 Bearer key。可在
 
 **Command Code 配額。** 儀表板與 `ocx account refresh` 會在正規主機 `https://api.commandcode.ai` 探測 `/alpha/billing/credits` 視窗（5 小時與每週）。OAuth preset (`command-code`) 使用已儲存的帳號 bearer；Provider-API key preset (`commandcode`) 使用目前設定的有效 key。使用者改寫過的仿冒 base URL 不會被探測。當 Command Code 同時回報週期消耗時，剩餘的 monthly / purchased / free credits 會顯示為 USD 視窗。
 
+OrcaRouter 瀏覽器登入（`ocx login orcarouter-oauth`）的金鑰交換成功回應本文必須是不超過
+64 KiB 的有效 UTF-8 JSON。此交換請求原有的 30 秒時限涵蓋回應標頭與完整本文的接收；過大或
+格式錯誤的本文會在儲存金鑰前被拒絕。這些限制只適用於登入時的金鑰交換，不是推論請求酬載的
+限制。`scope` 驗證規則維持不變：允許省略，明確無效的值仍會被拒絕。
+
 **SambaNova Cloud 探索。** preset 從固定 API host 讀取 SambaNova Cloud 公開的 `/v1/models` 列表，保留
 provider-native id，並把 discovery 限制在 128 KiB／128 個 raw row。因 catalog 不需要認證，CLI login
 流程會把 key 回報為 unverifiable，而不會把公開 response 當成有效 key 的證明。Chat request 仍使用
@@ -374,6 +397,16 @@ endpoint 不在範圍內。可在 [SambaNova Cloud](https://cloud.sambanova.ai/a
 text 的 row，排除 embedding 與 image-generation model。它保留含 `/` 的原生 id，以及回報的 context／
 input-modality metadata，並把 discovery 限制在 512 KiB／512 個 raw row。Dedicated deployment host 不在
 範圍內。可在 [Nebius Token Factory](https://tokenfactory.nebius.com) 建立 key。
+
+**Crusoe 探索。** key-based preset 使用 `openai-chat` adapter，只把 Bearer key 傳到 Crusoe 固定的
+Serverless Inference host。`/v1/models` 會以 401 拒絕未驗證的請求，因此成功列出 model 即視為 key 驗證通過。
+discovery 會依 Crusoe 回傳的形式完整保留 `zai-org/GLM-5.3`、`moonshotai/Kimi-K2.6` 這類含 `/` 的原生 id，
+並限制在 256 KiB／256 個 raw row。只保留 `is_public: true` 且 `architecture.modality` 為 text 或 multimodal 的 row，因此帳戶私有部署以及 embedding、媒體類 row 會被排除。reasoning model 會透過 Chat Completions 的 `reasoning` 欄位回傳思考內容，
+adapter 會讀取該欄位。只有 `openai/gpt-oss-120b` 接受 `reasoning_effort` 等級（`low`、`medium`、`high`），
+其他 reasoning model 把該欄位當作開關，因此 preset 不宣告 provider-wide effort 等級，也不宣告
+provider-wide parallel tool call。rate limit 以 project 與 model 為單位（超過時回傳 429，共用 deployment
+擴容時回傳 503），新帳戶可獲得 $5 免費額度。可在 [Crusoe Cloud console](https://console.crusoecloud.com)
+的 Intelligence Foundry > Inference 建立 key。
 
 **DigitalOcean 探索。** preset 以 model access key 存取固定的 shared Serverless Inference host，並把經
 認證的 `/v1/models` response 與 DigitalOcean 文件支持的 Chat Completions allowlist 取交集。未知、

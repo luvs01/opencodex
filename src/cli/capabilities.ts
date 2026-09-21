@@ -96,6 +96,85 @@ export const HEAD_CAPABILITIES: readonly HeadCapability[] = [
  */
 export const CAPABILITIES: readonly Capability[] = [
   {
+    "command": [
+      "remote-workspace",
+      "pair"
+    ],
+    "summary": "Enroll this executor with one Hub using a one-time code from stdin and locally approved roots.",
+    "routes": [],
+    "flags": [
+      {
+        "name": "--json",
+        "value": "boolean",
+        "summary": "Emit the public local executor status."
+      },
+      {
+        "name": "--pairing-code-stdin",
+        "value": "boolean",
+        "summary": "Read the one-time pairing code from stdin."
+      },
+      {
+        "name": "--root",
+        "value": "string",
+        "summary": "Approve an absolute workspace directory; repeatable."
+      },
+      {
+        "name": "--toolchain-root",
+        "value": "string",
+        "summary": "Approve a read-only toolchain directory; repeatable."
+      },
+      {
+        "name": "--executor-helper",
+        "value": "string",
+        "summary": "Select a reviewed native helper file."
+      },
+      {
+        "name": "--name",
+        "value": "string",
+        "summary": "Name this executor."
+      }
+    ],
+    "mutates": true,
+    "json": "payload",
+    "details": [
+      "Executor-local operation; Hub consent and session control stay in the dashboard."
+    ]
+  },
+  {
+    "command": [
+      "remote-workspace",
+      "agent"
+    ],
+    "summary": "Keep the paired executor connected to its Hub.",
+    "routes": [],
+    "flags": [],
+    "mutates": true,
+    "json": "none",
+    "details": [
+      "Executor-local operation; Hub consent and session control stay in the dashboard."
+    ]
+  },
+  {
+    "command": [
+      "remote-workspace",
+      "status"
+    ],
+    "summary": "Read local executor enrollment and available capabilities without printing credentials.",
+    "routes": [],
+    "flags": [
+      {
+        "name": "--json",
+        "value": "boolean",
+        "summary": "Emit the public local executor status."
+      }
+    ],
+    "mutates": false,
+    "json": "payload",
+    "details": [
+      "Executor-local operation; Hub consent and session control stay in the dashboard."
+    ]
+  },
+  {
     command: ["models", "price"],
     summary: "Read the saved manual price for an exact provider/model selector.",
     routes: [{ method: "GET", path: "/api/providers/{provider}/model-costs" }],
@@ -236,6 +315,56 @@ export const CAPABILITIES: readonly Capability[] = [
     ],
   },
   {
+    command: ["companion"],
+    summary: "Inspect and configure menu-bar and widget companion usage settings.",
+    routes: [
+      { method: "GET", path: "/api/companion/settings" },
+      { method: "GET", path: "/api/usage/timeline" },
+      { method: "PUT", path: "/api/companion/settings" },
+    ],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit companion settings as JSON." }],
+    mutates: true,
+    json: "payload",
+    details: [
+      "`show` (the default) reads settings; `set key=value ...` updates selected settings; `reset` restores defaults.",
+      "Values accepted by `set` are parsed as JSON when valid, so booleans, numbers, arrays, objects, and null can be passed directly.",
+    ],
+  },
+  {
+    command: ["account", "history"],
+    summary: "Cached quota observations for one stored Codex pool account.",
+    routes: [{ method: "GET", path: "/api/codex-auth/quota/history" }],
+    flags: [
+      { name: "--json", value: "boolean", summary: "Emit the bounded observation history." },
+      { name: "--limit", value: "number", summary: "Return the newest 1 to 200 observations." },
+    ],
+    mutates: false,
+    json: "payload",
+    details: ["Use account history openai <pool-account-id>. Reads cached observations only; no refresh or warmup. Native main is not included."],
+  },
+  {
+    command: ["account", "main", "reauth"],
+    summary: "Reauthenticate the native main Codex login with a device code (#3898); headless hubs need no Codex App or keyring.",
+    routes: [
+      { method: "POST", path: "/api/codex-auth/main/reauth-device" },
+      { method: "GET", path: "/api/codex-auth/main/reauth-device" },
+      { method: "DELETE", path: "/api/codex-auth/main/reauth-device" },
+    ],
+    flags: [
+      { name: "--device", value: "boolean", summary: "Run the device-code flow (the only reauth mode)." },
+      { name: "--no-wait", value: "boolean", summary: "Print the flow handle and code without waiting for completion." },
+      { name: "--flow", value: "string", summary: "Flow id for status and cancel." },
+      { name: "--json", value: "boolean", summary: "Emit the flow status as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: [
+      "Same-identity reauth only: the device login must complete for the ChatGPT account that already holds the native main slot, and the commit is fenced by the exclusive claim plus a path/hash/inode snapshot.",
+      "/api/codex-auth/login stays pool-only and keeps rejecting __main__; this namespace is the only device-reauth surface for the native main slot.",
+      "Payloads carry only flowId, status, the verification URL, the device code, and a closed set of failure codes -- never tokens, emails, or raw account ids.",
+    ],
+  },
+  {
     command: ["account", "list"],
     summary: "Codex OAuth accounts with pool priority and pause state.",
     routes: [{ method: "GET", path: "/api/codex-auth/accounts" }],
@@ -245,6 +374,25 @@ export const CAPABILITIES: readonly Capability[] = [
     details: [
       "STATUS names `paused` alongside `selected`: a paused-but-selected account still receives requests.",
       "`--quota` shows cached Codex windows (including 5h); `--refresh` bypasses the server TTL.",
+    ],
+  },
+  {
+    command: ["account", "import-orca"],
+    summary: "Preview or register read-only links to Orca-managed Codex accounts without another login.",
+    routes: [],
+    flags: [
+      { name: "--source", value: "string", required: true, summary: "Orca data directory containing codex-accounts." },
+      { name: "--registry", value: "string", required: true, summary: "The chosen Orca profile's orca-data.json account registry." },
+      { name: "--apply", value: "boolean", summary: "Register new accounts; requires a stopped proxy. Default is preview." },
+      { name: "--json", value: "boolean", summary: "Emit counts and fixed invalid-reason codes without credentials or source paths." },
+    ],
+    mutates: true,
+    json: "envelope",
+    details: [
+      "Local files only; never copies refresh tokens or changes Orca authentication files.",
+      "Skips existing ChatGPT identities. New accounts remain pending until dashboard validation.",
+      "Orca must keep the source login available and refreshed; a missing or expired source fails closed.",
+      "Mixed eligible and invalid entries exit successfully; an all-invalid result exits nonzero.",
     ],
   },
   {
@@ -596,17 +744,39 @@ export const CAPABILITIES: readonly Capability[] = [
     ],
   },
   {
+    command: ["system", "codex-cli-update", "attest"],
+    summary: "Observe the selected or explicitly named Windows npm Codex installation files without enabling updates.",
+    routes: [],
+    flags: [
+      { name: "--candidate", value: "string", summary: "Absolute npm codex.cmd or package bin/codex.js path; all four paths are all-or-none." },
+      { name: "--npm-prefix", value: "string", summary: "Absolute prefix containing node_modules/@openai/codex." },
+      { name: "--npm-cli", value: "string", summary: "Absolute node_modules/npm/bin/npm-cli.js path." },
+      { name: "--node", value: "string", summary: "Absolute node.exe path; observed, never executed." },
+      { name: "--json", value: "boolean", summary: "Emit the path-free installation identity observation." },
+    ],
+    mutates: false,
+    json: "envelope",
+    details: [
+      "Opt-in Windows x64 local-volume inspection using held native file handles; refuses reparse points, active writers and unsupported layouts.",
+      "Without explicit paths, the proof-bound launcher snapshot identifies the selected candidate: the configured CODEX_CLI_PATH or the first codex on the captured PATH, with an OpenCodex wrapper resolving to its codex.opencodex-real backing. Discovery only proposes paths; the held-handle observation remains the authority.",
+      "Success binds observed file identities and bytes, not selected-runtime admission or installer ownership.",
+      "selectionAttested, managed and applyAllowed remain false. The digest is an observation, not a durable update permit.",
+      "Does not run the named Codex/npm/Node files, query a registry, install software, control processes or persist state.",
+    ],
+  },
+  {
     command: ["system", "codex-restart"],
-    summary: "Restart the Codex app-server.",
+    summary: "Restart the Codex desktop app and app-servers.",
     routes: [{ method: "POST", path: "/api/system/codex-restart" }],
     flags: [
-      { name: "--yes", value: "boolean", summary: "Required: restarts the operator's running Codex app-server." },
+      { name: "--yes", value: "boolean", summary: "Required: fully quits and relaunches the operator's Codex desktop app and restarts its app-servers." },
       { name: "--json", value: "boolean", summary: "Emit the restart result as JSON." },
     ],
     mutates: true,
     json: "payload",
     details: [
       "`sync --restart-codex` is not a substitute: it restarts only as a side effect after a catalog or cache write, so it cannot restart a healthy install on request.",
+      "Restarts the Codex desktop app as well as the app-servers, through the same module the CLI uses. When the proxy itself runs inside the Codex app it refuses instead, because restarting the app would kill the request.",
       "--yes is mandatory because this interrupts a running editor session, which must never happen because an agent guessed a subcommand.",
     ],
   },
@@ -672,8 +842,9 @@ export const CAPABILITIES: readonly Capability[] = [
     summary: "Synchronize client catalogs, including Aside profiles through the running server's mutation owner.",
     routes: [{ method: "POST", path: "/api/client-integrations/aside/sync" }],
     flags: [
-      { name: "--restart-codex", value: "boolean", summary: "Restart Codex app-servers after a catalog or cache write." },
-      { name: "--restart-desktop-app", value: "boolean", summary: "Restart the Codex desktop app after a catalog or cache write." },
+      { name: "--restart-codex", value: "boolean", summary: "Restart the Codex app-servers and fully quit and relaunch the Codex desktop app after a catalog or cache write, on macOS, Linux and Windows." },
+      { name: "--restart-app-server-only", value: "boolean", summary: "Restart only the Codex app-servers and leave the desktop app running; wins over --restart-codex when both are given." },
+      { name: "--restart-desktop-app", value: "boolean", summary: "Deprecated alias of --restart-codex." },
     ],
     mutates: true,
     json: "none",

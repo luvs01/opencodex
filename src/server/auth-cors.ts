@@ -1,3 +1,5 @@
+import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
+import { modelCapabilitiesConfigError } from "../config/provider-validation";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
@@ -9,10 +11,13 @@ import {
   providerWebSearchBridgeConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
+  retryOnResetPolicyConfigError,
   sanitizeModelCostsForDisplay,
 } from "../config";
 import {
   apiKeyTransportConfigError,
+  autoReviewModelOverridesConfigError,
+  autoReviewModelTargetConfigError,
   booleanRecordConfigError,
   providerReasoningPinsConfigError,
   modelAdapterRecordConfigError,
@@ -25,7 +30,9 @@ import {
   upstreamHttpVersionConfigError,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
+import { providerEgressConfigError } from "../lib/provider-egress";
 import { redactSecretString } from "../lib/redact";
+import { DECLARABLE_HOSTED_TOOL_TYPES } from "../responses/hosted-tool-policy";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../providers/registry";
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -482,6 +489,9 @@ export interface ApiAuthMatrixRow {
  * against every cell rather than reading the table back to itself.
  */
 export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
+  { endpoint: "/v1/audio/transcriptions", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  { endpoint: "/v1/live", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  { endpoint: "/v1/realtime/calls", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
   // #1686: a bearer that is one of OUR admission secrets is now accepted here. It is safe
   // because materializeCodexUpstreamAuth substitutes the stored main credential rather than
   // forwarding it; a bearer that is NOT our secret stays unadmitted and remains Codex Direct
@@ -499,6 +509,8 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   // it forwards no caller credential upstream and its body is booleans plus model ids — and it
   // 404s on any host whose runtimeRole is not "hub", so no standalone install gains a surface.
   { endpoint: "/v1/hub-state", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  // Usage additionally requires a configured key identity; unscoped environment keys are refused.
+  { endpoint: "/v1/usage", bearer: "rejected", dedicated: "accepted", xApiKey: "rejected" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -602,6 +614,23 @@ function sameCanonicalProviderSeed(actual: Record<string, unknown>, expected: Oc
   return actualKeys.every(key => JSON.stringify(actual[key]) === JSON.stringify((expected as unknown as Record<string, unknown>)[key]));
 }
 
+/**
+ * Operator-overlay tolerant variant of the canonical seed check: every key the registry
+ * seed defines must still match the submitted provider verbatim, but keys the seed never
+ * defines are ignored instead of failing the comparison. Field-masked writes (PATCH,
+ * the provider editor, reload) merge onto the persisted row, so the submitted candidate
+ * legitimately carries stored operator overlays like `selectedModels` or `disabled`.
+ * Those fields are validated by their own write boundaries and cannot widen what the
+ * forward proxy claims. Full-object writes (POST) keep the strict exact-key comparison
+ * so a forged overlay cannot ride in on a canonical transport seed.
+ */
+function matchesCanonicalProviderSeed(actual: Record<string, unknown>, expected: OcxProviderConfig): boolean {
+  return Object.keys(expected).every(
+    key => Object.hasOwn(actual, key)
+      && JSON.stringify(actual[key]) === JSON.stringify((expected as unknown as Record<string, unknown>)[key]),
+  );
+}
+
 function positiveWindowValue(value: unknown): boolean {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
@@ -638,13 +667,41 @@ function nativeContextOverlayError(raw: Record<string, unknown>): string | null 
  * string, or null when the provider may be persisted. Caller-controlled names/fields are
  * redacted and JSON-escaped so secrets never reach the response.
  */
-export function providerManagementConfigError(name: unknown, provider: unknown): string | null {
+export function providerManagementConfigError(
+  name: unknown,
+  provider: unknown,
+  options?: { allowOperatorOverlays?: boolean },
+): string | null {
   if (typeof name !== "string" || !provider || typeof provider !== "object" || Array.isArray(provider)) {
     return "provider must be a plain object";
   }
   const raw = provider as Record<string, unknown>;
+  const capabilitiesError = modelCapabilitiesConfigError(raw.modelCapabilities);
+  if (capabilitiesError) return capabilitiesError;
   const pinsError = providerReasoningPinsConfigError(raw);
   if (pinsError) return pinsError;
+  if (name === "openai" && (Object.hasOwn(raw, "autoReviewModel") || Object.hasOwn(raw, "autoReviewModelOverrides"))) {
+    return "provider openai must not include autoReviewModel or autoReviewModelOverrides";
+  }
+  // Canonical OpenAI is the ChatGPT forward seed. allowPrivateNetwork is the explicit
+  // opt-in that skips destination DNS classification (loopback, RFC1918, metadata).
+  // Overlay-tolerant comparison would otherwise treat it as an extra key and persist it.
+  if (name === "openai" && Object.hasOwn(raw, "allowPrivateNetwork")) {
+    return "provider openai must not include allowPrivateNetwork";
+  }
+  // The same reasoning applies to `headers`, and it is not hypothetical. Canonical OpenAI
+  // has no registry `staticHeaders`, so any header block on this row is operator-authored,
+  // and the forward adapter copies it onto the ChatGPT request BEFORE the incoming forward
+  // headers — a persisted value therefore wins whenever the caller omits that header. The
+  // exact-key comparison rejected it as an extra key; overlay tolerance would silently admit
+  // it on every merge-based write path while POST still refused it.
+  if (name === "openai" && Object.hasOwn(raw, "headers")) {
+    return "provider openai must not include headers";
+  }
+  const autoReviewTargetError = autoReviewModelTargetConfigError(raw.autoReviewModel, "autoReviewModel", true);
+  if (autoReviewTargetError) return autoReviewTargetError;
+  const autoReviewMapError = autoReviewModelOverridesConfigError(raw.autoReviewModelOverrides, "autoReviewModelOverrides", true);
+  if (autoReviewMapError) return autoReviewMapError;
   for (const field of FORBIDDEN_PROVIDER_RUNTIME_FIELDS) {
     if (Object.hasOwn(raw, field)) return `provider ${name} must not include runtime field "${field}"`;
   }
@@ -667,6 +724,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     delete canonicalCandidate.modelCosts;
     // requestPacing is a user-owned transport overlay, not part of the canonical seed.
     delete canonicalCandidate.requestPacing;
+    // retryOnReset is the same kind of overlay: it tunes how this provider's own Responses
+    // sends recover, not what the canonical forward seed is. Validated below
+    // (retryOnResetPolicyConfigError).
+    delete canonicalCandidate.retryOnReset;
     // Context windows are the same kind of user-owned overlay as requestPacing: the operator
     // narrowing what their own native rows advertise. They can only ever LOWER the measured
     // window (see nativeOpenAiContextWindow), so admitting them cannot widen what the proxy
@@ -683,7 +744,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
-    const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
+    const canonical = seed && (options?.allowOperatorOverlays
+      ? matchesCanonicalProviderSeed(canonicalCandidate, seed)
+      : sameCanonicalProviderSeed(canonicalCandidate, seed));
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
     }
@@ -699,6 +762,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const destinationError = providerDestinationConfigError(name, typed);
   if (destinationError) return `provider ${name} ${destinationError}`;
+  for (const field of ["responsesPath", "chatCompletionsPath"] as const) {
+    const sendPathError = providerRelativeSendPathConfigError(field, raw[field]);
+    if (sendPathError) return `provider ${JSON.stringify(redactSecretString(name))} ${sendPathError}`;
+  }
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
@@ -707,17 +774,28 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // it before it reaches the management API response.
     return `provider ${JSON.stringify(redactSecretString(name))} ${retryOn429Error}`;
   }
+  const retryOnResetError = retryOnResetPolicyConfigError(raw.retryOnReset);
+  if (retryOnResetError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${retryOnResetError}`;
+  }
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
   }
-  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge);
+  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge, name, typed);
   if (webSearchBridgeError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${webSearchBridgeError}`;
   }
   const upstreamHttpVersionError = upstreamHttpVersionConfigError(raw.upstreamHttpVersion);
   if (upstreamHttpVersionError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${upstreamHttpVersionError}`;
+  }
+  // Per-provider egress shares one definition with the transports and the config loader, so a
+  // value the dashboard accepts is one a request can actually leave by. The message never
+  // echoes the value: a proxy URL routinely embeds `user:password@`.
+  const egressError = providerEgressConfigError(typed);
+  if (egressError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${egressError}`;
   }
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
@@ -738,6 +816,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const reasoningSummariesError = booleanRecordConfigError(raw.modelSupportsReasoningSummaries, "modelSupportsReasoningSummaries");
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
+  const suppressSyntheticMaxError = booleanRecordConfigError(raw.modelSuppressSyntheticMax, "modelSuppressSyntheticMax");
+  if (suppressSyntheticMaxError) return `provider ${name} ${suppressSyntheticMaxError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
     raw.modelReasoningSummaryDelivery,
     raw.modelSupportsReasoningSummaries,
@@ -779,6 +859,22 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     "omitReasoningEffortWithToolsModels",
   );
   if (toolReasoningOptOutError) return `provider ${name} ${toolReasoningOptOutError}`;
+  const unsupportedHostedToolsError = nonBlankStringArrayConfigError(
+    raw.unsupportedHostedTools,
+    "unsupportedHostedTools",
+  );
+  if (unsupportedHostedToolsError) return `provider ${name} ${unsupportedHostedToolsError}`;
+  if (Array.isArray(raw.unsupportedHostedTools)) {
+    // Closed vocabulary, same reason as the config schema: an unrecognized name would be
+    // stored and then strip nothing, so the operator would keep getting the upstream 400
+    // this field exists to prevent.
+    const unknownTool = (raw.unsupportedHostedTools as unknown[])
+      .find(tool => typeof tool === "string" && !DECLARABLE_HOSTED_TOOL_TYPES.has(tool.trim()));
+    if (unknownTool !== undefined) {
+      return `provider ${name} unsupportedHostedTools must name only hosted tool types: `
+        + `${[...DECLARABLE_HOSTED_TOOL_TYPES].join(", ")}`;
+    }
+  }
   const openRouterError = openRouterRoutingConfigError(typed);
   if (openRouterError) return `provider ${name} ${openRouterError}`;
   const vercelError = vercelGatewayRoutingConfigError(typed);
@@ -858,16 +954,27 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   commandCodeVersion: "editor",
   statelessResponses: "editor",
   requiresAdjacentResponsesToolResults: "editor",
+  requiresPairedResponsesToolResults: "editor",
   annotateEmptyToolOutputs: "editor",
   supportsServiceTier: "editor",
   modelSupportsServiceTier: "editor",
   preserveResponsesReasoningContent: "editor",
+  dropResponsesReasoningItems: "editor",
+  modelReasoningEffortsAuthoritative: "editor",
   decodesNativeCompactionBlobs: "editor",
   allowEncryptedV2AgentTasks: "editor",
   allowPrivateNetwork: "editor",
+  // A proxy URL routinely embeds `user:password@`, so it never reaches the dashboard DTO and
+  // the editor may not write it. `ocx config set` and the config file remain the way to set
+  // it, which is the same boundary `apiKey` sits behind and for the same reason.
+  proxy: "redacted",
+  // A bypass list names destinations, carries no credential, and is only meaningful next to a
+  // route the operator can already see.
+  noProxy: "editor",
   upstreamHttpVersion: "editor",
   upstreamWebsocket: "editor",
   directGeminiWireRenames: "editor",
+  googleToolSchemaPolicy: "editor",
   disabled: "editor",
   codexAccountMode: "editor",
   apiKey: "redacted",
@@ -888,6 +995,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   contextWindow: "editor",
   modelContextWindows: "editor",
   modelInputModalities: "editor",
+  modelCapabilities: "editor",
   modelMaxInputTokens: "runtime",
   modelAutoCompactTokenLimits: "editor",
   defaultMaxOutputTokens: "editor",
@@ -907,9 +1015,12 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   refreshPolicy: "editor",
   reasoningEfforts: "editor",
   modelReasoningEfforts: "editor",
+  modelSuppressSyntheticMax: "editor",
   modelDefaultReasoningEfforts: "editor",
   pinnedReasoningEffort: "editor",
   modelPinnedReasoningEfforts: "editor",
+  autoReviewModel: "editor",
+  autoReviewModelOverrides: "editor",
   modelSupportsReasoningSummaries: "editor",
   modelSupportsVerbosity: "editor",
   supportsVerbosity: "editor",
@@ -920,6 +1031,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   xaiResponsesDefaultVersion: "runtime",
   zaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
+  unsupportedHostedTools: "editor",
   responsesSnapshotRepair: "editor",
   webSearchBridge: "editor",
   reasoningEffortMap: "editor",
@@ -936,14 +1048,17 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   pinParallelToolCallsFalse: "editor",
   terminalContinuationGuard: "editor",
   openaiChatEofTolerance: "editor",
+  foldDeveloperRoleToSystem: "editor",
   promptCacheKey: "editor",
   chatServiceTier: "editor",
   responsesItemIdRepair: "editor",
   autoToolChoiceOnlyModels: "editor",
   preserveReasoningContentModels: "editor",
   requiresReasoningPlaceholderModels: "editor",
+  showThinkingSummary: "editor",
   retryOn429: "editor",
   transientRetryOn5xx: "editor",
+  retryOnReset: "editor",
   reasoningSplitModels: "editor",
   reasoningDetailsModels: "editor",
   thinkingToggleModels: "editor",

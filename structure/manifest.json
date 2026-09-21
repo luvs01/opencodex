@@ -49,7 +49,9 @@
       "title": "Overview",
       "scope": "Product boundary, local state ownership, and the non-negotiable invariants index.",
       "documents": [
+        "app/",
         "gui/",
+        "src/companion/",
         "scripts/",
         "src/config.ts",
         "src/lib/"
@@ -59,7 +61,7 @@
       "path": "runtime.md",
       "tier": 1,
       "title": "Runtime",
-      "scope": "Entrypoints, process lifecycle, CLI surface, and provider/adapter selection.",
+      "scope": "Entrypoints, process lifecycle, CLI surface, and the Remote Hub, sideband, and request-compatibility contracts on that path.",
       "documents": [
         "bin/",
         "src/adapters/",
@@ -88,6 +90,7 @@
         "src/router.ts",
         "src/server/",
         "src/service.ts",
+        "src/service/",
         "src/stall-timeout.ts",
         "src/storage/",
         "src/tray/",
@@ -139,6 +142,17 @@
       "documents": [
         "src/codex/",
         "src/providers/",
+        "src/server/"
+      ]
+    },
+    {
+      "path": "transports/byte-accounting.md",
+      "tier": 3,
+      "title": "Byte Accounting",
+      "scope": "Request-copy and stream-buffer byte accounting shared by parsing, SSE rewriting, the adapters, and the translator budget.",
+      "documents": [
+        "src/adapters/",
+        "src/lib/",
         "src/server/"
       ]
     },
@@ -203,6 +217,22 @@
         "src/adapters/",
         "src/chat/",
         "src/server/"
+      ]
+    },
+    {
+      "path": "providers-and-adapters.md",
+      "tier": 4,
+      "title": "Providers And Adapters",
+      "scope": "Provider and adapter selection, the adapter inventory, live model discovery, and the hosted-search continuation bridge.",
+      "documents": [
+        "src/adapters/",
+        "src/chat/",
+        "src/combos/",
+        "src/oauth/",
+        "src/providers/",
+        "src/responses/",
+        "src/server/",
+        "src/web-search/"
       ]
     },
     {
@@ -287,7 +317,8 @@
       "title": "Compatibility Lab",
       "scope": "Optional Lab evidence, automation, and its core-runtime isolation boundary.",
       "documents": [
-        "src/lab/"
+        "src/lab/",
+        "src/server/index.ts"
       ]
     },
     {
@@ -297,10 +328,12 @@
       "scope": "Dashboard serving, authentication boundaries, /api/* ownership, and usage accounting.",
       "documents": [
         "gui/",
+        "src/companion/",
         "src/codex/",
         "src/lib/",
         "src/server/",
         "src/usage/",
+        "src/usage/timeline.ts",
         "src/vision/"
       ]
     },
@@ -325,6 +358,16 @@
         "src/cli/",
         "src/client/",
         "src/server/"
+      ]
+    },
+    {
+      "path": "desktop-shell.md",
+      "tier": 6,
+      "title": "Desktop shell",
+      "scope": "Tauri desktop shell, proxy attachment and sidecar lifecycle, tray controls, bootstrap navigation, and desktop companion presence.",
+      "documents": [
+        "desktop/",
+        "src/server/management/companion-routes.ts"
       ]
     },
     {
@@ -366,17 +409,92 @@
       "path": "remote-workspace.md",
       "tier": 3,
       "title": "Remote Workspace",
-      "scope": "Inactive workspace protocol, cryptographic identity primitives, and bounded framing.",
+      "scope": "Opt-in workspace identity, executor grants, runtime adapters, management and dashboard integration.",
       "documents": [
         "src/remote-control/"
       ]
     }
   ],
+  "contracts": {
+    "version": 1,
+    "entries": [
+      {
+        "id": "paginated-history-writer",
+        "owner": {
+          "document": "codex-home.md",
+          "anchor": "paginated-history-writer-boundary"
+        },
+        "dependents": [
+          "catalog.md",
+          "config.md",
+          "gui-and-management-api.md",
+          "ops/docs-and-release.md",
+          "providers/openai-tiers.md",
+          "runtime.md",
+          "subagents.md"
+        ]
+      },
+      {
+        "id": "request-copy-accounting",
+        "owner": {
+          "document": "transports/byte-accounting.md",
+          "anchor": "request-copy-accounting"
+        },
+        "dependents": [
+          "adapters/registry.md",
+          "catalog.md",
+          "clients/claude-desktop.md",
+          "clients/integrations.md",
+          "data-planes/images.md",
+          "data-planes/inbound-compat.md",
+          "ops/docs-and-release.md",
+          "ops/service-and-sidecars.md",
+          "overview.md",
+          "providers/chat-compat.md",
+          "providers/cursor.md",
+          "providers/xai-grok.md",
+          "runtime.md",
+          "subagents.md",
+          "transports/inventory.md",
+          "transports/streaming-health.md"
+        ]
+      },
+      {
+        "id": "stream-buffer-accounting",
+        "owner": {
+          "document": "transports/byte-accounting.md",
+          "anchor": "stream-buffer-accounting"
+        },
+        "dependents": [
+          "adapters/registry.md",
+          "catalog.md",
+          "clients/claude-desktop.md",
+          "clients/integrations.md",
+          "data-planes/images.md",
+          "data-planes/inbound-compat.md",
+          "ops/docs-and-release.md",
+          "ops/service-and-sidecars.md",
+          "overview.md",
+          "providers/chat-compat.md",
+          "providers/cursor.md",
+          "providers/xai-grok.md",
+          "runtime.md",
+          "subagents.md",
+          "transports/inventory.md",
+          "transports/streaming-health.md"
+        ]
+      }
+    ]
+  },
   "grace": {
     "undocumentedSourceAreas": [
       {
         "path": "src/bridge.ts",
         "reason": "no doc names this file; it is the legacy adapter bridge entry and its behavior is described under the adapter registry without a path reference"
+      },
+      {
+        "path": "src/bridge/",
+        "reason": "no doc names this directory; it holds the leaves moved out of the src/bridge.ts facade and inherits the same adapter-registry description the facade has"
       },
       {
         "path": "src/quota/",
@@ -405,7 +523,11 @@
         "reason": "no test constrains routed slug shape; the ten files that mention provider/model consume slugs rather than enforcing the form"
       }
     ],
-    "oversizeDocs": [],
+    "oversizeDocs": [
+      "gui-and-management-api.md",
+      "providers/openai-tiers.md",
+      "transports/responses.md"
+    ],
     "staleRefs": []
   }
 }

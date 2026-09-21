@@ -1,3 +1,7 @@
+import {
+  PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE,
+  PLAINTEXT_V2_COLLABORATION_NAMESPACE,
+} from "../../src/responses/plaintext-v2-agent-messages";
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { handleResponses } from "../../src/server/responses";
@@ -7,6 +11,7 @@ import { fetchWithTransientRetry, isNonReplayableResponse } from "../../src/lib/
 import { codexWsExchange } from "../../src/server/responses/codex-ws-exchange";
 import { CodexWsSession } from "../../src/server/responses/codex-ws-session";
 import { prepareCodexWsRequest } from "../../src/server/responses/codex-ws-request";
+import { readCodexWsStage } from "../../src/server/responses/codex-ws-wire";
 import { CodexWsMetadata, CODEX_WS_METADATA_MAX_BYTES, CODEX_WS_METADATA_MAX_VALUE_BYTES } from "../../src/server/responses/codex-ws-metadata";
 import {
   bunSupportsBoundedCodexWsRelay,
@@ -25,9 +30,10 @@ import {
 } from "../../src/server/responses/ws-upstream";
 import type { OcxProviderConfig } from "../../src/types";
 import type { OcxConfig } from "../../src/types";
+import { BOUNDED_WS_RUNTIME, codexWsUpstreamFetch, shouldUseCodexWsUpstream, streamingInit } from "../helpers/ws-upstream-fixtures";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
-const BOUNDED_WS_RUNTIME = "1.4.0";
 
 // #864 keeps win32 rewrite traffic out of the tee()+JS-pull chain, so
 // `isWin32EagerRewrite(platform, needsClientRewrite)` sends it through the eager
@@ -39,26 +45,6 @@ const BOUNDED_WS_RUNTIME = "1.4.0";
 // `FakeWebSocket.instances`; they hold the marker to this rule rather than to a
 // constant that only held before the backfill landed.
 const EAGER_RELAY_FORCED_BY_PLATFORM = isWin32EagerRewrite(process.platform, true);
-
-function shouldUseCodexWsUpstream(url: string, init?: RequestInit, upstreamWebsocket = false): boolean {
-  return rawShouldUseCodexWsUpstream(url, init, BOUNDED_WS_RUNTIME, upstreamWebsocket);
-}
-
-function codexWsUpstreamFetch(
-  url: string,
-  init: RequestInit,
-  fallback: typeof fetch,
-): Promise<Response> {
-  return rawCodexWsUpstreamFetch(url, init, fallback, BOUNDED_WS_RUNTIME);
-}
-
-function streamingInit(body: Record<string, unknown> = {}): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: "Bearer test" },
-    body: JSON.stringify({ model: "gpt-5.5", stream: true, ...body }),
-  };
-}
 
 describe("shouldUseCodexWsUpstream", () => {
   test("uses HTTP SSE on runtimes without a bounded response sink", async () => {
@@ -145,11 +131,15 @@ describe("shouldUseCodexWsUpstream", () => {
     expect(shouldUseCodexWsUpstream(CODEX_URL, { method: "POST", body: "{\"stream\":true" })).toBe(false);
   });
 
-  test("opt-in upstream WebSocket only for configured OpenAI-compatible Responses endpoints", () => {
+  test("keeps configured provider endpoints on bounded HTTP SSE", () => {
     // The canonical backend ignores the flag.
     expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), false)).toBe(true);
-    // Configured providers join the WS lane on their own /v1/responses path.
-    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", streamingInit(), true)).toBe(true);
+    // Bun cannot reject oversized messages before assembling them, so even an
+    // opted-in provider cannot join the WebSocket lane.
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", streamingInit(), true)).toBe(false);
+    // The first-party api.openai.com lane still honors the operator opt-in.
+    expect(shouldUseCodexWsUpstream("https://api.openai.com/v1/responses", streamingInit(), true)).toBe(true);
+    expect(shouldUseCodexWsUpstream("https://api.openai.com/v1/responses", streamingInit(), false)).toBe(false);
     // Plain HTTP stays on SSE; never send credentials or request data through ws://.
     expect(shouldUseCodexWsUpstream("http://10.0.0.5:8080/v1/responses", streamingInit(), true)).toBe(false);
     expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", streamingInit(), false)).toBe(false);
@@ -225,7 +215,14 @@ beforeEach(() => {
   for (const key of PROXY_ENV_KEYS) delete process.env[key];
 });
 
+// A case that calls handleResponses directly never takes the writer lease startServer takes,
+// so its dispatch is refused. Dropped in teardown so a throwing case cannot leave it behind.
+let releaseSpendHome: (() => void) | undefined;
+const takeSpendHome = (): void => { releaseSpendHome ??= acquireOwnedSpendHome(); };
+
 afterEach(() => {
+  releaseSpendHome?.();
+  releaseSpendHome = undefined;
   globalThis.WebSocket = RealWebSocket;
   globalThis.fetch = RealFetch;
   FakeWebSocket.instances = [];
@@ -292,11 +289,7 @@ describe("providerFetch routing", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  test("routes an opt-in provider's Responses streams over its upstream WS", async () => {
-    installFake(ws => {
-      ws.emit("open", {});
-      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r1" } }) });
-    });
+  test("routes an opt-in provider's Responses streams over bounded HTTP SSE", async () => {
     const baseCalls: string[] = [];
     const sentinel = new Response("base");
     const provider = {
@@ -308,16 +301,15 @@ describe("providerFetch routing", () => {
     } as unknown as OcxProviderConfig;
     const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
 
-    const wsResponse = await wrapped("https://sub2api.example.com/v1/responses", streamingInit());
-    expect(wsResponse.headers.get("content-type")).toContain("text/event-stream");
-    expect(baseCalls).toHaveLength(0);
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    expect(FakeWebSocket.instances[0]!.url).toBe("wss://sub2api.example.com/v1/responses");
+    const response = await wrapped("https://sub2api.example.com/v1/responses", streamingInit());
+    expect(await response.text()).toBe("base");
+    expect(baseCalls).toHaveLength(1);
+    expect(FakeWebSocket.instances).toHaveLength(0);
 
     // The same provider's non-Responses paths (images/search/chat) stay on the base fetch.
     await wrapped("https://sub2api.example.com/v1/images", streamingInit());
-    expect(baseCalls).toHaveLength(1);
-    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(baseCalls).toHaveLength(2);
+    expect(FakeWebSocket.instances).toHaveLength(0);
   });
 });
 
@@ -346,6 +338,208 @@ describe("handleResponses Codex WS relay selection", () => {
     });
   }
 
+  function plaintextV2CollaborationRequest(): Request {
+    return new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer test" },
+      body: JSON.stringify({
+        model: "gpt-5.5",
+        stream: true,
+        tools: [{ type: "namespace", name: "collaboration", tools: [{
+          type: "function", name: "spawn_agent", parameters: {
+            type: "object", properties: { message: { type: "string", encrypted: true } },
+          },
+        }, { type: "function", name: "send_message", parameters: { type: "object" } }] }],
+        input: [
+          {
+            type: "additional_tools",
+            tools: [{
+              type: "namespace",
+              name: "collaboration",
+              tools: [
+                {
+                  type: "function",
+                  name: "spawn_agent",
+                  parameters: {
+                    type: "object",
+                    properties: { message: { type: "string", encrypted: true } },
+                  },
+                },
+                { type: "function", name: "send_message", parameters: { type: "object" } },
+              ],
+            }],
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "delegate" }] },
+        ],
+      }),
+    });
+  }
+
+  test.each(["collaboration-optimize", null])("plaintext v2 WS restoration handles namespace=%s", async namespace => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.created",
+          response: {
+            id: "r-plaintext-v2-ws",
+            object: "response",
+            status: "in_progress",
+            output: [],
+          },
+        }),
+      });
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.output_item.added",
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_spawn",
+            call_id: "call-spawn",
+            namespace,
+            name: "start_delegated_task",
+            arguments: "",
+            encrypted_function_args: [],
+            status: "in_progress",
+          },
+        }),
+      });
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.function_call_arguments.done",
+          item_id: "fc_spawn",
+          output_index: 0,
+          namespace,
+          name: "collaboration-optimize__start_delegated_task",
+          arguments: JSON.stringify({ message: "plain WS assignment" }),
+          encrypted_function_args: [],
+        }),
+      });
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_spawn",
+            call_id: "call-spawn",
+            namespace,
+            name: "start_delegated_task",
+            arguments: JSON.stringify({ message: "plain WS assignment" }),
+            encrypted_function_args: [],
+            status: "completed",
+          },
+        }),
+      });
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "r-plaintext-v2-ws",
+            status: "completed",
+            output: [{
+              type: "function_call",
+              id: "fc_spawn",
+              call_id: "call-spawn",
+              namespace,
+              name: "start_delegated_task",
+              arguments: JSON.stringify({ message: "plain WS assignment" }),
+              encrypted_function_args: [],
+              status: "completed",
+            }],
+          },
+        }),
+      });
+    });
+    const config = { ...forwardConfig(), plaintextV2AgentMessages: true } as OcxConfig;
+    const request = plaintextV2CollaborationRequest();
+
+    takeSpendHome();
+    const response = await handleResponses(request, config, { model: "", provider: "" }, {
+      codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const frame = JSON.parse(FakeWebSocket.instances[0]!.sent[0]!) as {
+      type: string;
+      stream?: unknown;
+      input: Array<Record<string, unknown>>;
+    };
+    const additionalTools = frame.input.find(item => item.type === "additional_tools") as {
+      tools: Array<{
+        name: string;
+        tools: Array<{
+          name: string;
+          parameters: { properties: { message: Record<string, unknown> } };
+        }>;
+      }>;
+    };
+    expect(frame.type).toBe("response.create");
+    expect(frame.stream).toBeUndefined();
+    expect(additionalTools.tools[0]!.name).toBe("collaboration-optimize");
+    expect(additionalTools.tools[0]!.tools[0]!.name).toBe("start_delegated_task");
+    expect(additionalTools.tools[0]!.tools[0]!.parameters.properties.message.encrypted).toBeUndefined();
+
+    expect(isEagerRelaySseResponse(response)).toBe(true);
+    const clientText = await response.text();
+    expect(clientText).toContain("response.function_call_arguments.done");
+    const argumentDoneLine = clientText.split("\n")
+      .find(line => line.includes('"response.function_call_arguments.done"'))!;
+    const argumentDone = JSON.parse(argumentDoneLine.replace(/^data: /, "")) as Record<string, unknown>;
+    expect(argumentDone.namespace).toBe("collaboration");
+    expect(argumentDone.name).toBe("spawn_agent");
+    expect(argumentDone.encrypted_function_args).toEqual([]);
+    const completedLine = clientText.split("\n")
+      .find(line => line.includes('"response.completed"'))!;
+    const completed = JSON.parse(completedLine.replace(/^data: /, "")) as {
+      response: { output: Array<Record<string, unknown>> };
+    };
+    expect(completed.response.output[0]!.namespace).toBe("collaboration");
+    expect(completed.response.output[0]!.name).toBe("spawn_agent");
+    expect(completed.response.output[0]!.encrypted_function_args).toEqual([]);
+  });
+
+  test("plaintext v2 restoration overflow fails closed on the WS upstream path", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "r-plaintext-v2-ws-overflow",
+            status: "completed",
+            output: Array.from({ length: 10_000 }, (_, index) => ({
+              type: "function_call",
+              call_id: `call-${index}`,
+              namespace: PLAINTEXT_V2_COLLABORATION_NAMESPACE,
+              name: "start_delegated_task",
+              arguments: "{}",
+            })),
+          },
+        }),
+      });
+    });
+    const config = { ...forwardConfig(), plaintextV2AgentMessages: true } as OcxConfig;
+
+    takeSpendHome();
+    const response = await handleResponses(
+      plaintextV2CollaborationRequest(),
+      config,
+      { model: "", provider: "" },
+      { codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME },
+    );
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(isEagerRelaySseResponse(response)).toBe(true);
+    const clientText = await response.text();
+    expect(clientText).toContain("event: response.failed");
+    expect(clientText).toContain(PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE);
+    expect(clientText).toContain("data: [DONE]");
+    expect(clientText).not.toContain(PLAINTEXT_V2_COLLABORATION_NAMESPACE);
+    expect(clientText).not.toContain("start_delegated_task");
+    expect(FakeWebSocket.instances[0]!.closed).toBe(true);
+  });
+
   test("a successful WS upgrade bypasses the configured legacy tee path", async () => {
     installFake(ws => {
       ws.emit("open", {});
@@ -354,6 +548,7 @@ describe("handleResponses Codex WS relay selection", () => {
       });
     });
 
+    takeSpendHome();
     const response = await handleResponses(request(), forwardConfig(), { model: "", provider: "" }, {
       codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
     });
@@ -376,6 +571,7 @@ describe("handleResponses Codex WS relay selection", () => {
       { status: 200, headers: { "content-type": "text/event-stream" } },
     )) as typeof fetch;
 
+    takeSpendHome();
     const response = await handleResponses(request(), forwardConfig(), { model: "", provider: "" }, {
       codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
     });
@@ -397,6 +593,7 @@ describe("handleResponses Codex WS relay selection", () => {
     });
 
     const logCtx = { model: "", provider: "" };
+    takeSpendHome();
     const response = await handleResponses(request(), forwardConfig(), logCtx, {
       codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
     });
@@ -407,6 +604,27 @@ describe("handleResponses Codex WS relay selection", () => {
     expect(text).toContain("data: [DONE]");
     expect(logCtx.activeAttempt?.streamAborted).toBe(true);
     expect(FakeWebSocket.instances[0].closed).toBe(true);
+  });
+
+  test("handleResponses adopts the exchange stage onto the logged attempt (#4191)", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("close", { code: 1006 });
+    });
+
+    const logCtx = { model: "", provider: "" };
+    takeSpendHome();
+    const response = await handleResponses(request(), forwardConfig(), logCtx, {
+      codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+    });
+
+    expect([502, 504]).toContain(response.status);
+    const stage = (logCtx.activeAttempt as { codexWsStage?: Record<string, unknown> } | undefined)?.codexWsStage;
+    expect(stage).toBeDefined();
+    expect(stage?.closeCode).toBe(1006);
+    expect(stage?.sent).toBe(true);
+    expect(typeof stage?.ocxVersion).toBe("string");
+    expect(stage?.bunVersion).toBe(BOUNDED_WS_RUNTIME);
   });
 
   test.skipIf(bunSupportsBoundedCodexWsRelay())(
@@ -420,6 +638,7 @@ describe("handleResponses Codex WS relay selection", () => {
         { status: 200, headers: { "content-type": "text/event-stream" } },
       )) as typeof fetch;
 
+      takeSpendHome();
       const response = await handleResponses(request(), forwardConfig(), { model: "", provider: "" });
 
       expect(FakeWebSocket.instances).toHaveLength(0);
@@ -457,6 +676,7 @@ describe("handleResponses Codex WS relay selection", () => {
       { status: 200, headers: { "content-type": "text/event-stream" } },
     )) as typeof fetch;
 
+    takeSpendHome();
     const response = await handleResponses(request(), forwardConfig(), { model: "", provider: "" });
     const text = await response.text();
 
@@ -505,6 +725,7 @@ describe("codexWsUpstreamFetch", () => {
       ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r1", status: "completed", output: [] } }) });
     };
     globalThis.WebSocket = CapturingSocket as unknown as typeof WebSocket;
+    takeSpendHome();
     const response = await handleResponses(new Request("http://localhost/v1/responses", {
       method: "POST",
       headers: { authorization: "Bearer fixture", "content-type": "application/json", "x-openai-internal-codex-responses-lite": "true" },
@@ -839,12 +1060,12 @@ describe("codexWsUpstreamFetch", () => {
       });
 
     test("keeps noncanonical providers on the stream path", async () => {
-      const response = await receive(refusal, [], "https://gateway.example/v1/responses");
+      const response = await receive(refusal, [], "https://api.openai.com/v1/responses");
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("event: error");
     });
 
-    test.each([CODEX_URL, "https://gateway.example/v1/responses"])(
+    test.each([CODEX_URL, "https://api.openai.com/v1/responses"])(
       "settles synchronous error/send-throw/close races and detaches deadlines for %s", async url => {
         jest.useFakeTimers();
         const abort = new AbortController();
@@ -1682,24 +1903,61 @@ describe("oversized Codex create frames", () => {
     expect(failure.message).toContain("closed before a Responses terminal event (close 1006)");
   });
 
-  test("dials the configured provider's own wss URL for an opt-in upstream", async () => {
-    process.env.HTTPS_PROXY = "http://proxy.example:8080";
-    process.env.NO_PROXY = "sub2api.example.com:443";
+  test("a pre-terminal 1006 marks the response with a content-free stage record", async () => {
     installFake(ws => {
       ws.emit("open", {});
-      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r-ws" } }) });
+      ws.emit("close", { code: 1006, reason: "abnormal closure detail" });
     });
+    const response = await codexWsUpstreamFetch(CODEX_URL, streamingInit(), (() => {
+      throw new Error("fallback must not run after open");
+    }) as unknown as typeof fetch);
+
+    expect(response.status).toBe(502);
+    const stage = readCodexWsStage(response);
+    expect(stage).toBeDefined();
+    expect(stage?.closeCode).toBe(1006);
+    expect(stage?.sent).toBe(true);
+    expect(stage?.requestBytes).toBeGreaterThan(0);
+    expect(stage?.upstreamFrames).toBe(0);
+    expect(stage?.firstFrameMs).toBeNull();
+    expect(stage?.reused).toBe(false);
+    expect(typeof stage?.ocxVersion).toBe("string");
+    expect(stage?.bunVersion).toBe(BOUNDED_WS_RUNTIME);
+    // Content-free: the close reason is upstream text and never enters the record.
+    expect(JSON.stringify(stage)).not.toContain("abnormal closure detail");
+    expect(JSON.stringify(stage)).not.toContain("reason");
+  });
+
+  test("a committed exchange marks exactly one stage and never byte-counts the frame", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.created", response: { id: "r1" } }) });
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r1" } }) });
+    });
+    const response = await codexWsUpstreamFetch(CODEX_URL, streamingInit(), (() => {
+      throw new Error("fallback must not run after open");
+    }) as unknown as typeof fetch);
+
+    expect(response.status).toBe(200);
+    await response.text();
+    const stage = readCodexWsStage(response);
+    expect(stage).toBeDefined();
+    // The happy path skips the UTF-8 walk of the create frame on purpose.
+    expect(stage?.requestBytes).toBeNull();
+    expect(stage?.closeCode).toBeNull();
+    expect(stage?.sent).toBe(true);
+    expect(stage?.relayedEvents).toBeGreaterThan(0);
+  });
+
+  test("falls back before dialing a custom upstream URL", async () => {
     const sentinel = new Response("fallback");
     const response = await codexWsUpstreamFetch(
       "https://sub2api.example.com/v1/responses",
       streamingInit(),
       (async () => sentinel) as typeof fetch,
     );
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    expect(FakeWebSocket.instances[0]!.url).toBe("wss://sub2api.example.com/v1/responses");
-    expect(FakeWebSocket.instances[0]!.options?.proxy).toBeUndefined();
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    expect(await response.text()).toContain("response.completed");
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(response).toBe(sentinel);
   });
 
   test("response.done normalization keeps unknown usage fields (#41980 parity)", async () => {

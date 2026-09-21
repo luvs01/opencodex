@@ -1,9 +1,5 @@
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { findCommand } from "./registry";
-
-const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
+import { packageVersion as readPackageVersion } from "../lib/package-version";
 
 /**
  * Version of the `ocx` bundle this process is running from.
@@ -13,9 +9,7 @@ const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta
  * rather than throwing; callers must treat that as "cannot compare", not as a mismatch.
  */
 export function packageVersion(): string {
-  const raw = readFileSync(join(repoRoot, "package.json"), "utf8");
-  const parsed = JSON.parse(raw) as { version?: unknown };
-  return typeof parsed.version === "string" ? parsed.version : "unknown";
+  return readPackageVersion();
 }
 
 export function printVersion(): void {
@@ -27,10 +21,13 @@ export function printUsage(): void {
 
 Usage:
   ocx setup                   Interactive setup (alias: init)
-  ocx start [--port <port>]   Start the proxy server (auto-syncs models to Codex)
+  ocx start [--port <port>] [--socks5 [host:port] | --socks5-off]
+                              Start the proxy; SOCKS5 defaults to 127.0.0.1:10808
   ocx stop                    Stop the proxy AND restore native Codex (plain codex works again)
   ocx restore                 Restore native Codex without stopping (alias: eject)
   ocx restore back            Re-point codex at the running proxy (undo restore)
+  ocx restore --remove-codex-provider-table
+                              Also drop [model_providers.opencodex] that a paginated restore kept
   ocx recover-history --legacy-openai --yes
                                Force all user-message opencodex rows to OpenAI (legacy recovery)
   ocx recover-history --ocx-compaction <thread-id> --yes
@@ -41,10 +38,12 @@ Usage:
   ocx tray <sub>              Windows status tray (install|start|stop|status|uninstall)
   ocx ensure                  Ensure the proxy is running and Codex config/cache are current
   ocx connect <url>           Connect this machine to a remote OpenCodex hub (credential via stdin)
+  ocx remote-workspace <sub>  Pair/run an OCX-only remote execution computer
   ocx disconnect              Restore local state and clear the hub connection
   ocx sync [--restart-codex]  Fetch models from providers and inject into Codex config
   ocx sync-cache [--restart-codex]
                               Refresh Codex's model cache from the active catalog
+  ocx catalog pull <https-url> Install a validated remote catalog and refresh the Codex cache
   ocx status                  Check proxy server status (on a hub: one block with its ports and token source)
   ocx doctor                  Diagnose environment/network issues (WSL, proxy, ChatGPT reachability)
   ocx doctor --reclaim-response-temps
@@ -86,6 +85,7 @@ Usage:
   ocx grok <sub>              Grok Build model selection and apply
   ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection
   ocx config <sub>            Validated configuration show/get/set/import/export
+  ocx companion <show|set|reset>  Menu-bar and widget companion usage settings
   ocx lab <sub>               Read-only Compatibility Lab projection inspection
   ocx claude [args...]        Launch Claude Code wired to the proxy (model discovery on)
   ocx claude desktop [sub]    Manage and apply Claude Desktop's four-family profile
@@ -100,6 +100,8 @@ Examples:
   ocx init                    Set up provider and inject into Codex
   ocx start                   Start on default port (10100)
   ocx start --port 8080       Start on custom port
+  ocx start --socks5          Outbound via SOCKS5 at 127.0.0.1:10808 (saved)
+  ocx start --socks5-off      Clear a saved SOCKS5 outbound proxy
   ocx help service            Show service command help
   ocx help hub                Explain the hub topology, token file, and invites
   ocx sync                    Sync available models to Codex`);

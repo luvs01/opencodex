@@ -26,6 +26,7 @@ import {
 } from "./npm-cache-preflight.mjs";
 import { handoffWindowsTrayForUpdate, planWindowsTrayUpdate } from "./tray-update-plan.mjs";
 import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
+import { packageVersion } from "../lib/package-version";
 import { selfLaunchArgv } from "../lib/self-launch-argv";
 
 /**
@@ -143,11 +144,7 @@ export function resolvePnpmActiveLauncher(owner: PnpmGlobalOwner): string | null
 }
 
 export function currentVersion(): string {
-  try {
-    return (JSON.parse(readFileSync(join(HERE, "..", "..", "package.json"), "utf8")).version as string) ?? "?";
-  } catch {
-    return "?";
-  }
+  return packageVersion("?");
 }
 
 export function defaultUpdateTag(current: string): Channel {
@@ -479,6 +476,16 @@ export async function runUpdate(): Promise<void> {
         "⚠️  Codex resume-history metadata restore is incomplete (a backup manifest remains).\n" +
         "    The DB may be busy or the manifest/target may need review; untracked routed history is intentionally unchanged.\n" +
         "    After the update: close the Codex app, run 'ocx doctor', then run 'ocx stop' once to retry.",
+      );
+    }
+    if (decision.reason === "history-deferred") {
+      // Not the same warning: nothing was restored here. Saying "history metadata is
+      // incomplete" would imply config and catalog came back, and an operator who
+      // believed that would not know a teardown is still owed.
+      console.warn(
+        "⚠️  The shared teardown was refused by the Codex history preflight and restored nothing.\n" +
+        "    Config, catalog, history and provenance were preserved, and the teardown receipt was kept.\n" +
+        "    The proxy is down, so the update continues; close the Codex app and run 'ocx stop' once afterwards to finish the restore.",
       );
     }
   }

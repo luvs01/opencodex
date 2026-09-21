@@ -17,7 +17,7 @@ What opencodex is, what it owns on disk, and the invariants nothing may break.
 | Doc | Scope |
 | --- | --- |
 | [`overview.md`](overview.md) | Product boundary, local state ownership, and the non-negotiable invariants index. |
-| [`runtime.md`](runtime.md) | Entrypoints, process lifecycle, CLI surface, and provider/adapter selection. |
+| [`runtime.md`](runtime.md) | Entrypoints, process lifecycle, CLI surface, and the Remote Hub, sideband, and request-compatibility contracts on that path. |
 
 ### Tier 2 — Configuration and catalog
 
@@ -36,13 +36,14 @@ The wire surfaces a client actually talks to.
 
 | Doc | Scope |
 | --- | --- |
+| [`transports/byte-accounting.md`](transports/byte-accounting.md) | Request-copy and stream-buffer byte accounting shared by parsing, SSE rewriting, the adapters, and the translator budget. |
 | [`transports/responses.md`](transports/responses.md) | The Responses HTTP/SSE data plane, combo failover, and streaming commit boundaries. |
 | [`transports/streaming-health.md`](transports/streaming-health.md) | Heartbeat and stall deadlines, plus the opt-in WebSocket transport. |
 | [`transports/inventory.md`](transports/inventory.md) | The per-provider transport table and diagnostic outbound safety. |
 | [`data-planes/images.md`](data-planes/images.md) | Standalone image generation and edit relay. |
 | [`data-planes/search.md`](data-planes/search.md) | Hosted search relay and exact account selectors. |
 | [`data-planes/inbound-compat.md`](data-planes/inbound-compat.md) | Chat Completions inbound, Anthropic-shaped clients, and JSON-upstream streaming clients. |
-| [`remote-workspace.md`](remote-workspace.md) | Inactive workspace protocol, cryptographic identity primitives, and bounded framing. |
+| [`remote-workspace.md`](remote-workspace.md) | Opt-in workspace identity, executor grants, runtime adapters, management and dashboard integration. |
 
 ### Tier 4 — Providers and adapters
 
@@ -50,6 +51,7 @@ Per-vendor contracts and the adapter authority that constructs them.
 
 | Doc | Scope |
 | --- | --- |
+| [`providers-and-adapters.md`](providers-and-adapters.md) | Provider and adapter selection, the adapter inventory, live model discovery, and the hosted-search continuation bridge. |
 | [`providers/openai-tiers.md`](providers/openai-tiers.md) | Pool/Direct account modes, API-key separation, wire identity, and quota evidence. |
 | [`providers/cursor.md`](providers/cursor.md) | Cursor native exec, parameterized models, checkpoints, and active-context usage. |
 | [`providers/google.md`](providers/google.md) | Gemini thought-text, response parts, thought-signature replay, and adjacency repair. |
@@ -76,6 +78,7 @@ Background service, docs, release, and design discipline.
 
 | Doc | Scope |
 | --- | --- |
+| [`desktop-shell.md`](desktop-shell.md) | Tauri desktop shell, proxy attachment and sidecar lifecycle, tray controls, bootstrap navigation, and desktop companion presence. |
 | [`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) | Service install/repair, platform launchers, tray, and sidecar processes. |
 | [`ops/docs-and-release.md`](ops/docs-and-release.md) | Docs site, workflow map, branch policy, release flow, and cross-platform CI. |
 | [`design-methodology.md`](design-methodology.md) | Stage ordering for new GUI, CLI, and user-facing surfaces. |
@@ -83,25 +86,27 @@ Background service, docs, release, and design discipline.
 ## Which doc describes which source
 
 A source area can be described by more than one doc, because these docs are organised by topic and
-`src/` is organised by module. Changing an area obliges the same change to update every doc listed
-for it; see [`AGENTS.md`](AGENTS.md).
+`src/` is organised by module. Changing an area requires review of every listed document. Edit only the documents whose local explanation changes; named cross-cutting authorities and dependents are listed below.
 
 | Source path | Described by |
 | --- | --- |
 | `.github/` | [`ops/docs-and-release.md`](ops/docs-and-release.md) |
+| `app/` | [`overview.md`](overview.md) |
 | `bin/` | [`runtime.md`](runtime.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
+| `desktop/` | [`desktop-shell.md`](desktop-shell.md) |
 | `docs-site/` | [`ops/docs-and-release.md`](ops/docs-and-release.md) |
 | `gui/` | [`overview.md`](overview.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`design-methodology.md`](design-methodology.md) |
 | `scripts/` | [`overview.md`](overview.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
-| `src/adapters/` | [`runtime.md`](runtime.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers/cursor.md`](providers/cursor.md)<br>[`providers/chat-compat.md`](providers/chat-compat.md)<br>[`adapters/registry.md`](adapters/registry.md) |
-| `src/chat/` | [`runtime.md`](runtime.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md) |
+| `src/adapters/` | [`runtime.md`](runtime.md)<br>[`transports/byte-accounting.md`](transports/byte-accounting.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/cursor.md`](providers/cursor.md)<br>[`providers/chat-compat.md`](providers/chat-compat.md)<br>[`adapters/registry.md`](adapters/registry.md) |
+| `src/chat/` | [`runtime.md`](runtime.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md) |
 | `src/claude/` | [`runtime.md`](runtime.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md) |
 | `src/cli.ts` | [`runtime.md`](runtime.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
 | `src/cli/` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
 | `src/client/` | [`runtime.md`](runtime.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md) |
 | `src/clients/` | [`clients/integrations.md`](clients/integrations.md) |
 | `src/codex/` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md)<br>[`codex-home.md`](codex-home.md)<br>[`catalog.md`](catalog.md)<br>[`subagents.md`](subagents.md)<br>[`providers/openai-tiers.md`](providers/openai-tiers.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
-| `src/combos/` | [`runtime.md`](runtime.md) |
+| `src/combos/` | [`runtime.md`](runtime.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md) |
+| `src/companion/` | [`overview.md`](overview.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md) |
 | `src/compatibility/` | [`runtime.md`](runtime.md)<br>[`adapters/compatibility-contracts.md`](adapters/compatibility-contracts.md) |
 | `src/config.ts` | [`overview.md`](overview.md)<br>[`runtime.md`](runtime.md)<br>[`config.md`](config.md)<br>[`providers/openai-tiers.md`](providers/openai-tiers.md) |
 | `src/config/` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md) |
@@ -112,35 +117,50 @@ for it; see [`AGENTS.md`](AGENTS.md).
 | `src/index.ts` | [`runtime.md`](runtime.md) |
 | `src/integrations/` | [`clients/integrations.md`](clients/integrations.md) |
 | `src/lab/` | [`runtime.md`](runtime.md)<br>[`adapters/compatibility-lab.md`](adapters/compatibility-lab.md) |
-| `src/lib/` | [`overview.md`](overview.md)<br>[`runtime.md`](runtime.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`clients/integrations.md`](clients/integrations.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
-| `src/oauth/` | [`runtime.md`](runtime.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md) |
-| `src/providers/` | [`runtime.md`](runtime.md)<br>[`subagents.md`](subagents.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md) |
+| `src/lib/` | [`overview.md`](overview.md)<br>[`runtime.md`](runtime.md)<br>[`transports/byte-accounting.md`](transports/byte-accounting.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`clients/integrations.md`](clients/integrations.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
+| `src/oauth/` | [`runtime.md`](runtime.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md) |
+| `src/providers/` | [`runtime.md`](runtime.md)<br>[`subagents.md`](subagents.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md) |
 | `src/reasoning-effort.ts` | [`runtime.md`](runtime.md) |
 | `src/remote-control/` | [`remote-workspace.md`](remote-workspace.md) |
 | `src/remote/` | [`runtime.md`](runtime.md) |
-| `src/responses/` | [`runtime.md`](runtime.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`providers/kiro.md`](providers/kiro.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`providers/chat-compat.md`](providers/chat-compat.md) |
+| `src/responses/` | [`runtime.md`](runtime.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/kiro.md`](providers/kiro.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`providers/chat-compat.md`](providers/chat-compat.md) |
 | `src/router.ts` | [`runtime.md`](runtime.md) |
 | `src/routing/` | [`catalog.md`](catalog.md) |
-| `src/server/` | [`runtime.md`](runtime.md)<br>[`catalog.md`](catalog.md)<br>[`subagents.md`](subagents.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/streaming-health.md`](transports/streaming-health.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/images.md`](data-planes/images.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`adapters/registry.md`](adapters/registry.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) |
+| `src/server/` | [`runtime.md`](runtime.md)<br>[`catalog.md`](catalog.md)<br>[`subagents.md`](subagents.md)<br>[`transports/byte-accounting.md`](transports/byte-accounting.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/streaming-health.md`](transports/streaming-health.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/images.md`](data-planes/images.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`adapters/registry.md`](adapters/registry.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) |
+| `src/server/index.ts` | [`adapters/compatibility-lab.md`](adapters/compatibility-lab.md) |
+| `src/server/management/companion-routes.ts` | [`desktop-shell.md`](desktop-shell.md) |
 | `src/service.ts` | [`runtime.md`](runtime.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
+| `src/service/` | [`runtime.md`](runtime.md) |
 | `src/stall-timeout.ts` | [`runtime.md`](runtime.md) |
 | `src/storage/` | [`runtime.md`](runtime.md) |
 | `src/tray/` | [`runtime.md`](runtime.md) |
 | `src/types.ts` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md) |
 | `src/update/` | [`runtime.md`](runtime.md) |
 | `src/usage/` | [`runtime.md`](runtime.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md) |
+| `src/usage/timeline.ts` | [`gui-and-management-api.md`](gui-and-management-api.md) |
 | `src/vision/` | [`runtime.md`](runtime.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md) |
-| `src/web-search/` | [`runtime.md`](runtime.md) |
+| `src/web-search/` | [`runtime.md`](runtime.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md) |
 
 ### Not described by any doc
 
 | Source path | Why |
 | --- | --- |
 | `src/bridge.ts` | no doc names this file; it is the legacy adapter bridge entry and its behavior is described under the adapter registry without a path reference |
+| `src/bridge/` | no doc names this directory; it holds the leaves moved out of the src/bridge.ts facade and inherits the same adapter-registry description the facade has |
 | `src/quota/` | no doc names a path here; quota evidence is described in providers/openai-tiers.md in prose only |
 | `src/service-manager-probe.ts` | no doc names this file; service probing is described in ops/service-and-sidecars.md without a path reference |
 | `src/sidecar/` | no doc names a path here; ops/service-and-sidecars.md describes sidecar behavior in prose only |
 | `src/types/` | shared declarations plus the tool-name and wire-pin resolvers, which no doc currently describes |
+
+## Cross-cutting contracts
+
+Source review remains defined by the source-to-doc map above. This registry names each authoritative statement and the documents that review it. Link validation proves declared topology, not behavioral correctness.
+
+| Contract | Authority | Review dependents |
+| --- | --- | --- |
+| `paginated-history-writer` | [`codex-home.md#paginated-history-writer-boundary`](codex-home.md#paginated-history-writer-boundary) | [`catalog.md`](catalog.md)<br>[`config.md`](config.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md)<br>[`providers/openai-tiers.md`](providers/openai-tiers.md)<br>[`runtime.md`](runtime.md)<br>[`subagents.md`](subagents.md) |
+| `request-copy-accounting` | [`transports/byte-accounting.md#request-copy-accounting`](transports/byte-accounting.md#request-copy-accounting) | [`adapters/registry.md`](adapters/registry.md)<br>[`catalog.md`](catalog.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`clients/integrations.md`](clients/integrations.md)<br>[`data-planes/images.md`](data-planes/images.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md)<br>[`overview.md`](overview.md)<br>[`providers/chat-compat.md`](providers/chat-compat.md)<br>[`providers/cursor.md`](providers/cursor.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`runtime.md`](runtime.md)<br>[`subagents.md`](subagents.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`transports/streaming-health.md`](transports/streaming-health.md) |
+| `stream-buffer-accounting` | [`transports/byte-accounting.md#stream-buffer-accounting`](transports/byte-accounting.md#stream-buffer-accounting) | [`adapters/registry.md`](adapters/registry.md)<br>[`catalog.md`](catalog.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`clients/integrations.md`](clients/integrations.md)<br>[`data-planes/images.md`](data-planes/images.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md)<br>[`overview.md`](overview.md)<br>[`providers/chat-compat.md`](providers/chat-compat.md)<br>[`providers/cursor.md`](providers/cursor.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`runtime.md`](runtime.md)<br>[`subagents.md`](subagents.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`transports/streaming-health.md`](transports/streaming-health.md) |
 
 ## Decision records
 
