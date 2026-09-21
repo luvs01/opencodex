@@ -490,9 +490,12 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
   // block's provider table — duplicate key — and alias rewriting skips provider orphans
   // because they have no alias and no model id). The dot-terminated prefix keeps a user's
   // `[model_providers.opencodex_backup]` out of scope.
+  const ownedProviderIds = new Set<string>();
   for (const [position, header] of headers.entries()) {
     if (header.array || header.segments.length !== 2 || header.segments[0] !== "model_providers") continue;
-    // Inside the fence the regular splice owns the table, so do not add it as an orphan.
+    // Inside the fence the regular splice owns the table, so do not add it as an orphan —
+    // but it is still ownership evidence for the markerless inherited rows below, whose
+    // only link back to us is their `model_provider` reference.
     const insideRegion = region !== null
       && header.index >= region.start && header.index < region.end;
     const end = clampEnd(header.index, headers[position + 1]?.index ?? content.length);
@@ -523,6 +526,7 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
     // shows it as a bare `x-opencodex-grok = "1"` assignment. Both forms decide.
     if (!hasInlineOwnershipMarker(keys.get("extra_headers"))
       && keys.get(OPENCODEX_GROK_MARKER) !== "1") continue;
+    ownedProviderIds.add(header.segments[1]!);
     if (insideRegion) continue;
     if (header.segments[1] === OPENCODEX_PROVIDER_ID) {
       orphans.push({
@@ -563,7 +567,18 @@ function findOpencodexOrphans(content: string, region: ManagedRegion | null): Or
         if (childKeys.get(OPENCODEX_GROK_MARKER) === "1") hasOwnershipMarker = true;
       }
     }
-    const legacyGenerated = isLegacyGeneratedTable(header.segments[1]!, keys);
+    // The pre-marker managed block routed models through `model_provider = "opencodex"`
+    // with no row-local marker; a Grok rewrite that drops the fence leaves such rows
+    // unclaimable, so their aliases stay user-reserved and every sync writes a -2
+    // duplicate beside the stale original. Inheritance is accepted as a LEGACY
+    // fingerprint only — migration when this write emits the replacement, never teardown
+    // authority — and only when the referenced provider passed the strict predicate and
+    // the alias carries the generated shape a user table would not normally reuse.
+    const inheritedLegacy =
+      keys.get("model_provider") === OPENCODEX_PROVIDER_ID
+      && ownedProviderIds.has(OPENCODEX_PROVIDER_ID)
+      && isGeneratedAliasForModel(header.segments[1]!, modelId);
+    const legacyGenerated = isLegacyGeneratedTable(header.segments[1]!, keys) || inheritedLegacy;
     // A marker is durable deletion authority. A legacy-fingerprint model keeps dev's
     // conservative classification and is migrated only when this write replaces it.
     const ownership: "explicit" | "legacy" = hasOwnershipMarker

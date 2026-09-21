@@ -1502,6 +1502,56 @@ describe("Grok orphan adoption — fence boundary (#511 follow-up)", () => {
     expect(() => Bun.TOML.parse(content)).not.toThrow();
   });
 
+  // The markerless variant of the same rewrite: the provider-inheritance block shape
+  // carried no row-local marker, so after a fence-dropping Grok rewrite a strict
+  // per-model-marker rule would leave the stale row user-owned — its alias stays
+  // reserved and the regenerated model lands on a -2 suffix while selectors keep
+  // resolving the stale original. These rows are adopted as LEGACY fingerprints:
+  // migrated when this write emits their replacement, never teardown authority.
+  test("adopts markerless model_provider-referencing entries left unfenced by a Grok rewrite", () => {
+    writeFileSync(configPath, [
+      "[ui]",
+      'fork_secondary_model = "grok-build"',
+      "",
+      "[model_providers.opencodex]",
+      "[model_providers.opencodex.extra_headers]",
+      'x-opencodex-grok = "1"',
+      'base_url = "http://127.0.0.1:10100/v1"',
+      'api_backend = "responses"',
+      'api_key = "opencodex-loopback"',
+      "",
+      "[model.ocx-gpt-5-6-sol]",
+      'model = "gpt-5.6-sol"',
+      'model_provider = "opencodex"',
+      'name = "OCX gpt-5.6-sol"',
+      "",
+      "[model.ocx-gpt-5-6-terra]",
+      'model = "gpt-5.6-terra"',
+      'model_provider = "opencodex"',
+      'name = "OCX gpt-5.6-terra"',
+      "",
+      "[models]",
+      'default = "ocx-gpt-5-6-sol"',
+    ].join("\n"));
+
+    const result = injectGrokConfig(10100, MODELS, { grokHome });
+    expect(result).toMatchObject({ ok: true, changed: true });
+
+    const content = readFileSync(configPath, "utf8");
+    // The sol row is emitted this write, so the markerless original is replaced and its
+    // alias released — no -2 duplicate, no stale row resolving the default selector. The
+    // retired terra row is legacy-only evidence: not emitted, so it is preserved rather
+    // than deleted, and its alias stays reserved.
+    expect(tables(content)).toEqual(["ocx-gpt-5-6-terra", "ocx-gpt-5-6-sol"]);
+    expect(content).not.toContain("[model.ocx-gpt-5-6-sol-2]");
+    expect(content).not.toContain("[model.ocx-gpt-5-6-terra-2]");
+    const survivor = /^default = "([^"]+)"/m.exec(content)?.[1];
+    expect(content).toContain(`[model.${survivor}]`);
+    expect(content).toContain("context_window = 372000");
+    expect(content).toContain('fork_secondary_model = "grok-build"');
+    expect(() => Bun.TOML.parse(content)).not.toThrow();
+  });
+
   test("does not adopt a model referencing a provider that fails the ownership predicate", () => {
     writeFileSync(configPath, [
       "[model_providers.my-gateway]",

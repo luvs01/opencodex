@@ -21,6 +21,7 @@ extra_headers = { "x-opencodex-grok" = "1" }
 model = "gpt-5.6-sol"
 model_provider = "opencodex"
 name = "OCX gpt-5.6-sol"
+extra_headers = { "x-opencodex-grok" = "1" }
 context_window = 272000
 supports_reasoning_effort = true
 reasoning_effort = "low"
