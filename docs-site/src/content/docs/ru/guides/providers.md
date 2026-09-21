@@ -16,7 +16,7 @@ description: Все способы, которыми opencodex аутентиф�
 
 Используйте «голый» `gpt-5.6-sol` с опцией Pool/Direct на странице Providers или
 `openai-apikey/gpt-5.6-sol` для API. Между маршрутами учётных данных нет сквозного фолбэка.
-Маршрут API публикует метаданные: контекст 1,050,000 / максимум входных токенов 922,000. Его
+Маршрут API публикует метаданные: контекст 922,000 / максимум входных токенов 922,000. Его
 виртуальные id `sol-pro`, `terra-pro` и `luna-pro` сохраняют выбранную публичную идентичность, тогда
 как в фактическом запросе используется базовая модель плюс `reasoning.mode: "pro"`.
 
@@ -60,7 +60,7 @@ description: Все способы, которыми opencodex аутентиф�
 | --- | --- | --- |
 | `key` | Отправляет ваш API-ключ (`Authorization: Bearer …` либо `x-api-key` / `api-key` в зависимости от адаптера). Ключ может быть литералом или ссылкой вида `${ENV_VAR}`. | Большинство провайдеров. |
 | `forward` | Передаёт провайдеру **входящие заголовки аутентификации Codex** без изменений — ключ не хранится. Это сквозной режим (passthrough) входа через ChatGPT. | OpenAI (адаптер `openai-responses`). |
-| `oauth` | Берёт сохранённый OAuth-токен доступа (автоматически обновляется до истечения срока) и использует его как bearer-ключ. | xAI, Anthropic, Kimi, Kiro, Google Antigravity, Cursor, GitHub Copilot. |
+| `oauth` | Берёт сохранённый OAuth-токен доступа (автоматически обновляется до истечения срока) и использует его как bearer-ключ. | xAI, Anthropic, Kimi, Kiro, Google Antigravity, Cursor, Command Code, GitHub Copilot, Nous Portal. |
 
 Повтор при 429 на том же ключе ([`retryOn429`](/ru/reference/configuration/)) применим только к
 провайдерам с API-ключом (`authMode: "key"`). Пресеты OAuth, forward и local исключены — их
@@ -93,33 +93,63 @@ account id, OpenAI beta/originator/session — см. [Адаптеры](/ru/refe
 
 ## 2. Вход по аккаунту (OAuth)
 
-Семь пресетов провайдеров используют вход через OAuth — плюс GitHub Copilot через
+Восемь пресетов провайдеров используют вход через OAuth — плюс GitHub Copilot через
 экспериментальный неофициальный мост device flow. opencodex хранит их учётные данные в
-`~/.opencodex/auth.json` и обновляет их автоматически. CLI входа также принимает `chatgpt`: эта
-команда получает учётные данные ChatGPT и одновременно создаёт запись провайдера в режиме `forward`.
+`~/.opencodex/auth.json` и обновляет их автоматически. CLI входа принимает и `ocx login codex`, но это
+не один из провайдеров выше: команда направляется во вход пула аккаунтов Codex (тот же поток, что и
+`ocx account login codex`). У пула отдельный реестр аккаунтов, поэтому такому входу нужен запущенный
+прокси. `chatgpt` и `openai` — псевдонимы того же маршрута.
 
 ```bash
 ocx login xai          # xAI Grok
 ocx login anthropic    # Anthropic Claude (Pro/Max)
 ocx login kimi         # Moonshot Kimi
+ocx login nous         # Nous Portal (device grant; модели free + paid)
 ocx login kiro         # импорт учётных данных kiro-cli (с фолбэком на токен)
 ocx login google-antigravity
 ocx login cursor       # отдельный PKCE-вход Cursor
 ocx login command-code # браузерный OAuth Command Code (или импорт ~/.commandcode/auth.json)
+ocx login devin       # Cognition/Devin: сначала импорт данных Devin CLI, иначе вход через браузер Auth0
 ocx login github-copilot  # device flow GitHub → токен Copilot (Copilot Pro/Business)
-ocx login chatgpt      # отдельный OAuth-вход ChatGPT
+ocx login codex        # пул аккаунтов Codex (псевдонимы: chatgpt, openai; нужен запущенный прокси)
 ocx logout <provider>
 ```
 
 | Провайдер | Адаптер | Базовый URL | Примечания |
 | --- | --- | --- | --- |
-| `xai` | `openai-chat` | `https://api.x.ai/v1` | Каталог Grok загружается в реальном времени; фолбэк по умолчанию — `grok-4.5`. |
+| `xai` | `openai-chat` | `https://cli-chat-proxy.grok.com/v1` | OAuth использует отдельный шлюз подписки Grok CLI. Переопределение с API-ключом использует `https://api.x.ai/v1` и может добавлять Priority Processing. Каталог Grok загружается в реальном времени; фолбэк по умолчанию — `grok-4.5`. |
 | `anthropic` | `anthropic` | `https://api.anthropic.com` | Модели Claude; актуальный список моделей загружается из `/v1/models`. |
 | `kimi` | `openai-chat` | `https://api.kimi.com/coding/v1` | Модели Kimi K2.7/K2.6/K2.5 для кодинга. |
-| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Первый вход импортирует существующую сессию после установки Kiro CLI (в Unix: `curl -fsSL https://cli.kiro.dev/install | bash`; в Windows PowerShell: `irm 'https://cli.kiro.dev/install.ps1' | iex`; затем выполните `kiro-cli login`). **Добавить аккаунт** выполняет выход из `kiro-cli`, запускает новый вход через браузер, переключает аккаунт самого `kiro-cli` и сохраняет метаданные профиля отдельно для каждого аккаунта. Существующие аккаунты OpenCodex сохраняются; при отмене или сбое восстанавливается предыдущая сессия `kiro-cli`. |
-| `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth поверх протокола Cloud Code Assist. Используется поддерживаемый статический каталог из шести моделей, поскольку CCA не предоставляет общий эндпоинт `/models`. |
+| `nous` | `openai-chat` | `https://inference-api.nousresearch.com/v1` | Шлюз подписки Nous Research (тот же бэкенд, что использует Hermes Agent). Вход по device grant против `portal.nousresearch.com`; access-токен — это JWT для каждого запроса к inference. Смешанный каталог платных + `:free` моделей (`tencent/hy3:free`, `stepfun/step-3.7-flash:free`, …) обнаруживается вживую по авторизованному аккаунту. Refresh-токены одноразовые и ротируются при каждом обновлении. |
+| `kiro` | `kiro` | `https://runtime.us-east-1.kiro.dev` | Первый вход импортирует существующую сессию после установки Kiro CLI (в Unix: `curl -fsSL https://cli.kiro.dev/install` &#124; `bash`; в Windows PowerShell: `irm 'https://cli.kiro.dev/install.ps1'` &#124; `iex`; затем выполните `kiro-cli login`). **Добавить аккаунт** выполняет выход из `kiro-cli`, запускает новый вход через браузер, переключает аккаунт самого `kiro-cli` и сохраняет метаданные профиля отдельно для каждого аккаунта. Существующие аккаунты OpenCodex сохраняются; при отмене или сбое восстанавливается предыдущая сессия `kiro-cli`. |
+| `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth поверх протокола Cloud Code Assist. Живое обнаружение использует аутентифицированный CCA-эндпоинт `v1internal:fetchAvailableModels` и публикует только agent-модели, доступные текущему аккаунту; поддерживаемый каталог остаётся резервным вариантом. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Экспериментальный PKCE-вход, живой транспорт HTTP/2 и обнаружение моделей с фильтрацией по аккаунту. |
+| `devin` | `devin` | `https://server.codeium.com` | Экспериментальный неофициальный мост к Cognition/Devin. Вход сначала импортирует учётные данные, которые уже хранит установленный Devin CLI (`devin auth login` записывает `devin-session-token` в его `credentials.toml`); если их нет — открывает страницу Auth0 в браузере и обменивает вставленный токен через `RegisterUser` на долгоживущий API-ключ. `ocx login devin-cli` продолжает работать как устаревший алиас. Список моделей запрашивается для каждой учётной записи через `GetCascadeModelConfigs`; потоковая передача идёт только по пути `runTurn` поверх Connect-RPC. В пресете панели по умолчанию отсутствует. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Экспериментально. Device flow GitHub + обмен `copilot_internal` (OAuth-клиент VS Code). Требуется активная подписка Copilot; это не официальный сторонний API. |
+
+Проверки квот аккаунтов и провайдера Google Antigravity используют фиксированные адреса Google, включая резервный запрос списка моделей. Для этих адресов поддерживается прозрачный Fake-IP DNS с сохранением проверки TLS, запрета перенаправлений и проверки частных адресов. Пользовательский base URL меняет только запросы моделей; `NO_PROXY` сохраняет политику прямого подключения.
+
+### Диагностика потерь схем инструментов Google
+
+Объявления инструментов Google компилируются для выбранного класса конечной точки. Когда отладка
+провайдера включена командой `ocx debug provider on`, переключателем Logs в дашборде или переменной
+`OCX_DEBUG=1`, потеря схемы при преобразовании совместимости на пути с отсутствующей политикой или
+`compatible` записывает событие
+`[ocx:google:google-tool-schema-loss]` (следите за ним через `ocx debug provider logs -f`). Оно
+содержит только версию отчёта, класс конечной точки, индикатор `lossy`, ограниченный счётчик
+неопределённых сравнений, фиксированные категории потерь с ограниченными счётчиками и признак усечения. Имена инструментов и свойств, пути, значения
+и текст схемы не включаются. При отсутствии политики или `compatible` преобразование только
+наблюдается. При `reject-lossy` начальная компиляция с потерей или неопределённым результатом
+ограниченного сравнения отклоняется до отправки; отдельное событие потери для отклонённого запроса
+не записывается. При `reject-lossy`
+восстановление Vertex или Cloud Code Assist, снимающее ограничения, пишет столь же безопасное событие
+`google-tool-schema-repair` и возвращает исходный 400 без изменённой отправки; при отсутствии политики
+или при `compatible` исправленный запрос повторяется как прежде. Прямой AI Studio
+такое восстановление не выполняет. Нативные схемы вывода исключены из обоих путей. См.
+[справочник команд отладки](/ru/reference/cli/agents/).
+
+
+После терминального сбоя обновления Nous выполните `ocx login nous`, чтобы пройти повторную аутентификацию.
 
 Для канонических пресетов Kimi Coding Plan (вход через аккаунт `kimi` и API-ключ `kimi-code`)
 opencodex передаёт в запрос Chat Completions только стабильный `prompt_cache_key`, предоставленный
@@ -134,10 +164,24 @@ OAuth можно запустить и из [веб-дашборда](/ru/guides
 
 OAuth-провайдеры, чьи учётные данные содержат стабильный id аккаунта или email, могут хранить
 несколько входов. Страница Providers показывает эти аккаунты в выпадающем списке, позволяет
-добавить ещё один и переключает активный аккаунт, не выполняя выход из остальных. Учётные данные
-Только учётные данные Kimi без идентификатора заменяют активный слот; аккаунты Kiro сохраняются по ARN профиля.
+добавить ещё один и переключает активный аккаунт, не выполняя выход из остальных. При обычном входе
+учётные данные Kimi без идентификатора заменяют активный слот; явное действие **Добавить аккаунт**
+сохраняет прежний слот и активирует отдельный новый. Аккаунты Kiro сохраняются по ARN профиля.
 `chatgpt` всегда занимает один слот, поскольку у пула аккаунтов Codex отдельный реестр. Токены остаются в `~/.opencodex/auth.json`;
 `/api/oauth/accounts` возвращает только маскированные метаданные.
+
+### Импорт Cockpit Tools Antigravity
+
+В v1 OpenCodex импортирует только JSON-экспорт **Cockpit Tools Antigravity** для провайдера `google-antigravity`. На вкладке «Аккаунты» этого провайдера в панели Providers выберите локальный JSON-файл. Панель не показывает содержимое файла или значения учётных данных: она выводит только числа импортированных, обновлённых, ошибочных и неподдерживаемых записей. Другие провайдеры Cockpit в v1 не поддерживаются.
+
+CLI принимает экспорт только из файла или stdin — не вставляйте его в аргумент команды:
+
+```bash
+ocx account import google-antigravity --format cockpit-tools --file <path> [--json]
+cat accounts.json | ocx account import google-antigravity --format cockpit-tools --stdin [--json]
+```
+
+Inline JSON и лишние позиционные аргументы отклоняются. Храните экспортированные файлы приватно и удаляйте их или защищайте после импорта.
 
 ### Импорт учётных данных Kiro
 
@@ -154,7 +198,7 @@ OAuth-провайдеры, чьи учётные данные содержат 
 
 ## 3. Каталог API-ключей
 
-opencodex поставляется с 76 встроенными пресетами: 64 на основе ключей, восемь OAuth, три локальных и
+opencodex поставляется с 96 встроенными пресетами: 80 на основе ключей, 12 OAuth, три локальных и
 один пресет ChatGPT-форварда по умолчанию. Селектор **Add provider** в дашборде открывает страницу
 выдачи ключей провайдера, проверяет ключ и сохраняет его; проверка зависит от провайдера.
 Наиболее заметные записи:
@@ -164,8 +208,9 @@ opencodex поставляется с 76 встроенными пресетам
 [условиях Cline](https://cline.bot/tos). Маршрут вида `cline-pass/cline-pass/kimi-k3`
 намеренный: первая часть выбирает провайдера opencodex, а полный slug `cline-pass/kimi-k3`
 отправляется upstream. Использование учитывается в общих для аккаунта скользящем 5-часовом,
-недельном и месячном лимитах. Сейчас opencodex публикует только проверенный на живом API reasoning tier
-`low`; более высокие запросы ограничиваются до `low`, пока шлюз не опубликует или не подтвердит более широкий диапазон.
+недельном и месячном лимитах. Проверка живого API 2026-08-13 подтвердила, что все статические модели ClinePass
+принимают на входе шлюза `low`, `medium`, `high`, `xhigh` и `max`. opencodex сохраняет запрошенный tier без изменения;
+нормализация для конкретного backend остаётся ответственностью ClinePass.
 
 **Cline** использует тот же ключ и эндпоинт с оплатой по мере использования и доступом к 100+ моделям
 (ID в формате OpenRouter, например `anthropic/claude-sonnet-4-6`). Промо-бесплатные модели Cline
@@ -187,6 +232,7 @@ opencodex поставляется с 76 встроенными пресетам
 | MiniMax · MiniMax (CN) | `https://api.minimax.io/v1` · `https://api.minimaxi.com/v1` |
 | DeepSeek | `https://api.deepseek.com` |
 | Cerebras | `https://api.cerebras.ai/v1` |
+| Chutes | `https://llm.chutes.ai/v1` |
 | DeepInfra | `https://api.deepinfra.com/v1/openai` |
 | Hyperbolic | `https://api.hyperbolic.xyz/v1` |
 | Nscale Serverless Inference | `https://inference.api.nscale.com/v1` |
@@ -195,8 +241,11 @@ opencodex поставляется с 76 встроенными пресетам
 | Command Code | `https://api.commandcode.ai/provider/v1` |
 | SambaNova Cloud | `https://api.sambanova.ai/v1` |
 | Nebius Token Factory | `https://api.tokenfactory.nebius.com/v1` |
+| Crusoe | `https://api.inference.crusoecloud.com/v1` |
 | DigitalOcean Serverless Inference | `https://inference.do-ai.run/v1` |
 | Scaleway Generative APIs | `https://api.scaleway.ai/v1` |
+| Featherless AI | `https://api.featherless.ai/v1` |
+| Novita AI | `https://api.novita.ai/openai/v1` |
 | Together | `https://api.together.xyz/v1` |
 | Fireworks | `https://api.fireworks.ai/inference/v1` |
 | Moonshot (Kimi API) · Kimi (coding) | `https://api.moonshot.ai/v1` · `https://api.kimi.com/coding/v1` |
@@ -204,20 +253,45 @@ opencodex поставляется с 76 встроенными пресетам
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
+| [BigModel Coding Plan — Responses (статический список)](/guides/providers/#bigmodel-coding-plan-over-responses) | `https://open.bigmodel.cn/api/v1` |
 | Qwen Cloud | Token plan (по умолчанию): `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Pay as you go: `https://dashscope.aliyuncs.com/compatible-mode/v1` · или Custom |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
 | Volcengine Ark · Coding Plan · Agent Plan | `https://ark.cn-beijing.volces.com/api/v3` · `https://ark.cn-beijing.volces.com/api/coding/v3` · `https://ark.cn-beijing.volces.com/api/plan/v3` |
 | Xiaomi MiMo | `https://api.xiaomimimo.com/anthropic` |
+| Xiaomi MiMo (OpenAI Chat) | `https://api.xiaomimimo.com/v1` |
 | Kilo | `https://api.kilo.ai/api/gateway` |
 | GitLab Duo | `https://cloud.gitlab.com/ai/v1/proxy/openai/v1` |
 | Cloudflare AI Gateway | `https://gateway.ai.cloudflare.com/v1/{account-id}/{gateway}/anthropic` |
 | …и другие | opencode zen, Vercel AI Gateway, Venice, NanoGPT, Synthetic, Qianfan, Alibaba, Parallel, ZenMux, LiteLLM |
 
+**OpenCode Zen** (`opencode-zen`) и бесключевой пресет **OpenCode Free** используют один
+`https://opencode.ai/zen/v1`. Бесплатные модели на этом шлюзе часто упираются в короткое окно
+примерно 15–20 запросов в минуту (оценка сообщества; OpenCode не публикует RPM).
+Zen может отвечать общими 429 без заголовков `Retry-After` / `X-RateLimit-*`. Это отдельно от
+бесключевой десктопной квоты (~200 запросов Big Pickle/бесплатных моделей за 5 часов на
+`opencode-free`). Когда Zen опускает `Retry-After` на таком 429, opencodex добавляет пояснение
+в ошибку клиента и синтетический `Retry-After`; при наличии upstream `Retry-After` он имеет
+приоритет. Повтор с тем же ключом по-прежнему включается через [`retryOn429`](/ru/reference/configuration/).
+
+**Бесключевой уровень `opencode-free` сейчас закрыт для сторонних клиентов.** Zen отклоняет любой
+запрос без заголовка `x-opencode-session`, возвращая тип ошибки `MissingSessionID` и сообщение
+«OpenCode's free tier can only be used in OpenCode». Проверяется только наличие заголовка, поэтому
+прокси мог бы пройти её, выдумав значение, — opencodex так не делает. Подделать идентификатор сессии
+и версионный User-Agent `opencode/<version>` значит объявить себя клиентом OpenCode, а OpenCode не
+публикует договор о стороннем подключении к этому бесключевому уровню; полученный так HTTP 200 —
+это обойдённая проверка допуска, а не разрешение. Поэтому opencodex сообщает об ограничении вместо
+обхода: запрос к `opencode-free` возвращает ошибку с объяснением.
+
+Поддерживаемый путь к тем же моделям — провайдер **`opencode-zen`** с ключом OpenCode Zen API,
+полученным на [opencode.ai/auth](https://opencode.ai/auth). Если OpenCode позже опубликует сторонний
+путь для бесключевого уровня, opencodex сможет его использовать; до тех пор пресет документирует
+ограничение. Условия вышестоящего сервиса: [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
+
 Большинство использует адаптер `openai-chat` с bearer-ключом; немногие провайдеры, предоставляющие
 только Anthropic-совместимую конечную точку (например, **Xiaomi MiMo**), используют адаптер
 `anthropic` (`x-api-key`).
-Volcengine Agent Plan использует нативную конечную точку Responses через адаптер `openai-responses`.
+Volcengine Coding Plan и Agent Plan используют нативные конечные точки Responses через адаптер `openai-responses`. В проверенных продолжениях с вызовом инструментов на Ark Coding Plan повторная отправка элемента `reasoning`, возвращённого предыдущим ходом, даёт `400 InvalidParameter`, поэтому пресет Coding Plan удаляет такие элементы перед пересылкой входа продолжения. Состояние reasoning того хода при этом теряется; отключается через `dropResponsesReasoningItems: false`. Уже сохранённая конфигурация Coding Plan с `openai-chat` не переписывается и остаётся на Chat: чтобы перейти, вручную смените `adapter` на `openai-responses` и `responsesPath` на `/responses` либо удалите и заново добавьте пресет.
 
 > **Три маршрута тарификации Volcengine:** `volcengine` — Ark API с оплатой по факту,
 > `volcengine-coding-plan` расходует квоту Coding Plan, а `volcengine-agent-plan` — квоту Agent
@@ -228,7 +302,15 @@ Volcengine Agent Plan использует нативную конечную т�
 > каталог. У шлюза Agent Plan ресурса `/models` нет. Для pay-as-you-go модель по умолчанию —
 > `doubao-seed-2-1-pro-260628`; его статический каталог также включает актуальные текстовые модели
 > DeepSeek и GLM. Для Coding Plan модель по умолчанию — `ark-code-latest`, для Agent Plan —
-> `deepseek-v4-pro`.
+> `deepseek-v4-flash`.
+
+**Discovery для Chutes.** Пресет `chutes` использует фиксированный общий OpenAI-совместимый LLM
+gateway Chutes. Из публичного каталога `/v1/models` он оставляет только строки, где
+`supported_features` содержит `tools`, сохраняет нативные id со знаком `/` и безопасные live metadata,
+а также ограничивает discovery размером 256 KiB и 128 исходными строками. Публичный каталог не может
+подтвердить корректность введённого ключа, но chat-запросы всё равно аутентифицируются настроенным
+Bearer-ключом. Пользовательские Chute host и API не для LLM требуют custom provider. Ключ создаётся в
+[дашборде Chutes](https://chutes.ai/auth/start).
 
 **Discovery для DeepInfra.** `deepinfra` — провайдер OpenAI Chat Completions с аутентификацией по
 ключу; он использует адаптер `openai-chat` и Bearer API-ключ. Принадлежащий registry URL списка
@@ -258,6 +340,15 @@ Service token Nscale создаётся в [Nscale Console](https://console.nsca
 аутентифицированного discovery endpoint после входа. Запросы чата используют настроенный bearer-ключ.
 Ключи создаются в [Command Code Studio](https://commandcode.ai/studio/).
 
+**Квота Command Code.** Дашборд и `ocx account refresh` опрашивают окна `/alpha/billing/credits` (5 часов и неделя) на каноническом хосте `https://api.commandcode.ai`. OAuth-пресет (`command-code`) использует сохранённый bearer аккаунта; пресет Provider-API ключа (`commandcode`) — активный настроенный ключ. Пользовательски изменённый похожий base URL не опрашивается. Если Command Code также сообщает расход за период, оставшиеся monthly / purchased / free credits показываются как USD-окно.
+
+При входе в OrcaRouter через браузер (`ocx login orcarouter-oauth`) тело успешного ответа при обмене
+кода на ключ должно быть корректным JSON в UTF-8 размером не более 64 KiB. Действующий 30-секундный
+лимит этого запроса охватывает получение заголовков и всего тела ответа; слишком большое или
+некорректное тело отклоняется до сохранения ключа. Эти ограничения относятся только к обмену кода
+на ключ при входе, а не к содержимому запросов инференса. Проверка `scope` не меняется: отсутствие
+поля допускается, а явно недопустимое значение отклоняется.
+
 **Discovery для SambaNova Cloud.** Пресет читает общедоступный список SambaNova Cloud `/v1/models` на
 фиксированном API-хосте, сохраняет нативные id провайдера и ограничивает discovery размером 128 KiB
 и 128 исходными строками. Каталог не требует аутентификации, поэтому процедура входа CLI сообщает, что
@@ -271,6 +362,19 @@ SambaStudio не входят в область пресета. Ключи со�
 Он сохраняет нативные id со знаком `/`, а также заявленные context и input-modality metadata, и
 ограничивает discovery размером 512 KiB и 512 исходными строками. Хосты dedicated deployment не
 входят в область пресета. Ключи создаются в [Nebius Token Factory](https://tokenfactory.nebius.com).
+
+**Discovery для Crusoe.** Пресет с ключом использует adapter `openai-chat` и отправляет Bearer key
+только на фиксированный host Serverless Inference Crusoe. `/v1/models` отвечает 401 на запросы без
+ключа, поэтому успешный список считается проверкой ключа. Discovery сохраняет нативные id с косой
+чертой, такие как `zai-org/GLM-5.3` и `moonshotai/Kimi-K2.6`, ровно в том виде, в каком их возвращает
+Crusoe, и ограничен 256 KiB и 256 исходными строками. Остаются только строки с `is_public: true` и `architecture.modality` text или multimodal, так что приватные для аккаунта развёртывания, а также embedding- и медиа-строки исключаются. Reasoning-модели возвращают рассуждения в поле
+`reasoning` Chat Completions, которое adapter читает. Лестницу `reasoning_effort` (`low`, `medium`,
+`high`) принимает только `openai/gpt-oss-120b`; остальные reasoning-модели трактуют это поле как
+переключатель вкл/выкл, поэтому пресет не заявляет ни provider-wide лестницу effort, ни provider-wide
+parallel tool calls. Лимиты действуют на project и model (429 при превышении, 503 пока общий deployment
+масштабируется); новые аккаунты получают $5 бесплатных кредитов. Ключ создаётся в
+[консоли Crusoe Cloud](https://console.crusoecloud.com) в разделе Intelligence Foundry, Inference.
+
 **Discovery для DigitalOcean.** Пресет использует model access key на фиксированном общем хосте
 Serverless Inference и публикует только пересечение аутентифицированного ответа `/v1/models` с
 подтверждённым документацией allowlist для Chat Completions. Неизвестные, Responses-only,
@@ -284,6 +388,23 @@ embedding-, transcription- и прочие media-model id исключаются
 ограничен 128 KiB и 128 исходными строками. Используется общий endpoint Project по умолчанию; URL с
 Project ID и dedicated deployment настраиваются как custom provider. API-ключ создаётся в
 [консоли Scaleway](https://console.scaleway.com/generative-api).
+
+**Discovery для Featherless.** Пресет проходит аутентификацию на фиксированном OpenAI-совместимом
+хосте и запрашивает только первые 100 популярных моделей, отфильтрованных по chat и текущему plan.
+Затем registry по принципу fail closed требует, чтобы каждая строка отдельно подтверждала доступность
+по plan, отсутствие Hugging Face gate и `features.tool_use: true`. Discovery ограничен 128 KiB и 100
+исходными строками, поэтому каталог из десятков тысяч моделей не загружается и не кэшируется целиком.
+`/v1/models` описан как вызываемый как с аутентификацией, так и без неё, поэтому не может подтвердить корректность введённого ключа, но chat-запросы всё равно аутентифицируются настроенным Bearer-ключом.
+Индивидуальные plan предназначены для interactive/prototype; произвольные приложения требуют Scale
+plan. Ключ создаётся в [дашборде Featherless](https://featherless.ai/account/api-keys).
+
+**Discovery для Novita.** Пресет с ключом использует adapter `openai-chat` и отправляет Bearer key
+только на фиксированный OpenAI-совместимый host Novita. Из публичного списка моделей остаются лишь
+строки, одновременно указывающие `model_type: chat` и endpoint `chat/completions`; discovery ограничен
+512 KiB и 256 исходными строками. Поскольку catalog публичный, login сообщает, что ключ невозможно
+проверить, а не считает успешный список доказательством. Возможности зависят от модели, поэтому пресет
+не заявляет provider-wide parallel tool calls или OpenAI `reasoning_effort`. Ключ создаётся в
+[Novita key manager](https://novita.ai/settings/key-management).
 
 > **Область Baseten:** пресет поддерживает только общие [Model APIs](https://docs.baseten.co/inference/model-apis/overview)
 > Baseten. Для локальной работы используйте личный [API-ключ](https://docs.baseten.co/organization/api-keys),
@@ -305,7 +426,7 @@ Project ID и dedicated deployment настраиваются как custom prov
 > в интерактивных инструментах программирования. Автоматизация общего API, серверы пользовательских
 > приложений и неинтерактивные пакетные вызовы запрещены и могут привести к блокировке ключа плана.
 
-> **Два маршрута GLM:** `zai` — это международная подписка Z.AI на coding-план, а `zhipu-bigmodel` —
+> **Тарификация GLM:** `zai` — это международная подписка Z.AI на coding-план, а `zhipu-bigmodel` —
 > внутренняя китайская конечная точка BigModel с оплатой по факту использования. Разные хосты,
 > разные ключи, разная тарификация: ключ от одного сервиса не подойдёт к другому.
 
@@ -331,9 +452,9 @@ GPT-5.6 Sol/Terra/Luna заранее внесены в резервные сп�
 
 | Маршрут Codex | Предзаданные id моделей | Контекст, видимый Codex |
 | --- | --- | --- |
-| Вход Codex (Pool или Direct) | `gpt-5.6-*` | 372,000 |
-| OpenAI (API key) | `openai-apikey/gpt-5.6-*` плюс `*-pro` | 1,050,000 (макс. вход 922,000) |
-| OpenRouter | `openrouter/openai/gpt-5.6-sol`, `openrouter/openai/gpt-5.6-terra`, `openrouter/openai/gpt-5.6-luna` | 1,050,000 |
+| Вход Codex (Pool или Direct) | `gpt-5.6-*` | 922,000 |
+| OpenAI (API key) | `openai-apikey/gpt-5.6-*` плюс `*-pro` | 922,000 (макс. вход 922,000) |
+| OpenRouter | `openrouter/openai/gpt-5.6-sol`, `openrouter/openai/gpt-5.6-terra`, `openrouter/openai/gpt-5.6-luna` | 922,000 |
 | Cursor | `cursor/gpt-5.6-sol`, `cursor/gpt-5.6-terra`, `cursor/gpt-5.6-luna` | 1,000,000 |
 
 Нативные записи GPT-5.6 сохраняют закреплённые вышестоящие шкалы уровней рассуждений (например, у
@@ -353,9 +474,9 @@ Assist), `azure` / `azure-openai`, `kiro` и `cursor`. Проприетарны�
 **GitLab Duo** остаётся шлюзом с ключом/токеном подписки на своей OpenAI-совместимой конечной
 точке. **Cloudflare AI Gateway** требует подставить в URL id аккаунта и шлюза.
 
-Copilot предоставляет каталог со смешанными проводами: его семейство GPT-5 (`gpt-5.3-codex`,
-`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`)
-отклоняет `/chat/completions` для агентного трафика, поэтому opencodex по умолчанию
+Copilot предоставляет каталог со смешанными проводами: модели (`gpt-5.3-codex`,
+`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`)
+отклоняют `/chat/completions` для агентного трафика, поэтому opencodex по умолчанию
 маршрутизирует эти модели через Responses API, а все остальные модели Copilot остаются на
 chat completions. Приоритет: жёсткий wire-пин → явная запись
 [`modelAdapters`](/ru/reference/configuration/providers/) → дефолт реестра → adapter всего
@@ -366,8 +487,12 @@ Cursor отслеживается отдельно как эксперимент
 `ocx init` и в селекторе Add Provider дашборда как экспериментальная запись локальной конфигурации
 с метаданными статического резервного каталога моделей Cursor. Когда настроен токен доступа Cursor,
 opencodex использует живой транспорт HTTP/2 Cursor. Его встроенный резервный список включает
-`gpt-5.6-sol` / `terra` / `luna` (контекст 1M), `grok-4.5` / `grok-4.5-fast` (500K) и `kimi-k3`
-(262K); живое обнаружение решает, какие из них останутся видимыми для аккаунта. Cursor отдаёт
+`gpt-5.6-sol` / `terra` / `luna` (контекст 1M), обычные/Fast-строки Grok 4.5 и 4.6 (500K) и
+`kimi-k3` (262K); живое обнаружение решает, какие из них останутся видимыми для аккаунта. Для
+Grok 4.6 в обеих формах доступны `low` / `medium` / `high` / `xhigh`, а для 4.5 — только до `high`.
+Fast-запросы передают соответствующую базовую модель Grok с отдельными параметрами `effort` и
+`fast=true` в `requested_model`; плоские id `cursor-grok-{version}-{effort}-fast` служат только
+идентификаторами discovery и picker. Cursor отдаёт
 Kimi K3 только через wire id с суффиксом усилия, поэтому `cursor/kimi-k3` предоставляет лестницу
 `low` / `high` / `max` и по умолчанию использует `max` — как и задокументированное значение по
 умолчанию в API модели. Управляемое сервером Cursor
@@ -384,15 +509,23 @@ MCP, запись экрана и computer-use доступны как хуки 
 
 ### Ollama Cloud
 
-Ollama Cloud — это размещённая в облаке (не локальная) Ollama, OpenAI-совместимая по адресу
-`https://ollama.com/v1`, с ключом со страницы
-[ollama.com/settings/keys](https://ollama.com/settings/keys). opencodex классифицирует её облачную
+Ollama Cloud — это размещённая в облаке (не локальная) Ollama. Укажите адрес
+`https://ollama.com/v1` и ключ со страницы
+[ollama.com/settings/keys](https://ollama.com/settings/keys). opencodex обращается к ней через
+собственный REST API Ollama (`POST /api/chat`), а не через OpenAI-совместимую поверхность, и
+получает список моделей от провайдера, поэтому новые модели Ollama Cloud появляются без
+изменения конфигурации. opencodex классифицирует её облачную
 линейку по поддержке изображений, чтобы [vision-сайдкар](/ru/guides/sidecars/) включался
-только для текстовых моделей. Текстовые модели (например, `glm-5.2`, `deepseek-v4-pro`, `gpt-oss`,
+только для текстовых моделей. Текстовые модели (например, `glm-5.2`, `deepseek-v4-flash`, `gpt-oss`,
 `qwen3-coder`, `minimax-m2.x`, `nemotron-3-*`) перечислены в `noVisionModels`; модели с нативной
 поддержкой изображений (например, `kimi-k2.6`, `minimax-m3`, `gemma4`, `qwen3.5`,
 `gemini-3-flash-preview`) — нет. Сопоставление терпимо к тегам Ollama вида `:size`, поэтому
 `gpt-oss` покрывает и `gpt-oss:120b`, и `gpt-oss:20b`.
+
+Ollama в документации указывает, что структурированный вывод сейчас не поддерживается на Ollama
+Cloud. Поэтому для канонического `ollama-cloud` opencodex отклоняет такие запросы
+(`text.format`) явной ошибкой, а не молча возвращает свободную прозу; локальные и пользовательские
+`ollama-native` конечные точки сохраняют нативное поведение `format` Ollama.
 
 ## 4. Локальные провайдеры
 

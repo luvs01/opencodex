@@ -84,6 +84,15 @@ describe("registered nested hashes", () => {
     expect(resolveAppHashChange("integrations/claude/desktop").replaceTo).toBeNull();
   });
 
+  test("the DSH deep link is registered and survives normalization", () => {
+    expect(INTEGRATION_TAB_HASHES).toContain("integrations/dsh");
+    expect(readPageFromHash("integrations/dsh")).toBe("integrations");
+    expect(resolveAppHashChange("integrations/dsh")).toEqual({
+      page: "integrations",
+      replaceTo: null,
+    });
+  });
+
   test("bare #integrations is Overview and has no suffix of its own", () => {
     expect(readPageFromHash("integrations")).toBe("integrations");
     expect(hashBelongsToPage("integrations", "integrations")).toBe(true);
@@ -107,6 +116,28 @@ describe("the collapse disturbs no neighbouring route", () => {
     // Cross-page suffixes stay invalid in both directions.
     expect(hashBelongsToPage("integrations/keys", "dashboard")).toBe(false);
     expect(hashBelongsToPage("logs/debug", "integrations")).toBe(false);
+  });
+});
+
+describe("two-plane integration call routing", () => {
+  test("existing integration descendants stay on the shared base and only machine controls use machineApiBase", async () => {
+    const app = await Bun.file(new URL("../src/App.tsx", import.meta.url)).text();
+    const integrations = await Bun.file(new URL("../src/pages/Integrations.tsx", import.meta.url)).text();
+    const startup = await Bun.file(new URL("../src/pages/Startup.tsx", import.meta.url)).text();
+    expect(app).toContain('<Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />');
+    expect(app).toContain('<Startup apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />');
+    for (const component of ["ApiKeys", "Grok", "Claude", "IntegrationsOverview", "FileIntegrationPage"]) {
+      expect(integrations).toContain(`${component}`);
+    }
+    expect(integrations).toContain("<ApiKeys apiBase={apiBase}");
+    expect(integrations).toContain("<Grok apiBase={apiBase}");
+    expect(integrations).toContain("<Claude apiBase={apiBase}");
+    expect(integrations).toContain("<IntegrationsOverview apiBase={apiBase}");
+    expect(integrations).toContain("`${machineApiBase}/api/machine/clients`");
+    expect(integrations).toContain("`${machineApiBase}/api/machine/sync`");
+    expect(startup).toContain("`${machineApiBase}/api/machine/shim`");
+    expect(startup).toContain("`${apiBase}/api/settings`");
+    expect(startup).toContain("`${apiBase}/api/startup-health`");
   });
 });
 

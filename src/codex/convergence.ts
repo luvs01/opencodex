@@ -1,17 +1,20 @@
 import { join } from "node:path";
 
-import { getConfigDir, websocketsEnabled, withExpectedConfigGenerationSync } from "../config";
+import { getConfigDir, saveConfigPreservingClaudeCode, websocketsEnabled, withExpectedConfigGenerationSync } from "../config";
+import { reconcileSuccessfulModelDiscoveries } from "../providers/new-model-policy";
+import { pendingModelSelectionProviders } from "../providers/initial-model-selection";
 import { COMBO_NAMESPACE } from "../combos";
-import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { getAuthStorePath } from "../oauth/store";
 import type { OcxConfig } from "../types";
 import { captureCatalogAdmissionSnapshot } from "./catalog-admission";
+import { legacyCustomModelCatalogSlugs } from "./custom-model-catalog-migration";
 import {
+  type CatalogGatherPathKind,
   type CatalogSourceForGather,
   bundledCatalogCacheState,
   resolveCatalogSourceForGather,
-} from "./catalog/bundled";
-import {
+  } from "./catalog/bundled";
+  import {
   acceptCatalogGatherSourcePath,
   captureAndSealCatalogHomeSelection,
   captureCatalogGatherTargetIdentity,
@@ -19,29 +22,68 @@ import {
   readCatalogGatherSource,
   sealCatalogGatherEvidenceSession,
   type CatalogFilesystemEvidenceSession,
-} from "./catalog/filesystem-evidence";
-import {
+  } from "./catalog/filesystem-evidence";
+  import {
   CatalogGatherBusyError,
   createCatalogGatherAuthorityIdentity,
   filterCatalogVisibleModels,
   gatherRoutedModelsForCatalogGather,
   type CatalogGatherProviderAuthOutcome,
-} from "./catalog/provider-fetch";
-import {
+  type CatalogGatherProviderModelOutcome,
+  } from "./catalog/provider-fetch";
+  import {
   catalogBackupPathFor,
   catalogHasRoutedEntries,
-  findNativeTemplate,
+  findSupportedNativeTemplate,
   legacyCatalogBackupPath,
+  nativeMultiAgentDefaults,
   parseCatalogJson,
   type RawCatalog,
-} from "./catalog/parsing";
-import {
-  buildCatalogEntries,
+  type RawEntry,
+  } from "./catalog/parsing";
+  import {
+  buildCatalogEntriesFromObservedState,
+  CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
+  finalizeAutoReviewModelOverride,
+  mergeCatalogEntriesFromObservedState,
+  mergeCatalogModelsWithNativeRecovery,
   orderForSubagents,
-} from "./catalog/sync";
-import { exactComboCatalogSlugs } from "./catalog/aggregation";
-import { disabledNativeSlugs } from "./catalog/metadata";
+  } from "./catalog/sync";
+  import { multiAgentV2EnabledFromConfigText } from "./features";
+  import { enforceCatalogSlugUniqueness, exactComboCatalogSlugs } from "./catalog/aggregation";
+  import {
+  isNativeAliasCatalogEntry,
+  accountBoundNativeOpenAiSlugs,
+  accountBoundNativeOpenAiSlugsBySelector,
+  disabledNativeSlugs,
+  desktopAllowlistSuppressedNativeSlugs,
+  NATIVE_OPENAI_MODELS,
+  nativeContextLimits,
+  shouldIncludeAccountBoundNativeOpenAi,
+  shouldIncludeNativeOpenAi,
+} from "./catalog/metadata";
+import {
+  trustedAccountBoundNativeCatalogSlug,
+  visibleCodexAccountSelectors,
+} from "./catalog/account-models";
+import {
+  clampCatalogModelsToObservedCodexSupport,
+  supportedCodexReasoningEffortsFromObservedCatalog,
+} from "./catalog/effort";
+import { suppressedSyntheticMaxCatalogSlugs } from "./catalog/model-hints";
 import { codexRuntimeStatePath, peekCodexRuntimeProcessCache } from "./runtime";
+import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "./account-namespaces";
+import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
+import {
+  availableAccountGatedNativeModels,
+  codexModelEntitlementStateForAccount,
+  isCodexModelEntitlementSnapshotCurrent,
+  type CodexModelEntitlementSnapshot,
+} from "./model-entitlements";
+import { resolveAdmittedCodexModelEntitlements } from "./model-entitlement-admission";
+import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
+import { providerCodexAccountMode } from "../providers/registry";
+import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { withCatalogWriteSerialization } from "./catalog-write-serialization";
 import {
   publishHashedCodexCatalogBackup,
@@ -71,7 +113,7 @@ export interface CatalogWriteReceipt {
 
 export type CodexCatalogCommitResult =
   | { readonly kind: "committed"; readonly changed: boolean; readonly writes: CatalogWriteReceipt }
-  | { readonly kind: "stale"; readonly reason: "generation" | "home-selection" | "source-observation" | "process-local" | "target-identity" | "candidate-consumed" }
+  | { readonly kind: "stale"; readonly reason: "generation" | "home-selection" | "source-observation" | "process-local" | "target-identity" | "candidate-consumed" | "account-entitlement" }
   | { readonly kind: "refused"; readonly reason: "source-unreadable" | "source-ambiguous" | "target-unsafe" }
   | { readonly kind: "failed"; readonly surface: "disk"; readonly writes: CatalogWriteReceipt };
 
@@ -98,6 +140,8 @@ interface CandidateState {
   readonly legacyBackup?: PreparedCatalogFileWrite;
   readonly changed: boolean;
   readonly notices: readonly CatalogNotice[];
+  readonly modelEntitlements: CodexModelEntitlementSnapshot;
+  readonly discoveryConfig?: OcxConfig;
 }
 
 const candidateStates = new WeakMap<object, CandidateState>();
@@ -119,12 +163,23 @@ function catalogBytes(catalog: RawCatalog): string {
   return `${JSON.stringify(catalog, null, 2)}\n`;
 }
 
+function nativePriorityBaseline(catalog: ReadonlyRawCatalogLike | null): Map<string, number> {
+  return new Map((catalog?.models ?? []).flatMap(entry => (
+    typeof entry.slug === "string"
+      && !entry.slug.includes("/")
+      && typeof entry.priority === "number"
+      ? [[entry.slug, entry.priority] as const]
+      : []
+  )));
+}
+
 interface ReadonlyRawCatalogLike {
   readonly models?: readonly Readonly<Record<string, unknown>>[];
 }
 
 function hasRoutedEntries(catalog: ReadonlyRawCatalogLike): boolean {
-  return (catalog.models ?? []).some(entry => typeof entry.slug === "string" && entry.slug.includes("/"));
+  return (catalog.models ?? []).some(entry => typeof entry.slug === "string"
+    && (entry.slug.includes("/") || isNativeAliasCatalogEntry(entry as RawEntry)));
 }
 
 function processEvidence(source: CatalogSourceForGather): CatalogProcessLocalEvidence {
@@ -137,7 +192,14 @@ function processEvidence(source: CatalogSourceForGather): CatalogProcessLocalEvi
 function bindGatherPaths(
   session: CatalogFilesystemEvidenceSession,
   snapshot: CatalogAdmissionSnapshot,
-): Readonly<{ catalog: string; cache: string; keyedBackup: string; legacyBackup?: string }> {
+): Readonly<{
+  catalog: string;
+  cache: string;
+  keyedBackup: string;
+  legacyBackup?: string;
+  catalogKind: CatalogGatherPathKind;
+  multiAgentV2Enabled: boolean;
+}> {
   const catalog = targetPath(snapshot.targets.catalog);
   const cache = targetPath(snapshot.targets.cache);
   const keyedBackup = targetPath(snapshot.targets.catalogBackups[0]!);
@@ -146,7 +208,7 @@ function bindGatherPaths(
   const configPath = snapshot.sourceEvidence.required["catalog-target-selection"].logicalPath;
 
   acceptCatalogGatherSourcePath(session, "catalog-target-selection", configPath);
-  readCatalogGatherSource(session, "catalog-target-selection");
+  const configBytes = readCatalogGatherSource(session, "catalog-target-selection");
   acceptCatalogGatherSourcePath(session, "active-catalog-merge", catalog);
   acceptCatalogGatherSourcePath(session, "hashed-backup-fallback", keyedBackup);
   acceptCatalogGatherSourcePath(session, "legacy-backup-fallback", legacyBackup ?? legacyCatalogBackupPath());
@@ -154,58 +216,187 @@ function bindGatherPaths(
   acceptCatalogGatherSourcePath(session, "runtime-selection", codexRuntimeStatePath(getConfigDir()));
   acceptCatalogGatherSourcePath(session, "provider-auth-selection", getAuthStorePath());
   acceptCatalogGatherSourcePath(session, "native-catalog-selection", catalog);
-  return { catalog, cache, keyedBackup, ...(legacyBackup ? { legacyBackup } : {}) };
+  return {
+    catalog,
+    cache,
+    keyedBackup,
+    ...(legacyBackup ? { legacyBackup } : {}),
+    catalogKind: legacyBackup ? "default" : "custom",
+    multiAgentV2Enabled: multiAgentV2EnabledFromConfigText(
+      configBytes === null ? null : Buffer.from(configBytes).toString("utf8"),
+    ),
+  };
 }
 
+/**
+ * Prepara um candidato de catálogo para convergência sem gravá-lo em disco.
+ * Clona a fonte e mescla as observações nativas, os modelos roteados e por conta,
+ * aplicando a configuração, inclusive nomes nativos, e os limites de raciocínio
+ * observados no runtime antes de retornar o catálogo resultante.
+ */
 function prepareCatalog(
   config: Readonly<OcxConfig>,
   source: Extract<CatalogSourceForGather, { kind: "available" }>,
   active: RawCatalog | null,
   routedModels: Awaited<ReturnType<typeof gatherRoutedModelsForCatalogGather>>,
+  multiAgentV2Enabled: boolean,
+  baseline: ReadonlyMap<string, number>,
+  baselineCatalogModels: readonly Readonly<Record<string, unknown>>[],
+  degradedProviderNames: ReadonlySet<string>,
+  modelEntitlements: CodexModelEntitlementSnapshot,
+  nativeRecoverySources: readonly (readonly RawEntry[])[] = [],
+  observedAccountNativeEntries: readonly RawEntry[] = [],
 ): RawCatalog {
   const catalog = JSON.parse(JSON.stringify(source.catalog)) as RawCatalog;
-  const template = findNativeTemplate(catalog);
+  // Strict selector: an unknown bare row must never become the routed template (#2813).
+  const template = findSupportedNativeTemplate(catalog);
   const enabled = filterCatalogVisibleModels(routedModels, config);
   const featured = config.subagentModels ?? [];
   const ordered = orderForSubagents(enabled, featured);
+  const modelPickerOrder = config.modelPickerOrder ?? [];
   const multiAgentMode = config.multiAgentMode === "v1" || config.multiAgentMode === "v2"
     ? config.multiAgentMode : "default";
   const exactComboSlugs = exactComboCatalogSlugs(config);
+  const bareEligibleAccountIds = providerCodexAccountMode(
+    OPENAI_CODEX_PROVIDER_ID,
+    config.providers[OPENAI_CODEX_PROVIDER_ID],
+  ) === "direct" ? new Set([MAIN_CODEX_ACCOUNT_ID]) : undefined;
+  const availableBareGatedNativeSlugs = availableAccountGatedNativeModels(
+    modelEntitlements,
+    bareEligibleAccountIds,
+  );
+  const availableAccountGatedNativeSlugs = availableAccountGatedNativeModels(modelEntitlements);
+  const availableBareNativeSlugs = NATIVE_OPENAI_MODELS.filter(slug => (
+    !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug) || availableBareGatedNativeSlugs.has(slug)
+  ));
+  const availableAccountNativeSlugs = NATIVE_OPENAI_MODELS.filter(slug => (
+    !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug) || availableAccountGatedNativeSlugs.has(slug)
+  ));
+  const suppressedBareNativeSlugs = new Set([
+    ...desktopAllowlistSuppressedNativeSlugs(config),
+    ...[...ACCOUNT_GATED_NATIVE_OPENAI_MODELS].filter(slug => !availableBareGatedNativeSlugs.has(slug)),
+  ]);
   const hasPhysicalComboProvider = Object.hasOwn(config.providers, COMBO_NAMESPACE);
   const enabledProviders = Object.entries(config.providers).filter(([, provider]) => provider.disabled !== true);
-  const includeNativeOpenAi = enabledProviders.length === 0 || enabledProviders.some(([name, provider]) => (
-    name === "openai" && isCanonicalOpenAiForwardProvider(provider)
-  ));
-  const disabledNative = disabledNativeSlugs(config);
-  const nativeSlugs = includeNativeOpenAi
-    ? [...new Set((active?.models ?? catalog.models ?? []).flatMap(entry => (
-        typeof entry.slug === "string" && !entry.slug.includes("/") && !disabledNative.has(entry.slug)
-          ? [entry.slug] : []
-      )))]
+  const includeNativeOpenAi = shouldIncludeNativeOpenAi(config);
+  const accountSelectors = shouldIncludeAccountBoundNativeOpenAi(config)
+    ? visibleCodexAccountSelectors(config)
     : [];
-  const entries = buildCatalogEntries(
-    template ? JSON.parse(JSON.stringify(template)) : null,
-    nativeSlugs, ordered, featured, websocketsEnabled(config), multiAgentMode, exactComboSlugs,
+  const accountTargets = new Map(codexAccountNamespaceEntries(config));
+  const accountNativeSlugsBySelector = accountSelectors.length > 0
+    ? new Map([...accountBoundNativeOpenAiSlugsBySelector(config, observedAccountNativeEntries)].map(([selector, slugs]) => {
+      const target = accountTargets.get(selector);
+      const accountId = target && isMainCodexAccountTarget(target) ? MAIN_CODEX_ACCOUNT_ID : target;
+      return [selector, slugs.filter(slug => (
+        !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug)
+        || (accountId !== undefined
+          && codexModelEntitlementStateForAccount(modelEntitlements, accountId, slug) === "granted")
+      ))] as const;
+    }))
+    : new Map<string, readonly string[]>();
+  const accountNativeSlugs = accountSelectors.length > 0
+    ? [...new Set([...accountNativeSlugsBySelector.values()].flatMap(slugs => [...slugs]))]
+    : [];
+  // Unknown account-native ids have no safe bare/global identity. They are only projected through
+  // selector-qualified rows when a live selector is configured.
+  const observedNativeSlugs: string[] = [];
+  const disabledNative = disabledNativeSlugs(config);
+  const openaiContextCap = nativeContextLimits(config);
+  const nativeCatalogModels = mergeCatalogModelsWithNativeRecovery(
+    active?.models ?? catalog.models ?? [],
+    [catalog.models ?? [], ...nativeRecoverySources],
   );
-  if (entries.length === nativeSlugs.length) {
-    const configuredProviders = new Set(enabledProviders.map(([name]) => name));
-    const preserved = (active?.models ?? []).filter(entry => {
-      if (typeof entry.slug !== "string" || !entry.slug.includes("/")) return false;
-      const provider = entry.slug.slice(0, entry.slug.indexOf("/"));
-      const description = typeof entry.description === "string" ? entry.description : "";
-      return configuredProviders.has(provider) || !description.startsWith("Routed via opencodex → ");
-    });
-    entries.push(...preserved);
-  }
-  if (!hasPhysicalComboProvider) {
-    const exact = exactComboSlugs;
-    catalog.models = entries.filter(entry => (
-      typeof entry.slug !== "string" || !exact.has(entry.slug)
-      || (Array.isArray(entry.input_modalities) && entry.input_modalities.length > 0)
-    ));
-  } else {
-    catalog.models = entries;
-  }
+  const catalogModels = nativeCatalogModels;
+  const suppressedSyntheticMaxSlugs = suppressedSyntheticMaxCatalogSlugs(config, ordered, catalogModels);
+  const routedEntries = buildCatalogEntriesFromObservedState({
+    template: template ? JSON.parse(JSON.stringify(template)) : null,
+    gptSlugs: [],
+    goModels: ordered,
+    featured,
+    modelPickerOrder,
+    wsEnabled: websocketsEnabled(config),
+    multiAgentMode,
+    exactComboSlugs,
+    accountSelectors,
+    suppressedBareNativeSlugs,
+    disabledNativeAccountSlugs: new Set(),
+    multiAgentV2Enabled,
+    openaiContextCap,
+  });
+  const accountBoundEntries = accountSelectors.length === 0
+    ? []
+    : buildCatalogEntriesFromObservedState({
+      template: template ? JSON.parse(JSON.stringify(template)) : null,
+      gptSlugs: availableAccountNativeSlugs,
+      goModels: [],
+      featured,
+      wsEnabled: websocketsEnabled(config),
+      multiAgentMode,
+      exactComboSlugs,
+      accountSelectors,
+      suppressedBareNativeSlugs,
+      disabledNativeAccountSlugs: new Set([...disabledNative].filter(slug => suppressedBareNativeSlugs.has(slug))),
+      multiAgentV2Enabled,
+      keepNativeChatGptOnV1: config.keepNativeChatGptOnV1 === true,
+      openaiContextCap,
+      accountNativeSlugs,
+      accountNativeSlugsBySelector,
+    }).filter(entry => trustedAccountBoundNativeCatalogSlug(entry) !== undefined);
+  const gatheredProviderNames = new Set(enabledProviders.map(([name]) => name));
+  const selectedModelsByProvider = new Map<string, ReadonlySet<string>>(
+    enabledProviders.flatMap(([name, provider]) => (
+      Array.isArray(provider.selectedModels) && provider.selectedModels.length > 0
+        ? [[name, new Set(provider.selectedModels)] as const]
+        : []
+    )),
+  );
+  const mergedModels = mergeCatalogEntriesFromObservedState({
+    modelPickerOrder,
+    accountSelectors,
+    catalogModels,
+    baselineCatalogModels,
+    routedEntries,
+    baseline,
+    featured,
+    wsEnabled: websocketsEnabled(config),
+    template,
+    disabledModels: new Set(config.disabledModels ?? []),
+    selectedModelsByProvider,
+    gatheredProviderNames,
+    pendingProviderNames: pendingModelSelectionProviders(config),
+    degradedProviderNames,
+    legacyCustomModelSlugs: legacyCustomModelCatalogSlugs(config),
+    multiAgentMode,
+    multiAgentV2Enabled,
+    keepNativeChatGptOnV1: config.keepNativeChatGptOnV1 === true,
+    exactComboSlugs,
+    hasPhysicalComboProvider,
+    includeNativeOpenAi,
+    accountBoundEntries,
+    suppressedBareNativeSlugs,
+    suppressedSyntheticMaxSlugs,
+    openaiContextCap,
+    nativeDisplayNames: config.providers[OPENAI_CODEX_PROVIDER_ID]?.modelDisplayNames,
+    nativeMultiAgentDefaults: nativeMultiAgentDefaults(baselineCatalogModels),
+    policy: {
+      ...CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
+      nativeBackfillSlugs: [...availableBareNativeSlugs, ...observedNativeSlugs],
+      warningPolicy: "suppress",
+    },
+  });
+  clampCatalogModelsToObservedCodexSupport(
+    mergedModels,
+    source.runtimeSupport.kind === "available"
+      ? supportedCodexReasoningEffortsFromObservedCatalog(source.runtimeSupport.catalog)
+      : null,
+  );
+  finalizeAutoReviewModelOverride(mergedModels, catalogModels, config);
+  // The second writer of this file. A dashboard model toggle, a combo edit, or a Codex account
+  // login reaches `convergeCodexCatalog` and commits through `fixedCommit`, never through
+  // `writeRetainedCatalogSync`, so the #4730 uniqueness guard has to stand here too or the same
+  // `source-invalid` rejection returns by a different route. Silent because this merge runs under
+  // `warningPolicy: "suppress"`.
+  catalog.models = enforceCatalogSlugUniqueness(mergedModels, false);
   return catalog;
 }
 
@@ -220,7 +411,7 @@ export async function gatherCodexCatalogCandidate(
       return { kind: "disposition", disposition: { status: "skipped", reason: "stale", retryable: true } };
     }
     const paths = bindGatherPaths(session, snapshot);
-    const source = resolveCatalogSourceForGather(session);
+    const source = resolveCatalogSourceForGather(session, paths.catalogKind);
     if (source.kind === "catalog-unavailable") {
       return { kind: "disposition", disposition: { status: "skipped", reason: "catalog-unavailable", retryable: false } };
     }
@@ -234,12 +425,17 @@ export async function gatherCodexCatalogCandidate(
       readCatalogGatherSource(session, "native-catalog-selection");
     }
     const authOutcomes: CatalogGatherProviderAuthOutcome[] = [];
+    const providerModelOutcomes: CatalogGatherProviderModelOutcome[] = [];
     const discoveryPolicies: CatalogProviderDiscoveryPolicySnapshot[] = [];
     providerGatherStarted = true;
-    const routedModels = await gatherRoutedModelsForCatalogGather(snapshot.config, session, {
-      providerAuthOutcomes: authOutcomes,
-      discoveryPolicySnapshots: discoveryPolicies,
-    });
+    const [routedModels, modelEntitlements] = await Promise.all([
+      gatherRoutedModelsForCatalogGather(snapshot.config, session, {
+        providerAuthOutcomes: authOutcomes,
+        providerModelOutcomes,
+        discoveryPolicySnapshots: discoveryPolicies,
+      }),
+      resolveAdmittedCodexModelEntitlements(snapshot.config),
+    ]);
     const processLocal = processEvidence(source);
     const sourceEvidence = sealCatalogGatherEvidenceSession(session);
     if (!same(sourceEvidence.required, snapshot.sourceEvidence.required)) {
@@ -255,7 +451,49 @@ export async function gatherCodexCatalogCandidate(
     }
 
     const active = catalogFrom(activeBytes);
-    const preparedCatalog = prepareCatalog(snapshot.config, source, active, routedModels);
+    // Retained sync restores native priorities from the once-only pristine backup. Convergence
+    // must use the same admitted evidence instead of treating its already-featured active catalog
+    // as the baseline, or feature A -> feature B -> none would retain stale priorities.
+    const backupCanAcceptPristineCatalog = keyedBackupBytes === null
+      || (paths.legacyBackup !== undefined && legacyBackupBytes === null);
+    const baselineCatalog = catalogFrom(keyedBackupBytes)
+      ?? catalogFrom(legacyBackupBytes)
+      ?? (backupCanAcceptPristineCatalog
+        ? (active && !catalogHasRoutedEntries(active)
+          ? active
+          : !hasRoutedEntries(source.catalog) ? source.catalog : null)
+        : null);
+    const discoveryConfig = structuredClone(snapshot.config) as OcxConfig;
+    const discoveryChanged = reconcileSuccessfulModelDiscoveries({
+      config: discoveryConfig,
+      models: routedModels,
+      authoritativeProviders: providerModelOutcomes
+        .filter(outcome => outcome.state === "authoritative")
+        .map(outcome => outcome.provider),
+      now: new Date().toISOString(),
+    });
+    const preparedCatalog = prepareCatalog(
+      discoveryConfig,
+      source,
+      active,
+      routedModels,
+      paths.multiAgentV2Enabled,
+      nativePriorityBaseline(baselineCatalog),
+      baselineCatalog?.models ?? [],
+      new Set(providerModelOutcomes
+        .filter(outcome => outcome.state === "degraded")
+        .map(outcome => outcome.provider)),
+      modelEntitlements,
+      [
+        catalogFrom(keyedBackupBytes)?.models ?? [],
+        catalogFrom(legacyBackupBytes)?.models ?? [],
+      ],
+      [
+        ...(catalogFrom(cacheBytes)?.models ?? []),
+        ...(catalogFrom(activeBytes)?.models ?? []).filter(entry =>
+          trustedAccountBoundNativeCatalogSlug(entry) !== undefined),
+      ],
+    );
     const preparedCatalogBytes = catalogBytes(preparedCatalog);
     const preparedCacheBytes = `${JSON.stringify({
       fetched_at: "2000-01-01T00:00:00Z",
@@ -266,8 +504,17 @@ export async function gatherCodexCatalogCandidate(
       ? Buffer.from(activeBytes!).toString("utf8")
       : !hasRoutedEntries(source.catalog) ? `${JSON.stringify(source.catalog, null, 2)}\n` : null;
     const notices = new Set<CatalogNotice>();
-    if (source.source !== "bundled-catalog-template") notices.add("fallback");
-    if (authOutcomes.some(outcome => outcome.state !== "available")) notices.add("provider-auth");
+    const sourceIsAuthoritative = paths.catalogKind === "default"
+      ? source.source === "bundled-catalog-template"
+      : source.source === "active-catalog-merge";
+    if (!sourceIsAuthoritative) notices.add("fallback");
+    const authDegradedProviders = new Set(authOutcomes
+      .filter(outcome => outcome.state !== "available")
+      .map(outcome => outcome.provider));
+    if (authDegradedProviders.size > 0) notices.add("provider-auth");
+    if (providerModelOutcomes.some(outcome => (
+      outcome.state === "degraded" && !authDegradedProviders.has(outcome.provider)
+    ))) notices.add("provider-network");
     const candidate = {} as CodexCatalogCandidate;
     candidateStates.set(candidate, {
       consumed: false,
@@ -290,6 +537,8 @@ export async function gatherCodexCatalogCandidate(
       changed: Buffer.from(activeBytes ?? []).toString("utf8") !== preparedCatalogBytes
         || Buffer.from(cacheBytes ?? []).toString("utf8") !== preparedCacheBytes,
       notices: Object.freeze([...notices]),
+      modelEntitlements,
+      ...(discoveryChanged ? { discoveryConfig } : {}),
     });
     return { kind: "candidate", candidate };
   } catch (error) {
@@ -307,6 +556,9 @@ export async function gatherCodexCatalogCandidate(
 }
 
 function revalidateCandidate(state: CandidateState): CodexCatalogCommitResult | null {
+  if (!isCodexModelEntitlementSnapshotCurrent(state.modelEntitlements)) {
+    return { kind: "stale", reason: "account-entitlement" };
+  }
   let session: CatalogFilesystemEvidenceSession;
   let validatingTargets = false;
   try {
@@ -434,6 +686,12 @@ export async function convergeCodexCatalog(
   const state = candidateStates.get(gathered.candidate as object)!;
   lifecycle.onCommitBegin?.();
   const committed = await commitCodexCatalogCandidate(gathered.candidate, request.deadlineMs);
+  if (committed.kind === "committed" && state.discoveryConfig) {
+    const mutable = snapshot.config as OcxConfig;
+    mutable.modelDiscovery = state.discoveryConfig.modelDiscovery;
+    mutable.disabledModels = state.discoveryConfig.disabledModels;
+    saveConfigPreservingClaudeCode(mutable);
+  }
   return {
     changed: committed.kind === "committed" ? committed.changed : false,
     catalogRefresh: projectCommit(committed, state.notices),
