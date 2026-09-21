@@ -1,4 +1,5 @@
 import type { OcxConfig } from "../types";
+import { deleteConfigTopLevelKey } from "../config/rebase-provenance";
 
 export interface ProviderRewriteResult {
   /** Number of references re-pointed. */
@@ -19,11 +20,13 @@ export interface ProviderRewriteResult {
  *
  * Three shapes exist and the difference matters: routed model strings
  * (`"<provider>/<model>"`), bare provider ids (`customModels[].provider`,
- * `combos[*].targets[].provider`), and keys that ARE provider ids or routes
- * (`providerContextCaps`, `claudeCode.desktopProfile.assignments`). A rewrite
- * that handles only the first leaves an orphaned context cap and — worse — a
- * combo target naming a provider that no longer exists, which fails validation
- * in `src/combos/types.ts` and makes `loadConfig` discard the whole config.
+ * `combos[*].targets[].provider`, `routingProfiles[*].candidates[].provider`),
+ * and keys that ARE provider ids or routes (`providerContextCaps`,
+ * `claudeCode.desktopProfile.assignments`). A rewrite that handles only the
+ * first leaves an orphaned context cap and — worse — a combo target or routing
+ * candidate naming a provider that no longer exists, which fails validation in
+ * `src/combos/types.ts` / `src/routing/profile.ts` and makes `loadConfig`
+ * discard the whole config.
  *
  * `providers[*].selectedModels` is deliberately NOT rewritten: those are
  * per-provider native model ids, and upstream ids may themselves contain a
@@ -109,16 +112,31 @@ export function rewriteProviderReferences(config: OcxConfig, from: string, to: s
     }
   }
 
+  // Routing-profile candidates carry a bare provider id next to a bare model
+  // id (OcxRoutingProfileCandidate), and profile validation requires the
+  // provider to be configured — so an unrewritten candidate is the same
+  // load-failing dangling reference a stale combo target is.
+  for (const profile of Object.values(config.routingProfiles ?? {})) {
+    for (const candidate of profile.candidates ?? []) {
+      if (candidate.provider === from) {
+        candidate.provider = to;
+        changed += 1;
+      }
+    }
+  }
+
   // Keys. `providerContextCaps` is KEYED by provider id — a prefix rewrite would
   // silently orphan the cap — and a destination key may already be occupied.
-  const caps = config.providerContextCaps;
-  if (caps && Object.hasOwn(caps, from)) {
-    if (Object.hasOwn(caps, to)) {
-      collisions.push(`providerContextCaps.${to}`);
-    } else {
-      caps[to] = caps[from]!;
-      delete caps[from];
-      changed += 1;
+  for (const field of ["providerContextCaps", "providerContextCapValues"] as const) {
+    const caps = config[field];
+    if (caps && Object.hasOwn(caps, from)) {
+      if (Object.hasOwn(caps, to)) {
+        collisions.push(`${field}.${to}`);
+      } else {
+        caps[to] = caps[from]!;
+        delete caps[from];
+        changed += 1;
+      }
     }
   }
 
@@ -147,4 +165,33 @@ export function rewriteProviderReferences(config: OcxConfig, from: string, to: s
   }
 
   return { changed, collisions };
+}
+
+/**
+ * Drop the custom-model rows that belonged to a provider being removed.
+ *
+ * The sibling of the rename pass above. `rewriteProviderReferences` already
+ * carries `customModels[].provider` across a rename, so the array tracks the
+ * provider lifecycle — but removal used to delete only `config.providers[name]`
+ * and leave the rows behind. Those orphans still reach `/api/models` and the
+ * generated Codex catalog, which key on the row rather than on provider
+ * existence, so they surface as models that resolve to nothing (#1273).
+ *
+ * Only the rows are touched: the `customModelCatalogMigration` marker records
+ * one-time ownership of pre-marker rows and must survive removal unchanged, or
+ * an older binary's view of that ownership silently changes.
+ *
+ * Returns the number of rows dropped so callers can report it.
+ */
+export function dropProviderCustomModels(config: OcxConfig, provider: string): number {
+  const existing = config.customModels;
+  if (!Array.isArray(existing) || existing.length === 0) return 0;
+  const kept = existing.filter(model => model.provider !== provider);
+  if (kept.length === existing.length) return 0;
+  // Match the add/remove routes: an emptied list is dropped rather than left as
+  // `[]`, so the `customModels` field is absent either way. Only that field —
+  // the `customModelCatalogMigration` marker is deliberately left in place.
+  if (kept.length > 0) config.customModels = kept;
+  else deleteConfigTopLevelKey(config, "customModels");
+  return existing.length - kept.length;
 }

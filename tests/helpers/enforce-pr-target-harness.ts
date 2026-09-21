@@ -23,6 +23,13 @@ export type RecordedCall = { method: string; args: unknown };
 export type HarnessResult = {
   calls: RecordedCall[];
   /**
+   * Values the script wrote through `core.setOutput`, in write order. The
+   * write-capable gate consumes `RESOLVED_PULL_NUMBER` from the resolver, and
+   * the client sets it as a step output; exposing it lets a test assert the
+   * SHA-to-PR resolution directly instead of inferring it from later calls.
+   */
+  outputs: Array<{ name: string; value: unknown }>;
+  /**
    * Paths the script read through its `node:fs` stub. Kept separate from
    * `calls` so exact method-sequence assertions stay stable while the fs
    * capability stays recorded (round: the harness must not hand a write-capable
@@ -53,6 +60,8 @@ export type PullRequestState = {
   draft?: boolean;
   base?: { ref: string };
   user?: { login: string };
+  /** `pulls.get` changed_files; omit to default to listed file count in harness. */
+  changed_files?: number;
 };
 
 export type Comment = {
@@ -169,11 +178,26 @@ export type RunOptions = {
   /** Page-keyed open PR fixtures for `pulls.list` (1-based via array index). */
   openPullPages?: unknown[][];
   /**
-   * Check-runs `checks.listForRef` reports for the head. Defaults to a green
-   * `ci` check so completed-checklist scenarios pass the claim check.
-   * Pass a red/pending/missing set to exercise the claim-check reset paths.
+   * Check-runs `checks.listForRef` used to report for readiness claim checks.
+   * Local CI is now an author attestation only, so the gate no longer lists
+   * checks; these fixtures remain so older scenarios that pass `checkRuns`
+   * still construct cleanly without affecting gate behavior.
    */
-  checkRuns?: Array<{ name: string; status: string; conclusion: string | null }>;
+  checkRuns?: Array<{
+    name: string;
+    status: string;
+    conclusion: string | null;
+    app?: { id: number } | null;
+  }>;
+  /** Page-keyed check-run fixtures for `checks.listForRef` pagination. */
+  checkRunPages?: Array<Array<{
+    name: string;
+    status: string;
+    conclusion: string | null;
+    app?: { id: number } | null;
+  }>>;
+  /** Optional filtered total; unused now that the gate skips check listing. */
+  checkRunTotalCount?: number;
   /**
    * Review threads `pullRequestReviewThreads` (via GraphQL) reports for the PR.
    * Each entry is `{ isResolved, author }`; the harness wraps it into the
@@ -198,6 +222,35 @@ export type RunOptions = {
    * decide whether to add/remove the `review-ready` label.
    */
   labels?: string[];
+  /**
+   * Changed files `pulls.listFiles` reports for the PR. Used by the embedded
+   * hygiene reassessment that blocks Ready while deterministic hygiene fails.
+   * Defaults to an empty list (no hygiene failures).
+   */
+  files?: Array<{
+    filename: string;
+    status?: string;
+    patch?: string;
+    previous_filename?: string;
+  }>;
+  /** Page-keyed file fixtures for `pulls.listFiles` pagination tests. */
+  filePages?: Array<
+    Array<{
+      filename: string;
+      status?: string;
+      patch?: string;
+      previous_filename?: string;
+    }>
+  >;
+  /**
+   * Commit messages on the pull request branch, read by the carry-attribution
+   * assessor. The squash body is assembled from the description and these, so
+   * a `Co-authored-by` trailer can legitimately live in either.
+   *
+   * Defaults to one commit carrying the PR title, which is what a
+   * single-commit branch looks like.
+   */
+  commitMessages?: string[];
   /**
    * GraphQL query fragments that should reject. Unlike `failOn: ["graphql"]`,
    * which fails the review-threads read, this lets a test fail a specific
@@ -230,13 +283,13 @@ const DEFAULT_BODY = [
   "",
   "## Test plan",
   "",
-  "- [x] Run `bun test tests/ci-workflows.test.ts`",
+  "- [x] Run `bun test tests/ci-workflows/ci-workflows.test.ts`",
   "- [x] Confirm enforce-pr-target behaviour locally",
 ].join("\n");
 
 /** The repo's documented "CI passed" check, green by default. */
 const DEFAULT_GREEN_CHECKS = [
-  { name: "ci", status: "completed", conclusion: "success" },
+  { name: "ci", status: "completed", conclusion: "success", app: { id: 15368 } },
 ];
 
 const DEFAULT_PR = {
@@ -616,11 +669,31 @@ export async function runEnforcePrTarget(
     (options.openPulls && options.openPulls.length > 0 ? [options.openPulls] : []);
   const associatedPullRequestPages: unknown[][] =
     options.associatedPullRequestPages ?? [options.associatedPullRequests ?? [pr]];
+  const filePages: unknown[][] =
+    options.filePages ??
+    (options.files && options.files.length > 0 ? [options.files] : [[]]);
+  const listedFileCount = filePages.flat().length;
+  const commitMessages =
+    options.commitMessages ?? [String((options.pr as { title?: string })?.title ?? "")];
+  const prInput = options.pr as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(prInput, "changed_files")) {
+    (pr as Record<string, unknown>).changed_files = prInput.changed_files;
+  } else {
+    (pr as { changed_files: number }).changed_files = listedFileCount;
+  }
+  const checkRunPages = (options.checkRunPages ?? [options.checkRuns ?? DEFAULT_GREEN_CHECKS])
+    .map(page => page.map(check => ({
+      ...check,
+      // Existing fixtures model trusted GitHub Actions checks unless a test
+      // explicitly supplies another app or null to exercise provenance.
+      app: check.app === undefined ? { id: 15368 } : check.app,
+    })));
   const paginatePageCount = Math.max(
     pages.length,
     issueEventPages.length,
     openPullPages.length,
     associatedPullRequestPages.length,
+    filePages.length,
     1,
   );
 
@@ -717,6 +790,18 @@ export async function runEnforcePrTarget(
         return respond("pulls.list", args, openPullPages[page - 1] ?? []);
       },
       listReviews: (args: unknown) => respond("pulls.listReviews", args, options.reviews ?? []),
+      listFiles: (args: unknown) => {
+        const page = Number((args as { page?: number })?.page ?? 1);
+        return respond("pulls.listFiles", args, filePages[page - 1] ?? []);
+      },
+      listCommits: (args: unknown) => {
+        const page = Number((args as { page?: number })?.page ?? 1);
+        return respond(
+          "pulls.listCommits",
+          args,
+          page === 1 ? commitMessages.map(message => ({ commit: { message } })) : [],
+        );
+      },
     },
     issues: {
       // Honours `page`, so a caller that skips `paginate` sees only page one —
@@ -736,11 +821,15 @@ export async function runEnforcePrTarget(
       removeLabel: (args: unknown) => respond("issues.removeLabel", args, {}),
     },
     checks: {
-      listForRef: (args: unknown) =>
-        respond("checks.listForRef", args, {
-          total_count: (options.checkRuns ?? DEFAULT_GREEN_CHECKS).length,
-          check_runs: options.checkRuns ?? DEFAULT_GREEN_CHECKS,
-        }),
+      listForRef: (args: unknown) => {
+        const page = Number((args as { page?: number })?.page ?? 1);
+        return respond("checks.listForRef", args, {
+          total_count:
+            options.checkRunTotalCount ??
+            checkRunPages.reduce((total, rows) => total + rows.length, 0),
+          check_runs: checkRunPages[page - 1] ?? [],
+        });
+      },
     },
     repos: {
       getCollaboratorPermissionLevel: (args: unknown) =>
@@ -822,9 +911,13 @@ export async function runEnforcePrTarget(
     paginate = Object.assign(
       async (fn: (args: unknown) => Promise<{ data: unknown[] }>, params: unknown) => {
         const collected: unknown[] = [];
-        for (let page = 1; page <= paginatePageCount; page += 1) {
+        const pageCount = fn === rest.checks.listForRef ? checkRunPages.length : paginatePageCount;
+        for (let page = 1; page <= pageCount; page += 1) {
           const response = await fn({ ...(params as object), page });
-          collected.push(...response.data);
+          const rows = fn === rest.checks.listForRef
+            ? ((response.data as unknown as { check_runs?: unknown[] }).check_runs ?? [])
+            : response.data;
+          collected.push(...rows);
         }
         return collected;
       },
@@ -837,8 +930,19 @@ export async function runEnforcePrTarget(
          */
         iterator: (fn: (args: unknown) => Promise<{ data: unknown[] }>, params: unknown) => ({
           async *[Symbol.asyncIterator]() {
-            for (let page = 1; page <= paginatePageCount; page += 1) {
-              yield await fn({ ...(params as object), page });
+            const pageCount = fn === rest.checks.listForRef ? checkRunPages.length : paginatePageCount;
+            for (let page = 1; page <= pageCount; page += 1) {
+              const response = await fn({ ...(params as object), page });
+              if (fn !== rest.checks.listForRef) {
+                yield response;
+                continue;
+              }
+              // Match @octokit/plugin-paginate-rest: list envelopes such as
+              // `{ total_count, check_runs }` become array-valued page data.
+              yield {
+                ...response,
+                data: (response.data as unknown as { check_runs?: unknown[] }).check_runs ?? [],
+              };
             }
           },
         }),
@@ -1119,6 +1223,7 @@ export async function runEnforcePrTarget(
 
   return {
     calls,
+    outputs,
     fsReads,
     logs,
     warnings,

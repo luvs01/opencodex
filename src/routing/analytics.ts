@@ -11,7 +11,7 @@
  * sample for the full history.
  */
 
-import type { PersistedUsageEntry, PersistedUsageAttempt } from "../usage/log";
+import type { PersistedUsageEntry } from "../usage/log";
 import { estimateRequestCost, serviceTierContext } from "../usage/cost";
 import { openRequestHistoryIndex, requestHistoryDb } from "./history/indexer";
 
@@ -116,9 +116,11 @@ interface Bucket extends AnalyticsBreakdownRow {
 
 const COOLDOWN_RECOVERY_KINDS = new Set([
   "rate-limit-429",
+  "key-401",
   "key-429",
   "oauth-401",
   "anthropic-oauth-429",
+  "oauth-account-429",
 ]);
 
 function percentile(sorted: number[], p: number): number | undefined {
@@ -144,14 +146,15 @@ function parseEntry(rowJson: string): PersistedUsageEntry | null {
   }
 }
 
-function attemptsOf(entry: PersistedUsageEntry | null): PersistedUsageAttempt[] | undefined {
-  return entry?.attempts;
-}
-
 function cooldownTriggering(entry: PersistedUsageEntry | null, status: number): boolean {
   if (status === 429) return true;
-  const attempts = attemptsOf(entry) ?? [];
-  return attempts.some(attempt => attempt.recoveryKinds.some(kind => COOLDOWN_RECOVERY_KINDS.has(kind)));
+  if (!Array.isArray(entry?.attempts)) return false;
+  return entry.attempts.some((attempt: unknown) => {
+    if (!attempt || typeof attempt !== "object") return false;
+    const recoveryKinds = (attempt as { recoveryKinds?: unknown }).recoveryKinds;
+    return Array.isArray(recoveryKinds)
+      && recoveryKinds.some(kind => typeof kind === "string" && COOLDOWN_RECOVERY_KINDS.has(kind));
+  });
 }
 
 function successCostUsd(
