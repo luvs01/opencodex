@@ -270,6 +270,11 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         } catch {
           /* fall through */
         }
+        // A buffered result admitted at close is recorded, not settled — resolve it here.
+        if (receivedResult) {
+          finish(() => resolve({ patch: receivedResult!, lastActivityAt }));
+          return;
+        }
       }
       if (signal === "SIGKILL") {
         finish(() => reject(new FabricTaskError("total timeout exceeded", "timeout", "environment")));

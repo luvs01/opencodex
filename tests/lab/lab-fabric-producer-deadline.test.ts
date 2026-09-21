@@ -259,6 +259,8 @@ describe("isolated fabric producer deadline admission", () => {
     await withProducer(async (h) => {
       h.at(1_099);
       h.result();
+      await h.pending();
+      h.child.close();
       await h.success();
     });
   });
@@ -299,6 +301,8 @@ describe("isolated fabric producer deadline admission", () => {
       expect(h.timers[1]!.cleared).toBe(false);
       h.at(1_189);
       h.result();
+      await h.pending();
+      h.child.close();
       await h.success(1_090);
     });
   });
@@ -312,6 +316,8 @@ describe("isolated fabric producer deadline admission", () => {
       }
       h.at(1_249);
       h.result();
+      await h.pending();
+      h.child.close();
       await h.success(1_180);
     });
   });
