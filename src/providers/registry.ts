@@ -117,6 +117,29 @@ export function providerMatchesRegistryTransport(
 }
 
 /**
+ * `providerMatchesRegistryTransport` for a configured name that may be a generated-metadata
+ * ALIAS rather than a registry id.
+ *
+ * A registry row claims extra names through `extraMetadataAliases` (`gemini` for `google`,
+ * `anthropic-key` for `anthropic`, ...), and `resolveMetadataProvider` resolves those names —
+ * case-folded, the way saved provider keys arrive — to the row's metadata bundle. A provider
+ * saved under an alias is owned by the declaring entry, so its transport must be validated
+ * against that entry; an id-only lookup finds no `gemini` row and would drop a verdict the
+ * registry still owns.
+ */
+export function providerMatchesRegistryTransportOrAlias(
+  name: string,
+  provider: Pick<OcxProviderConfig, "baseUrl" | "adapter"> & Partial<Pick<OcxProviderConfig, "authMode">>,
+): boolean {
+  const lower = name.toLowerCase();
+  const entry = getProviderRegistryEntry(name)
+    ?? PROVIDER_REGISTRY.find(row =>
+      row.id.toLowerCase() === lower
+      || (row.extraMetadataAliases ?? []).some(alias => alias.toLowerCase() === lower));
+  return entry !== undefined && providerMatchesRegistryTransport(entry.id, provider);
+}
+
+/**
  * Resolve the registry entry a configured provider actually points at, by TRANSPORT
  * rather than by name.
  *

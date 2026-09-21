@@ -205,6 +205,45 @@ describe("vision eligibility core", () => {
     expect(requiresVisionPreprocessing(config, provider, candidate.id, candidate.provider)).toBe(false);
   });
 
+  test("11e. a canonical metadata alias keeps the owning registry row's verdict", () => {
+    // `gemini` is an extraMetadataAlias of the `google` registry row — a provider saved under
+    // that name resolves to the google bundle but owns no registry id of its own. An id-only
+    // transport check dropped the verdict entirely, and a generated text-only model silently
+    // degraded to "unknown" (eligible, no sidecar).
+    const provider = {
+      adapter: "google",
+      authMode: "key",
+      baseUrl: "https://generativelanguage.googleapis.com",
+    } as const;
+    const config = configWithProviders({ gemini: provider });
+    const candidate = { provider: "gemini", id: "gemini-live-2.5-flash-preview-native-audio" };
+
+    expect(modelAcceptsImageInput(config, candidate)).toBe(false);
+    expect(requiresVisionPreprocessing(config, provider, candidate.id, candidate.provider)).toBe(true);
+
+    // Saved provider keys are case-folded by resolveMetadataProvider; the transport binding
+    // must fold the same way or a title-cased alias would lose the same verdict.
+    const folded = configWithProviders({ Gemini: provider });
+    expect(modelAcceptsImageInput(folded, { provider: "Gemini", id: candidate.id })).toBe(false);
+  });
+
+  test("11f. an alias-named custom destination follows the owning entry's pinning", () => {
+    // `google` is a name-pinned (non-preserved) preset, so a `gemini` row pointed at a custom
+    // gateway answers with the same verdict the canonical `google` name returns — the alias
+    // inherits its owner's transport rule rather than failing open or closed on its own.
+    const provider = {
+      adapter: "google",
+      authMode: "key",
+      baseUrl: "https://operator-gateway.example/google",
+    } as const;
+    const config = configWithProviders({ gemini: provider, google: provider });
+    const id = "gemini-live-2.5-flash-preview-native-audio";
+
+    expect(modelAcceptsImageInput(config, { provider: "gemini", id }))
+      .toBe(modelAcceptsImageInput(config, { provider: "google", id }));
+    expect(modelAcceptsImageInput(config, { provider: "gemini", id })).toBe(false);
+  });
+
   test("12. only the selected Anthropic OAuth provider contributes Anthropic options", () => {
     const config = configWithProviders({
       anthropic: {
