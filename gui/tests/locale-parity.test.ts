@@ -14,6 +14,16 @@ async function readDict(locale: string): Promise<Map<string, string>> {
   return out;
 }
 
+/**
+ * A value with no letters once its placeholders are removed has nothing to translate: an em
+ * dash, a currency template, a bare glyph. Matching English there is evidence of nothing, so
+ * it is derived from the value instead of growing the allowlist by one entry every time the
+ * UI gains another symbol.
+ */
+function carriesTranslatableWords(value: string): boolean {
+  return /\p{L}/u.test(value.replace(/\{[a-zA-Z0-9_]+\}/g, " "));
+}
+
 // When the English locale grows, `scripts/sync-locale-keys.mjs` seeds the new key into every
 // locale as an English placeholder so the build does not break. That is fine for de/ko/ja/zh/ru
 // (they each have a human owner who will translate later), but zh-TW is this PR's contribution
@@ -30,6 +40,8 @@ async function readDict(locale: string): Promise<Map<string, string>> {
 // gap. Anything *not* on this list that ships an English-identical value is treated as a stale
 // placeholder and fails the build.
 const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
+  // A bare em dash: the "no Reasoning control" marker is a symbol, not copy.
+  "integrations.cursor.noControl",
   // API protocol/endpoint names
   "api.chatCompletionsEndpoint",
   "api.messagesEndpoint",
@@ -97,6 +109,9 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "nav.grok",
   // Other short identifiers, commands, and product names kept in English
   "api.clientConfig.clientOpencode",
+  // Cline CLI is a product name, not untranslated interface copy.
+  "integrations.tab.cline",
+  "api.clientConfig.clientCline",
   "api.clientConfig.clientPi",
   "api.clientConfig.clientOmp",
   "api.clientConfig.clientHermes",
@@ -107,6 +122,8 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "codexAuth.codexApp",
   "codexAuth.creditNextBadge",
   "common.github",
+  // Windows PowerShell is a product name, not an untranslated prose placeholder.
+  "remote.pairingCommandWindows",
   "grok.title",
   // Integration tabs: client/product proper nouns kept in English
   "integrations.tab.codex",
@@ -128,10 +145,19 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "api.clientConfig.clientPrime",
   "integrations.tab.aside",
   "api.clientConfig.clientAside",
+  "integrations.tab.raycast",
+  "api.clientConfig.clientRaycast",
+  // "omo" is the product's own lowercase spelling, identical in every locale.
+  "integrations.tab.omo",
+  "api.clientConfig.clientOmo",
+  // Cline product name and CLI acronym are intentionally preserved.
+  "integrations.tab.cline",
+  "api.clientConfig.clientCline",
   "integrations.codex.title",
   // Provider proper nouns kept in English
   "provider.name.commandCodeAuth",
   "provider.name.commandCodeApi",
+  "provider.name.orcaRouterApi",
   // Routing analytics identifiers and short labels
   "routing.revision",
   "routing.unavailable",
@@ -161,6 +187,10 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "integrations.cursor.title",
   "integrations.cursor.privateInference",
   "integrations.cursor.baseUrl",
+  // Cost cells are a fixed `$0.1401` / `≥$0.1401` in every locale (the column header is the
+  // untranslated `~$`); the templates are pure placeholders on purpose.
+  "logs.cost.approximate",
+  "logs.cost.lowerBound",
 ]);
 
 test("zh-TW ships no untranslated English placeholders beyond the intentional allowlist", async () => {
@@ -172,6 +202,7 @@ test("zh-TW ships no untranslated English placeholders beyond the intentional al
     const enValue = en.get(key);
     if (enValue === undefined) continue; // key-set parity is the other test's job
     if (!value.trim()) continue; // blank-value is the other test's job
+    if (!carriesTranslatableWords(value)) continue; // a symbol is identical in every locale
     if (value === enValue && !ZH_TW_KEEP_ENGLISH.has(key)) {
       stale.push(key);
     }
@@ -204,6 +235,8 @@ test("every locale key set matches the English source", async () => {
 const CURSOR_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "integrations.tab.cursor",
   "integrations.cursor.title",
+  // Em-dash marker, identical in every locale.
+  "integrations.cursor.noControl",
   "integrations.cursor.privateInference",
   "integrations.cursor.baseUrl",
   // "API Key" is the literal field name in Cursor's gateway form.
