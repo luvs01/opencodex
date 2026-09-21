@@ -87,12 +87,28 @@ export function claudeCodeBaselineArmed(config: OcxConfig): boolean {
  * whole snapshot. Mirror that committed subtree and rebase the hand-edit guard
  * together so a later unrelated save does not mistake the scoped write for an
  * outstanding in-memory mutation.
+ *
+ * The live subtree may already hold pending mutations a concurrent request
+ * assigned but has not saved yet — the Claude settings PUT yields between
+ * assigning `config.claudeCode` and saving. Adopt through the same three-way
+ * reconcile guarded saves use, so pending live leaves survive, disjoint
+ * committed changes merge in, and only the baseline moves wholesale to the
+ * committed subtree.
  */
 export function adoptPersistedClaudeCode(
   config: OcxConfig,
   persistedClaudeCode: OcxConfig["claudeCode"],
 ): void {
-  config.claudeCode = structuredClone(persistedClaudeCode);
+  const storedBaseline: ConfigMergeValue = claudeCodeBaseline.has(config)
+    ? claudeCodeBaseline.get(config)
+    : MISSING_CONFIG_VALUE;
+  const merged = reconcileConfigValue(
+    storedBaseline === undefined ? MISSING_CONFIG_VALUE : storedBaseline,
+    config.claudeCode === undefined ? MISSING_CONFIG_VALUE : config.claudeCode,
+    persistedClaudeCode === undefined ? MISSING_CONFIG_VALUE : persistedClaudeCode,
+  );
+  if (merged === MISSING_CONFIG_VALUE) delete config.claudeCode;
+  else config.claudeCode = merged as OcxConfig["claudeCode"];
   const baseline = liveConfigBaseline.get(config);
   if (baseline) baseline.claudeCode = structuredClone(persistedClaudeCode);
   if (claudeCodeBaseline.has(config)) {

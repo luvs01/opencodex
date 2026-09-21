@@ -137,9 +137,15 @@ async function persistDesktopModeField(
   desktopMode: "first-party" | "gateway",
 ): Promise<{ ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" }> {
   const { recordClaudeDesktopMode } = await import("../../claude/desktop-first-party");
-  const outcome = mutatePersistedConfig(persisted => recordClaudeDesktopMode(persisted, desktopMode));
+  const outcome = mutatePersistedConfig(persisted => {
+    const mutation = recordClaudeDesktopMode(persisted, desktopMode);
+    return { changed: mutation.changed, value: structuredClone(persisted.claudeCode) };
+  });
   if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  recordClaudeDesktopMode(config, desktopMode);
+  // First-party apply ends here — no profile-marker write follows — so without
+  // adopting, live diverges from the armed baseline and a later whole-config
+  // save reads that divergence as a pending mutation and stomps hand edits.
+  adoptPersistedClaudeCode(config, outcome.value);
   return { ok: true };
 }
 

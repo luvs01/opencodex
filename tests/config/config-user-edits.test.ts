@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   armClaudeCodeBaseline,
+  adoptPersistedClaudeCode,
   adoptPersistedProviderIntoLiveConfig,
   deleteConfigTopLevelKey,
   getConfigPath,
@@ -572,6 +573,22 @@ test("our own change wins a conflict and rebases the baseline", () => {
   live.port = 10102;
   saveConfigPreservingClaudeCode(live);
   expect((diskConfig().claudeCode as Record<string, unknown>).authMode).toBe("proxy");
+});
+
+// A scoped Desktop write commits against the file, then adopts the committed
+// subtree. A live mutation still pending — a Claude settings PUT yields between
+// assigning `config.claudeCode` and saving — must survive the adoption and reach
+// the next save instead of being silently replaced.
+test("a scoped Claude write keeps a pending live Claude edit", () => {
+  const live = loadConfig();
+  armClaudeCodeBaseline(live);
+  live.claudeCode = { ...(live.claudeCode ?? {}), authMode: "proxy" };
+
+  adoptPersistedClaudeCode(live, { authMode: "subscription", desktopMode: "first-party" });
+
+  expect(live.claudeCode).toMatchObject({ authMode: "proxy", desktopMode: "first-party" });
+  saveConfigPreservingClaudeCode(live);
+  expect(diskConfig().claudeCode).toEqual({ authMode: "proxy", desktopMode: "first-party" });
 });
 
 test("OAuth reconciliation keeps a pending live Claude subtree authoritative", () => {
