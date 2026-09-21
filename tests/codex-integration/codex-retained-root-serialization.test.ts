@@ -307,7 +307,7 @@ test("startup and CLI sync-cache cannot write models_cache while another process
     const cliStart = cliSource.indexOf('"sync-cache": async');
     const cliRoot = cliSource.slice(cliStart, cliSource.indexOf('gui: async', cliStart));
     expect(cliRoot).toContain("withCatalogWriteSerialization(owningCodexHome");
-    expect(cliRoot).toContain("invalidateCodexModelsCacheWithPermit");
+    expect(cliRoot).toContain("syncCodexModelsCacheWithPermit");
 
     const startup = readFileSync(join(repoRoot, "src/server/index.ts"), "utf8");
     const startupStart = startup.indexOf("const startupCodexHome");
