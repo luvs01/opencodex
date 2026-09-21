@@ -26,12 +26,11 @@
  * CODEX_HOME is resolved at CALL time (the `features.ts:58-67` pattern) so tests
  * can point fixtures via env or an explicit path.
  */
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { expandUserPath } from "../config";
-import { CODEX_CONFIG_PATH } from "./paths";
-import { OCX_SECTION_MARKER } from "./injected-marker";
+import { resolveCodexHomeDir } from "./home";
 import {
   durableWrite,
   durableWriteExclusive,
@@ -140,237 +139,100 @@ export function isToggleId(value: string): value is ToggleId {
   return Object.prototype.hasOwnProperty.call(TOGGLE_KEYS, value);
 }
 
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
+export { activeConfigPath, activeStorePath, activeBaseVariantDir } from "./prompt-layers/paths";
+export type { Paths } from "./prompt-layers/paths";
+export { computeRevision, readFileBytes } from "./prompt-layers/revision";
+export { normalizeBody, findInvalidCharacter, encodeBasicString, decodeBasicString } from "./prompt-layers/encoding";
+export type { CharacterFinding } from "./prompt-layers/encoding";
+export { inspectOwnership } from "./prompt-layers/toml-read";
+export type { Ownership } from "./prompt-layers/toml-read";
 
-export interface Paths {
-  configPath?: string;
-  storePath?: string;
-  baseVariantDir?: string;
-}
-
-function activeCodexHome(): string {
-  const raw = process.env.CODEX_HOME?.trim();
-  if (!raw) return CODEX_CONFIG_PATH.slice(0, -"/config.toml".length);
-  const path = resolve(expandUserPath(raw));
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return path;
-  }
-}
-
-export function activeConfigPath(opts?: Paths): string {
-  return opts?.configPath ?? join(activeCodexHome(), "config.toml");
-}
-
-export function activeStorePath(opts?: Paths): string {
-  return opts?.storePath ?? join(activeCodexHome(), "opencodex-prompt.json");
-}
+import { activeConfigPath, activeStorePath, activeBaseVariantDir, journalPathFor, lockPathFor, type Paths } from "./prompt-layers/paths";
+import { readFileOrNull, computeRevision, updateFingerprintField } from "./prompt-layers/revision";
+import { normalizeBody, findInvalidCharacter, decodeBasicString } from "./prompt-layers/encoding";
+import { rootArrayEntries, hasRootKey, rootLines, tableLines, boolInLines, inspectOwnership } from "./prompt-layers/toml-read";
+import { setRootBool, setRootString, setTableBool, setProjection, removeUnownedProjection } from "./prompt-layers/toml-edit";
 
 /**
- * Where authored base-prompt variants live, one markdown file per variant.
+ * Instruction documents the prompt probe renders out of CODEX_HOME, in the
+ * precedence order Codex itself applies: an `AGENTS.override.md` shadows
+ * `AGENTS.md`. Both are hashed into the probe fingerprint, because either one
+ * changes the rendered project document without touching a managed file.
+ */
+const PROBE_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md"] as const;
+
+/**
+ * The project-document filenames Codex would look for in a given home, in its own
+ * order: the two built-ins first, then whatever `project_doc_fallback_filenames`
+ * adds, de-duplicated (`core/src/agents_md.rs` `candidate_filenames`).
  *
- * A directory of real files rather than another JSON store, because
- * `model_instructions_file` points Codex at a path it reads directly. Embedding the
- * bodies in `opencodex-prompt.json` would mean materialising a temp file at selection
- * time, which is a second write path for no gain.
+ * Read from config rather than hard-coded, because a user who configures
+ * `TEAM.md` renders TEAM.md, and a fingerprint that only knew about AGENTS.md
+ * would let an edit to it pass unnoticed.
+ *
  */
-export function activeBaseVariantDir(opts?: Paths): string {
-  return opts?.baseVariantDir ?? join(activeCodexHome(), "opencodex-prompt-base");
-}
-
-function journalPathFor(storePath: string): string {
-  return `${storePath.replace(/\.json$/, "")}.journal`;
-}
-
-function lockPathFor(storePath: string): string {
-  return `${storePath.replace(/\.json$/, "")}.lock`;
-}
-
-// ---------------------------------------------------------------------------
-// Character policy — see the header. Defined over Unicode SCALAR VALUES, not
-// UTF-16 code units, because a lone surrogate is not a scalar value and UTF-8
-// encoding would silently substitute U+FFFD.
-// ---------------------------------------------------------------------------
-
-export interface CharacterFinding {
-  /** code-point index, consistent across module, route and editor */
-  position: number;
-  reason: "control" | "unpaired-surrogate";
-  codePoint: number;
-}
-
-/** Tab to four spaces, CRLF and lone CR to LF. Applied BEFORE validation. */
-export function normalizeBody(body: string): string {
-  return body.replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
-}
-
-/** First offending scalar, or null. Run AFTER normalizeBody. */
-export function findInvalidCharacter(body: string): CharacterFinding | null {
-  let position = 0;
-  for (let i = 0; i < body.length; ) {
-    const code = body.codePointAt(i)!;
-    const unit = body.charCodeAt(i);
-    const isHighSurrogate = unit >= 0xd800 && unit <= 0xdbff;
-    const isLowSurrogate = unit >= 0xdc00 && unit <= 0xdfff;
-    // codePointAt only combines a well-formed pair, so a surviving surrogate
-    // code point here is unpaired by construction.
-    if ((isHighSurrogate || isLowSurrogate) && code === unit) {
-      return { position, reason: "unpaired-surrogate", codePoint: code };
-    }
-    const isNewline = code === 0x0a;
-    const isC0 = code < 0x20 && !isNewline;
-    const isDel = code === 0x7f;
-    const isC1 = code >= 0x80 && code <= 0x9f;
-    if (isC0 || isDel || isC1) {
-      return { position, reason: "control", codePoint: code };
-    }
-    i += code > 0xffff ? 2 : 1;
-    position += 1;
+function probeInstructionFilenames(configBytes: string | null): string[] {
+  const names: string[] = [...PROBE_INSTRUCTION_FILES];
+  for (const entry of rootArrayEntries(configBytes, "project_doc_fallback_filenames")) {
+    // Upstream trims each configured name and drops whitespace-only entries
+    // (`core/src/config/mod.rs`), so " TEAM.md " and "TEAM.md" are one filename.
+    const name = entry.trim();
+    if (name === "") continue;
+    if (!names.includes(name)) names.push(name);
   }
-  return null;
+  return names;
 }
+
 
 /**
- * TOML basic-string encoding, total over the accepted set: three rules, none of
- * them in the range where `Bun.TOML.parse` misbehaves. `\r` cannot appear
- * because normalizeBody removed it; control characters cannot appear because
- * findInvalidCharacter rejected them.
+ * The directories Codex would look in for a project document, given the home the
+ * probe runs in.
+ *
+ * Upstream finds the nearest ancestor holding a `project_root_markers` entry
+ * (default `.git`) and then searches every directory from that root down to the cwd,
+ * inclusive; with no such ancestor it searches the cwd alone
+ * (`core/src/agents_md.rs` `agents_md_paths`).
+ *
+ * This was originally written off as unreachable on the grounds that the probe runs
+ * in CODEX_HOME with no checkout around it. That was wrong, and a review round caught
+ * it: `~/.codex` inside a dotfiles repository is an ordinary setup, and there the
+ * walk finds real documents. The walk is cheap — a bounded number of `existsSync`
+ * calls beside a subprocess spawn — so it is performed rather than assumed away.
  */
-export function encodeBasicString(body: string): string {
-  return `"${body.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
-}
-
-/**
- * Inverse of `encodeBasicString`, deliberately narrow: it accepts ONLY the three
- * escapes we emit. `\t`, `\f`, `\b`, `\r` and `\uXXXX` are refused rather than
- * guessed — decoding them correctly is exactly the ambiguity the restricted set
- * exists to avoid.
- */
-export function decodeBasicString(literal: string): string | null {
-  if (literal.length < 2 || !literal.startsWith('"') || !literal.endsWith('"')) return null;
-  const inner = literal.slice(1, -1);
-  let out = "";
-  for (let i = 0; i < inner.length; i += 1) {
-    const ch = inner[i]!;
-    if (ch !== "\\") {
-      if (ch === '"') return null; // unescaped quote: not a single literal
-      out += ch;
-      continue;
-    }
-    const next = inner[i + 1];
-    if (next === "\\") out += "\\";
-    else if (next === '"') out += '"';
-    else if (next === "n") out += "\n";
-    else return null; // any other escape is outside what we will decode
-    i += 1;
+function probeProjectDocDirs(home: string, configBytes: string | null): string[] {
+  const markers = projectRootMarkers(configBytes);
+  // An explicitly empty array disables root detection upstream, which is not the same
+  // as an absent key falling back to the default.
+  if (markers.length === 0) return [home];
+  let root: string | null = null;
+  for (let dir = home; ; ) {
+    if (markers.some(marker => existsSync(join(dir, marker)))) { root = dir; break; }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Byte-level hashing. The revision covers COMPLETE file bytes plus existence,
-// so removing the marker while leaving the value intact still changes it.
-// ---------------------------------------------------------------------------
-
-function readFileOrNull(path: string): string | null {
-  try {
-    if (!existsSync(path)) return null;
-    return readFileSync(path, "utf8");
-  } catch {
-    return null;
+  if (root === null) return [home];
+  const dirs: string[] = [];
+  for (let dir = home; ; ) {
+    dirs.push(dir);
+    if (dir === root) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
+  // Root first, matching upstream's reversed search order. Order is load-bearing:
+  // the digest must not change merely because the walk was traversed the other way.
+  return dirs.reverse();
 }
 
-export function computeRevision(configBytes: string | null, storeBytes: string | null): string {
-  const hash = createHash("sha256");
-  hash.update("cfg:");
-  hash.update(configBytes ?? "\0absent");
-  hash.update("\nstore:");
-  hash.update(storeBytes ?? "\0absent");
-  return `sha256:${hash.digest("hex")}`;
+/** `project_root_markers`, defaulting to `.git` when the key is absent. */
+function projectRootMarkers(configBytes: string | null): string[] {
+  if (!hasRootKey(configBytes, "project_root_markers")) return [".git"];
+  // Present-but-empty disables root detection upstream, which is why presence is
+  // tested separately from the decoded entries rather than inferred from them.
+  return rootArrayEntries(configBytes, "project_root_markers").filter(m => m !== "");
 }
 
-export { readFileOrNull as readFileBytes };
-
-// ---------------------------------------------------------------------------
-// Scoped TOML scanning. Line-based like `features.ts:80-93`: booleans need no
-// escaping, and line editing preserves the user's comments and formatting
-// exactly where a re-serialize would not.
-// ---------------------------------------------------------------------------
-
-const TABLE_HEADER = /^\s*\[/;
-
-/** Lines of the root scope: everything before the first `[table]` header. */
-function rootLines(content: string): string[] {
-  const lines = content.split("\n");
-  const first = lines.findIndex(l => TABLE_HEADER.test(l));
-  return first === -1 ? lines : lines.slice(0, first);
-}
-
-/** Lines of `[header]`'s body, up to the next table header. */
-function tableLines(content: string, header: string): string[] | null {
-  const lines = content.split("\n");
-  const escaped = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const start = lines.findIndex(l => new RegExp(`^\\s*\\[${escaped}\\]\\s*(?:#.*)?$`).test(l));
-  if (start === -1) return null;
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex(l => TABLE_HEADER.test(l));
-  return end === -1 ? rest : rest.slice(0, end);
-}
-
-function boolInLines(lines: string[], key: string): boolean | null {
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^\\s*${escaped}\\s*=\\s*(true|false)\\s*(?:#.*)?$`);
-  for (const line of lines) {
-    const m = pattern.exec(line);
-    if (m) return m[1] === "true";
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Ownership of the generated projection.
-//
-// Canonical physical form, always exactly two lines at the top of the document:
-//
-//     # Auto-injected by opencodex
-//     developer_instructions = "<single-line basic string>"
-//
-// Replacement is "find the marker, replace the next line" — never a span search.
-// Adjacency mirrors `injected-marker.ts:53-60`, tightened by a shape check.
-// ---------------------------------------------------------------------------
-
-const DEV_INSTRUCTIONS_KEY = "developer_instructions";
-const CANONICAL_LINE = /^developer_instructions = "(?:[^"\\]|\\.)*"$/;
-const ANY_DEV_INSTRUCTIONS = /^\s*(?:developer_instructions|"developer_instructions"|'developer_instructions')\s*=/;
-
-export type Ownership =
-  /** no such key anywhere in the root scope */
-  | { state: "absent" }
-  /** marker-adjacent and canonically shaped: ours to rewrite */
-  | { state: "owned"; line: number; literal: string }
-  /** marker-adjacent but reshaped: refuse, offer repair */
-  | { state: "owned-malformed"; line: number; raw: string }
-  /** no marker: externally authored, refuse and offer adoption */
-  | { state: "external"; line: number; raw: string };
-
-export function inspectOwnership(configBytes: string | null): Ownership {
-  if (configBytes === null) return { state: "absent" };
-  const lines = rootLines(configBytes);
-  for (let i = 0; i < lines.length; i += 1) {
-    const raw = lines[i]!;
-    if (!ANY_DEV_INSTRUCTIONS.test(raw)) continue;
-    const marked = i > 0 && lines[i - 1]!.includes(OCX_SECTION_MARKER);
-    if (!marked) return { state: "external", line: i + 1, raw };
-    if (!CANONICAL_LINE.test(raw)) return { state: "owned-malformed", line: i + 1, raw };
-    const literal = raw.slice(`${DEV_INSTRUCTIONS_KEY} = `.length);
-    return { state: "owned", line: i + 1, literal };
-  }
-  return { state: "absent" };
-}
 
 // ---------------------------------------------------------------------------
 // Store — the single source of truth for custom layers.
@@ -506,8 +368,19 @@ function readToggle(configBytes: string | null, id: ToggleId): ToggleState {
 function readModelInstructionsFile(configBytes: string | null): string | null {
   if (configBytes === null) return null;
   for (const line of rootLines(configBytes)) {
-    const m = /^\s*model_instructions_file\s*=\s*"([^"]*)"\s*(?:#.*)?$/.exec(line);
-    if (m) return m[1]!;
+    // Capture the whole literal INCLUDING its quotes and decode it, rather than
+    // returning the raw inner text. `setRootString` writes this key through
+    // `encodeBasicString`, which escapes backslashes, so on Windows the stored
+    // literal is "C:\\Users\\..." while the path is "C:\Users\...". Reading the
+    // inner text verbatim returned the doubled form: the round trip did not
+    // survive, `baseSelection` compared a doubled path against the real variant
+    // path and reported `external` for a variant this code had just selected.
+    //
+    // `[^"]*` cannot span an escaped quote either. That is not a new limit -- it
+    // is the same one the writer's restricted escape set is built around, and
+    // `decodeBasicString` refuses anything outside it rather than guessing.
+    const m = /^\s*model_instructions_file\s*=\s*("[^"]*")\s*(?:#.*)?$/.exec(line);
+    if (m) return decodeBasicString(m[1]!);
   }
   return null;
 }
@@ -634,6 +507,125 @@ export function readPromptLayers(opts?: Paths): PromptLayerSnapshot {
   };
 }
 
+/**
+ * Identity for prompt-text probe admission, deliberately separate from the
+ * optimistic-concurrency revision above. The revision covers only config/store
+ * transaction bytes; an edit to the selected base variant changes the prompt
+ * without changing that transaction contract.
+ *
+ * The instruction documents in CODEX_HOME are hashed for the same reason, and they
+ * are read from `resolveCodexHomeDir()` rather than from `activeConfigPath`'s
+ * directory. Those two are deliberately different under test — the route fixtures
+ * inject `codexPromptPaths` at a temp root while CODEX_HOME points at a decoy — and
+ * the probe renders whatever lives in the home it actually runs in. Deriving the
+ * path from the injected config would name a file the probe never reads, which is
+ * a fingerprint that cannot fail rather than evidence.
+ *
+ * A BOUNDED invalidation key, not prompt identity. It covers opencodex-managed writes,
+ * the selected base prompt, the project documents Codex would discover from this home,
+ * and each skill's manifest. Plugin manifests, live MCP availability, and the clock
+ * also move the rendered prompt and are not files this process can name.
+ *
+ * The distinction is worth stating exactly, because the obvious phrasing is wrong: for
+ * a COVERED input the key moves and a late caller is refused with `busy`. For an
+ * UNCOVERED one the key does not move, so a late caller joins and reads the older
+ * rendering. That is the residual, bounded to one in-flight window in a read-only view.
+ *
+ * "Hash every input" is only closable against a pinned Codex — the dependency graph is
+ * upstream's and moves on its own. An enumeration-free alternative exists (admit only
+ * when the probe started after the request arrived) and is recorded in the plan; it
+ * costs the coalescing this work exists to provide unless arrivals are batched first.
+ * See devlog/_plan/260829_bugpr_lane_h_residual_issues/130_pr2872_probe_fingerprint.md.
+ */
+export function computePromptProbeStateFingerprint(opts?: Paths): string {
+  const configBytes = readFileOrNull(activeConfigPath(opts));
+  const storeBytes = readFileOrNull(activeStorePath(opts));
+  const variants = readBaseVariants(opts);
+  const selection = resolveBaseSelection(configBytes, variants, opts);
+  const hash = createHash("sha256");
+  updateFingerprintField(hash, "revision", computeRevision(configBytes, storeBytes));
+  updateFingerprintField(hash, "selected-base", selection.kind === "variant" ? `variant:${selection.id}` : selection.kind);
+  if (selection.kind === "variant") {
+    updateFingerprintField(hash, "variant-bytes", readFileOrNull(join(activeBaseVariantDir(opts), `${selection.id}.md`)));
+  }
+  if (selection.kind === "external") {
+    // The selected base file is hashed whether or not we manage it. Hashing the
+    // managed variant's bytes while recording an external selection as the bare
+    // word "external" would make the guarantee depend on who authored the file,
+    // which is not a distinction the probe's caller can see.
+    //
+    // Its path is part of the identity as well as its contents: pointing the key
+    // at a different file changes the prompt even when both files read alike.
+    updateFingerprintField(hash, "external-path", selection.path);
+    let externalBytes: string | null = null;
+    try {
+      // Relative to the CONFIG FILE's directory, which is what Codex does with its
+      // relative path fields. resolve() alone would use this process's cwd — the
+      // proxy's working directory, which has nothing to do with either the config
+      // or the probe child's cwd — and would hash an unrelated file.
+      externalBytes = readFileOrNull(resolve(dirname(activeConfigPath(opts)), expandUserPath(selection.path)));
+    } catch {
+      // An unresolvable path is a state, not a failure: it hashes as absent, and
+      // resolveBaseSelection has already reported the selection as external.
+      externalBytes = null;
+    }
+    updateFingerprintField(hash, "external-bytes", externalBytes);
+  }
+  // Codex prefers AGENTS.override.md over AGENTS.md, so both spellings are hashed
+  // in that order: an override edit changes the rendered project document exactly
+  // as a plain edit does.
+  const probeHome = resolveCodexHomeDir();
+  const filenames = probeInstructionFilenames(configBytes);
+  for (const dir of probeProjectDocDirs(probeHome, configBytes)) {
+    for (const name of filenames) {
+      // The path goes in the CONTENTS, never in the field name. Only contents are
+      // length-framed, so a name built from a path would reintroduce exactly the
+      // ambiguity this helper exists to remove. Path and bytes are separate fields
+      // because two directories in the walk can both hold an AGENTS.md.
+      const path = join(dir, name);
+      updateFingerprintField(hash, "doc-path", path);
+      updateFingerprintField(hash, "doc-bytes", readFileOrNull(path));
+    }
+  }
+  for (const path of probeSkillManifests(probeHome)) {
+    updateFingerprintField(hash, "skill-path", path);
+    updateFingerprintField(hash, "skill-bytes", readFileOrNull(path));
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+/**
+ * `SKILL.md` manifests under the home's skills directory.
+ *
+ * These were written off as unobservable in an earlier version of this function's
+ * comment. They are not: Codex reads each manifest's frontmatter and renders its
+ * description into `<skills_instructions>`, and a review round demonstrated a live
+ * description edit changing the probe's output while the fingerprint stood still.
+ *
+ * One directory listing plus one `readFileOrNull` per skill, beside a subprocess that
+ * costs orders of magnitude more. Sorted, because `readdirSync` order is not a
+ * contract and a digest must not depend on it.
+ *
+ * Only the top-level manifest per skill is read. A skill's bundled scripts and
+ * references do not reach the rendered section, so hashing the whole tree would buy
+ * redundant invalidations at a real cost on large skill sets.
+ */
+function probeSkillManifests(home: string): string[] {
+  const root = join(home, "skills");
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const manifests: string[] = [];
+  for (const entry of entries.sort()) {
+    const manifest = join(root, entry, "SKILL.md");
+    if (existsSync(manifest)) manifests.push(manifest);
+  }
+  return manifests;
+}
+
 // ---------------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------------
@@ -656,151 +648,6 @@ export type WriteError =
 export type WriteResult =
   | { ok: true; changed: boolean; snapshot: PromptLayerSnapshot }
   | { ok: false; error: WriteError; detail?: string };
-
-/** Line editing, not re-serialization: the user's comments and layout survive. */
-function dominantEol(content: string): "\r\n" | "\n" {
-  const crlf = (content.match(/\r\n/g) ?? []).length;
-  if (crlf === 0) return "\n";
-  const bareLf = (content.match(/\n/g) ?? []).length - crlf;
-  return crlf >= bareLf ? "\r\n" : "\n";
-}
-
-function splitLines(content: string): string[] {
-  return content.replace(/\r\n/g, "\n").split("\n");
-}
-
-/**
- * A leading UTF-8 BOM, split off so line editing never steps over it.
- *
- * Codex reads config.toml with Rust `toml_edit`, which accepts a BOM at byte 0 and
- * nowhere else. Inserting the generated block at line index 0 pushed the BOM down
- * to byte 58, the write reported success because our own byte comparison matched
- * what we intended to write, and the next parse failed with
- * "Expected a key but found (0xEF)" — a config file the user could no longer load,
- * produced by a write that told them it worked.
- *
- * Editors on Windows write this byte routinely, so the file is not exotic.
- */
-function splitBom(content: string): { bom: string; body: string } {
-  return content.startsWith("\ufeff")
-    ? { bom: "\ufeff", body: content.slice(1) }
-    : { bom: "", body: content };
-}
-
-function joinLines(lines: string[], eol: "\r\n" | "\n"): string {
-  const text = lines.join("\n");
-  return eol === "\n" ? text : text.replace(/\n/g, "\r\n");
-}
-
-function firstTableIndex(lines: string[]): number {
-  const idx = lines.findIndex(l => TABLE_HEADER.test(l));
-  return idx === -1 ? lines.length : idx;
-}
-
-/** Set a root-scope boolean, inserting above the first table when absent. */
-function setRootBool(content: string, key: string, value: boolean): string {
-  const eol = dominantEol(content);
-  const { bom, body } = splitBom(content);
-  const lines = splitLines(body);
-  const limit = firstTableIndex(lines);
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^(\\s*${escaped}\\s*=\\s*)(?:true|false)(\\s*(?:#.*)?)$`);
-  for (let i = 0; i < limit; i += 1) {
-    const m = pattern.exec(lines[i]!);
-    if (m) {
-      lines[i] = `${m[1]}${value}${m[2]}`;
-      return bom + joinLines(lines, eol);
-    }
-  }
-  lines.splice(limit, 0, `${key} = ${value}`);
-  return bom + joinLines(lines, eol);
-}
-
-/**
- * Set or REMOVE a root-scope basic string. `null` removes the key.
- *
- * Removal is what selecting the default variant does, and it has to be a real deletion
- * rather than an empty string: `model_instructions_file = ""` is a path Codex would try
- * to read, not an absent setting.
- */
-function setRootString(content: string, key: string, value: string | null): string {
-  const eol = dominantEol(content);
-  const { bom, body } = splitBom(content);
-  const lines = splitLines(body);
-  const limit = firstTableIndex(lines);
-  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^\\s*${escaped}\\s*=\\s*"[^"]*"\\s*(?:#.*)?$`);
-  for (let i = 0; i < limit; i += 1) {
-    if (!pattern.test(lines[i]!)) continue;
-    if (value === null) lines.splice(i, 1);
-    else lines[i] = `${key} = ${encodeBasicString(value)}`;
-    return bom + joinLines(lines, eol);
-  }
-  if (value === null) return bom + joinLines(lines, eol);
-  lines.splice(limit, 0, `${key} = ${encodeBasicString(value)}`);
-  return bom + joinLines(lines, eol);
-}
-
-/** Set a boolean inside `[table]`, appending the table when absent. */
-function setTableBool(content: string, table: string, key: string, value: boolean): string {
-  const eol = dominantEol(content);
-  const { bom, body } = splitBom(content);
-  const lines = splitLines(body);
-  const escaped = table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const start = lines.findIndex(l => new RegExp(`^\\s*\\[${escaped}\\]\\s*(?:#.*)?$`).test(l));
-  if (start === -1) {
-    const tail = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
-    lines.splice(tail, 0, `[${table}]`, `${key} = ${value}`);
-    return bom + joinLines(lines, eol);
-  }
-  const keyEscaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^(\\s*${keyEscaped}\\s*=\\s*)(?:true|false)(\\s*(?:#.*)?)$`);
-  let end = start + 1;
-  while (end < lines.length && !TABLE_HEADER.test(lines[end]!)) end += 1;
-  for (let i = start + 1; i < end; i += 1) {
-    const m = pattern.exec(lines[i]!);
-    if (m) {
-      lines[i] = `${m[1]}${value}${m[2]}`;
-      return bom + joinLines(lines, eol);
-    }
-  }
-  lines.splice(end, 0, `${key} = ${value}`);
-  return bom + joinLines(lines, eol);
-}
-
-/**
- * Replace, insert, or remove the generated two-line block. Canonical form is
- * marker + assignment at the top of the document; replacement is "find the
- * marker, replace the next line" rather than a span search.
- */
-function setProjection(content: string | null, projection: string | null): string {
-  const base = content ?? "";
-  const eol = dominantEol(base);
-  // The BOM is held aside for the whole edit. This is the function that produced
-  // the corruption: the insert below is at index 0, which put the marker line
-  // ahead of a byte that is only legal at byte 0.
-  const { bom, body } = splitBom(base);
-  const lines = splitLines(body);
-  const limit = firstTableIndex(lines);
-
-  let markerAt = -1;
-  for (let i = 0; i < limit; i += 1) {
-    if (i > 0 && lines[i - 1]!.includes(OCX_SECTION_MARKER) && ANY_DEV_INSTRUCTIONS.test(lines[i]!)) {
-      markerAt = i - 1;
-      break;
-    }
-  }
-
-  if (markerAt !== -1) {
-    if (projection === null) lines.splice(markerAt, 2);
-    else lines[markerAt + 1] = `${DEV_INSTRUCTIONS_KEY} = ${encodeBasicString(projection)}`;
-    return bom + joinLines(lines, eol);
-  }
-
-  if (projection === null) return bom + joinLines(lines, eol);
-  lines.splice(0, 0, OCX_SECTION_MARKER, `${DEV_INSTRUCTIONS_KEY} = ${encodeBasicString(projection)}`);
-  return bom + joinLines(lines, eol);
-}
 
 function serializeStore(layers: readonly CustomLayer[]): string {
   return `${JSON.stringify({ layers }, null, 2)}\n`;
@@ -1223,20 +1070,6 @@ export function adoptDeveloperInstructions(revision: string, opts?: Paths): Writ
       nextStore: serializeStore(layers),
     };
   });
-}
-
-/** Remove an unowned or reshaped `developer_instructions` from the root scope. */
-function removeUnownedProjection(content: string): string {
-  const eol = dominantEol(content);
-  const lines = splitLines(content);
-  const limit = firstTableIndex(lines);
-  for (let i = 0; i < limit; i += 1) {
-    if (!ANY_DEV_INSTRUCTIONS.test(lines[i]!)) continue;
-    const marked = i > 0 && lines[i - 1]!.includes(OCX_SECTION_MARKER);
-    lines.splice(marked ? i - 1 : i, marked ? 2 : 1);
-    return joinLines(lines, eol);
-  }
-  return joinLines(lines, eol);
 }
 
 // ---------------------------------------------------------------------------

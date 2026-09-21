@@ -25,7 +25,7 @@ interface ProviderAdapter {
 ## `openai-chat`
 
 **目标：** OpenAI **Chat Completions**（`POST {baseUrl}/chat/completions`）以及所有兼容 provider，
-包括 xAI、Kimi、DeepSeek、GLM、Groq、OpenRouter、Ollama（本地与云端）等。
+包括 xAI、Kimi、DeepSeek、GLM、Groq、OpenRouter、Ollama（本地）等。
 **认证：** `key`（Bearer）。
 
 - 把内部消息转换成 OpenAI role；工具映射为 `{type:"function", function:{…}}` 和
@@ -42,6 +42,38 @@ interface ProviderAdapter {
   `{ enabled: false }`。其公开 API 文档目前没有说明这一请求格式。adapter 会保留请求的 `low`、
   `medium`、`high`、`xhigh` 或 `max` 档位，把 `delta.reasoning_content` 或 `delta.reasoning`
   作为 reasoning delta，通过 `stream_options.include_usage` 请求流式 usage，并从非流式响应 envelope 中读取 usage。
+
+## `ollama-native`
+
+**目标：** Ollama 自有的 **Chat API**（`POST /api/chat`），而不是其 OpenAI 兼容接口。内置的
+`ollama-cloud` 提供方由 registry 选择到该 adapter；也可以在单独命名的自定义 / 自托管 Ollama
+提供方上配置 `adapter: "ollama-native"`。
+**认证：** cloud / 自定义端点使用 `key`（Bearer）；loopback 或 `authMode: "local"`
+端点不会收到任何凭据。
+
+- **registry 选择起决定作用。** 内置的 `ollama-cloud` 行保留 `https://ollama.com/v1` 作为
+  `/v1/models` 动态发现的基础 URL，同时推理会规范化到 `POST https://ollama.com/api/chat`。
+  对该提供方行，配置中的 `adapter` 会被丢弃。普通内置本地 Ollama 仍走 `openai-chat`；为本
+  地或自托管端点选择 `ollama-native` 是显式的提供方配置决策，并按主机名判别，因此非 Ollama
+  目标永远不会被悄悄改写。
+- **模型元数据：** `/v1/models` 不携带任何模型级元数据，因此在正典 Ollama Cloud 上，提供方
+  会通过 *有界限的* `POST /api/show`（每响应 256 KiB、每请求 8 秒、并发 4、48 个请求、整阶段
+  12 秒期限）补全每个被发现 id 的真实 context window 与 vision 能力。show 请求同源且从不
+  跟随重定向；失败只降级该模型，不会令发现本身失败。
+- **流式：** Ollama 原生 NDJSON。文本与 `message.thinking` delta 到达即转发；回合仅在
+  `done: true` 终止记录上完成，缓冲的 `done: false` 或缺失终记录会完全抑制部分文本与工具调用。
+- **Reasoning：** 映射到 Ollama 原生 `think` 字段（`low`/`medium`/`high`/`max`，外加布尔值），
+  按模型声明的档位收紧，并遵守上游配置的 `__omit__` sentinel 语义。
+- **图像：** 在模型具备 vision 能力时原样放入消息的 `images` 数组发送；video 会被拒绝而非
+  误发，远程图像 URL 不会被拉取。
+- **工具：** 以 Ollama 原生形状声明；流式 tool call 是 `arguments` 为对象的整调用记录，
+  tool result 回放按 call id 与工具名严格配对。`tool_choice: "none"` 与 `auto` 表现正常；
+  **`required` 或精确命名选择会 fail closed**，因为 Ollama 的 `/api/chat` 没有可用来强制它的
+  `tool_choice` 字段。
+- **正典 Ollama Cloud 上拒绝结构化输出。** Ollama 目前在文档中说明其 Cloud 不支持结构化输出，
+  且 Cloud 不会强制 `format` 字段，因此对按 schema 提出的请求，OpenCodex 会让其显式失败，而
+  不是返回不受约束的自由文本。本地 / 自定义 `ollama-native` 端点保留 Ollama 原生的 `format`
+  映射（`json_object` → `"json"`，`json_schema` → schema 对象本身）。
 
 ## `openai-responses`
 
@@ -118,13 +150,16 @@ Kiro 的 assistant 文本本身没有可靠的回合结束标记，但终止的 
 启用工具时，opencodex 会添加私有 `codex_kiro_final_answer`。重试不会制造空的 assistant/user 回合，
 而会保留原始 user/tool-result，并在发送前校验角色交替、非空结构消息以及 tool use/result 配对。
 完成工具的回答即使与先前 commentary 完全相同，也会作为 `final_answer` 发出。
+当缺少只有用户能提供的决定、信息或澄清而无法继续时，契约同样要求把该问题通过完成工具发出并停止；它也作为结束回合的 `final_answer` 到达，而不是 commentary。
 
 ### Reasoning effort
 
-`gpt-5.6-sol` 和 `claude-opus-5` 支持原生 effort，且请求字段名不同。`low` / `medium` / `high` /
-`xhigh` / `max` 分别通过 `additionalModelRequestFields.reasoning.effort` 和
-`output_config.effort` 发送。
-
+GPT-5.6 系列使用 `additionalModelRequestFields.reasoning.effort`，`claude-opus-5` 使用
+`additionalModelRequestFields.output_config.effort`。`gpt-5.6-luna` 和 `gpt-5.6-terra`
+仅通过原生字段发送已验证的 `low`、`medium`、`high` 和 `max`。
+这两个模型的原生 `xhigh` 尚未验证，因此仍使用原有的有界 thinking 指令模拟。
+`gpt-5.6-sol` 和 `claude-opus-5` 保留现有原生档位（`low`、`medium`、`high`、`xhigh`、`max`）。
+其他 Kiro 模型使用模拟推理；提供 effort 选项并不代表原生支持。
 
 ## `cursor`
 
@@ -160,6 +195,17 @@ Cursor 的 HTTP/1.1 兼容传输：通过 `agent.v1.AgentService/RunSSE` 接收 
   `desktopExecutor` 集成分别需要 opt-in；`nativeLocalExec: "on"` 会启用更广泛的内置
   executor，并绕过 Codex 审批和 sandbox 语义；旧的 `unsafeAllowNativeLocalExec: true` 仅在
   `nativeLocalExec` 未设置时等同。
+
+## `devin`
+
+**目标：** Cognition 的 `exa.api_server_pb.ApiServerService/GetChatMessage`（`server.codeium.com`，Connect 流式）。
+**认证：** 来自 `provider.apiKey` 或转发的 authorization 头的 Devin/Cognition API 密钥。登录会先尝试导入已安装 Devin CLI 已持有的凭据：`devin auth login` 会完成 CLI 自身的 PKCE 登录并把 `devin-session-token` 写入它自己的 `credentials.toml`，这与 `SeatManagementService.RegisterUser` 为浏览器登录签发的凭据相同。没有可用的 CLI 凭据时，登录回退到 Auth0 浏览器页面，再通过 `RegisterUser` 把粘贴的令牌换成长期密钥。`devin-cli` 仅作为已弃用的别名保留：`ocx login devin-cli` 仍会路由到 `devin`，以旧 id 保存的配置会在启动时被重写。
+
+- 使用 `runTurn` 而非常规的 fetch/parse 路径。请求与服务端事件由 `devin/cloud-direct/wire.ts` 手写的 protobuf 分帧处理。
+- 通过 `GetCascadeModelConfigs` 按账号获取模型；不在套餐内的模型在列表阶段就被过滤，而不是到请求时才失败。
+- Cognition 对工具说明有长度上限和精确短语黑名单。适配器会改写已知短语并截断过长的说明。
+- 密钥不会刷新。失效后请重新执行 `ocx login devin`。
+- 即使走 CLI 导入路径，本地的也只有凭据，请求本身无论哪条路径都发往 Cognition。早期版本曾在 `devin-cli` id 下提供第二个适配器，把请求作为对本地 `devin acp` 子进程的 Agent Client Protocol 会话来执行，现已移除。仍引用该适配器的已保存配置会在启动时重写为 `devin`，包括 `"devin-acp"` 这类自定义名称的行。
 
 ## `azure-openai`（别名：`azure`）
 

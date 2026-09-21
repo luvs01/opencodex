@@ -23,7 +23,7 @@ import type {
   CodexHistoryWorkerOperation,
   HistoryWorkerResult,
 } from "./history-worker";
-import { historyBackupPathFor } from "./history-provider";
+import { currentHistoryDbBusyTimeoutMs, resolveExistingHistoryBackupPath } from "./history-provider";
 import type { CodexHistoryFailureReason, CodexHistoryVerifiedNoopProof } from "./history-provider";
 import { getCodexHome, resolveCodexStateDbPath } from "./paths";
 
@@ -32,7 +32,7 @@ import { getCodexHome, resolveCodexStateDbPath } from "./paths";
  *
  * The SQLite root can differ from CODEX_HOME and both environment/config inputs
  * can change between invocations. The parent resolves one exact target and hands
- * those canonical paths to the Worker rather than asking the Worker to infer a
+ * those resolved paths to the Worker rather than asking the Worker to infer a
  * possibly different environment.
  */
 export function resolveCodexHistoryJobTarget(): {
@@ -45,10 +45,10 @@ export function resolveCodexHistoryJobTarget(): {
   return {
     canonicalCodexHome: home,
     canonicalStateDbPath: stateDb,
-    // Derived by the provider's own rule rather than guessed: the manifest lives
-    // in the config directory under a hash of the state database, so a
-    // hand-built path would address a different file entirely.
-    canonicalBackupPath: historyBackupPathFor(stateDb),
+    // Resolve through the provider's canonical-first compatibility rule. Passing
+    // only the newly normalized name would hide a pre-#4442 Windows manifest from
+    // the Worker and make an upgrade look like an empty backup.
+    canonicalBackupPath: resolveExistingHistoryBackupPath(stateDb),
   };
 }
 
@@ -110,6 +110,8 @@ export type CodexHistoryJobOutcome =
   | { readonly kind: "blocked"; readonly reason: "busy" | "database" | "unsafe-path" | "desired_disabled" | "desired_enabled" }
   | { readonly kind: "failed"; readonly reason: "worker-error" | "worker-died" | "timeout";
       readonly message: string; readonly historyFailureReason?: CodexHistoryFailureReason;
+      /** Specific integrity condition when `historyFailureReason` is `"integrity"`. */
+      readonly historyIntegrityCode?: string;
       readonly rows?: number; readonly files?: number };
 
 /**
@@ -258,6 +260,13 @@ export function describeHistoryJobFailure(
     return "permission was denied while writing Codex history; this is not a Codex app lock. Run 'ocx doctor'.";
   }
   if (outcome.historyFailureReason === "integrity") {
+    // Not every integrity stop is a retry. An ambiguous reroute means two histories
+    // produced the same row and no durable fact separates them, so retrying reaches the
+    // same refusal - the manifest needs a person, and saying "run doctor" sends them the
+    // wrong way.
+    if (outcome.historyIntegrityCode === "history_apply_ambiguous_reroute") {
+      return "a Codex history entry could not be re-routed because its manifest cannot prove whether an earlier relabel was undone; nothing was changed and the manifest was kept. Resolve it manually rather than retrying.";
+    }
     return partiallyChanged
       ? "the history backup or its restore target changed after a partial restore; the manifest was retained for review and safe retry. Run 'ocx doctor'."
       : "the history backup or its restore target failed integrity checks; no unverified provider metadata was applied. Run 'ocx doctor'.";
@@ -298,6 +307,7 @@ function classifyWorkerResult(result: HistoryWorkerResult): CodexHistoryJobOutco
       reason: "worker-error",
       message: redactWorkerMessage(result.message),
       ...(result.reason ? { historyFailureReason: result.reason } : {}),
+      ...(result.integrityCode ? { historyIntegrityCode: result.integrityCode } : {}),
       ...(result.rows !== undefined && result.files !== undefined
         ? { rows: result.rows, files: result.files }
         : {}),
@@ -427,6 +437,10 @@ export async function runCodexHistoryJob(
       canonicalStateDbPath: request.canonicalStateDbPath,
       canonicalBackupPath: request.canonicalBackupPath,
       ...(request.expectedDesiredEnabled === undefined ? {} : { expectedDesiredEnabled: request.expectedDesiredEnabled }),
+      // A Worker is a fresh module realm: it would otherwise open state_5.sqlite with this
+      // module's default rather than the timeout this process resolved. Production sends the
+      // same codex-rs-matching 5s the Worker would have used on its own.
+      busyTimeoutMs: currentHistoryDbBusyTimeoutMs(),
       env: {
         ...(process.env.CODEX_HOME ? { CODEX_HOME: process.env.CODEX_HOME } : {}),
         ...(process.env.OPENCODEX_HOME ? { OPENCODEX_HOME: process.env.OPENCODEX_HOME } : {}),
