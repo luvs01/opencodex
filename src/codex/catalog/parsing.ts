@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { atomicWriteFile, expandUserPath, getConfigDir, websocketsEnabled } from "../../config";
+import { atomicWriteFile, expandUserPath, getConfigDir, loadConfig, ultraFastTierEnabled, websocketsEnabled } from "../../config";
 import { CODEX_CONFIG_PATH, CODEX_MODELS_CACHE_PATH, DEFAULT_CATALOG_PATH, readRootTomlString, resolveCodexConfigPath } from "../paths";
 import { clearModelCache, DEFAULT_MODEL_CACHE_TTL_MS, getFreshCached, getStaleCached, isModelsFetchCoolingDown, markModelsFetchFailure, setCached } from "../model-cache";
 import { buildModelsRequest, resolveModelsAuthToken } from "../../oauth";
@@ -31,10 +31,11 @@ import { redactSecretString } from "../../lib/redact";
 import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 
-import { NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, isNativeOpenAiCapabilityAliasModel, nativeMultiAgentVersion, nativeOpenAiAutoCompactTokenLimit, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeContextLimitsInput } from "./metadata";
+import { NATIVE_OPENAI_CONTEXT_OVERRIDES, SUPPORTED_NATIVE_OPENAI_SLUGS, UPSTREAM_NATIVE_ENTRIES, hasNativeOpenAiCapabilityMetadata, nativeMultiAgentVersion, nativeOpenAiAutoCompactTokenLimit, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type NativeContextLimitsInput } from "./metadata";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { trustedAccountBoundNativeCatalogSlug } from "./account-models";
 import { CODEX_NATIVE_ALIAS_CATALOG_KIND } from "./kinds";
+import { NATIVE_GPT6_ASTRA_MODEL } from "./native-models";
 
 export function legacyCatalogBackupPath(): string {
   return join(getConfigDir(), "catalog-backup.json");
@@ -95,6 +96,8 @@ export const CODEX_PROVIDER_MODEL_CATALOG_KIND = "provider-model-v1";
 export interface CatalogModel {
   id: string;
   provider: string;
+  /** Canonical or configured short alias for the provider segment. */
+  providerAlias?: string | null;
   /** Public Codex-facing slug override (used by combo aliases). */
   alias?: string;
   /** Explicit combo takeover of a bare OpenAI-native catalog id. */
@@ -109,9 +112,13 @@ export interface CatalogModel {
   displayName?: string;
   owned_by?: string;
   reasoningEfforts?: string[];
+  /** Suppress only catalog synthesis of a missing max rung; provider-declared max survives. */
+  suppressSyntheticMax?: boolean;
   defaultReasoningEffort?: string;
   contextWindow?: number;
   maxInputTokens?: number;
+  /** Model-scoped output-token ceiling; omitted when no authoritative value is known. */
+  maxOutputTokens?: number;
   /** Soft client compaction threshold; hard context/input limits remain authoritative. */
   autoCompactTokenLimit?: number;
   contextCap?: number;
@@ -139,6 +146,29 @@ export interface CatalogModel {
   codexToolMode?: "code_mode_only" | "shell";
   /** Normalized upstream capability names retained for management/API consumers (#485 follow-up). */
   capabilities?: string[];
+  /**
+   * This row is listed but cannot currently serve a request (#1711). Today the only value is
+   * "no_credit", set when every usable target has positive quota-exhaustion evidence.
+   *
+   * It is NOT visibility. The row stays `visibility: "list"` on purpose: the issue explicitly
+   * rejects hiding, and Codex Desktop only understands "list" and "hide" anyway, so hiding would
+   * be the one outcome the reporter asked not to have. An OpenCodex-aware consumer greys the
+   * entry; the native picker ignores the field, which is the honest limit of what a custom
+   * catalog field can do.
+   */
+  quotaInactiveReason?: "no_credit";
+  /**
+   * Discovered per-token cost class for this routed model (#3666). "free" means the provider's
+   * own /models row reported a numeric zero for BOTH the prompt and the completion rate;
+   * "paid" means at least one rate is above zero. ABSENT means unknown — the provider published
+   * no usable pair, or this row never came from a models API at all.
+   *
+   * Fail closed: a partial, non-numeric, or negative rate leaves the field absent, never "free",
+   * because showing a paid model under a Free filter costs the user money while hiding a free
+   * one costs a click. This is a management/Dashboard projection only — deriveEntry never
+   * serializes it into the Codex catalog, and it never affects routing or visibility.
+   */
+  pricingStatus?: "free" | "paid";
   /** OpenCodex-only catalog ownership marker; Codex ignores the serialized extension field. */
   catalogKind?: typeof CODEX_CUSTOM_MODEL_CATALOG_KIND | typeof CODEX_PROVIDER_MODEL_CATALOG_KIND;
 }
@@ -155,6 +185,23 @@ export const ROUTED_MODEL_COMPATIBILITY_EXCLUSIONS = new Set([
   // Issue #2330: OpenCode Go models absent from current documentation or returning terminal HTTP 400 errors.
   "opencode-go/mimo-v2-omni",
   "opencode-go/mimo-v2-pro",
+  /*
+   * DeepSeek retired `deepseek-v4-pro` on 2026-09-14 04:00 UTC and routes its requests to
+   * V4.1-Flash (api-docs.deepseek.com/news/news260910). Deleting the registry rows removes
+   * the model on providers that publish a static roster, but every provider below discovers
+   * its models live — there, a deleted row does not remove anything, it only strips the
+   * context window, the effort ladder and the text-only hint, so the retired model would
+   * keep appearing with its capabilities broken. Excluding the slug is what actually takes
+   * it out of the routed catalog.
+   */
+  "command-code/deepseek-deepseek-v4-pro",
+  "commandcode/deepseek-deepseek-v4-pro",
+  "orcarouter/deepseek-deepseek-v4-pro",
+  "cline-pass/cline-pass-deepseek-v4-pro",
+  "baseten/deepseek-ai-DeepSeek-V4-Pro",
+  "digitalocean/deepseek-v4-pro",
+  "qoder/DeepSeek-V4-Pro",
+  "codebuddy/deepseek-v4-pro",
 ]);
 
 export function isRoutedModelCompatibilityExcluded(slug: string): boolean {
@@ -210,12 +257,19 @@ export function readCodexCatalogPath(): string {
   return activeDefaultCatalogPath();
 }
 
-/** Resolve the configured catalog without consulting ambient CODEX_HOME again. */
-export function readCodexCatalogPathForHome(codexHome: string): string {
+/**
+ * Resolve the configured catalog without consulting ambient CODEX_HOME again.
+ *
+ * `configText` is for a caller that has already read that same `config.toml` under
+ * its own constraints - the prompt-text probe reads it bounded, on the request
+ * thread - so resolving the catalog does not cost a second, unbounded read of the
+ * file the caller is holding. Omitting it keeps the original behaviour.
+ */
+export function readCodexCatalogPathForHome(codexHome: string, configText?: string): string {
   try {
     const configPath = join(codexHome, "config.toml");
-    if (existsSync(configPath)) {
-      const toml = readFileSync(configPath, "utf-8");
+    if (configText !== undefined || existsSync(configPath)) {
+      const toml = configText ?? readFileSync(configPath, "utf-8");
       const path = readRootTomlString(toml, "model_catalog_json");
       if (path) return resolve(codexHome, path);
     }
@@ -234,6 +288,30 @@ export function readConfiguredAutoReviewModel(): string | null {
     if (existsSync(configPath)) {
       const toml = readFileSync(configPath, "utf-8");
       return readRootTomlString(toml, "auto_review_model");
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * Read the root `model` pin from Codex's config.toml (issue #4646).
+ *
+ * Codex starts every new session on this id, and nothing in opencodex checks that the id is one
+ * the proxy actually exposes: the pin lives in Codex's config, while exposure is decided here by
+ * `disabledModels`, provider `selectedModels`, and account entitlements. When the two disagree
+ * every turn fails and no surface says why, which is what the `ocx doctor` section added for
+ * #4646 reports.
+ *
+ * Read-only, and deliberately the same shape and the same swallow-and-return-null error policy as
+ * `readConfiguredAutoReviewModel` above: a diagnostic must degrade to "unknown" on an unreadable
+ * or absent config rather than throw out of the surface that called it.
+ */
+export function readConfiguredDefaultModel(): string | null {
+  try {
+    const configPath = activeCodexConfigPath();
+    if (existsSync(configPath)) {
+      const toml = readFileSync(configPath, "utf-8");
+      return readRootTomlString(toml, "model");
     }
   } catch { /* ignore */ }
   return null;
@@ -265,22 +343,124 @@ export function findNativeTemplate(catalog: RawCatalog | null): RawEntry | null 
 }
 
 /**
- * Native OpenAI slugs that do NOT support the Fast (priority) service tier.
- * Upstream may advertise service_tiers for these models, but the tier is not
- * actually available — strip it so the Codex UI does not offer a dead toggle.
+ * Template selection, as opposed to catalog VALIDITY.
+ *
+ * `findNativeTemplate` answers "does this look like a real catalog?" and must stay
+ * permissive: four call sites use it as a validity gate, and a catalog holding only a
+ * newly launched native model has to keep passing or sync falls back to stale data.
+ *
+ * This answers a different question — "which row should every routed model inherit
+ * from?" — and must be strict. `deriveEntry` deep-clones the chosen row, so an unknown
+ * bare row carrying `base_instructions` would become the template for every routed
+ * model and hand them its native eligibility metadata. #2813 is the report that made
+ * that concrete: a Reserve-shaped row injected by the client is exactly such a row.
+ *
+ * Returning null is safe and expected; `deriveEntry` falls back to a conservative
+ * synthetic template.
  */
-const NO_FAST_TIER_NATIVE_SLUGS = new Set([
-  "gpt-5.3-codex-spark",
-]);
+export function findSupportedNativeTemplate(catalog: RawCatalog | null): RawEntry | null {
+  return catalog?.models?.find(
+    m => typeof m.slug === "string"
+      && SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug)
+      && !m.slug.includes("/")
+      && "base_instructions" in m
+      && m.opencodex_catalog_kind !== CODEX_NATIVE_ALIAS_CATALOG_KIND
+      && m.owned_by !== COMBO_NAMESPACE
+      && !(typeof m.description === "string" && m.description.startsWith("Routed via opencodex → ")),
+  ) ?? null;
+}
+
+/** Does this row already carry an `ultrafast` tier the operator put there themselves? */
+/**
+ * Read the opt-in from the live config, ONCE per catalog build.
+ *
+ * `deriveEntry` and its call sites are pure `RawEntry -> RawEntry` transforms with no
+ * config parameter, so the flag is resolved here rather than threaded through all of them.
+ * It is memoized because `normalizeRoutedCatalogEntry` runs per entry in a sync loop, and
+ * `loadConfig()` chmods the config dir, hardens three secrets, reads the file and runs a
+ * full Zod parse — doing that once per catalog row would be a real cost for one boolean.
+ * Callers holding a config still pass `opts.ultraFastTier` explicitly, which bypasses this
+ * entirely and is what the tests do. A read failure means OFF, matching `.catch(false)`.
+ */
+let ultraFastOptInCache: { value: boolean; at: number } | null = null;
+const ULTRA_FAST_OPT_IN_TTL_MS = 5_000;
+
+function ultraFastTierOptIn(): boolean {
+  const now = Date.now();
+  if (ultraFastOptInCache && now - ultraFastOptInCache.at < ULTRA_FAST_OPT_IN_TTL_MS) {
+    return ultraFastOptInCache.value;
+  }
+  let value = false;
+  try {
+    value = ultraFastTierEnabled(loadConfig());
+  } catch {
+    value = false;
+  }
+  ultraFastOptInCache = { value, at: now };
+  return value;
+}
+
+/** Test seam: drop the memoized opt-in so a config change is observed immediately. */
+export function resetUltraFastTierOptInCache(): void {
+  ultraFastOptInCache = null;
+}
+
+function entryDeclaresUltraFast(entry: RawEntry): boolean {
+  const tiers = entry.service_tiers;
+  const declaredInTiers = Array.isArray(tiers) && tiers.some(tier => (
+    !!tier && typeof tier === "object" && "id" in tier
+    && String((tier as { id?: unknown }).id).trim().toLowerCase() === "ultrafast"
+  ));
+  const speeds = entry.additional_speed_tiers;
+  const declaredInSpeeds = Array.isArray(speeds) && speeds.some(speed => (
+    typeof speed === "string" && speed.trim().toLowerCase() === "ultrafast"
+  ));
+  return declaredInTiers || declaredInSpeeds;
+}
+
+/**
+ * Keep the operator's `ultrafast` and drop everything else.
+ *
+ * A routed row must not inherit the native template's `priority` tier, which is the whole
+ * reason this strip exists. Preserving the supplied tier without this narrowing would
+ * smuggle Fast onto third-party providers under an unrelated flag.
+ */
+function retainOnlyUltraFastTier(entry: RawEntry): void {
+  const tiers = entry.service_tiers;
+  const keptTiers = Array.isArray(tiers)
+    ? tiers.filter(tier => (
+      !!tier && typeof tier === "object" && "id" in tier
+      && String((tier as { id?: unknown }).id).trim().toLowerCase() === "ultrafast"
+    ))
+    : [];
+  if (keptTiers.length > 0) entry.service_tiers = keptTiers;
+  else delete entry.service_tiers;
+
+  const speeds = entry.additional_speed_tiers;
+  const keptSpeeds = Array.isArray(speeds)
+    ? speeds.filter(speed => typeof speed === "string" && speed.trim().toLowerCase() === "ultrafast")
+    : [];
+  if (keptSpeeds.length > 0) entry.additional_speed_tiers = keptSpeeds;
+  else delete entry.additional_speed_tiers;
+
+  // A default of `priority` on a row that now only offers ultrafast would name a tier the
+  // row no longer carries.
+  if (String(entry.service_tier ?? "").trim().toLowerCase() !== "ultrafast") delete entry.service_tier;
+  if (String(entry.default_service_tier ?? "").trim().toLowerCase() !== "ultrafast") {
+    delete entry.default_service_tier;
+  }
+}
 
 export function normalizeServiceTiers(entry: RawEntry): RawEntry {
-  // Strip service tiers for models that do not actually support the Fast tier.
-  if (typeof entry.slug === "string" && NO_FAST_TIER_NATIVE_SLUGS.has(entry.slug)) {
-    delete entry.service_tier;
-    delete entry.service_tiers;
-    delete entry.default_service_tier;
-    delete entry.additional_speed_tiers;
-    return entry;
+  // Repair only the old built-in Astra speed copy on persisted native/account rows.
+  // A custom description (and every other field) remains user-owned.
+  const nativeSlug = trustedAccountBoundNativeCatalogSlug(entry) ?? entry.slug;
+  if (nativeSlug === NATIVE_GPT6_ASTRA_MODEL && Array.isArray(entry.service_tiers)) {
+    entry.service_tiers = entry.service_tiers.map(tier =>
+      tier && typeof tier === "object" && tier.id === "priority"
+        && tier.description === "1.5x speed, increased usage"
+        ? { ...tier, description: "2x speed, increased usage" } : tier,
+    );
   }
   // Codex stores the user-facing config spelling as "fast", but the catalog/request
   // service tier id is "priority" in current codex-rs. Keep legacy catalogs working.
@@ -353,8 +533,8 @@ export function applyNativeOpenAiContextOverride(entry: RawEntry, limits?: Nativ
     }
   }
   // providerContextCaps.openai is a ceiling for native OpenAI rows regardless of where the
-  // advertised window came from (#1430): preserved rows without a hardcoded override (e.g.
-  // gpt-5.4-mini) must stay under the cap too, and auto-compaction follows the capped window.
+  // advertised window came from (#1430): preserved rows without a hardcoded override
+  // must stay under the cap too, and auto-compaction follows the capped window.
   // The per-model window narrows the same rows for the same reason.
   const currentContext = typeof entry.context_window === "number" ? entry.context_window : undefined;
   const cappedContext = narrowNativeMaxContextWindow(nativeSlug, currentContext, limits);
@@ -403,10 +583,22 @@ export function ensureStrictCatalogFields(
   entry: RawEntry,
   options: { preserveExactInputModalities?: boolean; isRouted?: boolean } = {},
 ): RawEntry {
+  if (entry.shell_type === "default" || entry.shell_type === "local" || entry.shell_type === "shell_command") {
+    entry.shell_type = "unified_exec";
+  }
+  if (typeof entry.node_repl_disabled !== "boolean") entry.node_repl_disabled = false;
+  if (typeof entry.node_repl_auto_review_required !== "boolean") entry.node_repl_auto_review_required = false;
+  if (typeof entry.include_plugin_usage_instructions !== "boolean") entry.include_plugin_usage_instructions = false;
+  if (typeof entry.include_apps_usage_instructions !== "boolean") entry.include_apps_usage_instructions = true;
   if (typeof entry.supports_reasoning_summaries !== "boolean") entry.supports_reasoning_summaries = false;
   if (typeof entry.default_reasoning_summary !== "string") entry.default_reasoning_summary = "none";
   if (typeof entry.support_verbosity !== "boolean") entry.support_verbosity = true;
-  if (typeof entry.default_verbosity !== "string") entry.default_verbosity = "low";
+  // A row that has declared it does NOT support verbosity must not also ship a default for the
+  // control it just disowned: Codex seeds its picker from `default_verbosity`, so leaving the
+  // strict-fields fallback in place re-creates the dead toggle the explicit opt-out removed.
+  // Scoped to an explicit `false`, so rows that never declare a capability keep the default.
+  if (entry.support_verbosity === false) delete entry.default_verbosity;
+  else if (typeof entry.default_verbosity !== "string") entry.default_verbosity = "low";
   if (typeof entry.apply_patch_tool_type !== "string") entry.apply_patch_tool_type = "freeform";
   if (!entry.truncation_policy || typeof entry.truncation_policy !== "object" || Array.isArray(entry.truncation_policy)) {
     entry.truncation_policy = { mode: "tokens", limit: 10000 };
@@ -438,18 +630,44 @@ export function ensureStrictCatalogFields(
   }
   if (typeof entry.effective_context_window_percent !== "number") entry.effective_context_window_percent = 95;
   if (typeof entry.comp_hash !== "string") entry.comp_hash = "opencodex";
+  // Routed rows must not carry NATIVE eligibility metadata. `deriveEntry` deep-clones a
+  // native template and deletes a fixed denylist, so these five survive onto rows backed
+  // by unrelated provider credentials — advertising ChatGPT plan eligibility for a model
+  // that never touches a ChatGPT account (#2813).
+  //
+  // This lives here rather than only in `normalizeRoutedCatalogEntry` because that runs on
+  // freshly derived rows only. Degraded-provider and foreign routed rows are preserved
+  // from disk and reach the merge through this function alone, so sanitizing there would
+  // leave already-contaminated rows contaminated forever.
+  if (options.isRouted === true) {
+    entry.supported_in_api = true;
+    delete entry.available_in_plans;
+    delete entry.minimal_client_version;
+    delete entry.availability_nux;
+    delete entry.upgrade;
+  }
   return ensureAutoCompactTokenLimit(entry);
 }
 
 export type MultiAgentMode = "v1" | "default" | "v2";
 
 export interface MultiAgentModeOptions {
+  /** Caller-owned source metadata already defines the default for these projected rows. */
+  preserveDefaultMultiAgentVersion?: (entry: RawEntry) => boolean;
   /**
    * When the catalog is in v2 mode, stamp ChatGPT-native rows as v1 instead.
    * Routed parents get v2 (plaintext child tasks). Native Sol/Terra stay on v1
    * so they can still spawn Grok/Claude — ChatGPT encrypts v2 NEW_TASK bodies.
    */
   keepNativeChatGptOnV1?: boolean;
+  /**
+   * Pristine installed-catalog pins keyed by bare native slug. When provided, the
+   * backup — not the bundled snapshot — is authoritative for the rows it contains,
+   * and a preserved live/native row outside it keeps the pin it already carries:
+   * an absent baseline entry cannot distinguish a stale forced stamp from a
+   * legitimate user- or provider-preserved pin, so the non-destructive read wins.
+   */
+  nativeDefaults?: ReadonlyMap<string, string | null>;
 }
 
 /** Catalog rows that run on the ChatGPT backend (encrypt v2 child tasks). */
@@ -468,7 +686,7 @@ export function catalogEntryIsNativeChatGpt(entry: RawEntry): boolean {
   if (
     entry.opencodex_catalog_kind === CODEX_CUSTOM_MODEL_CATALOG_KIND
     && entry.use_responses_lite === true
-    && isNativeOpenAiCapabilityAliasModel(routedNativeSlug)
+    && hasNativeOpenAiCapabilityMetadata(routedNativeSlug)
   ) return true;
   if (UPSTREAM_NATIVE_ENTRIES.has(slug) || SUPPORTED_NATIVE_OPENAI_SLUGS.has(slug)) return true;
   return false;
@@ -519,6 +737,7 @@ export function applyMultiAgentMode(
     // Restore upstream defaults: clear any stale forced multi_agent_version and
     // re-apply upstream pins from the snapshot for native entries that have one.
     for (const entry of entries) {
+      if (options.preserveDefaultMultiAgentVersion?.(entry)) continue;
       const slug = typeof entry.slug === "string" ? entry.slug : "";
       const nativeAlias = entry.opencodex_catalog_kind === CODEX_NATIVE_ALIAS_CATALOG_KIND;
       const routedNativeSlug = slug.startsWith(`${OPENAI_CODEX_PROVIDER_ID}/`)
@@ -526,16 +745,37 @@ export function applyMultiAgentMode(
         : "";
       const codexForwardCapabilityAlias = entry.opencodex_catalog_kind === CODEX_CUSTOM_MODEL_CATALOG_KIND
         && entry.use_responses_lite === true
-        && isNativeOpenAiCapabilityAliasModel(routedNativeSlug)
+        && hasNativeOpenAiCapabilityMetadata(routedNativeSlug)
         ? routedNativeSlug
         : undefined;
+      const accountBoundNativeSlug = trustedAccountBoundNativeCatalogSlug(entry);
+      const nativeLookupSlug = accountBoundNativeSlug ?? slug;
+      // The baseline is built from bare native slugs only, so "absent from the
+      // baseline" is not evidence about a routed row — it is guaranteed. Only a
+      // native row can carry a pin the baseline legitimately failed to mention;
+      // a routed row keeps the documented default-mode normalization.
+      const isNativeCatalogEntry = accountBoundNativeSlug !== undefined || !slug.includes("/");
+      const hasNativeDefault = !nativeAlias
+        && codexForwardCapabilityAlias === undefined
+        && options.nativeDefaults?.has(nativeLookupSlug) === true;
       const upstreamPin = nativeAlias
         ? nativeMultiAgentVersion(slug)
         : codexForwardCapabilityAlias
           ? nativeMultiAgentVersion(codexForwardCapabilityAlias)
-          : UPSTREAM_NATIVE_ENTRIES.get(trustedAccountBoundNativeCatalogSlug(entry) ?? slug)?.multi_agent_version;
+          : hasNativeDefault
+            ? options.nativeDefaults?.get(nativeLookupSlug)
+            : options.nativeDefaults === undefined
+              ? UPSTREAM_NATIVE_ENTRIES.get(nativeLookupSlug)?.multi_agent_version
+              : undefined;
       if (typeof upstreamPin === "string") {
         entry.multi_agent_version = upstreamPin;
+      } else if (options.nativeDefaults !== undefined
+        && !nativeAlias
+        && codexForwardCapabilityAlias === undefined
+        && isNativeCatalogEntry
+        && !hasNativeDefault
+        && typeof entry.multi_agent_version === "string") {
+        continue;
       } else if (v2FeatureEnabled) {
         entry.multi_agent_version = "v2";
       } else {
@@ -554,17 +794,41 @@ export function normalizeRoutedCatalogEntry(
   entry: RawEntry,
   parallelToolCalls = false,
   toolMode?: "code_mode_only" | "shell" | string,
+  opts?: { ultraFastTier?: boolean },
 ): RawEntry {
   delete entry.model_messages;
   delete entry.tool_mode;
   applyRoutedCodexToolMode(entry, toolMode);
   delete entry.multi_agent_version;
+  delete entry.multi_agent_reasoning_effort;
   delete entry.use_responses_lite;
   delete entry.supports_websockets;
-  delete entry.additional_speed_tiers;
-  delete entry.service_tier;
-  delete entry.service_tiers;
-  delete entry.default_service_tier;
+  // Routed rows cloned from native templates must not inherit OpenAI-only experimental context
+  // delivery. Codex reads the flag as "this model accepts experimental context history" and drives
+  // its context-management cadence from it, so a third-party provider that never negotiated it gets
+  // a compact-after-every-step loop instead (observed on a routed DeepSeek row: 1,600+ compactions
+  // in a single thread). Nothing re-applies the field from provider metadata during this step, so
+  // the row leaves this normalization without it.
+  delete entry.supports_experimental_context;
+  /*
+   * Tier metadata is stripped from routed rows because a row cloned from a native template
+   * would otherwise hand a third-party provider OpenAI's tiers.
+   *
+   * The opt-in carves out exactly one case: an `ultrafast` the OPERATOR put in their own
+   * catalog. #3429's reporter added it by hand and watched a regeneration delete it every
+   * time. Preserving what they wrote is not the same as advertising a tier — upstream
+   * publishes only `priority`, and synthesizing an ultrafast row is what PR #2994 was
+   * closed for. So this keeps a supplied tier and still never invents one.
+   */
+  const keepUltraFast = (opts?.ultraFastTier ?? ultraFastTierOptIn()) && entryDeclaresUltraFast(entry);
+  if (!keepUltraFast) {
+    delete entry.additional_speed_tiers;
+    delete entry.service_tier;
+    delete entry.service_tiers;
+    delete entry.default_service_tier;
+  } else {
+    retainOnlyUltraFastTier(entry);
+  }
   // Routed rows cloned from native templates must not inherit OpenAI-only summary delivery.
   // Explicit provider/model metadata is re-applied after this normalization step.
   delete entry.supports_reasoning_summaries;
@@ -690,6 +954,22 @@ export function readNativeBaseline(catalogPath: string): Map<string, number> {
     if (typeof e.slug === "string" && !e.slug.includes("/") && typeof e.priority === "number") {
       out.set(e.slug, e.priority);
     }
+  }
+  return out;
+}
+
+/**
+ * Extract the pristine baseline's per-slug multi-agent pins. A bare native row that
+ * carried no pin maps to null so "baseline says unpinned" stays distinguishable
+ * from "baseline never contained this row".
+ */
+export function nativeMultiAgentDefaults(
+  models: readonly Readonly<Record<string, unknown>>[] | null | undefined,
+): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  for (const entry of models ?? []) {
+    if (typeof entry.slug !== "string" || entry.slug.includes("/")) continue;
+    out.set(entry.slug, typeof entry.multi_agent_version === "string" ? entry.multi_agent_version : null);
   }
   return out;
 }

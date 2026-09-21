@@ -1,8 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-import { acquireTestRunLock, TEST_RUN_ID_ENV } from "./test-run-lock";
+import { basename, join } from "node:path";
+import {
+  acquireTestRunLock,
+  resolveWrappedTestRunLockPath,
+  TEST_RUN_ID_ENV,
+  TEST_RUN_LOCK_PATH_ENV,
+  TEST_RUN_LOCK_TOKEN_ENV,
+} from "./test-run-lock";
+import {
+  createContainedTestTemp,
+  recoverStaleTestTempArtifactsOnce,
+  removeTestTempTree,
+  writeTestTempOwner,
+} from "./test-temp";
 
 export interface IsolatedTestEnvironment {
   root: string;
@@ -13,9 +25,20 @@ export interface IsolatedTestEnvironment {
 export function createIsolatedTestEnvironment(
   baseEnv: Record<string, string | undefined> = process.env,
 ): IsolatedTestEnvironment {
-  const root = mkdtempSync(join(tmpdir(), "opencodex-test-"));
+  const hostTemp = tmpdir();
+  const recovery = recoverStaleTestTempArtifactsOnce({ tempRoot: hostTemp });
+  if (recovery && (recovery.removed > 0 || recovery.errors > 0 || recovery.truncated)) {
+    console.warn(
+      `[test] stale TEMP recovery removed ${recovery.removed} OpenCodex test root(s)`
+      + (recovery.errors > 0 ? `; ${recovery.errors} could not be reclaimed` : "")
+      + (recovery.truncated ? "; the bounded scan will continue on a later run" : "")
+      + ".",
+    );
+  }
+  const root = mkdtempSync(join(hostTemp, "opencodex-test-"));
   const opencodexHome = join(root, ".opencodex");
   const codexHome = join(root, ".codex");
+  const containedTemp = createContainedTestTemp(root);
   mkdirSync(opencodexHome, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   if (process.platform === "win32") {
@@ -29,6 +52,7 @@ export function createIsolatedTestEnvironment(
     mkdirSync(join(root, "AppData", "Local"), { recursive: true });
     mkdirSync(join(root, "AppData", "Roaming"), { recursive: true });
   }
+  writeTestTempOwner(root, baseEnv[TEST_RUN_ID_ENV]);
 
   return {
     root,
@@ -54,9 +78,12 @@ export function createIsolatedTestEnvironment(
       USERPROFILE: root,
       OPENCODEX_HOME: opencodexHome,
       CODEX_HOME: codexHome,
+      TEMP: containedTemp,
+      TMP: containedTemp,
+      TMPDIR: containedTemp,
     },
     cleanup() {
-      rmSync(root, { recursive: true, force: true });
+      removeTestTempTree(root);
     },
   };
 }
@@ -144,12 +171,136 @@ const BUN_TEST_OPTIONS_REQUIRING_VALUES = new Set([
   "--config",
 ]);
 
+export interface ChangedRunPreflight {
+  comparisonRef: string;
+  comparisonCommit: string;
+  changedFiles: string[];
+}
+
+const changedComparisonRefs = ["upstream/dev", "origin/dev", "dev"] as const;
+
+/** Choose the highest-priority conventional dev ref without assuming which remote is canonical. */
+export function selectChangedComparisonRef(refExists: (ref: string) => boolean): string | null {
+  return changedComparisonRefs.find(refExists) ?? null;
+}
+
+function decodeOutput(output: Uint8Array | undefined): string {
+  return output ? new TextDecoder().decode(output) : "";
+}
+
+function changedComparisonRef(requested: string[]): string | null {
+  const delimiterIndex = requested.indexOf("--");
+  const wrapperArgs = delimiterIndex === -1 ? requested : requested.slice(0, delimiterIndex);
+  const changedArg = wrapperArgs.find(arg => arg === "--changed" || arg.startsWith("--changed="));
+  if (!changedArg) return null;
+  if (changedArg === "--changed" || changedArg === "--changed=") {
+    throw new Error(
+      "[test] changed mode requires an explicit comparison ref; use --changed=<ref> so the selection can be validated.",
+    );
+  }
+  return changedArg.slice("--changed=".length);
+}
+
+function gitRefExists(
+  ref: string,
+  cwd: string,
+  env: Record<string, string | undefined>,
+): boolean {
+  const result = Bun.spawnSync(["git", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+    cwd,
+    env,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  return result.exitCode === 0;
+}
+
+function gitOutput(
+  args: string[],
+  cwd: string,
+  env: Record<string, string | undefined>,
+): string {
+  const result = Bun.spawnSync(["git", ...args], {
+    cwd,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    const detail = decodeOutput(result.stderr).trim() || `exit ${result.exitCode ?? "unknown"}`;
+    throw new Error(`[test] git ${args[0]} failed while validating changed mode: ${detail}`);
+  }
+  return decodeOutput(result.stdout);
+}
+
+/** Resolve changed mode and inventory the diff against that commit before invoking Bun. */
+export function inspectChangedRun(
+  requested: string[],
+  cwd: string = process.cwd(),
+  env: Record<string, string | undefined> = process.env,
+): ChangedRunPreflight | null {
+  const requestedComparisonRef = changedComparisonRef(requested);
+  if (!requestedComparisonRef) return null;
+  if (requestedComparisonRef.startsWith("-")) {
+    throw new Error(
+      `[test] --changed comparison ref ${JSON.stringify(requestedComparisonRef)} is invalid.`,
+    );
+  }
+
+  const comparisonRef = requestedComparisonRef === "dev"
+    ? selectChangedComparisonRef(ref => gitRefExists(ref, cwd, env))
+    : requestedComparisonRef;
+  if (!comparisonRef) {
+    throw new Error(
+      `[test] --changed=dev could not resolve a comparison ref; none of ${changedComparisonRefs.join(", ")} exists.`,
+    );
+  }
+
+  if (!gitRefExists(comparisonRef, cwd, env)) {
+    throw new Error(
+      `[test] --changed comparison ref ${JSON.stringify(comparisonRef)} does not resolve to a commit.`,
+    );
+  }
+
+  const comparisonCommit = gitOutput(["merge-base", "HEAD", comparisonRef], cwd, env).trim();
+  if (!comparisonCommit) {
+    throw new Error(
+      `[test] --changed comparison ref ${JSON.stringify(comparisonRef)} has no merge base with HEAD.`,
+    );
+  }
+
+  const diff = gitOutput(["diff", "--name-only", comparisonCommit, "--"], cwd, env);
+  const changedFiles = [...new Set(diff.split("\n").filter(Boolean))];
+  return { comparisonRef, comparisonCommit, changedFiles };
+}
+
+/** Refuse a successful changed-mode run when Bun silently selected no tests for a real diff. */
+export function changedSelectionFailure(
+  preflight: ChangedRunPreflight,
+  output: string,
+): string | null {
+  if (preflight.changedFiles.length === 0) return null;
+  const summary = output
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .match(/Ran\s+(\d+)\s+tests?\s+across\s+(\d+)\s+files?\b/i);
+  if (!summary) {
+    return `[test] could not validate --changed=${preflight.comparisonCommit} (${preflight.comparisonRef} merge base): Bun did not emit a recognizable selection summary for a diff containing ${preflight.changedFiles.length} changed file(s).`;
+  }
+  if (Number(summary[1]) !== 0 || Number(summary[2]) !== 0) return null;
+  return `[test] --changed=${preflight.comparisonCommit} (${preflight.comparisonRef} merge base) selected 0 tests across 0 files, but the diff contains ${preflight.changedFiles.length} changed file(s). Bun follows only the parsed module graph; run the relevant focused tests for subprocess, read-as-data, or golden-file dependencies, or run the full suite.`;
+}
+
+/**
+ * True for a filter-less `bun run test`: no file arguments and no `--changed`.
+ * `--timeout` / `--dots` / `--parallel=N` still count as full.
+ */
 /** True for a filter-less `bun run test`. `--timeout` / `--dots` / `--parallel=N` still count. */
 function isFullSuiteRun(requested: string[]): boolean {
   const delimiterIndex = requested.indexOf("--");
   const wrapperArgs = delimiterIndex === -1 ? requested : requested.slice(0, delimiterIndex);
   const passedThrough = delimiterIndex === -1 ? [] : requested.slice(delimiterIndex + 1);
   if (passedThrough.length > 0) return false;
+  if (hasCliFlag(requested, "--changed")) return false;
 
   for (let index = 0; index < wrapperArgs.length; index++) {
     const arg = wrapperArgs[index];
@@ -170,26 +321,52 @@ function isFullSuiteRun(requested: string[]): boolean {
  * workers made deadline-sensitive tests fail under load, so the repository default is deterministic.
  * A caller-supplied `--parallel` or `--parallel=N` is left alone.
  */
-export function resolveBunTestArgs(requested: string[]): string[] {
+export function resolveBunTestArgs(
+  requested: string[],
+  comparisonCommit?: string,
+): string[] {
+  const delimiterIndex = requested.indexOf("--");
+  const effectiveRequested = comparisonCommit
+    ? requested.map((arg, index) => (
+        (delimiterIndex === -1 || index < delimiterIndex)
+          && (arg === "--changed" || arg.startsWith("--changed="))
+          ? "--changed=" + comparisonCommit
+          : arg
+      ))
+    : requested;
   const args = ["--isolate"];
-  if (!hasCliFlag(requested, "--parallel")) {
+  if (!hasCliFlag(effectiveRequested, "--parallel")) {
     args.push(`--parallel=${DEFAULT_TEST_PARALLELISM}`);
   }
-  args.push(...requested);
-  if (isFullSuiteRun(requested)) args.push("./tests/");
+  args.push(...effectiveRequested);
+  if (isFullSuiteRun(effectiveRequested)) args.push("./tests/");
   return args;
 }
 
+// Paths relative to tests/. An entry moves with its file (scripts/test-layout/move.ts rewrites
+// it); the lane label, the ignore glob, and the timeout table all key on the basename.
 export const SERIAL_FULL_SUITE_FILES = [
-  "codex-shim.test.ts",
-  "cursor-native-exec-shell.test.ts",
-  "issue-452-empty-503.test.ts",
-  "openai-provider-option-e2e.test.ts",
-  "release-helper.test.ts",
-  "update-stop-first.test.ts",
+  "codex-integration/codex-shim.test.ts",
+  "providers/cursor/cursor-native-exec-shell.test.ts",
+  "codex-integration/issue-452-empty-503.test.ts",
+  "adapters/openai/openai-provider-option-e2e.test.ts",
+  "ci-workflows/release-helper.test.ts",
+  "update/update-stop-first.test.ts",
+  // Relays a 50 MiB WebSocket frame end to end against a 15s deadline, so its result is a
+  // measurement of the whole process, not of the relay. On a healthy 3-CPU macOS runner the
+  // echo leg alone spends 7.4s of that budget; whichever half of `--shard=N/2` it lands in
+  // decides whether it finishes. It has been passing by accident: it sat in the lighter half
+  // until three unrelated test files were added elsewhere in the tree, Bun repartitioned, and
+  // it went from 7.4s to over 15s twice in a row without anything on the sideband path
+  // changing. Quarantining it here is what keeps it a test of the relay instead of a test of
+  // its neighbours.
+  "server/server-live.test.ts",
 ] as const;
 
-const SERIAL_LANE_TIMEOUT_MS: Partial<Record<(typeof SERIAL_FULL_SUITE_FILES)[number], number>> = {
+type SerialLaneBasename = (typeof SERIAL_FULL_SUITE_FILES)[number] extends infer P
+  ? P extends `${string}/${infer B}` ? B : P
+  : never;
+const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialLaneBasename, number>> = {
   // This file intentionally exercises 33 complete release-script subprocess trees.
   // It is ~90s on an idle machine and measured at ~170s under unrelated host load.
   "release-helper.test.ts": 5 * 60 * 1000,
@@ -211,22 +388,22 @@ function canUseSerialLanes(requested: string[]): boolean {
 }
 
 /** Build the default full-suite plan: one bounded main lane plus isolated risky files. */
-export function resolveBunTestPlan(requested: string[]): BunTestLane[] {
+export function resolveBunTestPlan(requested: string[], comparisonCommit?: string): BunTestLane[] {
   if (!canUseSerialLanes(requested)) {
-    return [{ label: "suite", args: resolveBunTestArgs(requested), timeoutMs: 15 * 60 * 1000 }];
+    return [{ label: "suite", args: resolveBunTestArgs(requested, comparisonCommit), timeoutMs: 15 * 60 * 1000 }];
   }
 
-  const mainArgs = resolveBunTestArgs(requested);
+  const mainArgs = resolveBunTestArgs(requested, comparisonCommit);
   const rootIndex = mainArgs.lastIndexOf("./tests/");
-  const ignores = SERIAL_FULL_SUITE_FILES.flatMap(file => ["--path-ignore-patterns", `**/${file}`]);
+  const ignores = SERIAL_FULL_SUITE_FILES.flatMap(file => ["--path-ignore-patterns", `**/${basename(file)}`]);
   mainArgs.splice(rootIndex === -1 ? mainArgs.length : rootIndex, 0, ...ignores);
   const serialRequested = withoutParallelOverride(requested);
   return [
     { label: "parallel suite", args: mainArgs, timeoutMs: 15 * 60 * 1000 },
     ...SERIAL_FULL_SUITE_FILES.map(file => ({
-      label: file,
+      label: basename(file),
       args: resolveBunTestArgs(["--parallel=1", ...serialRequested, `./tests/${file}`]),
-      timeoutMs: SERIAL_LANE_TIMEOUT_MS[file] ?? 3 * 60 * 1000,
+      timeoutMs: SERIAL_LANE_TIMEOUT_MS[basename(file) as SerialLaneBasename] ?? 3 * 60 * 1000,
     })),
   ];
 }
@@ -247,16 +424,98 @@ function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T |
   });
 }
 
-async function runTestLane(lane: BunTestLane, runId: string): Promise<number> {
-  const isolated = createIsolatedTestEnvironment({ ...process.env, [TEST_RUN_ID_ENV]: runId });
+/** Read continuously so a timeout can still report output received before EOF. */
+export function captureTestOutput(
+  stdout: ReadableStream<Uint8Array>,
+  stderr: ReadableStream<Uint8Array>,
+) {
+  const collect = (stream: ReadableStream<Uint8Array>) => {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let reading = true;
+    let complete = false;
+    const done = (async () => {
+      try {
+        while (reading) {
+          const chunk = await reader.read();
+          if (!reading) break;
+          if (chunk.done) {
+            complete = true;
+            break;
+          }
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+      } catch {
+        // Retain the prefix without turning a pipe error into an unhandled rejection.
+      } finally {
+        if (reading) text += decoder.decode();
+        reading = false;
+        reader.releaseLock();
+      }
+    })();
+    return {
+      done,
+      snapshot: () => ({ text, complete }),
+      cancel() {
+        if (!reading) return;
+        reading = false;
+        text += decoder.decode();
+        // A descendant may own a pipe, or a stream's cancellation may never settle.
+        // Cancellation is best effort; neither it nor EOF may extend the drain bound.
+        void reader.cancel().catch(() => {});
+      },
+    };
+  };
+  const out = collect(stdout);
+  const err = collect(stderr);
+  return {
+    async finish(timeoutMs: number) {
+      const drained = await waitWithTimeout(Promise.all([out.done, err.done]), timeoutMs);
+      if (drained === null) {
+        out.cancel();
+        err.cancel();
+      }
+      const stdout = out.snapshot();
+      const stderr = err.snapshot();
+      return {
+        stdout: stdout.text,
+        stderr: stderr.text,
+        complete: drained !== null && stdout.complete && stderr.complete,
+      };
+    },
+  };
+}
+
+export async function runTestLane(
+  lane: BunTestLane,
+  runId: string,
+  inheritedLock: { lockPath: string; ownerToken: string } | undefined,
+  capture = false,
+  writers = {
+    stdout: (value: string) => { process.stdout.write(value); },
+    stderr: (value: string) => { process.stderr.write(value); },
+  },
+): Promise<{ exitCode: number; output: string }> {
+  const isolated = createIsolatedTestEnvironment({
+    ...process.env,
+    [TEST_RUN_ID_ENV]: runId,
+    [TEST_RUN_LOCK_PATH_ENV]: inheritedLock?.lockPath,
+    [TEST_RUN_LOCK_TOKEN_ENV]: inheritedLock?.ownerToken,
+    // Lanes run many files in parallel, so a test that shortened a PRODUCT timing budget
+    // (not its own test timeout) needs headroom for process startup on a busy machine.
+    // See tests/helpers/ci-watchdog.ts `isolationBudgetMs`.
+    OCX_TEST_FULL_SUITE: "1",
+  });
   const startedAt = Date.now();
   let interrupted: NodeJS.Signals | null = null;
   const child = Bun.spawn([process.execPath, "test", ...lane.args], {
     env: isolated.env,
     stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: capture ? "pipe" : "inherit",
+    stderr: capture ? "pipe" : "inherit",
   });
+  const captured = capture ? captureTestOutput(child.stdout!, child.stderr!) : undefined;
   const forward = (signal: NodeJS.Signals) => {
     interrupted = signal;
     try { child.kill(signal); } catch { /* child already exited */ }
@@ -268,7 +527,7 @@ async function runTestLane(lane: BunTestLane, runId: string): Promise<number> {
 
   const exited = child.exited;
   try {
-    const exitCode = await waitWithTimeout(exited, lane.timeoutMs);
+    let exitCode = await waitWithTimeout(exited, lane.timeoutMs);
     if (exitCode === null) {
       console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${child.pid}.`);
       try { child.kill("SIGTERM"); } catch { /* child already exited */ }
@@ -277,48 +536,144 @@ async function runTestLane(lane: BunTestLane, runId: string): Promise<number> {
         try { child.kill("SIGKILL"); } catch { /* child already exited */ }
         await waitWithTimeout(exited, 2_000);
       }
-      return 124;
     }
-    if (interrupted === "SIGINT") return 130;
-    if (interrupted === "SIGTERM") return 143;
+    // Process exit does not guarantee EOF when a descendant inherited the pipe.
+    const result = await captured?.finish(1_000);
+    const stdout = result?.stdout ?? "";
+    const stderr = result?.stderr ?? "";
+    if (stdout) writers.stdout(stdout);
+    if (stderr) writers.stderr(stderr);
+    const output = stdout + "\n" + stderr;
+    if (result && !result.complete) {
+      console.error("[test] captured output is incomplete; collected output is shown above.");
+      if (exitCode === 0) exitCode = 1;
+    }
+    if (exitCode === null) return { exitCode: 124, output };
+    if (interrupted === "SIGINT") return { exitCode: 130, output };
+    if (interrupted === "SIGTERM") return { exitCode: 143, output };
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.warn(`[test] ${lane.label} finished in ${seconds}s (exit ${exitCode}).`);
-    return exitCode;
+    return { exitCode, output };
   } finally {
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
-    isolated.cleanup();
+    try {
+      isolated.cleanup();
+    } catch {
+      console.error("[test] deferred cleanup of one test root after Windows kept a handle open; a later run will retry it.");
+    }
   }
+}
+
+/**
+ * `gui` is not a workspace of the root package and declares React only in `gui/package.json`, so a
+ * root `bun install` never creates `gui/node_modules`. Twenty-six files under `tests/` import
+ * modules from `gui/src`, which makes those tests fail on a fresh clone or worktree with
+ * `Cannot find package 'react'` — reported as an "Unhandled error between tests" that names no
+ * test, so the cause is not obvious from the output.
+ *
+ * `.github/workflows/ci.yml` already installs them explicitly for exactly this reason; the local
+ * runner had no equivalent. Install on demand rather than fail, because the tests genuinely
+ * require the dependency and `gui/node_modules` is a gitignored build artifact, not source.
+ */
+export function ensureGuiDependencies(io: {
+  cwd?: string;
+  exists?: (path: string) => boolean;
+  install?: (guiDir: string) => { ok: boolean; detail: string };
+  log?: (message: string) => void;
+} = {}): { kind: "present" | "installed" | "absent" | "failed"; detail?: string } {
+  const cwd = io.cwd ?? process.cwd();
+  const exists = io.exists ?? existsSync;
+  const log = io.log ?? (message => console.warn(message));
+  const guiDir = join(cwd, "gui");
+  if (!exists(join(guiDir, "package.json"))) return { kind: "absent" };
+  if (exists(join(guiDir, "node_modules", "react", "package.json"))) return { kind: "present" };
+
+  log("[test] gui dependencies are missing or incomplete; installing them so tests importing gui/src can resolve React.");
+  const install = io.install ?? ((dir: string) => {
+    const result = Bun.spawnSync(["bun", "install", "--frozen-lockfile"], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      ok: result.exitCode === 0,
+      detail: decodeOutput(result.stderr) || decodeOutput(result.stdout),
+    };
+  });
+  const outcome = install(guiDir);
+  if (outcome.ok) return { kind: "installed" };
+  return { kind: "failed", detail: outcome.detail };
 }
 
 if (import.meta.main) {
   const requestedTests = process.argv.slice(2);
-  const runId = randomUUID();
-  const lock = await acquireTestRunLock({
-    runId,
-    onWait: owner => console.warn(
-      `[test] another Bun test run${owner ? ` (pid ${owner.pid})` : ""} holds the machine lock; waiting. `
-      + "Set OCX_TEST_NO_QUEUE=1 only for intentional overlap.",
-    ),
-    onAcquiredAfterWait: elapsedMs => console.warn(`[test] acquired the machine lock after ${Math.round(elapsedMs / 1000)}s.`),
-  });
-  const startedAt = Date.now();
-  try {
-    let exitCode = 0;
-    for (const lane of resolveBunTestPlan(requestedTests)) {
-      const laneExitCode = await runTestLane(lane, runId);
-      if (laneExitCode !== 0 && exitCode === 0) exitCode = laneExitCode;
-      if ([124, 130, 143].includes(laneExitCode)) break;
+  const guiDependencies = ensureGuiDependencies();
+  if (guiDependencies.kind === "failed") {
+    console.error(
+      "[test] could not install gui/node_modules, which tests importing gui/src need to resolve React.\n"
+      + "       Run it manually: cd gui && bun install --frozen-lockfile\n"
+      + (guiDependencies.detail ? `       ${guiDependencies.detail.trim().split("\n").slice(-3).join("\n       ")}` : ""),
+    );
+    process.exitCode = 1;
+  }
+  let changedRun: ReturnType<typeof inspectChangedRun> = null;
+  if (process.exitCode !== 1) {
+    try {
+      changedRun = inspectChangedRun(requestedTests);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
     }
-    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
-    if (isFullSuiteRun(requestedTests) && elapsedSeconds > 600) {
+  }
+  if (process.exitCode !== 1) {
+    if (changedRun) {
       console.warn(
-        `[test] the suite took ${elapsedSeconds}s; with --parallel=${DEFAULT_TEST_PARALLELISM} it should finish in a few minutes on an idle machine. `
-        + "Check for another test runner, a busy CPU, or a test that started polling something real.",
+        `[test] changed mode comparison ref: ${changedRun.comparisonRef}; merge base: ${changedRun.comparisonCommit}`,
       );
     }
-    process.exitCode = exitCode;
-  } finally {
-    lock.release();
+    const runId = randomUUID();
+    const lockPath = resolveWrappedTestRunLockPath({ env: process.env });
+    const lock = await acquireTestRunLock({
+      runId,
+      lockPath,
+      validatedRuntimePath: lockPath !== undefined,
+      onWait: owner => console.warn(
+        `[test] another Bun test run${owner ? ` (pid ${owner.pid})` : ""} holds the user lock; waiting. `
+        + "Set OCX_TEST_NO_QUEUE=1 only for intentional overlap.",
+      ),
+      onAcquiredAfterWait: elapsedMs => console.warn(`[test] acquired the user lock after ${Math.round(elapsedMs / 1000)}s.`),
+    });
+    const startedAt = Date.now();
+    try {
+      const inheritedLock = process.platform === "win32" && lockPath && lock.owner
+        ? { lockPath, ownerToken: lock.owner.token }
+        : undefined;
+      let exitCode = 0;
+      let captured = "";
+      for (const lane of resolveBunTestPlan(requestedTests, changedRun?.comparisonCommit)) {
+        const result = await runTestLane(lane, runId, inheritedLock, Boolean(changedRun));
+        captured += result.output;
+        if (result.exitCode !== 0 && exitCode === 0) exitCode = result.exitCode;
+        if ([124, 130, 143].includes(result.exitCode)) break;
+      }
+      if (exitCode === 0 && changedRun) {
+        const selectionFailure = changedSelectionFailure(changedRun, captured);
+        if (selectionFailure) {
+          console.error(selectionFailure);
+          exitCode = 1;
+        }
+      }
+      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+      if (isFullSuiteRun(requestedTests) && elapsedSeconds > 600) {
+        console.warn(
+          `[test] the suite took ${elapsedSeconds}s; with --parallel=${DEFAULT_TEST_PARALLELISM} it should finish in a few minutes on an idle machine. `
+          + "Check for another test runner, a busy CPU, or a test that started polling something real.",
+        );
+      }
+      process.exitCode = exitCode;
+    } finally {
+      lock.release();
+    }
   }
 }

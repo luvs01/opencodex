@@ -1,8 +1,10 @@
 import type { OcxProviderConfig } from "../types";
+import { debugProviderDiagnostic } from "../lib/debug";
+import { isXaiResponsesDestination } from "../providers/xai-transport";
 
 const CODEX_WEB_SEARCH_TOOL = "web_search";
 const CODEX_WEB_SEARCH_PREVIEW_TOOL = "web_search_preview";
-const XAI_API_HOST = "api.x.ai";
+const XAI_SEARCH_TOOL = "x_search";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -10,18 +12,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isCodexWebSearchToolType(value: unknown): boolean {
   return value === CODEX_WEB_SEARCH_TOOL || value === CODEX_WEB_SEARCH_PREVIEW_TOOL;
-}
-
-/** Match only xAI's documented public API, not arbitrary Responses-compatible gateways. */
-function isXaiPublicApi(provider: Pick<OcxProviderConfig, "baseUrl">): boolean {
-  try {
-    const url = new URL(provider.baseUrl);
-    return url.protocol === "https:"
-      && url.hostname.toLowerCase() === XAI_API_HOST
-      && (url.port === "" || url.port === "443");
-  } catch {
-    return false;
-  }
 }
 
 type ToolGroupRewrite = {
@@ -66,7 +56,7 @@ function normalizeToolGroup(tools: unknown[]): ToolGroupRewrite {
     // `search_context_size` 400s, while `user_location`, `search_content_types`, `filters` and
     // `enable_image_search` are all accepted. Deleting the accepted ones was a silent capability
     // loss, and it contradicted the sibling layer, whose own probe note already records
-    // user_location/filters as accepted (tests/responses-routed-web-search-fields.test.ts).
+    // user_location/filters as accepted (tests/responses/responses-routed-web-search-fields.test.ts).
     delete next.external_web_access;
     delete next.search_context_size;
     if (enableImageSearch && !Object.hasOwn(next, "enable_image_search")) {
@@ -147,15 +137,32 @@ function normalizeToolChoice(body: Record<string, unknown>): Record<string, unkn
   return body;
 }
 
+function currentInputStart(inputLength: number, replayPrefixLength: number | undefined): number {
+  if (typeof replayPrefixLength !== "number" || !Number.isFinite(replayPrefixLength)) return 0;
+  return Math.min(inputLength, Math.max(0, Math.trunc(replayPrefixLength)));
+}
+
+function hasToolType(tools: unknown, type: string): boolean {
+  return Array.isArray(tools) && tools.some(tool => isPlainObject(tool) && tool.type === type);
+}
+
 /**
  * Make Codex's hosted web-search declaration acceptable to xAI Responses without changing other
  * providers or mutating the caller-owned request body.
+ *
+ * Scoped to BOTH xAI Responses hosts, not just the public API. The 2026-08-22 probe recorded in
+ * `normalizeToolGroup` and in `isXaiResponsesDestination` already found the two hosts to be one
+ * dialect, but this gate stayed on `api.x.ai` alone, so the Grok CLI proxy — the OAuth lane — was
+ * left unnormalized. Re-probed 2026-08-27 against `cli-chat-proxy.grok.com`:
+ * `web_search_preview` -> 422 `unknown variant`, `external_web_access` -> 400 on every value,
+ * `search_context_size` -> 400, while `user_location` and `search_content_types` -> 200. Identical
+ * to the public API, which is what makes one shared gate correct.
  */
 export function normalizeXaiResponsesWebSearch(
   body: unknown,
   provider: Pick<OcxProviderConfig, "baseUrl">,
 ): unknown {
-  if (!isXaiPublicApi(provider) || !isPlainObject(body)) return body;
+  if (!isXaiResponsesDestination(provider) || !isPlainObject(body)) return body;
 
   let next: Record<string, unknown> = body;
   if (Array.isArray(body.tools)) {
@@ -186,5 +193,67 @@ export function normalizeXaiResponsesWebSearch(
     if (inputChanged) next = { ...next, input };
   }
 
-  return normalizeToolChoice(next);
+  const normalized = normalizeToolChoice(next);
+  const choice = normalized.tool_choice;
+  if ((choice === "auto" || choice === "none") && !hasAnyDeclaredTool(normalized)) {
+    debugProviderDiagnostic("xai", "tool-choice-omitted", { choice });
+    const { tool_choice: _toolChoice, ...rest } = normalized;
+    // `auto` selects from the catalog, so a catalog with nothing in it makes it meaningless and
+    // the omission says nothing the request did not already say. `none` is the opposite: it is a
+    // prohibition, and on a request whose catalog this normalizer just emptied it is the only
+    // place the turn's client-call boundary is written down. Downstream repair reads that
+    // boundary off the final outbound body, so omitting the word alone would hand back a call the
+    // caller ruled out. Restate it as the explicit empty catalog, which carries the same deny-all
+    // and which this destination already receives whenever a caller sends one itself.
+    return choice === "none" && !Array.isArray(rest.tools) ? { ...rest, tools: [] } : rest;
+  }
+  return normalized;
+}
+
+function isLiveWebSearchTool(tool: unknown): boolean {
+  return isPlainObject(tool)
+    && tool.type === CODEX_WEB_SEARCH_TOOL
+    && (!Object.hasOwn(tool, "external_web_access") || tool.external_web_access === true);
+}
+
+/**
+ * Add xAI's hosted X search declaration without changing web-search normalization or selectors.
+ * Destination classification belongs only to this opt-in injection path; the public-API
+ * normalizer above intentionally retains its narrower causality boundary.
+ */
+export function injectXaiResponsesXSearch(
+  body: unknown,
+  provider: Pick<OcxProviderConfig, "baseUrl" | "xaiResponsesXSearch">,
+  replayPrefixLength?: number,
+): unknown {
+  if (
+    !isPlainObject(body)
+    || !isXaiResponsesDestination(provider)
+    || provider.xaiResponsesXSearch !== true
+  ) return body;
+
+  const input = Array.isArray(body.input) ? body.input : undefined;
+  const inputStart = input ? currentInputStart(input.length, replayPrefixLength) : 0;
+  const currentInput = input?.slice(inputStart) ?? [];
+  const currentXSearchDeclared = hasToolType(body.tools, XAI_SEARCH_TOOL)
+    || currentInput.some(item =>
+      isPlainObject(item)
+      && item.type === "additional_tools"
+      && hasToolType(item.tools, XAI_SEARCH_TOOL)
+    );
+  if (currentXSearchDeclared) return body;
+
+  const liveWebSearchSurvives = Array.isArray(body.tools) && body.tools.some(isLiveWebSearchTool)
+    || currentInput.some(item =>
+      isPlainObject(item)
+      && item.type === "additional_tools"
+      && Array.isArray(item.tools)
+      && item.tools.some(isLiveWebSearchTool)
+    );
+  if (!liveWebSearchSurvives) return body;
+
+  // Declaration does not grant selection when `tool_choice` names a specific tool or carries an
+  // `allowed_tools` set that excludes x_search, so leave that selector byte-shape untouched.
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  return { ...body, tools: [...tools, { type: XAI_SEARCH_TOOL }] };
 }
