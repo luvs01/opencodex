@@ -88,19 +88,36 @@ export const FORWARD_HEADERS = [
  * Exported so the web-search and vision sidecars and the standalone search/images/live/context
  * relays apply the same precedence on their replays. Accepts either the mutable header record
  * most callers build or a `Headers` object (context-history materializes into one).
+ *
+ * `providerHeaders` is consulted directly — not via the outbound set — because compact and audio
+ * materialize caller headers without ever merging provider.headers; a configured value must still
+ * win there.
  */
 export function applyCallerUserAgentFallback(
   headers: Record<string, string> | Headers,
   callerHeaders: Headers,
+  providerHeaders?: Record<string, string> | Headers,
 ): void {
-  const present = headers instanceof Headers
-    ? headers.has("user-agent")
-    : Object.keys(headers).some(name => name.toLowerCase() === "user-agent");
-  if (present) return;
-  const userAgent = callerHeaders.get("user-agent");
-  if (!userAgent) return;
-  if (headers instanceof Headers) headers.set("user-agent", userAgent);
-  else headers["User-Agent"] = userAgent;
+  const configured = providerHeaders === undefined ? null : readUserAgentHeader(providerHeaders);
+  if (headers instanceof Headers) {
+    if (configured !== null) headers.set("user-agent", configured);
+    else if (!headers.has("user-agent")) {
+      const caller = callerHeaders.get("user-agent");
+      if (caller) headers.set("user-agent", caller);
+    }
+    return;
+  }
+  if (Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) return;
+  const caller = configured ?? callerHeaders.get("user-agent");
+  if (caller) headers["User-Agent"] = caller;
+}
+
+function readUserAgentHeader(source: Record<string, string> | Headers): string | null {
+  if (source instanceof Headers) return source.get("user-agent");
+  for (const [name, value] of Object.entries(source)) {
+    if (name.toLowerCase() === "user-agent") return value;
+  }
+  return null;
 }
 
 /** Replace every `input_image` part under a routed-compaction body with a short marker. */

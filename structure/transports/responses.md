@@ -23,7 +23,9 @@ The web-search and vision sidecar replays apply the same precedence: the caller 
 the name only when the provider's configured headers do not already carry it. So do the standalone
 search, images, live, and context-history relays, which receive the materialized headers rather
 than the caller's originals — each skips `user-agent` in its overlay and defers to the shared
-fallback so a configured provider value still wins.
+fallback so a configured provider value still wins. Native compact and audio materialize caller
+headers without merging `provider.headers` at all; the shared fallback reads the provider config
+directly there, so a configured value is still applied over the caller fingerprint.
 
 Retired Codex Spark has no model-specific tool or Responses Lite override; general Lite handling and
 namespace scrubbing remain shared compatibility behavior. Codex quota/reset evidence follows the

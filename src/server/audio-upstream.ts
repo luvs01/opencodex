@@ -1,3 +1,4 @@
+import { applyCallerUserAgentFallback } from "../adapters/openai-responses";
 import { formatErrorResponse } from "../bridge";
 import {
   CodexAccountCooldownError,
@@ -134,10 +135,14 @@ export async function resolveAudioUpstream(
       }
       log.provider = formatCodexProviderForLog(candidate.providerName, context.accountId, config);
       log.model = options.model;
+      const outboundHeaders = new Headers(selected);
+      // Audio materializes caller headers without merging provider.headers; a configured
+      // provider User-Agent still wins, and the caller fingerprint fills only the gap.
+      applyCallerUserAgentFallback(outboundHeaders, selected, candidate.provider.headers);
       return {
         providerName: candidate.providerName,
         providerBaseUrl: candidate.provider.baseUrl,
-        headers: Object.fromEntries(selected),
+        headers: Object.fromEntries(outboundHeaders),
         keyed: false,
         authContext: context,
         recordOutcome,

@@ -242,17 +242,38 @@ describe("Codex metadata integrity", () => {
     const unconfigured = new Headers();
     applyCallerUserAgentFallback(unconfigured, caller);
     expect(unconfigured.get("user-agent")).toBe("codex_cli_rs/0.154.0");
+    // Compact and audio never merge provider.headers: the configured value still
+    // wins over a caller fingerprint already present in the materialized set.
+    const materialized = new Headers({ "user-agent": "codex_cli_rs/0.154.0", authorization: "Bearer pool" });
+    const audioShaped = new Headers(materialized);
+    applyCallerUserAgentFallback(audioShaped, materialized, { "uSeR-aGeNt": "operator-agent/1" });
+    expect(audioShaped.get("user-agent")).toBe("operator-agent/1");
+    const audioUnconfigured = new Headers(materialized);
+    applyCallerUserAgentFallback(audioUnconfigured, materialized, undefined);
+    expect(audioUnconfigured.get("user-agent")).toBe("codex_cli_rs/0.154.0");
   });
 
-  test("every direct relay that overlays materialized headers defers User-Agent to the shared fallback", () => {
+  test("every relay and standalone send that overlays materialized headers defers User-Agent to the shared fallback", () => {
     for (const file of [
       "src/server/search.ts", "src/server/images.ts",
       "src/server/live.ts", "src/server/context-history.ts",
+      "src/server/audio-upstream.ts",
     ]) {
       const source = readFileSync(repoPath(file), "utf8");
       expect(source).toContain("applyCallerUserAgentFallback(");
-      expect(source).toMatch(/(?:name|key) !== "user-agent"/);
     }
+    for (const file of [
+      "src/server/search.ts", "src/server/images.ts",
+      "src/server/live.ts", "src/server/context-history.ts",
+      "src/server/responses/compact.ts",
+    ]) {
+      const source = readFileSync(repoPath(file), "utf8");
+      expect(source).toContain("applyCallerUserAgentFallback(");
+      expect(source).toMatch(/(?:name|key) [!=]== "user-agent"/);
+    }
+    // Every FORWARD_HEADERS overlay in compact applies the configured-provider oracle.
+    const compact = readFileSync(repoPath("src/server/responses/compact.ts"), "utf8");
+    expect(compact.split("applyCallerUserAgentFallback(").length - 1).toBe(4);
   });
 
   test("web-search and vision sidecars keep a configured User-Agent over the caller value", async () => {

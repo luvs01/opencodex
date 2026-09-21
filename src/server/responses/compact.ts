@@ -14,7 +14,7 @@ import {
 import { resolveProviderApiKey } from "../../providers/key-store";
 import { parseRequest } from "../../responses/parser";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
-import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
+import { applyCallerUserAgentFallback, FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { expandPreviousResponseInput, previousResponseProviderState, rememberResponseState } from "../../responses/state";
 import { repairLegacyDottedToolCallNames } from "../../responses/legacy-dotted-tool-name-repair";
 import { NoEligiblePolicyCandidateError, routeCompactionModel } from "../../router";
@@ -353,9 +353,13 @@ async function refreshNativeMainCompactContext(args: {
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
     });
     for (const name of FORWARD_HEADERS) {
+      if (name === "user-agent") continue;
       const value = selected.get(name);
       if (value) headers.set(name, value);
     }
+    // Compact builds its own header set without provider.headers; a configured provider
+    // User-Agent still wins, and the caller fingerprint fills only the gap.
+    applyCallerUserAgentFallback(headers, selected, refreshedProvider.headers);
     const override = (refreshedProvider as { _codexAccountOverride?: { accessToken: string; chatgptAccountId: string } })._codexAccountOverride;
     if (override) {
       headers.set("authorization", `Bearer ${override.accessToken}`);
@@ -445,9 +449,13 @@ async function refreshPoolCompactContext(args: {
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
     });
     for (const name of FORWARD_HEADERS) {
+      if (name === "user-agent") continue;
       const value = selected.get(name);
       if (value) headers.set(name, value);
     }
+    // Compact builds its own header set without provider.headers; a configured provider
+    // User-Agent still wins, and the caller fingerprint fills only the gap.
+    applyCallerUserAgentFallback(headers, selected, refreshedProvider.headers);
     const override = (refreshedProvider as { _codexAccountOverride?: { accessToken: string; chatgptAccountId: string } })._codexAccountOverride;
     if (override) {
       headers.set("authorization", `Bearer ${override.accessToken}`);
@@ -508,9 +516,13 @@ async function resolveAlternateCompactContext(args: {
     const headers = new Headers({ "content-type": "application/json" });
     const selected = headersForCodexAuthContext(req.headers, authCtx, config, selectedModelId, args.admission);
     for (const name of FORWARD_HEADERS) {
+      if (name === "user-agent") continue;
       const value = selected.get(name);
       if (value) headers.set(name, value);
     }
+    // Compact builds its own header set without provider.headers; a configured provider
+    // User-Agent still wins, and the caller fingerprint fills only the gap.
+    applyCallerUserAgentFallback(headers, selected, provider.headers);
     const override = (provider as { _codexAccountOverride?: { accessToken: string; chatgptAccountId: string } })._codexAccountOverride;
     if (override) {
       headers.set("authorization", `Bearer ${override.accessToken}`);
@@ -836,9 +848,13 @@ export async function handleResponsesCompact(
         });
         compactProvider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
         for (const name of FORWARD_HEADERS) {
+          if (name === "user-agent") continue;
           const value = selected.get(name);
           if (value) headers.set(name, value);
         }
+        // Compact builds its own header set without provider.headers; a configured provider
+        // User-Agent still wins, and the caller fingerprint fills only the gap.
+        applyCallerUserAgentFallback(headers, selected, compactProvider.headers);
         const override = (compactProvider as { _codexAccountOverride?: { accessToken: string; chatgptAccountId: string } })._codexAccountOverride;
         if (override) {
           headers.set("authorization", `Bearer ${override.accessToken}`);
