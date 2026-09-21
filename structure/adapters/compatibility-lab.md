@@ -138,10 +138,10 @@ exit timestamp. A stored result is accepted only on a clean `code 0` exit
 observed at `close`; a nonzero or signaled exit is a harness failure, and a
 latched failure always wins settlement. `close` also waits for the child's
 stdio, so after `exit` a bounded drain (`EXIT_DRAIN_MS`) lets in-flight protocol
-data arrive; if `close` never follows, the run is rejected as a sandbox
-violation — a held-open pipe proves a descendant escaped supervision, so its
-result cannot be trusted and its scratch cannot be cleaned under a live
-process.
+data arrive; if `close` never follows, the run is rejected as an inconclusive
+harness failure — a held-open pipe may mean a descendant escaped supervision or
+simply that drainage stalled, so the result cannot be trusted and its scratch
+cannot be cleaned while reporting success under a possibly-live process.
 
 ## Scope guard
 

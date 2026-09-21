@@ -294,14 +294,16 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         return;
       }
       if (reaped) {
-        // `close` never followed `exit`: something outlived the producer still
-        // holding its pipes. The process tree escaped supervision, so the
-        // result cannot be trusted and scratch cannot be cleaned under a live
-        // descendant — report the escape instead of accepting it.
+        // `close` never followed `exit`: the pipes outlived the producer, which
+        // may mean a descendant escaped supervision — but the drain also cannot
+        // rule out a stalled event loop or a slow pipe, so this is reported as
+        // an inconclusive harness failure rather than a sandbox escape. Either
+        // way the result is rejected: it must never resolve while a descendant
+        // might still be alive to mutate scratch after cleanup.
         finish(() => reject(new FabricTaskError(
-          "isolated producer left a descendant holding its stdio",
-          "sandbox_violation",
-          "environment",
+          "isolated producer exited but its stdio never closed",
+          "harness_failure",
+          "harness",
         )));
         return;
       }

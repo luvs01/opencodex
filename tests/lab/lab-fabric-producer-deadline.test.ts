@@ -407,7 +407,7 @@ describe("isolated fabric producer deadline admission", () => {
     });
   });
 
-  test("a held-open pipe turns a clean exit into a sandbox violation", async () => {
+  test("a clean exit whose close never arrives is a harness failure", async () => {
     await withProducer(async (h) => {
       h.at(1_099);
       h.result();
@@ -415,9 +415,13 @@ describe("isolated fabric producer deadline admission", () => {
       await h.pending();
       expect(h.timers).toHaveLength(3);
       h.timers[2]!.callback();
-      await h.rejection("sandbox_violation", "environment", "isolated producer left a descendant holding its stdio");
+      // The pipes outlived the producer — inconclusive, never a trusted result.
+      await h.rejection("harness_failure", "harness", "isolated producer exited but its stdio never closed");
       expect(h.child.stdout.destroyed).toBe(true);
       expect(h.child.stderr.destroyed).toBe(true);
+      // A close arriving after the decision is ignored.
+      h.child.close();
+      await h.rejection("harness_failure", "harness", "isolated producer exited but its stdio never closed");
     });
   });
 

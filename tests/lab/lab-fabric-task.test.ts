@@ -885,9 +885,10 @@ export async function execute() {
       configDir: home,
     });
     // `close` never follows `exit` while a descendant holds the pipes — the
-    // process tree escaped supervision, so the result cannot be trusted.
+    // process tree may have escaped supervision, so the result is rejected as
+    // an inconclusive harness failure rather than trusted.
     expect(result.outcome.outcome).not.toBe("pass");
-    expect(result.outcome.failure?.code).toBe("sandbox_violation");
+    expect(result.outcome.failure?.code).toBe("harness_failure");
   }, 20_000);
 
   test("activity resets inactivity deadline within total budget", async () => {
