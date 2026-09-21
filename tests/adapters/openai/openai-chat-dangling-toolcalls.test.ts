@@ -12,9 +12,10 @@ const provider: OcxProviderConfig = {
   baseUrl: "https://example.test/v1",
   apiKey: "sk-test",
   authMode: "key",
-  // The wire role folds to `system` unless a destination is recorded as accepting
-  // `developer`; this suite is about tool-result repair ordering, so it declares the
-  // destination rather than asserting the default.
+  // These cases assert where a developer barrier lands relative to a pending tool call, not
+  // which role carries it. The wire role folds to `system` unless a destination records that
+  // it accepts `developer`, so the destination is declared here and the assertions keep
+  // reading the role they were written against.
   foldDeveloperRoleToSystem: false,
 };
 

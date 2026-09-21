@@ -35,12 +35,18 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     aliases: ["eject"],
     usage: "ocx restore [back]",
     summary: "Restore native Codex config without stopping the proxy; `restore back` re-points codex at the running proxy.",
+    details: [
+      "--remove-codex-provider-table  Also remove [model_providers.opencodex] when a paginated home made restore keep it. Conversations tagged opencodex stop opening.",
+    ],
   },
   {
     name: "eject",
     aliases: [],
     usage: "ocx eject [back]",
     summary: "Restore native Codex config without stopping the proxy; `eject back` re-points codex at the running proxy.",
+    details: [
+      "--remove-codex-provider-table  Also remove [model_providers.opencodex] when a paginated home made restore keep it. Conversations tagged opencodex stop opening.",
+    ],
   },
   {
     name: "recover-history",
@@ -491,6 +497,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     details: [
       "Alias of ocx integration client <sub> --client zcode.",
       "enable writes the managed provider.opencodex block into ~/.zcode/v2/config.json; disable removes only that block.",
+      "ZCode 3.14 moved its providers to ~/.zcode/v2/provider_config.json; where that file exists, enable is refused because the write cannot reach the client.",
       "ZCode reads its config at startup — restart ZCode after enable/disable.",
       "Select OpenCodex Proxy/<provider>/<model> from ZCode's model picker.",
     ],
