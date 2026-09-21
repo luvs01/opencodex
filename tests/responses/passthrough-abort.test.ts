@@ -71,6 +71,12 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     expect(terminalRepair).toBeGreaterThanOrEqual(0);
     expect(webSearchBridge).toBeGreaterThan(terminalRepair);
     expect(sseBranch.slice(webSearchBridge)).toContain("firstLeg: passthroughSseBody,");
+    // Continuation legs need the same repair: the same transport can leave a complete leg
+    // open, and an unwrapped continuation body would stall the bridge identically.
+    const sendWrap = sseBranch.slice(webSearchBridge);
+    expect(sendWrap).toContain("send: async (continuationBody: string)");
+    expect(sendWrap.indexOf("relayResponsesSseWithTerminalRepair(\n                continuation.body"))
+      .toBeGreaterThan(sendWrap.indexOf("send: async"));
     // Native tee stays inside the bounded observer. The production owner passes
     // the raw stream and disconnect signal before any client-side rewrite.
     expect(sseBranch).toMatch(/const \[nativeBody, inspectBody\] = teeWithBoundedInspection\(passthroughSseBody, \{ clientGoneSignal \}\)/);

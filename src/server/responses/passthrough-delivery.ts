@@ -399,26 +399,45 @@ export async function deliverPassthroughResponse(
           // Continuation legs replay the same built request with the executed search appended.
           // The first leg already passed the recovery ladder, the outbound size ceiling, and the
           // host circuit; a KEY-auth destination has no OAuth refresh to replay on a later leg.
-          send: (continuationBody: string) => fetchWithHeaderTimeout(
-            nativeExchange.request.url,
-            { method: nativeExchange.request.method, headers: nativeExchange.request.headers, body: continuationBody },
-            upstream.signal,
-            connectMs,
-            true,
-            providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              // Pacing can outlive a manual selection change. A continuation must retain the
-              // first leg's key and appended search result, never rebuild from the original turn.
-              beforeDispatch: () => {
-                if (webSearchBridgeBinding?.kind !== "api-key"
-                  || !providerApiKeySelectionIsCurrent(config, route.providerName, webSearchBridgeBinding.provider)) {
-                  throw new Error("API key selection changed during a web-search continuation");
-                }
+          send: async (continuationBody: string) => {
+            const continuation = await fetchWithHeaderTimeout(
+              nativeExchange.request.url,
+              { method: nativeExchange.request.method, headers: nativeExchange.request.headers, body: continuationBody },
+              upstream.signal,
+              connectMs,
+              true,
+              providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                // Pacing can outlive a manual selection change. A continuation must retain the
+                // first leg's key and appended search result, never rebuild from the original turn.
+                beforeDispatch: () => {
+                  if (webSearchBridgeBinding?.kind !== "api-key"
+                    || !providerApiKeySelectionIsCurrent(config, route.providerName, webSearchBridgeBinding.provider)) {
+                    throw new Error("API key selection changed during a web-search continuation");
+                  }
+                },
+                providerName: route.providerName,
+                modelId: route.modelId,
+              }),
+              false,
+            );
+            // A continuation rides the same transport that can leave a complete leg open, so
+            // every repaired leg gets its own grace window — not just the first one.
+            if (!terminalRepairPolicy || !continuation.ok || !continuation.body) return continuation;
+            return new Response(
+              relayResponsesSseWithTerminalRepair(
+                continuation.body,
+                upstream,
+                terminalRepairPolicy,
+                translatorBudget,
+                options.responsesTerminalRepairScheduler,
+              ),
+              {
+                status: continuation.status,
+                statusText: continuation.statusText,
+                headers: continuation.headers,
               },
-              providerName: route.providerName,
-              modelId: route.modelId,
-            }),
-            false,
-          ),
+            );
+          },
           execute: createPassthroughWebSearchBridgeExecutor(webSearchBridgePlan, {
             providerApiKey: route.provider.apiKey ?? "",
             auth: webSearchBridgeAuth,
