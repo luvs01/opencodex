@@ -191,14 +191,23 @@ export function createWebsocketHandler(
           ws.close(1009, "message too large");
           return;
         }
+        // An established control connection only ever carries control frames, so the
+        // inbound body limit applies to raw bytes before the parse materializes them.
+        if (ws.data.nativeControl && rawBytes > resolveInboundBodyLimitBytes(config.maxInboundBodyBytes)) {
+          sendJsonFrame(ws, buildWsErrorFrame(413, {
+            type: "invalid_request_error",
+            code: "request_body_too_large",
+            message: "Native response control frame exceeds the configured inbound body limit.",
+          }));
+          return;
+        }
         let frame: Record<string, unknown>;
         try {
           frame = JSON.parse(typeof raw === "string" ? raw : raw.toString()) as Record<string, unknown>;
         } catch {
           return; // text-only contract; ignore unparseable frames
         }
-        if ((frame.type === "response.inject" || frame.type === "response.steer"
-          || (frame.type === "response.create" && ws.data.nativeControl))
+        if ((frame.type === "response.inject" || frame.type === "response.steer")
           && rawBytes > resolveInboundBodyLimitBytes(config.maxInboundBodyBytes)) {
           sendJsonFrame(ws, buildWsErrorFrame(413, {
             type: "invalid_request_error",

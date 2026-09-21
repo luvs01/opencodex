@@ -338,7 +338,8 @@ control events are preserved. A single bounded reader owns delivery; client canc
 account invalidation and shutdown abort its upstream. Numeric usage is summed once per
 response; steering control frames (which can contain returned user input) are not log samples.
 
-Bounds: 32 outstanding submissions, 128 response IDs per chain, 32 MiB replay journal,
+Bounds: 32 outstanding submissions, 128 response IDs per chain, 32 MiB replay journal
+with a 128 MiB aggregate pinned-journal ceiling independent of the configured budget,
 the configured inbound and upstream body ceilings, and the shared application-owned memory budget,
 256 KiB / 1,024 required-input stubs, existing WS frame/queue byte limits, a 90-second control
 wait, and a 30-minute saved-tool-result wait. Ordinary active-response silence uses the

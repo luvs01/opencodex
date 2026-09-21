@@ -984,6 +984,15 @@ During that time the turn holds one physical socket and one pinned credential th
 because the channel deliberately never re-enters account selection. Treat an enabled steering
 connection as a long-lived session resource rather than an ordinary bounded request.
 
+Steering frames also share the proxy's configured body and memory limits. A control frame above
+[`maxInboundBodyBytes`](/reference/inbound-body-admission/) is refused before
+it is parsed, and the reconstructed body sent upstream is refused when it exceeds
+[`maxUpstreamBodyBytes`](/reference/configuration/providers/). Each
+connection's replay journal is capped at 32 MiB and counted as pinned state against
+[`appOwnedMemoryBudgetMb`](/reference/configuration/server/); admitting a
+journal demotes evictable caches first rather than failing, and the aggregate across live journals
+is capped at 128 MiB regardless of the configured budget.
+
 A timeout means **delivery is unknown**, not that the server rejected the input.
 Do not resend an accepted instruction or rerun a tool automatically. Inspect the
 actual task state before deciding how to resume. No account switch or paid API

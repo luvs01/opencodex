@@ -4,7 +4,7 @@ import type { OcxConfig } from "../../src/types";
 import { createWebsocketHandler } from "../../src/server/index/websocket-handler";
 import type { ServeOptionsContext } from "../../src/server/index/serve-options";
 import { NativeSteeringChannel, MAX_NATIVE_STEERS, validateSteeringFrame } from "../../src/server/responses/native-steering";
-import { NativeSteeringReplay, MAX_NATIVE_STEERING_REPLAY_BYTES, nativeSteeringReplayRetainedStoreSnapshot } from "../../src/server/responses/native-steering-replay";
+import { NativeSteeringReplay, MAX_NATIVE_STEERING_REPLAY_BYTES, nativeSteeringReplayRetainedStoreSnapshot, setNativeSteeringReplayTotalCapForTests } from "../../src/server/responses/native-steering-replay";
 import { type WsData } from "../../src/server/ws-bridge";
 import { getRequestLogEntries, clearRequestLogsForTests } from "../../src/server/request-log";
 import { runOptionalShutdownHooks } from "../../src/lib/optional-shutdown-hooks";
@@ -313,6 +313,61 @@ test("replay journals share the application-owned memory budget", () => {
     expect(() => new NativeSteeringReplay("y".repeat(200), () => {})).toThrow("application-owned memory budget");
   } finally {
     first?.dispose();
+    resetAppOwnedMemoryForTests();
+  }
+});
+
+test("reclaimable app-owned stores demote to admit a steering journal", () => {
+  resetAppOwnedMemoryForTests();
+  registerRetainedStore({
+    id: "native_steering_replay",
+    category: "continuation",
+    snapshot: nativeSteeringReplayRetainedStoreSnapshot,
+    evictOldest: () => 0,
+  });
+  const cacheRows = [{ bytes: 300, at: 1 }];
+  registerRetainedStore({
+    id: "cache",
+    category: "caches",
+    snapshot: () => ({
+      count: cacheRows.length,
+      bytes: cacheRows.reduce((sum, row) => sum + row.bytes, 0),
+      evictableBytes: cacheRows.reduce((sum, row) => sum + row.bytes, 0),
+      pinnedBytes: 0,
+      oldestAt: cacheRows[0]?.at ?? null,
+    }),
+    evictOldest: () => cacheRows.splice(0, 1)[0]?.bytes ?? 0,
+  });
+  let replay: NativeSteeringReplay | undefined;
+  try {
+    configureAppOwnedMemoryBudget(400);
+    replay = new NativeSteeringReplay("x".repeat(200), () => {});
+    expect(cacheRows).toEqual([]);
+    expect(nativeSteeringReplayRetainedStoreSnapshot().bytes).toBeGreaterThan(0);
+  } finally {
+    replay?.dispose();
+    resetAppOwnedMemoryForTests();
+  }
+});
+
+test("a raised memory budget still caps the aggregate pinned steering journals", () => {
+  resetAppOwnedMemoryForTests();
+  registerRetainedStore({
+    id: "native_steering_replay",
+    category: "continuation",
+    snapshot: nativeSteeringReplayRetainedStoreSnapshot,
+    evictOldest: () => 0,
+  });
+  configureAppOwnedMemoryBudget(4096 * 1024 * 1024);
+  const replays: NativeSteeringReplay[] = [];
+  try {
+    replays.push(new NativeSteeringReplay("x".repeat(200), () => {}));
+    setNativeSteeringReplayTotalCapForTests(replays[0]!.retainedBytes * 2 + 1);
+    replays.push(new NativeSteeringReplay("y".repeat(200), () => {}));
+    expect(() => new NativeSteeringReplay("z".repeat(200), () => {})).toThrow("pinned steering journal ceiling");
+  } finally {
+    for (const replay of replays) replay.dispose();
+    setNativeSteeringReplayTotalCapForTests(null);
     resetAppOwnedMemoryForTests();
   }
 });
