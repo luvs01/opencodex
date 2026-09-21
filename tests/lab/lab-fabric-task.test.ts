@@ -215,6 +215,59 @@ export async function execute(input: FabricPatchExecutorInput): Promise<Syntheti
   };
 }
 
+function fabricEarlyErrorPatchExecutor(home: string): { executor: TrustedFabricPatchExecutor; marker: string } {
+  const dir = join(home, "fabric-executors");
+  mkdirSync(dir, { recursive: true });
+  const modulePath = join(dir, "early-error-patch.ts");
+  const marker = join(home, "late-child-error-mutation.txt");
+  writeFileSync(modulePath, `
+import { writeFileSync } from "node:fs";
+import type { FabricPatchExecutorInput, SyntheticPatchV1 } from "${repoImport("src/lab/fabric/types")}";
+import { SYNTHETIC_AFTER_UTF8, SYNTHETIC_VALUE_PATH } from "${repoImport("src/lab/fabric/constants")}";
+
+const patch: SyntheticPatchV1 = {
+  schemaVersion: 1,
+  operations: [{ op: "replace", path: SYNTHETIC_VALUE_PATH, contentUtf8: SYNTHETIC_AFTER_UTF8 }],
+};
+
+export async function execute(input: FabricPatchExecutorInput): Promise<SyntheticPatchV1> {
+  process.stdout.write(JSON.stringify({ type: "error", code: "harness_failure", message: "executor reported failure", attribution: "harness" }) + "\\n");
+  const deadline = Date.now() + ${FAST_FABRIC_ISOLATION.totalTimeoutMs + 500};
+  while (Date.now() < deadline) {
+    input.reportActivity();
+    await Bun.sleep(100);
+  }
+  writeFileSync(${JSON.stringify(marker)}, "late\\n");
+  return patch;
+}
+`);
+  return {
+    executor: createHostIssuedFabricPatchExecutor(modulePath, async () => correctSyntheticPatch()),
+    marker,
+  };
+}
+
+function fabricResultThenExitPatchExecutor(home: string): TrustedFabricPatchExecutor {
+  const dir = join(home, "fabric-executors");
+  mkdirSync(dir, { recursive: true });
+  const modulePath = join(dir, "result-then-exit-patch.ts");
+  writeFileSync(modulePath, `
+import type { FabricPatchExecutorInput, SyntheticPatchV1 } from "${repoImport("src/lab/fabric/types")}";
+import { SYNTHETIC_AFTER_UTF8, SYNTHETIC_VALUE_PATH } from "${repoImport("src/lab/fabric/constants")}";
+
+const patch: SyntheticPatchV1 = {
+  schemaVersion: 1,
+  operations: [{ op: "replace", path: SYNTHETIC_VALUE_PATH, contentUtf8: SYNTHETIC_AFTER_UTF8 }],
+};
+
+export function execute(_input: FabricPatchExecutorInput): Promise<SyntheticPatchV1> {
+  process.stdout.write(JSON.stringify({ type: "result", patch }) + "\\n");
+  process.exit(1);
+}
+`);
+  return createHostIssuedFabricPatchExecutor(modulePath, async () => correctSyntheticPatch());
+}
+
 function fabricTraversalPatchExecutor(home: string): TrustedFabricPatchExecutor {
   const dir = join(home, "fabric-executors");
   mkdirSync(dir, { recursive: true });
@@ -753,8 +806,39 @@ export async function execute() {
     });
     expect(result.outcome.outcome).not.toBe("pass");
     expect(result.outcome.failure?.code).toBe("timeout");
-    await Bun.sleep(750);
+    // The fixture's late write fires after totalTimeoutMs + 500; wait past it so a
+    // surviving child cannot escape detection.
+    await Bun.sleep(FAST_FABRIC_ISOLATION.totalTimeoutMs + 750);
     expect(existsSync(marker)).toBe(false);
+  }, 20_000);
+
+  test("producer error remains supervised until the child exits", async () => {
+    const home = tempHome();
+    process.env.OPENCODEX_HOME = home;
+    const { executor, marker } = fabricEarlyErrorPatchExecutor(home);
+    const result = await runFabricSyntheticPatchTaskForRoute({
+      routeContext: fabricMockRoute(),
+      destination: await fabricDestination(home),
+      patchExecutor: executor,
+      configDir: home,
+    });
+    expect(result.outcome.outcome).not.toBe("pass");
+    expect(result.outcome.failure?.code).toBe("harness_failure");
+    await Bun.sleep(FAST_FABRIC_ISOLATION.totalTimeoutMs + 750);
+    expect(existsSync(marker)).toBe(false);
+  }, 20_000);
+
+  test("producer result is rejected when the child exits nonzero", async () => {
+    const home = tempHome();
+    process.env.OPENCODEX_HOME = home;
+    const result = await runFabricSyntheticPatchTaskForRoute({
+      routeContext: fabricMockRoute(),
+      destination: await fabricDestination(home),
+      patchExecutor: fabricResultThenExitPatchExecutor(home),
+      configDir: home,
+    });
+    expect(result.outcome.outcome).not.toBe("pass");
+    expect(result.outcome.failure?.code).toBe("harness_failure");
   }, 20_000);
 
   test("activity resets inactivity deadline within total budget", async () => {

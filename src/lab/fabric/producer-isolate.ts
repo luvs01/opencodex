@@ -192,8 +192,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
                   : "harness_failure";
           const attribution = message.attribution === "environment" ? "environment" : "harness";
           const fabricError = new FabricTaskError(message.message, fabricCode, attribution);
-          finish(() => reject(fabricError));
-          killChild(child);
+          settleTimeout(fabricError);
           return;
         }
       } catch (error) {
@@ -227,8 +226,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     });
 
     child.stdout?.on("error", (error) => {
-      if (settled) return;
-      finish(() => reject(new FabricTaskError(error.message, "harness_failure", "harness")));
+      settleTimeout(new FabricTaskError(error.message, "harness_failure", "harness"));
     });
 
     child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -243,13 +241,18 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     });
 
     child.on("error", (error) => {
-      finish(() => reject(new FabricTaskError(error.message, "harness_failure", "harness")));
+      if (child.pid === undefined) {
+        // A spawn failure has no process to supervise and may never emit close.
+        childClosed = true;
+        finish(() => reject(new FabricTaskError(error.message, "harness_failure", "harness")));
+        return;
+      }
+      settleTimeout(new FabricTaskError(error.message, "harness_failure", "harness"));
     });
 
     child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
-      if (settled || killReason || error.code === "EPIPE") return;
-      killChild(child);
-      finish(() => reject(new FabricTaskError(error.message, "harness_failure", "harness")));
+      if (error.code === "EPIPE") return;
+      settleTimeout(new FabricTaskError(error.message, "harness_failure", "harness"));
     });
 
     child.on("close", (code, signal) => {
@@ -259,10 +262,6 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         finish(() => reject(killReason!));
         return;
       }
-      if (receivedResult) {
-        finish(() => resolve({ patch: receivedResult!, lastActivityAt }));
-        return;
-      }
       if (stdoutBuffer.trim()) {
         try {
           handleProtocolLine(stdoutBuffer.trim());
@@ -270,21 +269,25 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         } catch {
           /* fall through */
         }
-        // A buffered result admitted at close is recorded, not settled — resolve it here.
-        if (receivedResult) {
-          finish(() => resolve({ patch: receivedResult!, lastActivityAt }));
-          return;
-        }
       }
-      if (signal === "SIGKILL") {
-        finish(() => reject(new FabricTaskError("total timeout exceeded", "timeout", "environment")));
+      // A stored result is accepted only when the child exited normally.
+      if (code !== 0 || signal) {
+        if (signal === "SIGKILL") {
+          finish(() => reject(new FabricTaskError("total timeout exceeded", "timeout", "environment")));
+        } else {
+          finish(() => reject(new FabricTaskError(
+            `isolated producer exited (${code ?? signal ?? "unknown"})`,
+            "harness_failure",
+            "harness",
+          )));
+        }
         return;
       }
-      finish(() => reject(new FabricTaskError(
-        code === 0 ? "isolated producer returned no result" : `isolated producer exited (${code ?? signal ?? "unknown"})`,
-        "harness_failure",
-        "harness",
-      )));
+      if (receivedResult) {
+        finish(() => resolve({ patch: receivedResult!, lastActivityAt }));
+        return;
+      }
+      finish(() => reject(new FabricTaskError("isolated producer returned no result", "harness_failure", "harness")));
     });
 
     const payload = JSON.stringify({
@@ -303,8 +306,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         : undefined,
     });
     if (Buffer.byteLength(payload, "utf8") > FABRIC_PRODUCER_REQUEST_MAX_BYTES) {
-      killChild(child);
-      finish(() => reject(new FabricTaskError("producer request exceeds protocol limit", "budget_exhausted", "environment")));
+      settleTimeout(new FabricTaskError("producer request exceeds protocol limit", "budget_exhausted", "environment"));
       return;
     }
 
@@ -312,13 +314,11 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       child.stdin?.write(payload);
       child.stdin?.end();
     } catch (error) {
-      if (killReason) return;
-      killChild(child);
-      finish(() => reject(new FabricTaskError(
+      settleTimeout(new FabricTaskError(
         error instanceof Error ? error.message : String(error),
         "harness_failure",
         "harness",
-      )));
+      ));
       return;
     }
   });

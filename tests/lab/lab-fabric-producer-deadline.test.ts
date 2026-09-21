@@ -29,6 +29,8 @@ class DeadlineChild extends EventEmitter {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly signals: Array<NodeJS.Signals | number | undefined> = [];
+  // A successfully spawned child carries a pid; only spawn failures leave it undefined.
+  readonly pid = 4242;
   closed = false;
 
   kill(signal?: NodeJS.Signals | number): boolean {
@@ -36,10 +38,10 @@ class DeadlineChild extends EventEmitter {
     return true; // Buffered data can arrive after kill; only the test emits close.
   }
 
-  close(): void {
+  close(code: number | null = 0, signal: NodeJS.Signals | null = null): void {
     if (this.closed) return;
     this.closed = true;
-    this.emit("close", 0, null);
+    this.emit("close", code, signal);
   }
 }
 
@@ -74,7 +76,7 @@ function installTimers(restorers: Array<() => void>) {
 
 type ExpectedFailure =
   | [code: "inactivity_timeout" | "timeout"]
-  | [code: "harness_failure", attribution: "harness", message: string];
+  | [code: string, attribution: "harness" | "environment", message: string];
 
 type Harness = {
   child: DeadlineChild;
@@ -83,6 +85,7 @@ type Harness = {
   result: (newline?: boolean) => void;
   pending: () => Promise<void>;
   failure: (...expected: ExpectedFailure) => Promise<void>;
+  rejection: (...expected: ExpectedFailure) => Promise<void>;
   success: (lastActivityAt?: number) => Promise<void>;
 };
 
@@ -110,23 +113,27 @@ async function withProducer(body: (h: Harness) => Promise<void>, totalTimeoutMs 
     expect(child.stdout.listenerCount("data")).toBe(1);
     expect(child.listenerCount("close")).toBe(1);
     expect(timers.map(({ delay }) => delay).sort((a, b) => a - b)).toEqual([IDLE_MS, totalTimeoutMs]);
+    const rejection = async (...expected: ExpectedFailure) => {
+      const [code] = expected;
+      const attribution = expected.length === 3 ? expected[1] : "environment";
+      const message = expected.length === 3 ? expected[2]
+        : code === "inactivity_timeout" ? "inactivity timeout exceeded" : "total timeout exceeded";
+      await drain();
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status !== "rejected") throw new Error("producer did not reject after close");
+      expect(outcome.error).toBeInstanceOf(FabricTaskError);
+      expect(outcome.error).toMatchObject({ code, attribution, message });
+      expect(timers.every(({ cleared }) => cleared)).toBe(true);
+    };
     await body({
       child, timers, at: (value) => { time = value; },
       result: (newline = true) => { child.stdout.write(RESULT + (newline ? "\n" : "")); },
       pending: async () => { await drain(); expect(outcome.status).toBe("pending"); },
       failure: async (...expected) => {
-        const [code] = expected;
-        const attribution = code === "harness_failure" ? expected[1] : "environment";
-        const message = code === "harness_failure" ? expected[2]
-          : code === "inactivity_timeout" ? "inactivity timeout exceeded" : "total timeout exceeded";
         child.close();
-        await drain();
-        expect(outcome.status).toBe("rejected");
-        if (outcome.status !== "rejected") throw new Error("producer did not reject after close");
-        expect(outcome.error).toBeInstanceOf(FabricTaskError);
-        expect(outcome.error).toMatchObject({ code, attribution, message });
-        expect(timers.every(({ cleared }) => cleared)).toBe(true);
+        await rejection(...expected);
       },
+      rejection,
       success: async (lastActivityAt = START) => {
         await drain();
         expect(outcome).toEqual({ status: "resolved", value: { patch: PATCH, lastActivityAt } });
@@ -335,6 +342,64 @@ describe("isolated fabric producer deadline admission", () => {
       });
     });
   }
+
+  test("protocol error kills the child but settles only at close", async () => {
+    await withProducer(async (h) => {
+      h.child.stdout.write('{"type":"error","code":"sandbox_violation","message":"executor reported violation","attribution":"harness"}\n');
+      await h.pending();
+      expect(h.child.signals).toEqual(["SIGKILL"]);
+      h.child.close();
+      await h.rejection("sandbox_violation", "harness", "executor reported violation");
+    });
+  });
+
+  test("stdout stream error kills the child but settles only at close", async () => {
+    await withProducer(async (h) => {
+      h.child.stdout.emit("error", new Error("stdout read failure"));
+      await h.pending();
+      expect(h.child.signals).toEqual(["SIGKILL"]);
+      h.child.close();
+      await h.rejection("harness_failure", "harness", "stdout read failure");
+    });
+  });
+
+  test("unterminated trailing error at close rejects with its code", async () => {
+    await withProducer(async (h) => {
+      h.child.stdout.write('{"type":"error","code":"budget_exhausted","message":"executor spent budget","attribution":"environment"}');
+      h.child.close();
+      await h.rejection("budget_exhausted", "environment", "executor spent budget");
+    });
+  });
+
+  test("a stored result cannot survive a nonzero child exit", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result();
+      await h.pending();
+      h.child.close(1);
+      await h.rejection("harness_failure", "harness", "isolated producer exited (1)");
+    });
+  });
+
+  test("an unterminated buffered result is rejected on a nonzero exit", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result(false);
+      await h.pending();
+      h.child.close(1);
+      await h.rejection("harness_failure", "harness", "isolated producer exited (1)");
+    });
+  });
+
+  test("a stored result cannot survive a signaled child exit", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result();
+      await h.pending();
+      h.child.close(null, "SIGKILL");
+      await h.rejection("timeout");
+    });
+  });
 });
 
 test("trusted route keeps scratch until stderr-failed child closes, then cleans it", async () => {
