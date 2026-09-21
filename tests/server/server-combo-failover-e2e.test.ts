@@ -3668,11 +3668,11 @@ describe("cursor conversation continuity across store:false chains", () => {
     });
   }
 
-  async function postCursor(config: OcxConfig, raw: Record<string, unknown>): Promise<Response> {
+  async function postCursor(config: OcxConfig, raw: Record<string, unknown>, headers: Record<string, string> = {}): Promise<Response> {
     takeSpendHome();
     return trackTurn(await handleResponses(new Request("http://localhost/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify({ stream: false, store: false, ...raw }),
     }), config, { model: "", provider: "" }, {}));
   }
@@ -3713,6 +3713,38 @@ describe("cursor conversation continuity across store:false chains", () => {
     expect(response.status).toBe(200);
     expect(seen).toHaveLength(1);
     expect(seen[0]).not.toBe("legacy-cursor-conversation");
+  });
+
+  test("a helper call rewritten to a Cursor combo mints a fresh conversation id", async () => {
+    const seen: string[] = [];
+    customCursorTransportFactory = fakeCursorTransportFactory(seen);
+    const config = comboConfig(
+      { ca: provider("cursor", "https://api2.cursor.sh", "fake-cursor-token") },
+      [{ provider: "ca", model: "m1" }],
+    );
+    config.combos = { shadow: config.combos!.free! };
+    config.shadowCallIntercept = { enabled: true, model: "combo/shadow" };
+    const headers = { "session-id": "helper-iso-session", "thread-id": "helper-iso-thread" };
+
+    // Baseline: an ordinary turn on this thread resolves the deterministic thread-owned id.
+    const plain = await postCursor(config, { model: "ca/m1", input: "hello" }, headers);
+    expect(plain.status).toBe(200);
+
+    const first = await postCursor(config, { model: "gpt-5.6-luna", input: "helper turn" }, headers);
+    const second = await postCursor(config, { model: "gpt-5.6-luna", input: "helper turn" }, headers);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    expect(seen).toHaveLength(3);
+    const [owned, isolatedA, isolatedB] = seen;
+    // Without the combo-child shadowCallIntercepted propagation each child would derive the
+    // SAME thread-owned conversation id as the plain turn and resume the parent conversation.
+    expect(isolatedA).not.toBe(owned);
+    expect(isolatedB).not.toBe(owned);
+    expect(isolatedA).not.toBe(isolatedB);
+    for (const id of [isolatedA, isolatedB]) {
+      expect(id.startsWith("cursor_")).toBe(true);
+    }
   });
 
   test("store:false chain reuses the SAME cursor conversationId (native model)", async () => {
