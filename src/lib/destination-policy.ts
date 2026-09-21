@@ -145,6 +145,25 @@ function isBenchmarkDnsAnswer(address: string, assessment: DestinationAssessment
   return embedded.kind === "private" && embedded.detail === "benchmark address";
 }
 
+/**
+ * Mihomo (Clash.Meta) fake-IP DNS answers IPv6 queries from `fdfe:dcba:9876::/48` — its
+ * documented default `fake-ip-range6` (#3462). That prefix sits inside ULA `fc00::/7`, so
+ * `classifyIpv6` reports it as a private-network address and, unlike the IPv4 benchmark
+ * range, nothing about the address itself marks it synthetic. The exception is therefore
+ * narrower than the benchmark one: exact /48 match, DNS answers only (a literal URL still
+ * rejects), and only behind the `allowMihomoIpv6FakeIp` opt-in that the outbound caller
+ * derives from a scheme-matched proxy it then binds the request to.
+ */
+const MIHOMO_IPV6_FAKE_IP_PREFIX = [0xfdfe, 0xdcba, 0x9876] as const;
+
+function isMihomoIpv6FakeIpAnswer(address: string, assessment: DestinationAssessment | null): boolean {
+  if (assessment?.kind !== "private" || assessment.detail !== "private-network address") return false;
+  if (isIP(address) !== 6) return false;
+  const hextets = ipv6Hextets(normalizeHostname(address));
+  if (!hextets) return false;
+  return MIHOMO_IPV6_FAKE_IP_PREFIX.every((group, index) => hextets[index] === group);
+}
+
 function firstIpv6Hextet(hostname: string): number | null {
   const head = hostname.split(":")[0];
   if (!head) return 0;
@@ -219,6 +238,43 @@ function assessDestination(baseUrl: string): DestinationAssessment | null {
 
 function registryAllowsPrivateNetwork(name: string): boolean {
   return getProviderRegistryEntry(name)?.allowPrivateNetworkByDefault === true;
+}
+
+function normalizedCanonicalEndpoint(value: string): string | null {
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.username || parsed.password || parsed.hash) return null;
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Config-time Fake-IP allowance for the one overridable OAuth provider whose canonical
+ * Google endpoint is known to sit behind Clash/Mihomo transparent DNS in the field.
+ *
+ * Antigravity permits a custom base URL, so provider identity alone is not authority:
+ * adapter, auth mode, and the normalized final base URL must still match the registry seed.
+ * Custom destinations therefore keep the ordinary fail-closed SSRF policy.
+ */
+function registryAllowsBenchmarkDnsAtWriteTime(
+  name: string,
+  provider: Pick<OcxProviderConfig, "baseUrl"> & Partial<Pick<OcxProviderConfig, "adapter" | "authMode">>,
+): boolean {
+  if (name !== "google-antigravity") return false;
+  const entry = getProviderRegistryEntry(name);
+  if (
+    !entry
+    || entry.authKind !== "oauth"
+    || entry.allowBaseUrlOverride !== true
+    || provider.adapter !== entry.adapter
+    || provider.authMode !== "oauth"
+  ) return false;
+  const configured = normalizedCanonicalEndpoint(provider.baseUrl);
+  const canonical = normalizedCanonicalEndpoint(entry.baseUrl);
+  return configured !== null && configured === canonical;
 }
 
 /**
@@ -309,13 +365,16 @@ export function assertProviderDestinationAllowed(name: string, provider: Pick<Oc
  * advisory and must not hard-fail offline startups. DNS rebinding after validation is
  * a recorded residual for this loopback proxy (devlog 260712_pr_batch_landing 000).
  *
- * `allowBenchmarkAddresses` is only for the exact canonical ChatGPT Codex seed under
- * Clash fake-IP DNS (198.18.0.0/15). Every other non-public answer — including mixed
- * benchmark + private/metadata sets — still fails.
+ * `allowBenchmarkAddresses` remains the explicit caller opt-in used by canonical ChatGPT
+ * Codex. Canonical Google Antigravity receives the same 198.18.0.0/15 DNS-answer exception
+ * only when its adapter/auth/base URL still match the registry seed. Every other non-public
+ * answer — including custom Antigravity destinations and mixed benchmark + private/metadata
+ * sets — still fails.
  */
 export async function providerDestinationResolvedError(
   name: string,
-  provider: Pick<OcxProviderConfig, "baseUrl" | "allowPrivateNetwork">,
+  provider: Pick<OcxProviderConfig, "baseUrl" | "allowPrivateNetwork">
+    & Partial<Pick<OcxProviderConfig, "adapter" | "authMode">>,
   options?: { allowBenchmarkAddresses?: boolean },
 ): Promise<string | null> {
   const syncError = providerDestinationConfigError(name, provider);
@@ -330,6 +389,8 @@ export async function providerDestinationResolvedError(
     return null; // literals and localhost are fully handled by the sync path
   }
   if (providerAllowsPrivateNetwork(name, provider)) return null;
+  const allowBenchmarkAddresses = options?.allowBenchmarkAddresses === true
+    || registryAllowsBenchmarkDnsAtWriteTime(name, provider);
   let addresses: { address: string }[];
   try {
     addresses = await lookup(hostname, { all: true, verbatim: true });
@@ -341,7 +402,7 @@ export async function providerDestinationResolvedError(
     const assessment = ipKind === 4 ? classifyIpv4(address) : ipKind === 6 ? classifyIpv6(normalizeHostname(address)) : null;
     if (!assessment || assessment.kind === "public") continue;
     // Clash fake-IP only: 198.18/19 benchmark detail. Mixed dangerous sets still reject.
-    if (options?.allowBenchmarkAddresses && isBenchmarkDnsAnswer(address, assessment)) {
+    if (allowBenchmarkAddresses && isBenchmarkDnsAnswer(address, assessment)) {
       continue;
     }
     if (assessment.kind === "metadata") return `baseUrl hostname ${hostname} resolves to a blocked metadata endpoint (${address})`;
@@ -385,7 +446,13 @@ export function assessUrlDestination(url: string): UrlDestinationAssessment | nu
  */
 export async function resolvePublicAddresses(
   url: string,
-  options?: string | { context?: string; allowPrivateNetwork?: boolean; allowBenchmarkAddresses?: boolean },
+  options?: string | {
+    context?: string;
+    allowPrivateNetwork?: boolean;
+    allowBenchmarkAddresses?: boolean;
+    /** Mihomo IPv6 fake-IP (`fdfe:dcba:9876::/48`) DNS answers; see `isMihomoIpv6FakeIpAnswer`. */
+    allowMihomoIpv6FakeIp?: boolean;
+  },
 ): Promise<{
   hostname: string;
   addresses: { address: string; family: number }[];
@@ -396,6 +463,7 @@ export async function resolvePublicAddresses(
     : options?.context?.trim() || "image URL";
   const privateNetworkAllowed = typeof options === "object" && options?.allowPrivateNetwork === true;
   const benchmarkAllowed = typeof options === "object" && options?.allowBenchmarkAddresses === true;
+  const mihomoIpv6Allowed = typeof options === "object" && options?.allowMihomoIpv6FakeIp === true;
   let hostname: string;
   try {
     hostname = normalizeHostname(new URL(url.trim()).hostname);
@@ -440,7 +508,10 @@ export async function resolvePublicAddresses(
       // fake-IP DNS, not a LAN provider. Accept it without allowPrivateNetwork and
       // do not mark the destination private, so the caller's HTTP(S)_PROXY path
       // still applies (credit #1748).
-      if (benchmarkAllowed && isBenchmarkDnsAnswer(address, assessment)) {
+      if (
+        (benchmarkAllowed && isBenchmarkDnsAnswer(address, assessment))
+        || (mihomoIpv6Allowed && isMihomoIpv6FakeIpAnswer(address, assessment))
+      ) {
         validatedAddresses.push({ address, family: ipKind === 4 || ipKind === 6 ? ipKind : (family || 4) });
         continue;
       }

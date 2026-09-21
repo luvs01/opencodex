@@ -5,6 +5,11 @@ on:
     branches: [main, dev]
     paths:
       - "src/service.ts"
+      # The service implementation is the src/service/ directory; src/service.ts is only
+      # the pre-restructure compat facade. The desktop shell packages and launches the
+      # service, so its changes carry lifecycle evidence too.
+      - "src/service/**"
+      - "desktop/**"
       # Keep in sync with the release.yml service-gate regex (release.yml "Require
       # successful Cross-platform CI" step). src/cli.ts is the pre-restructure compat
       # stub that durable launchers still execute.
@@ -14,9 +19,16 @@ on:
       - "package.json"
       - "bun.lock"
       - ".github/workflows/service-lifecycle.yml"
+      # release.yml gates on THIS workflow having run for the release SHA. A release-branch
+      # commit that touches only release.yml (e.g. the v2.40.0 permissions carry, #3263/#3264)
+      # produced no run and the gate dead-ended until a manual dispatch.
+      - ".github/workflows/release.yml"
   push:
     paths:
       - "src/service.ts"
+      # Keep in sync with the release.yml service-gate regex (see above).
+      - "src/service/**"
+      - "desktop/**"
       # Keep in sync with the release.yml service-gate regex (see above).
       - "src/cli.ts"
       - "src/cli/index.ts"
@@ -24,6 +36,10 @@ on:
       - "package.json"
       - "bun.lock"
       - ".github/workflows/service-lifecycle.yml"
+      # release.yml gates on THIS workflow having run for the release SHA. A release-branch
+      # commit that touches only release.yml (e.g. the v2.40.0 permissions carry, #3263/#3264)
+      # produced no run and the gate dead-ended until a manual dispatch.
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:

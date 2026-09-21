@@ -1,4 +1,5 @@
 import { useI18n, type TKey } from "../i18n/shared";
+import { confirmAction } from "../action-dialogs";
 import { startupRiskDetailKey } from "../startup-health-ui";
 import { IconAlert, IconCheck, IconPower, IconTerminal } from "../icons";
 import type {
@@ -53,23 +54,17 @@ export function StartupHeroSection({
             : data.status === "at-risk"
               ? t(startupRiskDetailKey(data))
               : t("startup.safeDetail")}</p>
+          {/*
+            The three stat cards that used to restate this answer (routing, protection,
+            preference) are one line now; the page subtitle rides underneath as a visible
+            sentence rather than a title attribute.
+          */}
+          <p className="muted startup-state-line">
+            {t(routingKey)} · {t(PROTECTION_KEYS[data.protection])} · {t(data.autostartEnabled ? "startup.enabled" : "startup.disabled")}
+          </p>
+          <p className="muted text-label">{t("startup.subtitle")}</p>
         </div>
       </section>
-
-      <div className="startup-state-grid">
-        <section className="stat">
-          <div className="label">{t("startup.routing")}</div>
-          <div className="value">{t(routingKey)}</div>
-        </section>
-        <section className="stat">
-          <div className="label">{t("startup.restartProtection")}</div>
-          <div className="value">{t(PROTECTION_KEYS[data.protection])}</div>
-        </section>
-        <section className="stat">
-          <div className="label">{t("startup.preference")}</div>
-          <div className="value">{t(data.autostartEnabled ? "startup.enabled" : "startup.disabled")}</div>
-        </section>
-      </div>
     </>
   );
 }
@@ -171,6 +166,17 @@ export function StartupTraySection({
 }) {
   const { t } = useI18n();
 
+  /**
+   * Uninstalling removes the tray helper, so it asks first. Written as a named async
+   * function rather than a promise chain inside the handler: a floating `.then` in a JSX
+   * handler has no rejection path, which is what `no-floating-then-in-jsx-handler` catches.
+   */
+  const requestTrayUninstall = async () => {
+    if (await confirmAction({ message: t("startup.tray.uninstall"), tone: "danger" })) {
+      onTrayAction("uninstall");
+    }
+  };
+
   return (
     <section className="panel startup-actions">
       <div className="panel-head">
@@ -202,9 +208,7 @@ export function StartupTraySection({
           <button type="button" className="btn btn-ghost" disabled={trayBusy} onClick={() => onTrayAction("stop")}>{t("startup.tray.stop")}</button>
         )}
         {!trayLoading && !trayError && tray && (tray.installed || tray.stale) && (
-          <button type="button" className="btn btn-danger" disabled={trayBusy} onClick={() => {
-            if (window.confirm(t("startup.tray.uninstall"))) onTrayAction("uninstall");
-          }}>{t("startup.tray.uninstall")}</button>
+          <button type="button" className="btn btn-danger" disabled={trayBusy} onClick={() => { void requestTrayUninstall(); }}>{t("startup.tray.uninstall")}</button>
         )}
       </div>
       {(trayError || tray?.stale) && (
@@ -239,7 +243,12 @@ export function StartupRecoverySection({
         <h3 className="panel-title">{t("startup.recovery")}</h3>
         <IconTerminal />
       </div>
-      <p className="muted">{t("startup.recoveryHint")}</p>
+      {/*
+        The one-click install/repair buttons above are the primary path; the copyable
+        commands are the fallback. Open by default only while protection is missing.
+      */}
+      <details className="startup-recovery-details" open={data.status !== "protected"}>
+        <summary className="muted">{t("startup.recoveryHint")}</summary>
       <div className="startup-command-list">
         {data.serviceSupported && (
           <div className="startup-command-row">
@@ -276,6 +285,7 @@ export function StartupRecoverySection({
           <IconPower /> {t("startup.recommended", { cmd: data.recommendedCommand ?? data.commands.installService })}
         </div>
       )}
+      </details>
     </section>
   );
 }

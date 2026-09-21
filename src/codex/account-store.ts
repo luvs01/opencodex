@@ -1,5 +1,6 @@
+import { readOrcaAuthSource } from "./orca-auth-source";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, readFileSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, readFileSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ConfigMutationLockError,
@@ -12,6 +13,18 @@ import {
 } from "../config";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
 import type { CodexAccountCredentialRecord, CodexAccountCredentials } from "../types";
+import { advanceCodexCredentialMutationEpoch } from "./credential-mutation-epoch";
+import { isValidCodexAccountId } from "./account-id";
+import type { PoolQuotaWriter } from "./quota-types";
+import { CODEX_REFRESH_FLIGHT_CEILING_MS } from "./quota-recovery-timing";
+
+import {
+  CodexPoolRefreshCooldownError,
+  clearCodexPoolRefreshFailure,
+  codexPoolRefreshFence,
+  isCodexPoolRefreshCooling,
+  noteCodexPoolRefreshFailure,
+} from "./pool-refresh-backoff";
 
 type LegacyCodexAccountStore = Record<string, CodexAccountCredentials>;
 type CodexAccountStore = Record<string, CodexAccountCredentialRecord>;
@@ -40,11 +53,20 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isCredential(value: unknown): value is CodexAccountCredentials {
+  const hasNoSource = isObject(value)
+    && value.sourceAuthPath === undefined
+    && value.sourceSubject === undefined;
+  const hasCompleteSource = isObject(value)
+    && typeof value.sourceAuthPath === "string"
+    && value.sourceAuthPath.length > 0
+    && typeof value.sourceSubject === "string"
+    && value.sourceSubject.length > 0;
   return isObject(value)
     && typeof value.accessToken === "string"
     && typeof value.refreshToken === "string"
     && typeof value.expiresAt === "number"
-    && typeof value.chatgptAccountId === "string";
+    && typeof value.chatgptAccountId === "string"
+    && (hasNoSource || hasCompleteSource);
 }
 
 function isCredentialRecord(value: unknown): value is CodexAccountCredentialRecord {
@@ -56,7 +78,9 @@ function isCredentialRecord(value: unknown): value is CodexAccountCredentialReco
     && (value.replacedAt === undefined || typeof value.replacedAt === "number")
     && (value.lastCodexValidatedAt === undefined || typeof value.lastCodexValidatedAt === "number")
     && (value.lastCodexValidationStatus === undefined || value.lastCodexValidationStatus === "ok" || value.lastCodexValidationStatus === "failed")
-    && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string");
+    && (value.lastCodexValidationError === undefined || typeof value.lastCodexValidationError === "string")
+    && (value.codexValidationPending === undefined || typeof value.codexValidationPending === "boolean")
+    && (value.lastCodexValidationTerminal === undefined || typeof value.lastCodexValidationTerminal === "boolean");
 }
 
 export function refreshGrantFingerprintForToken(refreshToken: string): string {
@@ -64,6 +88,7 @@ export function refreshGrantFingerprintForToken(refreshToken: string): string {
 }
 
 function recordGrantFingerprint(record: CodexAccountCredentialRecord): string | undefined {
+  if (record.credential?.sourceAuthPath) return undefined;
   return record.refreshGrantFingerprint ?? (
     record.credential ? refreshGrantFingerprintForToken(record.credential.refreshToken) : undefined
   );
@@ -111,11 +136,26 @@ function persist(store: CodexAccountStore): void {
   atomicWriteFile(codexAccountsPath(), JSON.stringify(store, null, 2) + "\n");
 }
 
+function persistCredentialMutation(store: CodexAccountStore): void {
+  persist(store);
+  advanceCodexCredentialMutationEpoch();
+}
+
+/**
+ * Validation metadata that survives a credential write.
+ *
+ * `lastCodexValidationTerminal` is deliberately NOT in this list. Every credential write —
+ * re-login, the CAS refresh commit, same-grant alias propagation — rebuilds the record from this
+ * pick list, so leaving the marker out is what makes a successful refresh or a re-authentication
+ * erase a terminal verdict. Both events disprove "the grant was revoked", and a verdict that
+ * could only ever be set would brand an account dead forever on one spurious `invalid_grant`.
+ */
 function preservedValidationMetadata(record: CodexAccountCredentialRecord | undefined): Pick<
   CodexAccountCredentialRecord,
-  "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError"
+  "lastCodexValidatedAt" | "lastCodexValidationStatus" | "lastCodexValidationError" | "codexValidationPending"
 > {
   return {
+    ...(record?.codexValidationPending === true ? { codexValidationPending: true } : {}),
     ...(record?.lastCodexValidatedAt !== undefined ? { lastCodexValidatedAt: record.lastCodexValidatedAt } : {}),
     ...(record?.lastCodexValidationStatus !== undefined ? { lastCodexValidationStatus: record.lastCodexValidationStatus } : {}),
     ...(record?.lastCodexValidationError !== undefined ? { lastCodexValidationError: record.lastCodexValidationError } : {}),
@@ -128,8 +168,12 @@ export function getCodexAccountCredential(id: string): CodexAccountCredentials |
   return record.credential ?? null;
 }
 
-export function saveCodexAccountCredential(id: string, cred: CodexAccountCredentials): void {
-  withCredentialMutationLockSync(() => {
+export function saveCodexAccountCredential(
+  id: string,
+  cred: CodexAccountCredentials,
+  options: { validationPending?: boolean } = {},
+): number {
+  return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
     const refreshGrantFingerprint = current?.credential?.refreshToken === cred.refreshToken
@@ -140,38 +184,86 @@ export function saveCodexAccountCredential(id: string, cred: CodexAccountCredent
       generation: (current?.generation ?? 0) + 1,
       refreshGrantFingerprint,
       replacedAt: current ? Date.now() : undefined,
+      quotaHistoryIdentity: crypto.randomUUID(),
       ...preservedValidationMetadata(current),
+      ...(options.validationPending ? {
+        codexValidationPending: true,
+        lastCodexValidatedAt: undefined,
+        lastCodexValidationStatus: undefined,
+        lastCodexValidationError: undefined,
+      } : {}),
     };
-    persist(store);
+    persistCredentialMutation(store);
+    return store[id].generation;
   });
 }
 
-export function markCodexAccountValidated(id: string, atMs: number = Date.now()): void {
+export function markCodexAccountValidated(id: string, atMs: number = Date.now(), generation?: number): void {
   withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
     if (!current || current.deletedAt != null || !current.credential) return;
+    if (current.codexValidationPending && generation === undefined) return;
+    if (generation !== undefined && current.generation !== generation) return;
     store[id] = {
       ...current,
       lastCodexValidatedAt: atMs,
       lastCodexValidationStatus: "ok",
       lastCodexValidationError: undefined,
+      codexValidationPending: undefined,
+      // A completed validation is the direct refutation of a terminal verdict, and this
+      // spread would otherwise carry the old marker forward.
+      lastCodexValidationTerminal: undefined,
     };
-    persist(store);
+    // Becoming routable invalidates credential-derived caches; a timestamp-only
+    // update on an already validated account preserves the existing epoch policy.
+    if (current.codexValidationPending) persistCredentialMutation(store);
+    else persist(store);
   });
 }
 
-export function markCodexAccountValidationFailed(id: string, reason: string): void {
-  withCredentialMutationLockSync(() => {
+export interface MarkCodexAccountValidationFailedOptions {
+  /**
+   * Write only while the stored record is still at this generation.
+   *
+   * A validation attempt is not atomic with the store: an operator can re-authenticate the
+   * account, or another writer can commit a refresh, while a probe is still in flight. Without
+   * this fence the late failure lands on whatever credential happens to be there and brands a
+   * freshly installed one dead. Declining to write is the safe direction — the failure cannot be
+   * attributed to a credential the caller never observed.
+   */
+  expectedGeneration?: number;
+  /** The grant itself is revoked or expired; only a re-login clears it. */
+  terminal?: boolean;
+}
+
+/** Returns whether the verdict was actually persisted (false when the fence declined it). */
+export function markCodexAccountValidationFailed(
+  id: string,
+  reason: string,
+  options: MarkCodexAccountValidationFailedOptions = {},
+): boolean {
+  return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
-    if (!current || current.deletedAt != null || !current.credential) return;
+    if (!current || current.deletedAt != null || !current.credential) return false;
+    // Deferred validation is settled only by a caller that names the generation it observed.
+    // An unfenced write must never resolve a pending account, whichever verdict it carries.
+    if (current.codexValidationPending && options.expectedGeneration === undefined) return false;
+    if (options.expectedGeneration !== undefined && current.generation !== options.expectedGeneration) {
+      return false;
+    }
     store[id] = {
       ...current,
       lastCodexValidationStatus: "failed",
       lastCodexValidationError: reason,
+      // Only ever set here. A transient failure must not clear a terminal marker set earlier,
+      // and it must not invent one either, so the flag is written only when the caller proves
+      // the grant is dead.
+      ...(options.terminal ? { lastCodexValidationTerminal: true } : {}),
     };
     persist(store);
+    return true;
   });
 }
 
@@ -187,9 +279,112 @@ export function readCodexAccountRecord(id: string): CodexAccountCredentialRecord
   return loadCodexAccountRecordStore()[id] ?? null;
 }
 
+/**
+ * One store load, every record, for a caller that resolves MANY ids in a single synchronous pass.
+ *
+ * `readCodexAccountRecord` reloads, reparses and renormalizes the whole file per id. That is the
+ * right shape for one lookup and the wrong shape for a loop: the entitlement denial reader holds
+ * up to 64 accounts with four client versions each, so scoring one warm flagship request could
+ * perform up to 256 full-store reads on the request path.
+ *
+ * These are the same normalized records `readCodexAccountRecord` hands out, tombstones included,
+ * so the caller keeps its own `deletedAt` and `generation` checks instead of trusting a filtered
+ * view. That is the difference from `loadCodexAccountStore`, which drops both and cannot answer a
+ * question about credential generation.
+ */
+export function loadCodexAccountRecordSnapshot(): Readonly<Record<string, CodexAccountCredentialRecord>> {
+  return loadCodexAccountRecordStore();
+}
+
+const QUOTA_HISTORY_IDENTITY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function validQuotaHistoryIdentity(value: unknown): value is string {
+  return typeof value === "string" && QUOTA_HISTORY_IDENTITY_RE.test(value);
+}
+
+type DispatchedPoolCredential = Pick<CodexAccountCredentials, "accessToken" | "chatgptAccountId"> & { generation: number };
+
+function matchesDispatchedPoolCredential(record: CodexAccountCredentialRecord | undefined | null, dispatched: DispatchedPoolCredential): record is CodexAccountCredentialRecord & { credential: CodexAccountCredentials } {
+  return !!record?.credential && record.deletedAt == null
+    && dispatched.accessToken.length > 0 && dispatched.chatgptAccountId.length > 0
+    && Number.isSafeInteger(dispatched.generation) && dispatched.generation >= 0
+    && record.generation === dispatched.generation
+    && record.credential.accessToken === dispatched.accessToken
+    && record.credential.chatgptAccountId === dispatched.chatgptAccountId;
+}
+
+/** Optional evidence capture; a stale credential or unavailable store never gains a new writer. */
+export function capturePoolQuotaWriter(accountId: string, dispatched: DispatchedPoolCredential): PoolQuotaWriter | undefined {
+  if (!isValidCodexAccountId(accountId)) return undefined;
+  try {
+    const current = readCodexAccountRecord(accountId);
+    if (!matchesDispatchedPoolCredential(current, dispatched)) return undefined;
+    if (validQuotaHistoryIdentity(current.quotaHistoryIdentity)) {
+      return { accountId, credentialGeneration: dispatched.generation, historyIdentity: current.quotaHistoryIdentity };
+    }
+    return withCredentialMutationLockSync(() => {
+      const store = loadCodexAccountRecordStore();
+      const locked = store[accountId];
+      if (!matchesDispatchedPoolCredential(locked, dispatched)) return undefined;
+      if (!validQuotaHistoryIdentity(locked.quotaHistoryIdentity)) {
+        locked.quotaHistoryIdentity = crypto.randomUUID();
+        // Identity metadata is not a new credential; preserve generation and mutation epoch.
+        persist(store);
+      }
+      return { accountId, credentialGeneration: dispatched.generation, historyIdentity: locked.quotaHistoryIdentity };
+    });
+  } catch {
+    // History is optional evidence. Permission, lock and disk errors cannot fail inference.
+    return undefined;
+  }
+}
+
+/** Read-only retention identity; unlike capture this never initializes legacy metadata. */
+export function poolQuotaHistoryIdentity(accountId: string): string | undefined {
+  if (!isValidCodexAccountId(accountId)) return undefined;
+  try {
+    const record = readCodexAccountRecord(accountId);
+    return record?.credential && record.deletedAt == null && validQuotaHistoryIdentity(record.quotaHistoryIdentity)
+      ? record.quotaHistoryIdentity : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Recheck append admission after upstream I/O; refresh may retire a writer without erasing history. */
+export function isPoolQuotaWriterLive(writer: PoolQuotaWriter): boolean {
+  if (!isValidCodexAccountId(writer.accountId)) return false;
+  try {
+    const record = readCodexAccountRecord(writer.accountId);
+    return !!record?.credential && record.deletedAt == null
+      && record.generation === writer.credentialGeneration
+      && validQuotaHistoryIdentity(writer.historyIdentity)
+      && record.quotaHistoryIdentity === writer.historyIdentity;
+  } catch {
+    return false;
+  }
+}
+
 export function isCodexAccountGenerationLive(id: string, generation: number): boolean {
   const record = readCodexAccountRecord(id);
   return !!record?.credential && record.deletedAt == null && record.generation === generation;
+}
+
+/**
+ * The same verdict as {@link isCodexAccountGenerationLive}, over ONE store load.
+ *
+ * `readCodexAccountRecord` is `loadCodexAccountRecordStore()[id]`, so asking it per row
+ * reloads, reparses and renormalizes the whole file per row — the exact shape
+ * {@link loadCodexAccountRecordSnapshot} was added to avoid. The denial reader resolves
+ * several accounts in one synchronous pass on the request path, so it opens one checker and
+ * closes over the snapshot instead.
+ */
+export function beginCodexAccountGenerationLiveCheck(): (id: string, generation: number) => boolean {
+  const snapshot = loadCodexAccountRecordSnapshot();
+  return (id, generation) => {
+    const record = snapshot[id];
+    return !!record?.credential && record.deletedAt == null && record.generation === generation;
+  };
 }
 
 export function saveCodexAccountCredentialIfGeneration(
@@ -211,9 +406,11 @@ export function saveCodexAccountCredentialIfGeneration(
       generation: generation + 1,
       refreshGrantFingerprint,
       replacedAt: current.replacedAt,
+      quotaHistoryIdentity: current.credential.chatgptAccountId === cred.chatgptAccountId
+        ? current.quotaHistoryIdentity : crypto.randomUUID(),
       ...preservedValidationMetadata(current),
     };
-    persist(store);
+    persistCredentialMutation(store);
     return true;
   });
 }
@@ -257,7 +454,7 @@ export function commitRefreshedCodexCredentialWithAliases(
   return withCredentialMutationLockSync(() => {
     const store = loadCodexAccountRecordStore();
     const current = store[id];
-    if (!current || current.generation !== generation || current.deletedAt != null || !current.credential) {
+    if (!current || current.generation !== generation || current.deletedAt != null || !current.credential || current.credential.sourceAuthPath) {
       return { committed: false, propagatedAliases: [] };
     }
     const priorCredential = current.credential;
@@ -270,6 +467,8 @@ export function commitRefreshedCodexCredentialWithAliases(
       generation: generation + 1,
       refreshGrantFingerprint,
       replacedAt: current.replacedAt,
+      quotaHistoryIdentity: current.credential.chatgptAccountId === cred.chatgptAccountId
+        ? current.quotaHistoryIdentity : crypto.randomUUID(),
       ...preservedValidationMetadata(current),
     };
 
@@ -284,9 +483,10 @@ export function commitRefreshedCodexCredentialWithAliases(
       priorFingerprint !== undefined
       && priorCredential.refreshToken !== cred.refreshToken
       && !!priorCredential.chatgptAccountId
+      && priorCredential.chatgptAccountId === cred.chatgptAccountId
     ) {
       for (const [aliasId, alias] of Object.entries(store)) {
-        if (aliasId === id || alias.deletedAt != null || !alias.credential) continue;
+        if (aliasId === id || alias.deletedAt != null || !alias.credential || alias.credential.sourceAuthPath) continue;
         if (recordGrantFingerprint(alias) !== priorFingerprint) continue;
         if (alias.credential.accessToken !== priorCredential.accessToken) continue;
         if (alias.credential.expiresAt !== priorCredential.expiresAt) continue;
@@ -299,12 +499,13 @@ export function commitRefreshedCodexCredentialWithAliases(
           generation: aliasGeneration,
           refreshGrantFingerprint,
           replacedAt: alias.replacedAt,
+          quotaHistoryIdentity: alias.quotaHistoryIdentity,
           ...preservedValidationMetadata(alias),
         };
         propagatedAliases.push({ id: aliasId, generation: aliasGeneration });
       }
     }
-    persist(store);
+    persistCredentialMutation(store);
     return { committed: true, propagatedAliases };
   });
 }
@@ -315,7 +516,7 @@ export function tombstoneCodexAccount(id: string): number {
     const current = store[id];
     const generation = (current?.generation ?? 0) + 1;
     store[id] = { generation, deletedAt: Date.now() };
-    persist(store);
+    persistCredentialMutation(store);
     return generation;
   });
 }
@@ -329,6 +530,17 @@ export class TokenRefreshError extends Error {
     super(message);
     this.name = "TokenRefreshError";
     this.reason = reason;
+  }
+}
+
+/**
+ * The stored record or its refresh-grant fingerprint is gone. Retrying cannot
+ * conjure a missing credential, so callers must treat this as terminal.
+ */
+export class CodexCredentialUnavailableError extends Error {
+  constructor(message = "Codex account credential is unavailable; reauthenticate the account.") {
+    super(message);
+    this.name = "CodexCredentialUnavailableError";
   }
 }
 
@@ -366,6 +578,30 @@ export class CodexCredentialRefreshStaleError extends Error {
   }
 }
 
+/**
+ * Terminal means the grant itself is dead, or there is no grant to refresh.
+ * Token-endpoint 5xx (`unknown`) and a generation CAS loss stay transient
+ * because those genuinely may clear (#2887).
+ */
+export function isTerminalCodexPoolRefreshFailure(error: unknown): boolean {
+  return (error instanceof TokenRefreshError && (error.reason === "revoked" || error.reason === "expired"))
+    || error instanceof CodexCredentialUnavailableError;
+}
+
+function isOperationalCodexPoolRefreshFailure(error: unknown): boolean {
+  if (error instanceof CodexPoolRefreshCooldownError) return true;
+  if (error instanceof CodexCredentialRefreshBusyError) return true;
+  if (error instanceof CodexCredentialRefreshStaleError) return true;
+  if (error instanceof CodexCredentialRefreshLockTimeoutError) return true;
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function classifyCodexPoolRefreshFailureReason(error: unknown): string {
+  if (error instanceof TokenRefreshError) return error.reason;
+  if (error instanceof CodexCredentialGenerationConflictError) return "generation_conflict";
+  return "network";
+}
+
 /** Credential writers share the config mutation coordinator; contention is transient, not reauth. */
 function withCredentialMutationLockSync<T>(fn: () => T): T {
   try {
@@ -377,6 +613,41 @@ function withCredentialMutationLockSync<T>(fn: () => T): T {
 }
 
 type CodexTokenResult = { accessToken: string; chatgptAccountId: string; generation: number };
+type CodexRefreshGenerationHandoff = (accountId: string, fromGeneration: number, toGeneration: number) => void;
+// var (hoisted, initialized to undefined) rather than const: a registrar reached
+// through an import cycle can register while this module body is still evaluating,
+// and the lazily created Set must be reachable rather than in the temporal dead zone.
+var refreshGenerationHandoffs: Set<CodexRefreshGenerationHandoff> | undefined;
+function refreshHandoffs(): Set<CodexRefreshGenerationHandoff> {
+  return refreshGenerationHandoffs ??= new Set();
+}
+
+/** Register process-local state that must follow a credential refresh generation. */
+export function registerCodexRefreshGenerationHandoff(handoff: CodexRefreshGenerationHandoff): () => void {
+  const set = refreshHandoffs();
+  set.add(handoff);
+  return () => set.delete(handoff);
+}
+
+/**
+ * Invoke every registered handoff for one committed `fromGeneration` to `toGeneration` move.
+ *
+ * Each listener runs independently and a throw is contained: by the time handoffs run the
+ * rotated credential is already persisted, so a failing listener must not reject the shared
+ * refresh promise (surviving waiters would see a refresh failure that never happened), must
+ * not starve the remaining listeners, and must not block plan reconciliation. The warning
+ * carries no account id or token material — the same scrub refresh error messages get.
+ */
+function dispatchRefreshGenerationHandoffs(accountId: string, fromGeneration: number, toGeneration: number): void {
+  for (const handoff of refreshHandoffs()) {
+    try {
+      handoff(accountId, fromGeneration, toGeneration);
+    } catch (error) {
+      console.warn("[codex-auth] a refresh generation handoff listener failed", error);
+    }
+  }
+}
+
 type CodexRefreshResult = CodexTokenResult & {
   credential?: CodexAccountCredentials;
   /**
@@ -401,7 +672,36 @@ type CodexRefreshResult = CodexTokenResult & {
    * refresh of the one the caller was holding, not somebody else's replacement.
    */
   selfRefreshed?: boolean;
+  /**
+   * Three-way form of {@link selfRefreshed}, kept alongside it so existing callers are
+   * unaffected (#3019). `selfRefreshed` is `provenance === "self-refresh"`.
+   */
+  provenance?: CodexRefreshProvenance;
 };
+
+/**
+ * How THIS caller arrived at the credential it is returning (#3019).
+ *
+ * `selfRefreshed` is a boolean, and a boolean cannot carry three cases. Its `false` means
+ * both "somebody else replaced the credential" and "I joined an in-flight refresh of the
+ * same grant and adopted its result" — and a recovery budget has to treat those opposite
+ * ways. Joining is the same lineage getting its one refresh; replacement is a NEW lineage
+ * that has not had one yet, and charging it for somebody else's attempt would deny the
+ * fresh credential the recovery this exists to grant.
+ */
+export type CodexRefreshProvenance = "self-refresh" | "joined-lineage" | "external-replacement";
+
+/** Terminal outcome of one forced refresh, as seen by the caller that requested it. */
+export type ForcedRefreshOutcome =
+  | {
+      kind: "resolved";
+      provenance: CodexRefreshProvenance;
+      generation: number;
+      rotated: boolean;
+      /** Same-grant records advanced by this refresh, at their committed generations. */
+      propagatedAliases?: { id: string; generation: number }[];
+    }
+  | { kind: "failed"; error: unknown };
 const MAX_CODEX_REFRESH_FLIGHTS = 32;
 const CODEX_REFRESH_FLIGHT_STALE_MS = 120_000;
 interface RefreshFlight {
@@ -442,8 +742,41 @@ function isRefreshLockStale(path: string): boolean {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as { acquiredAt?: unknown };
     return typeof parsed.acquiredAt !== "number" || Date.now() - parsed.acquiredAt > REFRESH_LOCK_STALE_MS;
   } catch {
-    return true;
+    // The owner creates the file and writes its metadata in two steps, so a live lock is
+    // briefly unreadable. Age the file itself instead of calling that window stale, which
+    // let a waiter delete a lock whose owner was still inside its critical section.
+    try {
+      return Date.now() - statSync(path).mtimeMs > REFRESH_LOCK_STALE_MS;
+    } catch {
+      return false;
+    }
   }
+}
+
+function releaseCodexRefreshFileLock(path: string, fd: number): void {
+  let owned: { dev: bigint; ino: bigint } | null = null;
+  try {
+    const info = fstatSync(fd, { bigint: true });
+    if (info.dev >= 0n && info.ino > 0n) owned = { dev: info.dev, ino: info.ino };
+  } catch { /* Unknown descriptor identity never authorizes unlink. */ }
+  try {
+    withConfigMutationLockSync(() => {
+      let current: { dev: bigint; ino: bigint } | null = null;
+      try {
+        const info = statSync(path, { bigint: true });
+        if (info.dev >= 0n && info.ino > 0n) current = { dev: info.dev, ino: info.ino };
+      } catch { /* Keep the lock and the callback outcome when the path probe fails. */ }
+      if (owned && current && current.dev === owned.dev && current.ino === owned.ino) {
+        try { unlinkSync(path); } catch (err) {
+          if (errCode(err) !== "ENOENT") throw err;
+        }
+      }
+    });
+  } catch (err) {
+    // Keep the descriptor alive through comparison/unlink so its inode cannot be recycled.
+    // Unavailable coordination leaves the path without masking the completed refresh.
+    if (!(err instanceof ConfigMutationLockError)) throw err;
+  } finally { closeSync(fd); }
 }
 
 export async function withCodexRefreshFileLock<T>(lockKey: string, signal: AbortSignal, fn: () => Promise<T>): Promise<T> {
@@ -457,33 +790,45 @@ export async function withCodexRefreshFileLock<T>(lockKey: string, signal: Abort
   while (fd == null) {
     if (signal.aborted) throw signal.reason;
     try {
-      fd = openSync(path, "wx", 0o600);
-      writeFileSync(fd, JSON.stringify({ acquiredAt: Date.now(), pid: process.pid }) + "\n");
-      break;
-    } catch (err) {
-      if (errCode(err) !== "EEXIST") throw err;
-      if (isRefreshLockStale(path)) {
+      // Serialize only metadata operations, never the async refresh callback. Cooperating
+      // contenders cannot reclaim a successor between stale observation and path mutation.
+      withConfigMutationLockSync(() => {
         try {
-          unlinkSync(path);
-        } catch (unlinkErr) {
-          if (errCode(unlinkErr) !== "ENOENT") throw unlinkErr;
+          fd = openSync(path, "wx", 0o600);
+          writeFileSync(fd, JSON.stringify({ acquiredAt: Date.now(), pid: process.pid }) + "\n");
+        } catch (err) {
+          if (fd != null) {
+            const failedFd = fd;
+            fd = null;
+            try { releaseCodexRefreshFileLock(path, failedFd); } catch { /* Preserve write failure. */ }
+            throw err;
+          }
+          if (errCode(err) !== "EEXIST") throw err;
+          if (isRefreshLockStale(path)) {
+            try { unlinkSync(path); } catch (unlinkErr) {
+              if (errCode(unlinkErr) !== "ENOENT") throw unlinkErr;
+            }
+          }
         }
-        continue;
+      });
+    } catch (err) {
+      // A failed SQLite commit can follow successful file creation; it still owns an fd.
+      if (fd != null) {
+        const failedFd = fd;
+        fd = null;
+        try { releaseCodexRefreshFileLock(path, failedFd); } catch { /* Preserve admission failure. */ }
       }
-      if (Date.now() >= deadline) throw new CodexCredentialRefreshLockTimeoutError();
-      await sleep(REFRESH_LOCK_POLL_MS, signal);
+      if (!(err instanceof ConfigMutationLockError)) throw err;
     }
+    if (fd != null) break;
+    if (Date.now() >= deadline) throw new CodexCredentialRefreshLockTimeoutError();
+    await sleep(REFRESH_LOCK_POLL_MS, signal);
   }
 
   try {
     return await fn();
   } finally {
-    if (fd != null) closeSync(fd);
-    try {
-      unlinkSync(path);
-    } catch (err) {
-      if (errCode(err) !== "ENOENT") throw err;
-    }
+    releaseCodexRefreshFileLock(path, fd);
   }
 }
 
@@ -501,7 +846,7 @@ function findFreshCredentialForGrant(
   // require both ids to be present and exactly equal rather than inferring identity from the grant.
   if (!expectedChatgptAccountId) return null;
   for (const [candidateId, candidate] of Object.entries(records)) {
-    if (candidateId === excludeId || candidate.deletedAt != null || !candidate.credential) continue;
+    if (candidateId === excludeId || candidate.deletedAt != null || !candidate.credential || candidate.credential.sourceAuthPath) continue;
     if (recordGrantFingerprint(candidate) !== refreshGrantFingerprint) continue;
     if (!candidate.credential.chatgptAccountId) continue;
     if (candidate.credential.chatgptAccountId !== expectedChatgptAccountId) continue;
@@ -581,32 +926,169 @@ function awaitOwnCancellation<T>(work: Promise<T>, callerSignal?: AbortSignal): 
  */
 export async function forceRefreshCodexPoolToken(
   id: string,
-  options: { rejectedGeneration: number; rejectedAccessToken: string; signal?: AbortSignal },
-): Promise<CodexTokenResult & { rotated: boolean; selfRefreshed: boolean }> {
-  const result = await resolveCodexToken(
+  options: {
+    rejectedGeneration: number;
+    rejectedAccessToken: string;
+    signal?: AbortSignal;
+    /**
+     * Fires with THIS caller's classified outcome, regardless of `signal` (#3019).
+     *
+     * Cancellation rejects what the caller awaits; the shared flight keeps running and
+     * commits. A recovery budget claimed before the refresh therefore has no one left to
+     * settle it — the claim expires and the already-refreshed lineage gets a second
+     * refresh, which is the loop the budget exists to close. This callback is attached to
+     * the resolution itself, so it fires with no waiter present.
+     *
+     * It is called exactly once per call, for both success and failure, and its own
+     * failures are swallowed: settlement bookkeeping must never reject a credential the
+     * caller successfully obtained, nor disturb another waiter on the same flight.
+     */
+    onSettled?: (outcome: ForcedRefreshOutcome) => void | Promise<void>;
+  },
+): Promise<CodexTokenResult & { rotated: boolean; selfRefreshed: boolean; provenance: CodexRefreshProvenance }> {
+  const settle = (outcome: ForcedRefreshOutcome) => {
+    // Both halves matter: a synchronous throw and a rejected thenable are equally capable
+    // of turning settlement bookkeeping into an unhandled rejection that fails the process.
+    try { void Promise.resolve(options.onSettled?.(outcome)).catch(() => {}); } catch { /* ignore */ }
+  };
+  const classify = (result: CodexRefreshResult): CodexRefreshProvenance =>
+    // Default to the conservative reading. A path that did not classify itself is not
+    // assumed to be this caller's own lineage: charging a replacement for somebody else's
+    // attempt is the failure mode, so an unlabelled path leaves the returned lineage its
+    // own budget.
+    result.provenance ?? (result.selfRefreshed === true ? "self-refresh" : "external-replacement");
+
+  // The completion is NOT the caller's await.
+  //
+  // `options.signal` cancels what this function returns, while the shared flight keeps
+  // running and commits. Settling from the cancelled await therefore reported "failed" for
+  // a refresh that was about to succeed — releasing the budget, and letting the newly
+  // refreshed lineage claim again moments later. So the settlement rides an uncancelled
+  // resolution and the caller's cancellation is layered on top of it.
+  // A caller that is already gone must not start work. `resolveCodexToken` is called
+  // without the caller signal below, which bypasses its own pre-abort guard, so a
+  // pre-aborted request would otherwise rotate a credential nobody is waiting for.
+  if (options.signal?.aborted) {
+    settle({ kind: "failed", error: options.signal.reason });
+    throw options.signal.reason;
+  }
+  if (isCodexPoolRefreshCooling(id)) {
+    const error = new CodexPoolRefreshCooldownError();
+    settle({ kind: "failed", error });
+    throw error;
+  }
+  const completion = resolveCodexToken(
     id,
     { rejectedGeneration: options.rejectedGeneration, rejectedAccessToken: options.rejectedAccessToken },
-    options.signal,
+    // Deliberately no caller signal: the flight is shared and this settlement speaks for
+    // the credential, not for whoever happened to be waiting.
+    undefined,
   );
+  // Captured before the flight settles, spent only if it fails. A reauthentication that lands
+  // while this is in the air replaces the grant and clears its failures; this fence is how the
+  // late failure knows it is talking about a credential that no longer exists.
+  const refreshFence = codexPoolRefreshFence(id);
+  completion.then(
+    resolved => {
+      clearCodexPoolRefreshFailure(id);
+      settle({
+        kind: "resolved",
+        provenance: classify(resolved),
+        generation: resolved.generation,
+        rotated: resolved.accessToken !== options.rejectedAccessToken,
+        ...(resolved.propagatedAliases?.length
+          ? { propagatedAliases: resolved.propagatedAliases }
+          : {}),
+      });
+    },
+    error => {
+      if (isTerminalCodexPoolRefreshFailure(error) || isOperationalCodexPoolRefreshFailure(error)) {
+        if (isTerminalCodexPoolRefreshFailure(error)) clearCodexPoolRefreshFailure(id);
+      } else {
+        noteCodexPoolRefreshFailure(id, classifyCodexPoolRefreshFailureReason(error), undefined, refreshFence);
+      }
+      settle({ kind: "failed", error });
+    },
+  );
+  const result = await awaitOwnCancellation(completion, options.signal);
+  const provenance = classify(result);
+  const rotated = result.accessToken !== options.rejectedAccessToken;
   return {
     accessToken: result.accessToken,
     chatgptAccountId: result.chatgptAccountId,
     generation: result.generation,
-    rotated: result.accessToken !== options.rejectedAccessToken,
+    rotated,
     // Only a CAS this call performed itself proves the new credential descends from the
     // rejected one; anything else is somebody else's replacement and must not be treated
     // as this request's own lineage.
-    selfRefreshed: result.selfRefreshed === true,
+    selfRefreshed: provenance === "self-refresh",
+    provenance,
   };
 }
 
-export async function getValidCodexToken(id: string): Promise<CodexTokenResult> {
-  const result = await resolveCodexToken(id);
+export async function getValidCodexToken(
+  id: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<CodexTokenResult> {
+  // Cancellation ends THIS caller's wait. A shared refresh already in flight keeps running for
+  // whoever else awaits it, which is what `awaitOwnCancellation` inside the resolver preserves.
+  const result = await resolveCodexToken(id, undefined, options.signal);
   return {
     accessToken: result.accessToken,
     chatgptAccountId: result.chatgptAccountId,
     generation: result.generation,
   };
+}
+
+/** Source credentials never join refresh flights or spend a refresh grant, including after 401. */
+function resolveOrcaSourceToken(id: string, forced?: ForcedRefreshFence): CodexRefreshResult {
+  const initial = readCodexAccountRecord(id);
+  const initialCredential = initial?.credential;
+  if (!initial || initial.deletedAt != null || !initialCredential?.sourceAuthPath || !initialCredential.sourceSubject) {
+    throw new CodexCredentialGenerationConflictError();
+  }
+  const sourceCredential = readOrcaAuthSource(initialCredential.sourceAuthPath);
+  if (sourceCredential.chatgptAccountId !== initialCredential.chatgptAccountId
+    || sourceCredential.sourceSubject !== initialCredential.sourceSubject) {
+    throw new Error("Orca credential identity changed; reimport the account explicitly.");
+  }
+  if (sourceCredential.accessToken === initialCredential.accessToken
+    && sourceCredential.expiresAt === initialCredential.expiresAt) {
+    if (forced?.rejectedAccessToken === sourceCredential.accessToken) {
+      throw new Error("Orca bearer was rejected; update the account in Orca and retry.");
+    }
+    return { accessToken: sourceCredential.accessToken, chatgptAccountId: sourceCredential.chatgptAccountId,
+      generation: initial.generation, provenance: "external-replacement" };
+  }
+
+  return withCredentialMutationLockSync(() => {
+    const store = loadCodexAccountRecordStore();
+    const record = store[id];
+    const prior = record?.credential;
+    if (!record || record.deletedAt != null || !prior?.sourceAuthPath || !prior.sourceSubject) {
+      throw new CodexCredentialGenerationConflictError();
+    }
+    if (record.generation !== initial.generation) throw new CodexCredentialGenerationConflictError();
+    const credential = readOrcaAuthSource(prior.sourceAuthPath);
+    if (credential.chatgptAccountId !== prior.chatgptAccountId || credential.sourceSubject !== prior.sourceSubject) {
+      throw new Error("Orca credential identity changed; reimport the account explicitly.");
+    }
+    if (credential.accessToken !== prior.accessToken || credential.expiresAt !== prior.expiresAt) {
+      store[id] = {
+        credential, generation: record.generation + 1, replacedAt: Date.now(),
+        // The source identity was checked above. Retire old-generation writers without
+        // splitting this same account's retained quota history on every source rotation.
+        quotaHistoryIdentity: record.quotaHistoryIdentity,
+        ...preservedValidationMetadata(record),
+      };
+      persistCredentialMutation(store);
+    }
+    if (forced?.rejectedAccessToken === credential.accessToken) {
+      throw new Error("Orca bearer was rejected; update the account in Orca and retry.");
+    }
+    return { accessToken: credential.accessToken, chatgptAccountId: credential.chatgptAccountId,
+      generation: store[id]!.generation, provenance: "external-replacement" };
+  });
 }
 
 async function resolveCodexToken(
@@ -617,9 +1099,10 @@ async function resolveCodexToken(
   if (callerSignal?.aborted) throw callerSignal.reason;
   const record = readCodexAccountRecord(id);
   const cred = record?.deletedAt == null ? record?.credential : undefined;
-  if (!record || !cred) throw new Error("Codex account credential is unavailable; reauthenticate the account.");
+  if (!record || !cred) throw new CodexCredentialUnavailableError();
+  if (cred.sourceAuthPath) return resolveOrcaSourceToken(id, forced);
   const refreshGrantFingerprint = recordGrantFingerprint(record);
-  if (!refreshGrantFingerprint) throw new Error("Codex account credential is unavailable; reauthenticate the account.");
+  if (!refreshGrantFingerprint) throw new CodexCredentialUnavailableError();
 
   // The freshness shortcut is exactly what makes a 401 on a time-valid token
   // unrecoverable, so a forced caller skips it — but only while the stored credential
@@ -627,7 +1110,15 @@ async function resolveCodexToken(
   // correct again and refreshing would burn a rotation for nothing.
   const forcedTargetsStoredCredential = forced !== undefined && !forcedFenceSuperseded(record.generation, forced);
   if (cred.expiresAt > Date.now() + REFRESH_SKEW_MS && !forcedTargetsStoredCredential) {
-    return { accessToken: cred.accessToken, chatgptAccountId: cred.chatgptAccountId, generation: record.generation };
+    // The freshness shortcut: nothing was refreshed and nothing was adopted. A forced
+    // caller reaches it only once its fence was superseded, which is a replacement by
+    // definition; an ordinary caller does not read this field.
+    return {
+      accessToken: cred.accessToken,
+      chatgptAccountId: cred.chatgptAccountId,
+      generation: record.generation,
+      provenance: "external-replacement",
+    };
   }
 
   const existing = refreshLocks.get(refreshGrantFingerprint);
@@ -639,6 +1130,7 @@ async function resolveCodexToken(
       const refreshed = await awaitOwnCancellation(existing.promise, callerSignal);
       const current = readCodexAccountRecord(id);
       const currentCred = current?.deletedAt == null ? current?.credential : undefined;
+      if (currentCred?.sourceAuthPath) return resolveOrcaSourceToken(id, forced);
       // The flight owner already committed this credential, and it is the one stored
       // for this account: adopt the stored state instead of CAS-writing the identical
       // bytes, which would bump the generation a second time and invalidate the
@@ -652,6 +1144,14 @@ async function resolveCodexToken(
             accessToken: currentCred.accessToken,
             chatgptAccountId: currentCred.chatgptAccountId,
             generation: current.generation,
+            // Adopted the stored result of a flight this caller joined: same grant, same
+            // lineage. Not a replacement — that distinction is the whole point of #3019.
+            //
+            // Only `external-replacement` is inherited. The flight's own success is tagged
+            // `self-refresh` for the caller that performed the CAS, and copying that here
+            // would tell a caller that did no CAS that the credential is its own lineage.
+            // Everything this branch adopts is, by definition, a join.
+            provenance: refreshed.provenance === "external-replacement" ? "external-replacement" : "joined-lineage",
           };
         }
       }
@@ -687,6 +1187,9 @@ async function resolveCodexToken(
           accessToken: currentCred.accessToken,
           chatgptAccountId: currentCred.chatgptAccountId,
           generation: current.generation,
+          // `forcedFenceSuperseded` is exactly "somebody else moved this credential past
+          // the generation I was holding" — a new lineage, entitled to its own budget.
+          provenance: "external-replacement",
         };
       }
       if (
@@ -714,6 +1217,7 @@ async function resolveCodexToken(
           // This joiner performed its own CAS onto its own record, so the resulting
           // generation is its own lineage even though another caller drove the fetch.
           selfRefreshed: true,
+          provenance: "self-refresh",
           resolvedGrantFingerprint: refreshGrantFingerprint,
         };
       }
@@ -741,13 +1245,14 @@ async function resolveCodexToken(
    * eviction) and the 30s ceiling remain, because those bound the flight itself.
    */
   const abort = new AbortController();
-  const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]);
+  const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(CODEX_REFRESH_FLIGHT_CEILING_MS)]);
   let flight!: RefreshFlight;
   const fetchPromise = withCodexRefreshFileLock(refreshGrantFingerprint, signal, async (): Promise<CodexRefreshResult> => {
     const current = readCodexAccountRecord(id);
     const lockedRecord = readCodexAccountRecord(id);
     const lockedCred = lockedRecord?.deletedAt == null ? lockedRecord?.credential : undefined;
     if (!lockedRecord || !lockedCred) throw new CodexCredentialGenerationConflictError();
+    if (lockedCred.sourceAuthPath) return resolveOrcaSourceToken(id, forced);
     const startGeneration = lockedRecord.generation;
     const lockedRefreshGrantFingerprint = recordGrantFingerprint(lockedRecord);
     if (lockedRefreshGrantFingerprint !== refreshGrantFingerprint) {
@@ -759,6 +1264,9 @@ async function resolveCodexToken(
           credential: lockedCred,
           // This credential belongs to a DIFFERENT grant than the flight was opened
           // for. Tagging it keeps a joiner from adopting it as its own.
+          // It is also somebody else's credential by definition, so a joiner that ends up
+          // adopting it must not charge it to this lineage's budget (#3019).
+          provenance: "external-replacement",
           ...(lockedRefreshGrantFingerprint !== undefined
             ? { resolvedGrantFingerprint: lockedRefreshGrantFingerprint }
             : {}),
@@ -777,6 +1285,9 @@ async function resolveCodexToken(
         chatgptAccountId: lockedCred.chatgptAccountId,
         generation: startGeneration,
         credential: lockedCred,
+        // The stored credential is fresh and no forced fence still targets it: whoever
+        // wrote it, it was not this call. A joiner adopting it inherits that provenance.
+        provenance: "external-replacement",
         resolvedGrantFingerprint: refreshGrantFingerprint,
       };
     }
@@ -797,6 +1308,7 @@ async function resolveCodexToken(
         credential: sameGrantFreshCredential,
         resolvedGrantFingerprint: refreshGrantFingerprint,
         selfRefreshed: true,
+        provenance: "self-refresh",
       };
     }
     const res = await fetch(CHATGPT_TOKEN_URL, {
@@ -814,9 +1326,20 @@ async function resolveCodexToken(
       let errDesc: string;
       let errCodeExact: string | undefined;
       try {
-        const parsed = JSON.parse(errText) as { error?: string; error_description?: string };
-        errCodeExact = typeof parsed.error === "string" ? parsed.error.trim() : undefined;
-        errDesc = [parsed.error, parsed.error_description].filter(Boolean).join(": ") || `HTTP ${res.status}`;
+        const parsed = JSON.parse(errText) as {
+          error?: string | { code?: string; message?: string };
+          error_description?: string;
+        };
+        if (typeof parsed.error === "string") {
+          errCodeExact = parsed.error.trim();
+          errDesc = [parsed.error, parsed.error_description].filter(Boolean).join(": ");
+        } else if (parsed.error && typeof parsed.error === "object") {
+          errCodeExact = typeof parsed.error.code === "string" ? parsed.error.code.trim() : undefined;
+          errDesc = [parsed.error.code, parsed.error.message, parsed.error_description].filter(Boolean).join(": ");
+        } else {
+          errDesc = parsed.error_description || `HTTP ${res.status}`;
+        }
+        if (!errDesc) errDesc = `HTTP ${res.status}`;
       } catch { errDesc = `HTTP ${res.status}`; }
       // `invalid_grant` is the standard OAuth code for a refresh token that is no longer
       // usable, and upstream sends it bare with no description. Without it here the dead
@@ -826,9 +1349,23 @@ async function resolveCodexToken(
       // Matched on the exact `error` CODE, not anywhere in the combined text: a transient
       // `server_error` whose description happens to mention invalid_grant would otherwise
       // retire a healthy account, which is the failure this whole change exists to remove.
-      const reason = errCodeExact === "invalid_grant"
-          || errDesc.includes("invalidated") || errDesc.includes("revoked") ? "revoked" as const
-        : errDesc.includes("expired") ? "expired" as const
+      //
+      // That rule binds the DESCRIPTION words too. "invalidated", "revoked" and "expired" read
+      // as terminal prose, but upstream puts arbitrary text there: a `server_error` whose
+      // description says "token was revoked" or "session expired" is still a 5xx blip, and
+      // retiring the account on it is exactly the false quarantine #2887 exists to prevent.
+      // So a body that carries a structured code is classified by that code ALONE. The
+      // substring fallback survives only where there is no structured code to read at all --
+      // a description-only body, or one this parser could not decode -- because there the
+      // prose is the only signal upstream gave us.
+      const structuredCode = errCodeExact ? errCodeExact : undefined;
+      const proseIsOnlySignal = structuredCode === undefined;
+      const reason = structuredCode === "invalid_grant"
+          || structuredCode === "refresh_token_invalidated"
+          || (proseIsOnlySignal
+            && (errDesc.includes("invalidated") || errDesc.includes("revoked"))) ? "revoked" as const
+        : structuredCode === "refresh_token_expired"
+          || (proseIsOnlySignal && errDesc.includes("expired")) ? "expired" as const
         : "unknown" as const;
       throw new TokenRefreshError(reason, `Codex token refresh failed (${reason}); reauthenticate the account.`);
     }
@@ -876,6 +1413,7 @@ async function resolveCodexToken(
       // token — tagging the new grant would make every legitimate joiner look foreign.
       resolvedGrantFingerprint: refreshGrantFingerprint,
       selfRefreshed: true,
+      provenance: "self-refresh",
     };
   });
   /*
@@ -891,6 +1429,19 @@ async function resolveCodexToken(
    * committed result, for every waiter, including none.
    */
   const refreshPromise = fetchPromise.then(async (result): Promise<CodexRefreshResult> => {
+    // Generation-dependent completion belongs to the flight, not to its initiating
+    // request. The owner may stop waiting after a disconnect while this detached work
+    // still commits G+1; advance process-local affinities before any waiter observes
+    // the result (and even when there are no surviving waiters).
+    if (result.selfRefreshed) {
+      dispatchRefreshGenerationHandoffs(id, result.generation - 1, result.generation);
+      // A propagated alias committed at its OWN generation, so its affinities sit at
+      // alias.generation - 1: without this handoff they fail the exact-generation
+      // liveness check on the very next request that reads them.
+      for (const alias of result.propagatedAliases ?? []) {
+        dispatchRefreshGenerationHandoffs(alias.id, alias.generation - 1, alias.generation);
+      }
+    }
     await notePlanFromRefreshedAccessToken(id, result.accessToken, result.generation);
     // One settlement path for the whole flight: the refreshing account, then any dormant alias that
     // adopted the same rotated JWT. An alias holds the identical access token, so a changed
@@ -917,6 +1468,10 @@ async function resolveCodexToken(
     // produced this generation, and a forced caller needs that to know whether the new
     // credential descends from the one it was holding.
     ...(result.selfRefreshed !== undefined ? { selfRefreshed: result.selfRefreshed } : {}),
+    // Provenance rides out with the rest: a joiner that adopts this result needs the
+    // flight's own classification, not a guess made at the adoption site (#3019).
+    ...(result.provenance !== undefined ? { provenance: result.provenance } : {}),
+    ...(result.propagatedAliases?.length ? { propagatedAliases: result.propagatedAliases } : {}),
     ...(result.resolvedGrantFingerprint !== undefined
       ? { resolvedGrantFingerprint: result.resolvedGrantFingerprint }
       : {}),

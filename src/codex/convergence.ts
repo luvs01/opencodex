@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import { getConfigDir, saveConfigPreservingClaudeCode, websocketsEnabled, withExpectedConfigGenerationSync } from "../config";
 import { reconcileSuccessfulModelDiscoveries } from "../providers/new-model-policy";
+import { pendingModelSelectionProviders } from "../providers/initial-model-selection";
 import { COMBO_NAMESPACE } from "../combos";
 import { getAuthStorePath } from "../oauth/store";
 import type { OcxConfig } from "../types";
@@ -35,6 +36,7 @@ import {
   catalogHasRoutedEntries,
   findSupportedNativeTemplate,
   legacyCatalogBackupPath,
+  nativeMultiAgentDefaults,
   parseCatalogJson,
   type RawCatalog,
   type RawEntry,
@@ -48,7 +50,7 @@ import {
   orderForSubagents,
   } from "./catalog/sync";
   import { multiAgentV2EnabledFromConfigText } from "./features";
-  import { exactComboCatalogSlugs } from "./catalog/aggregation";
+  import { enforceCatalogSlugUniqueness, exactComboCatalogSlugs } from "./catalog/aggregation";
   import {
   isNativeAliasCatalogEntry,
   accountBoundNativeOpenAiSlugs,
@@ -68,15 +70,17 @@ import {
   clampCatalogModelsToObservedCodexSupport,
   supportedCodexReasoningEffortsFromObservedCatalog,
 } from "./catalog/effort";
+import { suppressedSyntheticMaxCatalogSlugs } from "./catalog/model-hints";
 import { codexRuntimeStatePath, peekCodexRuntimeProcessCache } from "./runtime";
 import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "./account-namespaces";
 import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
 import {
   availableAccountGatedNativeModels,
+  codexModelEntitlementStateForAccount,
   isCodexModelEntitlementSnapshotCurrent,
-  resolveCodexModelEntitlements,
   type CodexModelEntitlementSnapshot,
 } from "./model-entitlements";
+import { resolveAdmittedCodexModelEntitlements } from "./model-entitlement-admission";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
 import { providerCodexAccountMode } from "../providers/registry";
 import { OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
@@ -224,6 +228,12 @@ function bindGatherPaths(
   };
 }
 
+/**
+ * Prepara um candidato de catálogo para convergência sem gravá-lo em disco.
+ * Clona a fonte e mescla as observações nativas, os modelos roteados e por conta,
+ * aplicando a configuração, inclusive nomes nativos, e os limites de raciocínio
+ * observados no runtime antes de retornar o catálogo resultante.
+ */
 function prepareCatalog(
   config: Readonly<OcxConfig>,
   source: Extract<CatalogSourceForGather, { kind: "available" }>,
@@ -277,10 +287,10 @@ function prepareCatalog(
     ? new Map([...accountBoundNativeOpenAiSlugsBySelector(config, observedAccountNativeEntries)].map(([selector, slugs]) => {
       const target = accountTargets.get(selector);
       const accountId = target && isMainCodexAccountTarget(target) ? MAIN_CODEX_ACCOUNT_ID : target;
-      const entitled = accountId ? modelEntitlements.modelsByAccount.get(accountId) : undefined;
-      const confirmed = accountId ? modelEntitlements.confirmedAccountIds.has(accountId) : false;
       return [selector, slugs.filter(slug => (
-        !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug) || (confirmed && entitled?.has(slug) === true)
+        !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug)
+        || (accountId !== undefined
+          && codexModelEntitlementStateForAccount(modelEntitlements, accountId, slug) === "granted")
       ))] as const;
     }))
     : new Map<string, readonly string[]>();
@@ -297,6 +307,7 @@ function prepareCatalog(
     [catalog.models ?? [], ...nativeRecoverySources],
   );
   const catalogModels = nativeCatalogModels;
+  const suppressedSyntheticMaxSlugs = suppressedSyntheticMaxCatalogSlugs(config, ordered, catalogModels);
   const routedEntries = buildCatalogEntriesFromObservedState({
     template: template ? JSON.parse(JSON.stringify(template)) : null,
     gptSlugs: [],
@@ -340,6 +351,8 @@ function prepareCatalog(
     )),
   );
   const mergedModels = mergeCatalogEntriesFromObservedState({
+    modelPickerOrder,
+    accountSelectors,
     catalogModels,
     baselineCatalogModels,
     routedEntries,
@@ -350,6 +363,7 @@ function prepareCatalog(
     disabledModels: new Set(config.disabledModels ?? []),
     selectedModelsByProvider,
     gatheredProviderNames,
+    pendingProviderNames: pendingModelSelectionProviders(config),
     degradedProviderNames,
     legacyCustomModelSlugs: legacyCustomModelCatalogSlugs(config),
     multiAgentMode,
@@ -360,7 +374,10 @@ function prepareCatalog(
     includeNativeOpenAi,
     accountBoundEntries,
     suppressedBareNativeSlugs,
+    suppressedSyntheticMaxSlugs,
     openaiContextCap,
+    nativeDisplayNames: config.providers[OPENAI_CODEX_PROVIDER_ID]?.modelDisplayNames,
+    nativeMultiAgentDefaults: nativeMultiAgentDefaults(baselineCatalogModels),
     policy: {
       ...CANONICAL_NATIVE_CATALOG_CONTENT_POLICY,
       nativeBackfillSlugs: [...availableBareNativeSlugs, ...observedNativeSlugs],
@@ -373,8 +390,13 @@ function prepareCatalog(
       ? supportedCodexReasoningEffortsFromObservedCatalog(source.runtimeSupport.catalog)
       : null,
   );
-  finalizeAutoReviewModelOverride(mergedModels, catalogModels);
-  catalog.models = mergedModels;
+  finalizeAutoReviewModelOverride(mergedModels, catalogModels, config);
+  // The second writer of this file. A dashboard model toggle, a combo edit, or a Codex account
+  // login reaches `convergeCodexCatalog` and commits through `fixedCommit`, never through
+  // `writeRetainedCatalogSync`, so the #4730 uniqueness guard has to stand here too or the same
+  // `source-invalid` rejection returns by a different route. Silent because this merge runs under
+  // `warningPolicy: "suppress"`.
+  catalog.models = enforceCatalogSlugUniqueness(mergedModels, false);
   return catalog;
 }
 
@@ -412,7 +434,7 @@ export async function gatherCodexCatalogCandidate(
         providerModelOutcomes,
         discoveryPolicySnapshots: discoveryPolicies,
       }),
-      resolveCodexModelEntitlements(snapshot.config),
+      resolveAdmittedCodexModelEntitlements(snapshot.config),
     ]);
     const processLocal = processEvidence(source);
     const sourceEvidence = sealCatalogGatherEvidenceSession(session);
