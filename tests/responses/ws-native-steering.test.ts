@@ -292,7 +292,7 @@ test("native controls obey configured inbound and reconstructed outbound body li
   const sent: Frame[] = [];
   const ws = { readyState: 1, data: { nativeControl: {} }, send: (text: string) => sent.push(JSON.parse(text)) } as unknown as ServerWebSocket<WsData>;
   handler.message(ws, JSON.stringify({ type: "response.steer", previous_response_id: "r", input: "x".repeat(1024 * 1024) }));
-  expect(sent.at(-1)?.error.code).toBe("request_body_too_large");
+  expect(sent.at(-1)?.error.code).toBe("inbound_body_too_large");
 
   const channel = new NativeSteeringChannel({}, 300_000, 256);
   expect(() => channel.assertOutboundFrame(JSON.stringify({ type: "response.create", input: "x".repeat(1024) })))

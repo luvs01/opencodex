@@ -196,7 +196,7 @@ export function createWebsocketHandler(
         if (ws.data.nativeControl && rawBytes > resolveInboundBodyLimitBytes(config.maxInboundBodyBytes)) {
           sendJsonFrame(ws, buildWsErrorFrame(413, {
             type: "invalid_request_error",
-            code: "request_body_too_large",
+            code: "inbound_body_too_large",
             message: "Native response control frame exceeds the configured inbound body limit.",
           }));
           return;
@@ -211,7 +211,7 @@ export function createWebsocketHandler(
           && rawBytes > resolveInboundBodyLimitBytes(config.maxInboundBodyBytes)) {
           sendJsonFrame(ws, buildWsErrorFrame(413, {
             type: "invalid_request_error",
-            code: "request_body_too_large",
+            code: "inbound_body_too_large",
             message: "Native response control frame exceeds the configured inbound body limit.",
           }));
           return;
@@ -247,7 +247,7 @@ export function createWebsocketHandler(
           const idleMs = typeof config.stallTimeoutSec === "number" && Number.isFinite(config.stallTimeoutSec)
             ? Math.max(1, config.stallTimeoutSec) * 1000 : 300_000;
           const mode = nativeResponseControlMode(frame, config);
-          nativeControl = mode === "injection" ? new NativeInjectionChannel(frame, idleMs)
+          nativeControl = mode === "injection" ? new NativeInjectionChannel(frame, idleMs, config.maxUpstreamBodyBytes)
             : mode === "steering" ? new NativeSteeringChannel(frame, idleMs, config.maxUpstreamBodyBytes) : undefined;
         } catch {
           sendJsonFrame(ws, buildWsErrorFrame(400, { type: "invalid_request_error", message: "Invalid native steering request settings" }));

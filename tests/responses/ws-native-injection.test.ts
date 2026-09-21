@@ -209,7 +209,7 @@ test("accepted function results survive ordinary subsequent delta turns; no user
 function unitChannel(deadlines = { ackMs: 90_000, toolMs: 1_800_000 }) {
   const sent: Array<Record<string, unknown>> = [];
   const failures: Error[] = [];
-  const channel = new NativeInjectionChannel({ multi_agent: { enabled: true }, model: "fixture" }, 1000, deadlines);
+  const channel = new NativeInjectionChannel({ multi_agent: { enabled: true }, model: "fixture" }, 1000, undefined, deadlines);
   const detach = channel.attach(frame => sent.push(frame), error => failures.push(error));
   channel.observe({ type: "response.created", response: { id: "root" } });
   const advertise = (call: string, index = 0) => {
@@ -395,4 +395,11 @@ test("HTTP fallback never acquires injection ownership or replays a control fram
   expect(sent.at(-1)?.error.code).toBe("injection_not_supported");
   expect(fallbackCalls).toBe(requests); expect(InjectionSocket.all).toHaveLength(0);
   expect(ws.data.nativeControl).toBeUndefined();
+});
+
+test("injection channel refuses an oversized control body at the configured upstream limit", () => {
+  const channel = new NativeInjectionChannel({ multi_agent: { enabled: true } }, 300_000, 256);
+  expect(() => channel.assertOutboundFrame(JSON.stringify({ type: "response.create", input: "x".repeat(1024) })))
+    .toThrow("configured upstream body limit");
+  expect(() => channel.assertOutboundFrame(JSON.stringify({ type: "response.create", input: "x" }))).not.toThrow();
 });

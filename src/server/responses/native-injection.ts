@@ -1,4 +1,6 @@
 import { CodexWsCorrelation } from "./codex-ws-correlation";
+import { NativeSteeringError } from "./native-steering";
+import { checkOutboundBodySize } from "./outbound-body-guard";
 import type { NativeResponseControl } from "./native-response-control";
 import type { NativeSteeringReplayObserver } from "./native-steering-replay";
 import {
@@ -48,10 +50,17 @@ export class NativeInjectionChannel implements NativeResponseControl {
 
   /** Pin the original settings and lane; construction never opens a connection. */
   constructor(initial: Frame, private readonly idleMs = 300_000,
+    private readonly maxUpstreamBodyBytes?: number,
     private readonly deadlines = { ackMs: NATIVE_INJECTION_ACK_MS, toolMs: NATIVE_INJECTION_TOOL_MS }) {
     if (!isInjectionRequest(initial)) injectionError("injection_not_supported", "Native injection requires explicit multi_agent.enabled.");
     this.lane = initial.stream_id ?? undefined;
     for (const [key, value] of Object.entries(initial)) if (!ENVELOPE.has(key)) this.settings.set(key, injectionFingerprint(value));
+  }
+  /** Refuse the exact rebuilt control body before it reaches the retained socket. */
+  assertOutboundFrame(text: string): void {
+    if (!checkOutboundBodySize(text, this.maxUpstreamBodyBytes).admitted) {
+      injectionError("outbound_body_too_large", "Native injection frame exceeds the configured upstream body limit.");
+    }
   }
   /** Report that the real dispatch boundary has selected this owner. */
   get attached(): boolean { return this.everAttached; }
@@ -198,7 +207,12 @@ export class NativeInjectionChannel implements NativeResponseControl {
     if (Buffer.byteLength(JSON.stringify(frame)) > MAX_NATIVE_INJECTION_BYTES) injectionError("invalid_injection", "Native injection continuation exceeds its byte limit.");
     this.continuationSent = true;
     try { this.recordTerminal(); const copy = JSON.parse(JSON.stringify(frame)) as Frame; this.replay?.submitted(copy); this.send(copy); }
-    catch { this.fail(); injectionError("injection_delivery_unknown", "Continuation delivery is unknown; do not automatically resend results."); }
+    catch (error) {
+      // A typed refusal is a known non-delivery: release the continuation slot so a
+      // corrected frame can be sent, and surface the code instead of unknown-delivery.
+      if (error instanceof NativeSteeringError) { this.continuationSent = false; throw error; }
+      this.fail(); injectionError("injection_delivery_unknown", "Continuation delivery is unknown; do not automatically resend results.");
+    }
     if (!this.finished) this.armIdle(this.deadlines.ackMs);
     return true;
   }
