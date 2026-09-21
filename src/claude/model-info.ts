@@ -15,8 +15,9 @@
  *  - created_at is a fixed constant; max_input_tokens is authoritative-or-null;
  *    max_tokens is always null (no authoritative output limit exists proxy-side).
  */
-import { catalogModelEfforts, nativeEffortClamp, nativeOpenAiContextWindow, type CatalogModel } from "../codex/catalog";
+import { orderForModelPicker, catalogModelEfforts, nativeEffortClamp, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type CatalogModel, type NativeContextLimitsInput } from "../codex/catalog";
 import { claudeCodeAlias, claudeCodeNativeAlias } from "./alias";
+import { cursorFastIdFor } from "../adapters/cursor/catalog";
 import { desktop3pAlias } from "./desktop-3p";
 import { AUTO_CONTEXT_OFF, type AutoContextMode } from "./context-windows";
 
@@ -108,47 +109,147 @@ export function buildAnthropicModelInfos(
   auto: AutoContextMode = AUTO_CONTEXT_OFF,
   idStyle: AnthropicIdStyle = "desktop3p",
   aliasForRoute: (provider: string, modelId: string) => string = desktop3pAlias,
+  nativeContextCap?: NativeContextLimitsInput,
+  fastMode?: boolean,
+  // Presence is the feature gate: the caller passes undefined when `fastRows` is off, so a
+  // default install publishes nothing. The predicate answers ELIGIBILITY, not enablement.
+  fastRows?: (model: CatalogModel | { provider: string; id: string }) => boolean,
+  ordering?: { modelPickerOrder?: readonly string[]; featured?: readonly string[] },
 ): AnthropicModelInfo[] {
   const out: AnthropicModelInfo[] = [];
   const seen = new Set<string>();
+  // Every id the loops below will really emit, computed BEFORE either runs. `seen` alone is
+  // not enough: it grows as they run, so whether a synthetic id collided with a real one
+  // would depend on iteration order. With both `foo` and a real `foo--fast` in the roster,
+  // the synthetic id for `foo` IS the real model's id, and whichever ran first would win it.
+  const realDiscoveryIds = new Set<string>([
+    ...nativeSlugs.map(slug => (
+      idStyle === "readable" ? claudeCodeNativeAlias(slug) : aliasForRoute("native", slug)
+    )),
+    ...routedModels.map(m => {
+      // The same asymmetry the routed loop applies: readable uses the LISTED id, so a
+      // fastMode-rewritten Cursor row is counted under the id it is really published as,
+      // while Desktop 3P hashes the RAW id.
+      const listed = fastMode === true && m.provider === "cursor" && idStyle === "readable"
+        ? cursorFastIdFor(m.id) ?? m.id
+        : m.id;
+      return idStyle === "readable"
+        ? claudeCodeAlias(m.provider, listed)
+        : aliasForRoute(m.provider, m.id);
+    }),
+  ]);
   // [1m] picker variant (devlog 260712 B1): Claude Code accounts exactly 1M for ids
   // carrying the marker (2.1.207 binary: /\[1m\]/i → 1e6, compaction preserved), so
   // ONLY models with an authoritative >=1M window get a second selectable row —
   // the auto-context widening that let a 372K route carry the marker (and be
   // over-filled) is the #854 defect and does not come back. Guards (audit R1#11):
   // same dedupe set, never double-suffix.
-  const push1mVariant = (base: AnthropicModelInfo, contextWindow: number | undefined) => {
+  const push1mVariant = (
+    base: AnthropicModelInfo,
+    contextWindow: number | undefined,
+    maxInputTokens?: number,
+    selectorId?: string,
+  ) => {
     // The [1m] marker makes Claude Code account 1e6 tokens for the row, so it
     // may only name models whose AUTHORITATIVE effective window is >= 1M —
     // never the auto-context widening, which would mark a 372K route and have
     // Claude Code over-fill it (the #854 defect).
     if (contextWindow === undefined || contextWindow < ONE_MILLION) return;
     if (base.id.includes("[1m]")) return;
-    const id = `${base.id}[1m]`;
+    const id = selectorId ?? `${base.id}[1m]`;
     if (seen.has(id)) return;
     seen.add(id);
-    const window = contextWindow as number;
-    out.push({ ...base, id, display_name: `${base.display_name} · 1M`, max_input_tokens: ONE_MILLION });
+    // The marker fixes Claude Code's accounting at 1e6, but a model may accept less input
+    // than that — a routed GPT-5.6 row runs a 1,050,000 window while refusing past 922,000
+    // (measured — see devlog/_plan/260817_native_gpt56_1m_context/001_measurement_evidence.md).
+    // Advertising the flat 1e6 there would invite mid-session context_length_exceeded, so the
+    // variant reports whichever of the two is smaller.
+    const advertised = typeof maxInputTokens === "number" && maxInputTokens > 0
+      ? Math.min(ONE_MILLION, maxInputTokens)
+      : ONE_MILLION;
+    out.push({ ...base, id, display_name: `${base.display_name} · 1M`, max_input_tokens: advertised });
+  };
+  /**
+   * Publish a Fast sibling beside a row, following `push1mVariant` rather than the
+   * `fastMode` rewrite below: `fastMode` is a global switch with no per-request choice, so
+   * it REPLACES the listed id, while a selector has to leave the default pickable beside it.
+   *
+   * Because it only ADDS a row, it is safe for the Desktop 3P hashed style too — the
+   * exclusion `fastMode` needs exists because rewriting a hash strands a saved selection.
+   */
+  const pushFastVariant = (base: AnthropicModelInfo) => {
+    const id = `${base.id}--fast`;
+    // A real model always wins its own id, whatever the iteration order.
+    if (realDiscoveryIds.has(id) || seen.has(id)) return;
+    seen.add(id);
+    out.push({ ...base, id, display_name: `${base.display_name} · Fast` });
   };
   for (const slug of nativeSlugs) {
     const id = idStyle === "readable" ? claudeCodeNativeAlias(slug) : aliasForRoute("native", slug);
     if (seen.has(id)) continue;
     seen.add(id);
-    const info = modelInfo(id, `${slug} (native)`, nativeEffectiveLadder(slug), true, nativeOpenAiContextWindow(slug));
+    const nativeWindow = nativeOpenAiContextWindow(slug, nativeContextCap);
+    const nativeMaxInput = nativeOpenAiMaxInputTokens(slug, nativeContextCap);
+    // max_input_tokens is an INPUT limit, so it follows the measured input ceiling rather
+    // than the total window whenever the model publishes one.
+    const info = modelInfo(id, `${slug} (native)`, nativeEffectiveLadder(slug), true, nativeMaxInput ?? nativeWindow);
     out.push(info);
-    push1mVariant(info, nativeOpenAiContextWindow(slug));
+    push1mVariant(info, nativeWindow, nativeMaxInput);
+    // Natives too, not only routed rows: gpt-5.6-sol is the flagship Fast model, and
+    // omitting it would leave this surface without the model the feature exists for.
+    if (fastRows?.({ provider: "native", id: slug }) === true) pushFastVariant(info);
   }
+  const nativeEnd = out.length;
+  const routedGroups = new Map<CatalogModel, AnthropicModelInfo[]>();
   for (const m of routedModels) {
-    const id = idStyle === "readable" ? claudeCodeAlias(m.provider, m.id) : aliasForRoute(m.provider, m.id);
+    // Global Fast has no toggle on this surface, so the fast identity is what gets listed —
+    // a client here can only pick a listed id. Limited to the readable CLI style: Desktop 3P
+    // ids are hashed from the model name, so rewriting them would strand a saved selection.
+    const fastModelId = fastMode === true && m.provider === "cursor" && idStyle === "readable"
+      ? cursorFastIdFor(m.id)
+      : undefined;
+    const listedModelId = fastModelId ?? m.id;
+    const id = idStyle === "readable"
+      ? claudeCodeAlias(m.provider, listedModelId)
+      : aliasForRoute(m.provider, m.id);
     if (seen.has(id)) continue;
     seen.add(id);
+    const groupStart = out.length;
     const ladder = Array.isArray(m.reasoningEfforts) ? m.reasoningEfforts : [];
     const imageInput = Array.isArray(m.inputModalities) ? m.inputModalities.includes("image") : false;
-    const info = modelInfo(id, `${m.id} (${m.provider})`, ladder, imageInput, m.contextWindow);
+    // max_input_tokens is an input limit, so a row that publishes a lower input ceiling than
+    // its window (native GPT-5.6 forwarded through a provider: 922k under 1.05M) reports the
+    // ceiling. Rows without one keep reporting the window, as before.
+    const routedMaxInput = typeof m.maxInputTokens === "number" && m.maxInputTokens > 0
+      ? (typeof m.contextWindow === "number" && m.contextWindow > 0
+        ? Math.min(m.maxInputTokens, m.contextWindow)
+        : m.maxInputTokens)
+      : undefined;
+    const info = modelInfo(id, `${listedModelId} (${m.provider})`, ladder, imageInput, routedMaxInput ?? m.contextWindow);
     out.push(info);
     // Anthropic passthrough guard (audit 021 #3): never auto-widen canonical claude
     // routes — only a genuine >=1M window earns the variant row there.
-    push1mVariant(info, m.contextWindow);
+    // Claude Code groups canonical Fable ids before it compares the [1m] marker. This
+    // reversible alias only separates picker families; it is not an OpenAI-native route.
+    // The Messages ingress restores the canonical Anthropic id before passthrough.
+    const oneMillionSelector = idStyle === "readable"
+      && m.provider === "anthropic"
+      && listedModelId.startsWith("claude-fable-")
+      ? `${claudeCodeNativeAlias(listedModelId)}[1m]`
+      : undefined;
+    push1mVariant(info, m.contextWindow, routedMaxInput, oneMillionSelector);
+    // The whole model is passed, not a (provider, id) pair: a combo row lives in its own
+    // namespace with no config.providers entry, so the caller classifies it from the
+    // aggregated supportsServiceTier the row already carries.
+    if (fastRows?.(m) === true) pushFastVariant(info);
+    routedGroups.set(m, out.slice(groupStart));
   }
-  return out;
+  if (!ordering?.modelPickerOrder?.length) return out;
+  // Sort only after deduplication, preserving the registry's original collision winner
+  // and keeping each model's base/1M/Fast siblings together.
+  return [
+    ...out.slice(0, nativeEnd),
+    ...orderForModelPicker([...routedGroups.keys()], ordering.modelPickerOrder, ordering.featured)
+      .flatMap(model => routedGroups.get(model)!),
+  ];
 }

@@ -17,10 +17,24 @@
  * Design of record: devlog/_fin/260803_integrations_toggle_all/030 (routes),
  * 011 (Claude Code), 012 (Grok).
  */
-import { loadConfig, readRuntimePort, saveConfigPreservingClaudeCode } from "../../config";
-import { desktopVisibleNativeSlugs, filterCatalogVisibleModels, nativeOpenAiContextWindow, visibleNativeSlugs } from "../../codex/catalog";
+import { join } from "node:path";
+import { loadConfig, mutatePersistedConfig, saveConfigPreservingClaudeCode } from "../../config";
+import { readRuntimePort } from "../../config/process-state";
+import { desktopVisibleNativeSlugs, filterCatalogVisibleModels, nativeContextLimits } from "../../codex/catalog";
+import { getCodexHome } from "../../codex/paths";
+import { providerContextCap } from "../../providers/context-cap";
+import { OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { inspectDesktop3pConfigLibrary, removeDesktop3pStandardPivot, writeDesktop3pConfig } from "../../claude/desktop-3p";
-import { injectGrokConfig, stripGrokConfig, type GrokInjectModel } from "../../grok/inject";
+import {
+  applyDesktopFirstParty,
+  inspectDesktopFirstParty,
+  recordClaudeDesktopMode,
+  removeDesktopFirstParty,
+  resolveClaudeDesktopApplyMode,
+  type ClaudeDesktopMode,
+} from "../../claude/desktop-first-party";
+import { projectGrokCatalog } from "../../grok/catalog";
+import { injectGrokConfig, stripGrokConfig } from "../../grok/inject";
 import { inspectGrokConfig } from "../../grok/inspect";
 import { grokConfigPath } from "../../grok/status";
 import { assertNativeTeardownOwned } from "../../integrations/native/ownership-preflight";
@@ -41,7 +55,9 @@ export type NativeRefusalReason =
   | "write_failed"
   | "metadata_unreadable"
   | "cleanup_incomplete"
-  | "desired_state_changed";
+  | "desired_state_changed"
+  | "foreign_env"
+  | "intercept_disabled";
 
 export interface NativeStatus {
   clientId: NativeIntegrationClientId;
@@ -120,7 +136,7 @@ function desktopStatus(config: ManagementContext["config"]): NativeStatus {
   const seen = inspectDesktop3pConfigLibrary({
     appliedFingerprint: config.claudeCode?.desktopProfile?.appliedFingerprint ?? null,
   });
-  const state: NativeStatus["state"] = seen.kind === "gateway_ours"
+  const gatewayState: NativeStatus["state"] = seen.kind === "gateway_ours"
     ? "current"
     : seen.kind === "unsafe" || seen.kind === "broken" ? "unsafe" : "absent";
   const disableBlocked = seen.kind === "unsafe" || seen.kind === "broken" || seen.kind === "foreign"
@@ -129,6 +145,14 @@ function desktopStatus(config: ManagementContext["config"]): NativeStatus {
         message: "Claude Desktop configuration cannot be changed safely.",
       }
     : null;
+  // First-party mode lives in Claude Code's settings.json, not in Desktop's library. A leftover
+  // gateway profile still counts as current (it is what Desktop is actually running).
+  const firstParty = resolveClaudeDesktopApplyMode(config) === "first-party" && gatewayState === "absent"
+    ? inspectDesktopFirstParty(config)
+    : null;
+  const state: NativeStatus["state"] = firstParty
+    ? firstParty.settings.kind === "unreadable" ? "unsafe" : firstParty.applied ? "current" : "absent"
+    : gatewayState;
   return {
     clientId: "claude-desktop",
     state,
@@ -360,13 +384,14 @@ async function handleCodexToggle(ctx: ManagementContext): Promise<Response> {
       }
     }
     const { restoreNativeCodexAsync } = await import("../../codex/inject");
+    const { OCX_NATIVE_REPLAY_RECOVERY_NOTE } = await import("../../responses/compaction");
     const restored = await restoreNativeCodexAsync({ revalidateDesiredState: true });
     return jsonResponse({
       ok: true, clientId: "codex", changed: durable && persisted.status === "committed",
       state: restored.success ? "absent" : "unsafe",
       desiredEnabled: enabled,
       message: restored.success
-        ? "Codex restored to its native path; the proxy is still serving other clients"
+        ? `Codex restored to its native path; the proxy is still serving other clients. ${OCX_NATIVE_REPLAY_RECOVERY_NOTE}`
         : `Codex intent saved, but restoring the native path did not complete: ${restored.message}`,
       ...(restored.success
         ? (durable ? {} : { reason: "not_durable" })
@@ -499,21 +524,10 @@ async function handleGrokToggle(ctx: ManagementContext): Promise<Response> {
      * synchronous from entry (012 §One preflight is not enough).
      */
     const fetchModels = deps.fetchAllModels ?? defaultFetchAllModels;
-    let models: GrokInjectModel[];
+    let projection: ReturnType<typeof projectGrokCatalog>;
     try {
-      const routed = filterCatalogVisibleModels(await fetchModels(config), config);
-      models = [
-        // Native slugs carry their context window: without it Grok falls back
-        // to its own 200k default and understates a 372k model.
-        ...visibleNativeSlugs(config).map(id => {
-          const contextWindow = nativeOpenAiContextWindow(id);
-          return { id, ...(contextWindow !== undefined ? { contextWindow } : {}) };
-        }),
-        ...routed.map(m => ({
-          id: m.alias ?? `${m.provider}/${m.id}`,
-          ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
-        })),
-      ];
+      const allRouted = await fetchModels(config);
+      projection = projectGrokCatalog(allRouted, config);
     } catch (error) {
       // A catalog failure must never write an empty fence (syncGrokConfig
       // guards this; the route inherits the rule). Nothing was written.
@@ -526,12 +540,17 @@ async function handleGrokToggle(ctx: ManagementContext): Promise<Response> {
     if (recheck.kind === "orphaned_marker") return postCommitRefusal(409, "grok", "orphaned_marker", ORPHANED_MARKER_MESSAGE, { desiredEnabled });
 
     const inject = deps.injectGrokConfig ?? injectGrokConfig;
-    const result = inject(port, models, {
+    const result = inject(port, projection.models, {
       ...(hostname !== undefined ? { hostname } : {}),
       // The FULL list plus the exclusion set, never a pre-filtered list: the
       // writer allocates aliases over everything, so a model's alias never
       // depends on its neighbours' switches.
       excluded: new Set(config.grokExcludedModels ?? []),
+      // Visibility filters decide what to emit, not whether an owned pre-fence table is still
+      // current. Otherwise a hidden model is mistaken for retired state and survives outside.
+      catalogModelIds: projection.catalogModelIds,
+      disabledProviderNamespaces: projection.disabledProviderNamespaces,
+      comboPublicModelIds: projection.comboPublicModelIds,
     });
 
     if (result.skippedReason === "non-loopback") {
@@ -598,6 +617,28 @@ async function handleGrokToggle(ctx: ManagementContext): Promise<Response> {
   }
 }
 
+export function firstPartyRefusalMessage(
+  reason: "intercept_disabled" | "ca_unavailable" | "unreadable" | "foreign_env",
+  path: string,
+): string {
+  switch (reason) {
+    case "intercept_disabled":
+      return "First-party mode needs the Claude intercept proxy, which is off in this configuration (claudeCode.intercept.enabled / client role). Use gateway mode instead.";
+    case "ca_unavailable":
+      return `The local intercept certificate could not be created (${path}).`;
+    case "unreadable":
+      return `Claude Code settings could not be parsed (${path}); nothing was written.`;
+    case "foreign_env":
+      return `Claude Code settings already set HTTPS_PROXY or NODE_EXTRA_CA_CERTS to a value opencodex does not own (${path}); remove them first or use gateway mode.`;
+  }
+}
+
+/** Record which Desktop mode is applied; `false` when the config file could not be updated. */
+function persistDesktopModeMarker(desktopMode: ClaudeDesktopMode): boolean {
+  const outcome = mutatePersistedConfig(persisted => recordClaudeDesktopMode(persisted, desktopMode));
+  return outcome.status !== "unavailable";
+}
+
 let claudeDesktopToggleFlight: Promise<Response> | null = null;
 
 async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Response> {
@@ -625,6 +666,11 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
     const fingerprint = current.claudeCode?.desktopProfile?.appliedFingerprint ?? null;
 
     if (!body.enabled) {
+      const firstPartyRemoved = removeDesktopFirstParty();
+      if (!firstPartyRemoved.ok) {
+        return postCommitRefusal(409, "claude-desktop", "write_failed",
+          `Claude Code settings could not be read (${firstPartyRemoved.path}); the first-party proxy env was left in place.`, { desiredEnabled });
+      }
       const removed = (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint });
       if (removed.kind === "cleanup_incomplete") {
         return postCommitRefusal(500, "claude-desktop", "cleanup_incomplete",
@@ -635,9 +681,47 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
         return postCommitRefusal(409, "claude-desktop", removed.reason === "metadata_unreadable" ? "metadata_unreadable" : "write_failed",
           "Claude Desktop configuration could not be changed safely.", { desiredEnabled });
       }
+      const changed = removed.changed || firstPartyRemoved.changed;
       return jsonResponse({
-        ok: true, clientId: "claude-desktop", changed: removed.changed, state: "absent", desiredEnabled,
-        message: removed.changed ? "Claude Desktop integration disabled." : "Claude Desktop integration is already off.",
+        ok: true, clientId: "claude-desktop", changed, state: "absent", desiredEnabled,
+        message: changed ? "Claude Desktop integration disabled." : "Claude Desktop integration is already off.",
+      } satisfies NativeToggleEnvelope);
+    }
+
+    if (resolveClaudeDesktopApplyMode(current) === "first-party") {
+      // Same contract as POST /api/claude-desktop/apply: an owned gateway profile left on disk
+      // is pivoted to standard first, so the two modes are never active together.
+      const library = inspectDesktop3pConfigLibrary({ appliedFingerprint: fingerprint });
+      let gatewayRemoved = false;
+      if (library.kind === "gateway_ours" || library.kind === "gateway_drifted") {
+        const removed = (ctx.deps.removeDesktop3pStandardPivot ?? removeDesktop3pStandardPivot)({ appliedFingerprint: fingerprint, replaceWhileEnabled: true });
+        if (removed.kind === "cleanup_incomplete") {
+          return postCommitRefusal(500, "claude-desktop", "cleanup_incomplete",
+            "Claude Desktop now points at standard mode, but gateway credential cleanup is incomplete; first-party env was not applied.",
+            { desiredEnabled, residualPaths: removed.residualPaths ?? [] });
+        }
+        if (!removed.ok) {
+          return postCommitRefusal(409, "claude-desktop", removed.reason === "metadata_unreadable" ? "metadata_unreadable" : "write_failed",
+            "The gateway profile could not be removed safely, so first-party mode was not applied.", { desiredEnabled });
+        }
+        gatewayRemoved = removed.changed;
+      }
+      const applied = applyDesktopFirstParty(current);
+      if (!applied.ok) {
+        const reason = applied.reason === "foreign_env" || applied.reason === "intercept_disabled" ? applied.reason : "write_failed";
+        return postCommitRefusal(applied.reason === "unreadable" || applied.reason === "ca_unavailable" ? 500 : 409, "claude-desktop", reason,
+          firstPartyRefusalMessage(applied.reason, applied.path), { desiredEnabled });
+      }
+      const modeSaved = persistDesktopModeMarker("first-party");
+      const changed = applied.changed || gatewayRemoved;
+      return jsonResponse({
+        ok: true, clientId: "claude-desktop", changed, state: "current", desiredEnabled,
+        message: [
+          changed
+            ? "Claude Desktop integration enabled (first-party). Fully quit and reopen Claude Desktop."
+            : "Claude Desktop integration is already on.",
+          modeSaved ? "" : "The first-party mode marker could not be saved to config; status may report the mode as unsaved.",
+        ].filter(Boolean).join(" "),
       } satisfies NativeToggleEnvelope);
     }
 
@@ -661,11 +745,16 @@ async function handleClaudeDesktopToggle(ctx: ManagementContext): Promise<Respon
         latest.apiKeys?.[0]?.key,
         "static",
         latest.claudeCode?.desktopProfile,
+        nativeContextLimits(latest),
       );
       if (!result.written) return postCommitRefusal(500, "claude-desktop", "write_failed", "Claude Desktop apply failed.", { desiredEnabled: latestDesiredEnabled });
+      const modeSaved = persistDesktopModeMarker("gateway");
       return jsonResponse({
         ok: true, clientId: "claude-desktop", changed: true, state: "current", desiredEnabled: latestDesiredEnabled,
-        message: "Claude Desktop integration enabled.",
+        message: [
+          "Claude Desktop integration enabled.",
+          modeSaved ? "" : "The gateway mode marker could not be saved to config; status may report the mode as unsaved.",
+        ].filter(Boolean).join(" "),
       } satisfies NativeToggleEnvelope);
     } catch {
       return postCommitRefusal(500, "claude-desktop", "write_failed", "Claude Desktop apply failed.", { desiredEnabled });
@@ -683,8 +772,9 @@ export async function handleNativeIntegrationRoutes(ctx: ManagementContext): Pro
 
   if (url.pathname === "/api/native-integrations" && req.method === "GET") {
     const { getConfigPath } = await import("../../config");
+    const codexConfigPath = join(getCodexHome(), "config.toml");
     return jsonResponse({
-      clients: [claudeStatus(config, getConfigPath()), grokStatus(config), codexStatus(config, getConfigPath()), desktopStatus(config)],
+      clients: [claudeStatus(config, getConfigPath()), grokStatus(config), codexStatus(config, codexConfigPath), desktopStatus(config)],
     } satisfies NativeStatusListEnvelope);
   }
 

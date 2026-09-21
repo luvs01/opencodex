@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
 import type { Root } from "react-dom/client";
+import { clearClientResourceStoresForTests } from "../src/client-resource";
 import { useCodexAccountPool, type CodexAccountPoolController } from "../src/hooks/useCodexAccountPool";
 
 /**
@@ -21,6 +22,7 @@ let root: Root | null = null;
 let calls: string[] = [];
 let originalFetch: typeof globalThis.fetch;
 let accounts: unknown[] = [];
+let usageAccounts: unknown[] = [];
 let threshold = 80;
 let nextAccountsResponseGate: Promise<void> | null = null;
 let pauseResponseActiveId: string | null = null;
@@ -65,11 +67,15 @@ beforeEach(() => {
   activeGetId = null;
   deleteCatalogRefreshPending = false;
   accounts = [{ id: "a1", email: "account-one", isMain: true, paused: false, priority: 0, hasCredential: true, quota: null }];
+  usageAccounts = [];
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string, init?: RequestInit) => {
       const path = String(url).split("/api/")[1] ?? String(url);
       calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path.startsWith("usage?")) {
+        return { ok: true, json: async () => ({ accounts: usageAccounts }) } as unknown as Response;
+      }
       if (path === "codex-auth/accounts/priority") {
         const gate = nextPriorityResponseGate;
         nextPriorityResponseGate = null;
@@ -177,6 +183,7 @@ afterEach(async () => {
     root = null;
   }
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  clearClientResourceStoresForTests();
   for (const key of globals) {
     Object.defineProperty(globalThis, key, { configurable: true, value: previous[key] });
   }
@@ -209,6 +216,66 @@ test("the controller loads once on mount", async () => {
   expect(calls.filter(c => c.includes("codex-auth/accounts")).length).toBe(1);
   expect(seen.current!.accounts.length).toBe(1);
   expect(seen.current!.loadState).toBe("ready");
+});
+
+test("forced quota reads remain GET unless deferred validation is explicitly requested", async () => {
+  const seen = await mountController();
+  const originalTimeout = AbortSignal.timeout;
+  const deadlines: number[] = [];
+  AbortSignal.timeout = (ms: number) => {
+    deadlines.push(ms);
+    return new AbortController().signal;
+  };
+  try {
+    calls = [];
+    await act(async () => { await seen.current!.load(true); });
+    expect(calls).toContain("GET codex-auth/accounts?refresh=1");
+    expect(calls.some(call => call.startsWith("POST codex-auth/accounts"))).toBe(false);
+    expect(deadlines.at(-1)).toBe(20_000);
+    calls = [];
+    let finishValidation!: () => void;
+    nextAccountsResponseGate = new Promise<void>(resolve => { finishValidation = resolve; });
+    let validation!: Promise<boolean>;
+    await act(async () => { validation = seen.current!.load(true, { validatePending: true }); });
+    expect(calls).toContain("POST codex-auth/accounts/refresh");
+    expect(deadlines.at(-1)).toBeGreaterThan(8_000 + 2 * 30_000);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
+    expect(calls.filter(call => call.includes("codex-auth/accounts"))).toEqual(["POST codex-auth/accounts/refresh"]);
+    await act(async () => { finishValidation(); expect(await validation).toBe(true); });
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test("the controller joins 30-day usage to accounts by the displayed log label", async () => {
+  accounts = [
+    { id: "main", email: "main", isMain: true, paused: false, priority: 0, hasCredential: true, quota: null },
+    { id: "pool", email: "pool", logLabel: "pabc123", isMain: false, paused: false, priority: 0, hasCredential: true, quota: null },
+  ];
+  usageAccounts = [
+    { accountLogLabel: "main", totalTokens: 11, estimatedCostUsd: 0.01, usageCoverageRatio: 1 },
+    { accountLogLabel: "pabc123", totalTokens: 22, estimatedCostUsd: 0.02, usageCoverageRatio: 0.5 },
+    { accountLogLabel: "legacy-ambiguous", totalTokens: 999, estimatedCostUsd: 9, usageCoverageRatio: 1 },
+  ];
+
+  const seen = await mountController();
+  expect(seen.current!.accounts.map(account => ({
+    label: account.logLabel,
+    tokens: account.usage30d?.totalTokens,
+  }))).toEqual([
+    { label: "main", tokens: 11 },
+    { label: "pabc123", tokens: 22 },
+  ]);
+});
+
+test("account reloads do not refetch the independently polled usage summary", async () => {
+  const seen = await mountController();
+  expect(calls.filter(call => call.startsWith("GET usage?")).length).toBe(1);
+
+  await act(async () => { await seen.current!.load(); });
+
+  expect(calls.filter(call => call.startsWith("GET usage?")).length).toBe(1);
+  expect(calls.filter(call => call.includes("codex-auth/accounts")).length).toBe(2);
 });
 
 test("an inert controller issues no requests at all", async () => {
@@ -494,6 +561,29 @@ test("an accepted manual switch moves the pin before reconciliation lands", asyn
     releaseActive();
     await new Promise((resolve) => setTimeout(resolve, 30));
   });
+});
+
+test("a post-switch read accepts a newer server-side active account", async () => {
+  accounts = [
+    { id: "a1", email: "main", isMain: true, paused: false, priority: 0, hasCredential: true, quota: null },
+    { id: "a2", email: "selected", isMain: false, paused: false, priority: 0, hasCredential: true, quota: null },
+    { id: "a3", email: "failover", isMain: false, paused: false, priority: 0, hasCredential: true, quota: null },
+  ];
+  const seen = await mountController();
+
+  // The PUT accepts a2, but routing legitimately moves to a3 before the
+  // reconciliation read. That fresh response must retire the optimistic marker.
+  activeGetId = "a3";
+  await act(async () => {
+    expect(await seen.current!.switchAccount("a2")).toEqual({ ok: true, activeId: "a2" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+  // One mismatch may be the eventually-consistent response the optimistic marker
+  // exists to absorb.
+  expect(seen.current!.activeId).toBe("a2");
+
+  await act(async () => { await seen.current!.load(); });
+  expect(seen.current!.activeId).toBe("a3");
 });
 
 test("the main sentinel writes through to its distinct account row", async () => {

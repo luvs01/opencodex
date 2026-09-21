@@ -23,6 +23,13 @@ export type RecordedCall = { method: string; args: unknown };
 export type HarnessResult = {
   calls: RecordedCall[];
   /**
+   * Values the script wrote through `core.setOutput`, in write order. The
+   * write-capable gate consumes `RESOLVED_PULL_NUMBER` from the resolver, and
+   * the client sets it as a step output; exposing it lets a test assert the
+   * SHA-to-PR resolution directly instead of inferring it from later calls.
+   */
+  outputs: Array<{ name: string; value: unknown }>;
+  /**
    * Paths the script read through its `node:fs` stub. Kept separate from
    * `calls` so exact method-sequence assertions stay stable while the fs
    * capability stays recorded (round: the harness must not hand a write-capable
@@ -171,9 +178,10 @@ export type RunOptions = {
   /** Page-keyed open PR fixtures for `pulls.list` (1-based via array index). */
   openPullPages?: unknown[][];
   /**
-   * Check-runs `checks.listForRef` reports for the head. Defaults to a green
-   * `ci` check so completed-checklist scenarios pass the claim check.
-   * Pass a red/pending/missing set to exercise the claim-check reset paths.
+   * Check-runs `checks.listForRef` used to report for readiness claim checks.
+   * Local CI is now an author attestation only, so the gate no longer lists
+   * checks; these fixtures remain so older scenarios that pass `checkRuns`
+   * still construct cleanly without affecting gate behavior.
    */
   checkRuns?: Array<{
     name: string;
@@ -188,7 +196,7 @@ export type RunOptions = {
     conclusion: string | null;
     app?: { id: number } | null;
   }>>;
-  /** Optional filtered total for proving truncated check evidence fails closed. */
+  /** Optional filtered total; unused now that the gate skips check listing. */
   checkRunTotalCount?: number;
   /**
    * Review threads `pullRequestReviewThreads` (via GraphQL) reports for the PR.
@@ -235,6 +243,15 @@ export type RunOptions = {
     }>
   >;
   /**
+   * Commit messages on the pull request branch, read by the carry-attribution
+   * assessor. The squash body is assembled from the description and these, so
+   * a `Co-authored-by` trailer can legitimately live in either.
+   *
+   * Defaults to one commit carrying the PR title, which is what a
+   * single-commit branch looks like.
+   */
+  commitMessages?: string[];
+  /**
    * GraphQL query fragments that should reject. Unlike `failOn: ["graphql"]`,
    * which fails the review-threads read, this lets a test fail a specific
    * mutation (e.g. `markPullRequestReadyForReview`) while the threads read
@@ -266,7 +283,7 @@ const DEFAULT_BODY = [
   "",
   "## Test plan",
   "",
-  "- [x] Run `bun test tests/ci-workflows.test.ts`",
+  "- [x] Run `bun test tests/ci-workflows/ci-workflows.test.ts`",
   "- [x] Confirm enforce-pr-target behaviour locally",
 ].join("\n");
 
@@ -656,6 +673,8 @@ export async function runEnforcePrTarget(
     options.filePages ??
     (options.files && options.files.length > 0 ? [options.files] : [[]]);
   const listedFileCount = filePages.flat().length;
+  const commitMessages =
+    options.commitMessages ?? [String((options.pr as { title?: string })?.title ?? "")];
   const prInput = options.pr as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(prInput, "changed_files")) {
     (pr as Record<string, unknown>).changed_files = prInput.changed_files;
@@ -774,6 +793,14 @@ export async function runEnforcePrTarget(
       listFiles: (args: unknown) => {
         const page = Number((args as { page?: number })?.page ?? 1);
         return respond("pulls.listFiles", args, filePages[page - 1] ?? []);
+      },
+      listCommits: (args: unknown) => {
+        const page = Number((args as { page?: number })?.page ?? 1);
+        return respond(
+          "pulls.listCommits",
+          args,
+          page === 1 ? commitMessages.map(message => ({ commit: { message } })) : [],
+        );
       },
     },
     issues: {
@@ -1196,6 +1223,7 @@ export async function runEnforcePrTarget(
 
   return {
     calls,
+    outputs,
     fsReads,
     logs,
     warnings,
