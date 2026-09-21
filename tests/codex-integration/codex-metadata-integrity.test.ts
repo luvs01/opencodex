@@ -251,6 +251,12 @@ describe("Codex metadata integrity", () => {
     const audioUnconfigured = new Headers(materialized);
     applyCallerUserAgentFallback(audioUnconfigured, materialized, undefined);
     expect(audioUnconfigured.get("user-agent")).toBe("codex_cli_rs/0.154.0");
+    // The record shape applies the same precedence: a configured value evicts a
+    // stale caller User-Agent rather than losing to it.
+    const recordBoth: Record<string, string> = { "user-agent": "codex_cli_rs/0.154.0" };
+    applyCallerUserAgentFallback(recordBoth, caller, { "User-Agent": "operator-agent/1" });
+    expect(recordBoth["User-Agent"]).toBe("operator-agent/1");
+    expect(recordBoth["user-agent"]).toBeUndefined();
   });
 
   test("every relay and standalone send that overlays materialized headers defers User-Agent to the shared fallback", () => {

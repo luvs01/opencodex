@@ -852,9 +852,6 @@ export async function handleResponsesCompact(
           const value = selected.get(name);
           if (value) headers.set(name, value);
         }
-        // Compact builds its own header set without provider.headers; a configured provider
-        // User-Agent still wins, and the caller fingerprint fills only the gap.
-        applyCallerUserAgentFallback(headers, selected, compactProvider.headers);
         const override = (compactProvider as { _codexAccountOverride?: { accessToken: string; chatgptAccountId: string } })._codexAccountOverride;
         if (override) {
           headers.set("authorization", `Bearer ${override.accessToken}`);
@@ -885,6 +882,10 @@ export async function handleResponsesCompact(
       if (warmKeyProvider?.apiKey) compactProvider = warmKeyProvider;
       headers.set("authorization", `Bearer ${resolveProviderApiKey(compactProvider.apiKey)}`);
     }
+    // Applies to every native compact send — the key-auth path materializes no caller
+    // headers at all. A configured provider User-Agent still wins; the caller
+    // fingerprint fills only the gap.
+    applyCallerUserAgentFallback(headers, req.headers, compactProvider.headers);
     const { reasoning: _reasoning, ...compactBodyRaw } = raw as typeof raw & { reasoning?: unknown };
     // The regular /v1/responses path applies sanitizeReasoningInputContent via the adapter's
     // buildRequest, but the compact endpoint forwards directly. Apply the same sanitizer here

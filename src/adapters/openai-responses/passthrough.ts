@@ -107,8 +107,15 @@ export function applyCallerUserAgentFallback(
     }
     return;
   }
+  if (configured !== null) {
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "user-agent") delete headers[name];
+    }
+    headers["User-Agent"] = configured;
+    return;
+  }
   if (Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) return;
-  const caller = configured ?? callerHeaders.get("user-agent");
+  const caller = callerHeaders.get("user-agent");
   if (caller) headers["User-Agent"] = caller;
 }
 
