@@ -48,6 +48,16 @@ type PersistedServerBinding = Pick<OcxConfig, "port" | "hostname">;
 const persistedLiveServerBinding = new WeakMap<OcxConfig, PersistedServerBinding>();
 
 /**
+ * Config instances nobody holds long-term — the catalog auto-refresh tick's
+ * per-tick `loadConfig()` snapshot. A detached snapshot cannot express a
+ * deliberate deletion and owns no live listener socket, so the live policy's
+ * `hostname`/`port` and disk-only-key skips would only discard concurrent hand
+ * edits wholesale. Keyed on the instance so the mode cannot leak into the
+ * long-lived server config.
+ */
+const detachedConfigSnapshots = new WeakSet<OcxConfig>();
+
+/**
  * Arm the baseline for a long-lived config. MANDATORY at `startServer`, not lazy on
  * first save — arming lazily would lose exactly the hand edit made before that first
  * save, which is the case the guard exists for.
@@ -55,6 +65,17 @@ const persistedLiveServerBinding = new WeakMap<OcxConfig, PersistedServerBinding
 export function armClaudeCodeBaseline(config: OcxConfig): void {
   liveConfigBaseline.set(config, structuredClone(config));
   claudeCodeBaseline.set(config, structuredClone(config.claudeCode));
+}
+
+/**
+ * Arm a freshly loaded config instance no long-lived server owns. The save path
+ * then reconciles every field — the listener binding and keys that exist only
+ * on disk included — against this arming baseline, so a concurrent hand edit is
+ * adopted rather than overwritten by the snapshot's stale values.
+ */
+export function armDetachedConfigBaseline(config: OcxConfig): void {
+  armClaudeCodeBaseline(config);
+  detachedConfigSnapshots.add(config);
 }
 
 /**
@@ -302,7 +323,11 @@ function readPersistedServerBinding(
 }
 
 /**
- * The save entry point for every writer holding a LIVE server config.
+ * The save entry point for every writer holding a LIVE server config, and for a
+ * detached snapshot armed through {@link armDetachedConfigBaseline}. The live
+ * policy keeps `hostname`/`port` and disk-only keys out of the merge; a detached
+ * snapshot has neither hazard, so it rebases every field against its arming
+ * baseline instead.
  *
  * Conflict policy, chosen deliberately:
  * - disk changed, we did not → their hand edit wins;
@@ -327,28 +352,41 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
     if (baseline && onDisk !== undefined) {
       const persistedDiagnostics = configDiagnosticsFromRaw(JSON.stringify(onDisk));
       if (persistedDiagnostics.source === "file") {
-        const deletedKeys = configRebaseDeletionKeys(config);
-        const provenanceExists = configHasRebaseProvenance(config);
-        // Only keys this live config is actually known to have diverged on may be
-        // rebased. The baseline is captured once when the server arms it, so any key
-        // that appeared on disk afterwards — through saveConfig(), a hand edit, or
-        // another process — is absent from the baseline as well as from the live
-        // config. Reconciling those keys reads "live never changed this" and adopts
-        // the disk value, which resurrects a field the live writer had deliberately
-        // deleted (#1462 regression: PUT /api/grok/selection with an empty list).
-        // Restrict the merge to keys the baseline knew about, plus keys the live
-        // config still carries; a key that exists only on disk is left to the
-        // ordinary whole-config write below.
-        const rebaseableKeys = new Set([
-          ...Object.keys(baseline as unknown as Record<string, unknown>),
-          ...Object.keys(config as unknown as Record<string, unknown>),
-          ...(provenanceExists
-            ? Object.keys(persistedDiagnostics.config as unknown as Record<string, unknown>)
-            : []),
-        ]);
-        const skipped = new Set(["hostname", "port", "claudeCode", CONFIG_REBASE_PROVENANCE_KEY]);
-        for (const key of Object.keys(persistedDiagnostics.config as unknown as Record<string, unknown>)) {
-          if (!rebaseableKeys.has(key)) skipped.add(key);
+        // A detached snapshot diverged only where this pipeline mutated it (model
+        // discovery fields for the auto-refresh tick): it cannot express a
+        // deliberate deletion, so the disk-only-key and listener-binding skips
+        // below would only discard concurrent hand edits. It merges every top-level
+        // key — including configRebaseProvenance, so a cooperating writer's
+        // deletion marker adopted from disk is honored instead of silently dropped —
+        // and reads deletion intent AFTER the merge, from the marker disk actually
+        // carries now rather than a stale one the snapshot loaded.
+        const detached = detachedConfigSnapshots.has(config);
+        const deletedKeys = detached ? null : configRebaseDeletionKeys(config);
+        const skipped = detached
+          ? new Set(["claudeCode"])
+          : new Set(["hostname", "port", "claudeCode", CONFIG_REBASE_PROVENANCE_KEY]);
+        if (!detached) {
+          const provenanceExists = configHasRebaseProvenance(config);
+          // Only keys this live config is actually known to have diverged on may be
+          // rebased. The baseline is captured once when the server arms it, so any key
+          // that appeared on disk afterwards — through saveConfig(), a hand edit, or
+          // another process — is absent from the baseline as well as from the live
+          // config. Reconciling those keys reads "live never changed this" and adopts
+          // the disk value, which resurrects a field the live writer had deliberately
+          // deleted (#1462 regression: PUT /api/grok/selection with an empty list).
+          // Restrict the merge to keys the baseline knew about, plus keys the live
+          // config still carries; a key that exists only on disk is left to the
+          // ordinary whole-config write below.
+          const rebaseableKeys = new Set([
+            ...Object.keys(baseline as unknown as Record<string, unknown>),
+            ...Object.keys(config as unknown as Record<string, unknown>),
+            ...(provenanceExists
+              ? Object.keys(persistedDiagnostics.config as unknown as Record<string, unknown>)
+              : []),
+          ]);
+          for (const key of Object.keys(persistedDiagnostics.config as unknown as Record<string, unknown>)) {
+            if (!rebaseableKeys.has(key)) skipped.add(key);
+          }
         }
         reconcileConfigRecord(
           config as unknown as Record<string, unknown>,
@@ -356,7 +394,9 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
           persistedDiagnostics.config as unknown as Record<string, unknown>,
           skipped,
         );
-        for (const key of deletedKeys) delete (config as unknown as Record<string, unknown>)[key];
+        for (const key of deletedKeys ?? configRebaseDeletionKeys(config)) {
+          delete (config as unknown as Record<string, unknown>)[key];
+        }
       }
     }
     if (claudeCodeBaseline.has(config)) {

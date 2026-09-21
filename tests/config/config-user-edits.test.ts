@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   armClaudeCodeBaseline,
+  armDetachedConfigBaseline,
   adoptPersistedProviderIntoLiveConfig,
   deleteConfigTopLevelKey,
   getConfigPath,
@@ -907,4 +908,41 @@ test("a malformed upstreamHostCircuitThreshold hand edit disables only the circu
     "upstreamHostCircuitThreshold ignored: expected an integer from 0 to 20",
   );
   expect(diagnostics.config.providers.test).toBeDefined();
+});
+
+// A detached snapshot — the catalog auto-refresh tick's per-tick loadConfig() —
+// owns no live listener and cannot express a deletion of its own, so every field
+// rebases: a concurrent hand edit to the binding or to a key the snapshot never
+// held is adopted rather than overwritten by the snapshot's stale values.
+test("a detached snapshot save adopts concurrent listener and disk-only hand edits", () => {
+  const snapshot = loadConfig();
+  armDetachedConfigBaseline(snapshot);
+  // Discovery mutates only its own surfaces on the snapshot.
+  snapshot.disabledModels = ["test/retired"];
+  writeDiskConfig({
+    port: 10101,
+    hostname: "127.0.0.2",
+    metricsExport: { enabled: true },
+    claudeCode: { authMode: "proxy" },
+  });
+
+  saveConfigPreservingClaudeCode(snapshot);
+
+  const disk = diskConfig();
+  expect(disk.port).toBe(10101);
+  expect(disk.hostname).toBe("127.0.0.2");
+  expect(disk.metricsExport).toEqual({ enabled: true });
+  expect((disk.claudeCode as Record<string, unknown>).authMode).toBe("proxy");
+  expect(disk.disabledModels).toEqual(["test/retired"]);
+});
+
+test("a detached snapshot save keeps its own mutation in a same-leaf conflict", () => {
+  const snapshot = loadConfig();
+  armDetachedConfigBaseline(snapshot);
+  snapshot.disabledModels = ["test/retired"];
+  writeDiskConfig({ disabledModels: ["test/hand-hidden"] });
+
+  saveConfigPreservingClaudeCode(snapshot);
+
+  expect(diskConfig().disabledModels).toEqual(["test/retired"]);
 });

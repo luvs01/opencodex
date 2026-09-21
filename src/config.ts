@@ -134,6 +134,7 @@ export {
 } from "./config/mutation-lock";
 export {
   armClaudeCodeBaseline,
+  armDetachedConfigBaseline,
   adoptPersistedProviderIntoLiveConfig,
   claudeCodeBaselineArmed,
   reconcileLiveConfigFromDisk,
