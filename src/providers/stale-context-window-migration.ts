@@ -10,13 +10,13 @@
  *
  * This rewrites one thing: a window whose saved value is still byte-for-byte the
  * wrong number this file names, on a provider that still carries the registry's
- * adapter. A value the user changed does not match `from` and is left alone, and
- * nothing else in the row is touched. Same shape and the same restraint as
- * `model-rename-migration`, for the case where the id was right and the number
- * was not.
+ * adapter and still points at the registry's own endpoint. A value the user
+ * changed does not match `from` and is left alone, and nothing else in the row
+ * is touched. Same shape and the same restraint as `model-rename-migration`,
+ * for the case where the id was right and the number was not.
  */
 import { PROVIDER_REGISTRY } from "./registry";
-import type { OcxConfig } from "../types";
+import type { OcxConfig, OcxProviderConfig } from "../types";
 
 export interface StaleContextWindow {
   /** Registry provider id whose saved rows may carry the wrong window. */
@@ -58,9 +58,22 @@ export const STALE_CONTEXT_WINDOWS: readonly StaleContextWindow[] = [
   { provider: "devin", model: "grok-4-5", from: 256_000, to: 500_000 },
 ];
 
-function providerStillMatchesRegistry(id: string, adapter: unknown): boolean {
-  const entry = PROVIDER_REGISTRY.find(row => row.id === id);
-  return entry !== undefined && entry.adapter === adapter;
+/**
+ * Only repair a row that still points at the registry's own endpoint. The
+ * adapter alone cannot tell the registry provider from another destination —
+ * a repointed `alibaba-token-plan-intl` row keeps the generic `openai-chat`
+ * adapter, but the windows on its custom gateway are the user's own figures.
+ * Same ownership rule as `model-rename-migration`.
+ */
+function providerStillMatchesRegistry(name: string, prov: OcxProviderConfig): boolean {
+  const entry = PROVIDER_REGISTRY.find(row => row.id === name);
+  if (!entry || entry.adapter !== prov.adapter) return false;
+  if (!prov.baseUrl || !entry.baseUrl) return true;
+  const choices = entry.baseUrlChoices?.map(choice => choice.baseUrl) ?? [];
+  const known = [entry.baseUrl, ...choices]
+    .filter((url): url is string => typeof url === "string")
+    .map(url => url.replace(/\/+$/, ""));
+  return known.includes(prov.baseUrl.replace(/\/+$/, ""));
 }
 
 /** Pure projection. The caller decides whether to persist. */
@@ -74,7 +87,7 @@ export function projectStaleContextWindows(
   for (const entry of entries) {
     const prov = config.providers?.[entry.provider];
     if (!prov) continue;
-    if (!providerStillMatchesRegistry(entry.provider, prov.adapter)) continue;
+    if (!providerStillMatchesRegistry(entry.provider, prov)) continue;
     const windows = prov.modelContextWindows;
     if (!windows || windows[entry.model] !== entry.from) continue;
     windows[entry.model] = entry.to;

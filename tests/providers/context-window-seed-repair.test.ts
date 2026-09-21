@@ -47,6 +47,39 @@ describe("stale context window migration", () => {
     },
   );
 
+  test.each(["alibaba-token-plan", "alibaba-token-plan-intl"] as const)(
+    "skips %s when the row was repointed to a custom gateway",
+    provider => {
+      // A repointed row keeps the provider id and the generic openai-chat
+      // adapter, so the adapter alone cannot tell Alibaba from another
+      // OpenAI-compatible destination — the 983,616 there may be that
+      // gateway's real limit rather than the stale registry seed.
+      const config = alibabaConfig(provider, 983_616);
+      config.providers![provider]!.baseUrl = "https://gateway.example/v1";
+      const projection = projectStaleContextWindows(config);
+      expect(projection.changed).toBe(false);
+      expect(projection.config.providers![provider]!.modelContextWindows!["qwen3.8-max"]).toBe(983_616);
+    },
+  );
+
+  test("repairs a row pointing at the registry endpoint with a trailing slash", () => {
+    const config = alibabaConfig("alibaba-token-plan", 983_616);
+    config.providers!["alibaba-token-plan"]!.baseUrl =
+      "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/";
+    const projection = projectStaleContextWindows(config);
+    expect(projection.changed).toBe(true);
+    expect(projection.config.providers!["alibaba-token-plan"]!.modelContextWindows!["qwen3.8-max"]).toBe(1_000_000);
+  });
+
+  test("repairs an intl row pointed at a declared baseUrlChoices endpoint", () => {
+    const config = alibabaConfig("alibaba-token-plan-intl", 983_616);
+    config.providers!["alibaba-token-plan-intl"]!.baseUrl =
+      "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+    const projection = projectStaleContextWindows(config);
+    expect(projection.changed).toBe(true);
+    expect(projection.config.providers!["alibaba-token-plan-intl"]!.modelContextWindows!["qwen3.8-max"]).toBe(1_000_000);
+  });
+
   test("skips a row that no longer carries the registry adapter", () => {
     // A `devin` row retargeted at another transport is not the provider these
     // numbers describe, so rewriting its windows would be a guess.
