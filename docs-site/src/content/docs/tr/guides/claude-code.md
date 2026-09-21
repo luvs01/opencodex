@@ -64,6 +64,7 @@ bağlanmış olarak Claude Code'u başlatır:
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claudeCode.tierModels.haiku ?? claudeCode.smallFastModel` (isteğe bağlı; eski `ANTHROPIC_SMALL_FAST_MODEL` da geçerlidir) |
 | `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE}_MODEL` | `claudeCode.tierModels.*` (isteğe bağlı) |
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | `alwaysEnableEffort` açık olduğunda `1` (koşullu) |
+| `ENABLE_TOOL_SEARCH` | `claudeCode.toolSearch` ayarlandığında (koşullu; varsayılan olarak kapalı) |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `DISABLE_COMPACT` | `maxContextTokens` ayarlandığında eski bağlam geçersiz kılma (koşullu) |
 
 Kendi dışa aktardığınız değişkenler her zaman önceliklidir. Ekstra argümanlar
@@ -189,9 +190,11 @@ alternatif bir Desktop kullanıcı verisi kökü için `CLAUDE_USER_DATA_DIR`
 değerini ayarlayın. Eski `Claude-3p` dizini otomatik olarak okunmaz veya
 silinmez.
 
-Anthropic harici rotalar, `claude-opus-4-8-2026MMDD` gibi kararlı takma adlar
-alır. Tarih benzeri kısım, modelin çıkış tarihi değil, sentetik bir rota
-yuvasıdır. Gerçek Anthropic Claude rotaları kendi gerçek kimliklerini korur.
+Anthropic harici rotalar, `claude-opus-4-8-YYYYMMDD` gibi kararlı takma adlar
+alır; yıl 2026 ile 2035 arasındadır. Tarih benzeri kısım, modelin çıkış tarihi
+değil, sentetik bir rota yuvasıdır. Önce 2026 yuvaları atanır, bu nedenle mevcut
+takma adlar kimliklerini korur; sonraki yıllara ancak 2026 dolduktan sonra
+geçilir. Gerçek Anthropic Claude rotaları kendi gerçek kimliklerini korur.
 Yeni rotalar varsayılan olarak Opus ailesine gider, ancak bir rotayı taşımak
 çağırdığı sağlayıcıyı veya modeli değiştirmez. Eski uygulama bayrakları
 `--static`, `--hybrid` ve `--discovery-only` mevcut betikler için kullanılabilir
@@ -332,9 +335,19 @@ takma adlar ve eski yapılandırmalardan gelen `claude-ocx-<provider>--<model>`
 kimlikleri hala çözümlenir.
 
 Claude Desktop'ın altbilgi seçicisi zaten çalışan bir 3P görüşmesi için modeli
-değiştirmezse, o görüşmede `/model <id>` komutunu kullanın. OpenCodex seçici
-durumunu gözlemleyemez; her isteğin taşıdığı model kimliğini yönlendirir. Sonucu
-**Logs → requestedModel** altında onaylayın.
+değiştirmezse, `/model <id>` komutunu deneyebilirsiniz; ancak bu geçici çözüm de
+etkilenen Desktop derlemelerinde başarısız olabilir.
+[Sorun #3782](https://github.com/lidge-jun/opencodex/issues/3782), Windows üzerinde
+Claude Desktop 1.46388.4 ile hem altbilgi seçicisi hem de `/model` üzerinden yapılan
+değişikliklerden sonra görüşmenin ilk modelini kullanmaya devam ettiğini bildiriyor.
+Bu bildirim, davranışa hangi istemci veya yönlendirme bileşeninin neden olduğunu
+ortaya koymuyor.
+
+OpenCodex Claude Desktop profilinde istediğiniz varsayılan modeli seçmeyi, profili
+yeniden uygulamayı ve yeni bir görüşme başlatmayı da deneyebilirsiniz. Bu bir sorun
+giderme adımıdır; kesin çözüm değildir. OpenCodex seçici durumunu gözlemleyemez;
+her isteğin taşıdığı model kimliğini yönlendirir. İstemcinin ne gönderdiğini
+**Logs → requestedModel** altında kontrol edin.
 
 Yetkili 1M bağlam penceresine sahip modeller fazladan bir `…[1m]` seçici satırı
 alır: bunu seçmek Claude Code'un bu model için tam 1M bağlam hesabı yapmasını
@@ -722,3 +735,7 @@ modellerde opencodex varsayılan olarak bunu taslakla değiştirir (`blockedSkil
 aracının `model` argümanını değil, `<!-- ocx-route: ... -->` yönergelerini
 kullanır. Yönergenin hedeflenen rotayla eşleştiğinden emin olun. Model yer
 tutucusu olarak `"haiku"` iletin.
+
+`config.json` içindeki `claudeCode.stabilizePromptCache: true`, dönüştürülen rotalarda sistem talimatlarının sonundaki desteklenen Claude bildirimlerini son kullanıcı mesajına taşır. Varsayılan değer `false` olur. Yalnızca bu rol değişikliği istemcileriniz için uygunsa etkinleştirin. Kod bloklarındaki örnekler ve eşleşmeyen metin korunur; yerel Anthropic aktarımı değişmez. Meta veri yoksa önbellek anahtarı kararlı talimatlardan hesaplanır. Bu seçenek konuşma kimliği oluşturmaz veya üst hizmette önbellek isabeti garanti etmez.
+
+Dönüştürülen tüm Chat rotalarında zaman çizelgesi hatırlatmaları, bekleyen araç sonuçlarından sonra konuşmadaki konumlarını korur. Böylece yeni bir hatırlatma eklenmesi baştaki sistem istemini yeniden yazmaz ve konuşmanın ortasındaki bir yönerge, izlemesi gereken turların önüne geçmez. O konumun hangi rolü taşıdığı ayrı bir karardır: sağlayıcı `foldDeveloperRoleToSystem: false` kaydetmedikçe hatırlatma `system` olarak gönderilir; bu kayıt, üst hizmetin `developer` rolünü kabul ettiğini belirtir ve rol aynı konumda iletilir. Kabul etmeyen bir üst hizmet `400 role 'developer' is not allowed` yanıtı verir ve tur hiç başlamaz; kaydı olmayan hedefin katlanmasının nedeni budur. Bu davranış `stabilizePromptCache` açık veya kapalıyken geçerlidir; yerel Anthropic aktarımı değişmez. Önbelleğin yeniden kullanımı için kararlı bir oturum kimliği ve kullanılabilir üst hizmet önbelleği hâlâ gereklidir. Önceki talimatların veya araçların değişmesi ve konuşmanın sıkıştırılması da önbellek isabetini etkileyebilir; hatırlatma sırasını korumak tek başına yeniden kullanımı garanti etmez.
