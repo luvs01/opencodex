@@ -1,13 +1,32 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { createKiroAdapter } from "../../src/adapters/kiro";
+import { KIRO_COMPLETION_TOOL_NAME } from "../../src/adapters/kiro-constants";
 import { ADAPTER_REGISTRY } from "../../src/adapters/registry";
-import { parseRequest } from "../../src/responses/parser";
-import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../src/responses/turn-termination";
-import { conversationIdFromResponsesRequest } from "../../src/server/request-log-conversation";
-import type { OcxParsedRequest } from "../../src/types";
+import { encodeMessage } from "../../src/lib/eventstream-decoder";
+import type { OcxConfig, OcxParsedRequest } from "../../src/types";
 import { recoverEncryptedAgentTask, resetAgentTaskRecoveryState, restoreCachedEncryptedAgentTasks } from "../../src/server/responses/agent-task-recovery";
 import { codexHeaders, encryptedInput, fakeChatGptJwt, FERNET_TASK, SECOND_FERNET_TASK, originalFetch, recoverySse, routedConfig } from "../helpers/agent-task-recovery";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+
+const kiroEventEncoder = new TextEncoder();
+function kiroCompletionStream(answer: string): ReadableStream<Uint8Array> {
+  const input = JSON.stringify({ answer });
+  const frames = [
+    { name: KIRO_COMPLETION_TOOL_NAME, toolUseId: "completion-1" },
+    { name: KIRO_COMPLETION_TOOL_NAME, toolUseId: "completion-1", input },
+    { name: KIRO_COMPLETION_TOOL_NAME, toolUseId: "completion-1", stop: true },
+  ].map(payload => encodeMessage(
+    { ":message-type": "event", ":event-type": "toolUseEvent" },
+    kiroEventEncoder.encode(JSON.stringify(payload)),
+  ));
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index < frames.length) controller.enqueue(frames[index++]!);
+      else controller.close();
+    },
+  });
+}
+
 afterEach(() => { globalThis.fetch = originalFetch; resetAgentTaskRecoveryState(); });
 
 // Direct handler dispatch never takes the writer lease that startServer would take, so it is refused.
@@ -359,69 +378,63 @@ test("Responses handler restores known history and recovers only the new MESSAGE
 });
 
 test("cached-history reparse preserves recorded final-answer scope without suppressing a user follow-up", async () => {
-  const { post, providerResponse } = await import("../helpers/agent-task-recovery");
+  const { post } = await import("../helpers/agent-task-recovery");
   const sessionId = `recovery-final-replay-${crypto.randomUUID()}`;
   const headers = codexHeaders("acct-caller", { session_id: sessionId });
   const config = routedConfig({ enabled: true });
+  config.providers["kiro-test"] = {
+    adapter: "kiro",
+    baseUrl: "https://kiro.test",
+    authMode: "key",
+    apiKey: "synthetic-key",
+    liveModels: false,
+    models: ["gpt-5.6-sol"],
+  } as OcxConfig["providers"][string];
   const deliveredAnswer = "The assignment is complete.";
-  const recorded = parseRequest({ model: "xai/grok-4.5", input: "Earlier turn" });
-  bindTurnTerminationScope(recorded, conversationIdFromResponsesRequest({ sessionIdHeader: sessionId }));
-  rememberDeliveredFinalAnswer(recorded, { output: [{
-    type: "message", role: "assistant", phase: "final_answer",
-    content: [{ type: "output_text", text: deliveredAnswer }],
-  }] });
+  const tools = [{ type: "function", name: "bash", description: "Run a command", parameters: { type: "object" } }];
 
   let recoveries = 0;
-  const providerBodies: string[] = [];
+  const upstreamBodies: string[] = [];
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     if (String(url).includes("chatgpt.com")) {
       recoveries++;
       return new Response(recoverySse("Read the assignment."));
     }
-    providerBodies.push(String(init?.body));
-    return providerResponse();
+    upstreamBodies.push(String(init?.body));
+    return new Response(kiroCompletionStream(deliveredAnswer), {
+      headers: { "content-type": "application/vnd.amazon.eventstream" },
+    });
   }) as typeof fetch;
   const req = new Request("http://localhost/v1/responses", { headers });
   expect(await recoverEncryptedAgentTask(req, encryptedInput(), {}, config)).toBe(true);
 
-  // Keep the ordinary transport fixture, but exercise Kiro's real pre-send termination hook.
-  // The remembered record above belongs to a different parsed object: only core can bind
-  // the new object produced by recovery reparse to the same conversation.
-  const kiro = createKiroAdapter({ adapter: "kiro", baseUrl: "https://kiro.test", authMode: "key", apiKey: "synthetic-key" });
-  const createChat = ADAPTER_REGISTRY["openai-chat"].create;
-  const inspectedBodies: string[] = [];
-  const factory = spyOn(ADAPTER_REGISTRY["openai-chat"], "create").mockImplementation((provider, context) => ({
-    ...createChat(provider, context),
-    localTerminal(parsed: OcxParsedRequest) {
-      inspectedBodies.push(JSON.stringify(parsed._rawBody));
-      return kiro.localTerminal?.(parsed);
-    },
-  }));
+  // Deliver the answer through the real Kiro adapter so the record lands under the same
+  // transport-bound scope a reparsed body receives on replay.
+  const first = await post(config, "kiro-test/gpt-5.6-sol", [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Earlier turn" }] },
+  ], headers, undefined, { tools });
+  expect(first.status).toBe(200);
+  await first.text();
+  expect(upstreamBodies).toHaveLength(1);
+
   const finalMessage = { type: "message", role: "assistant", content: [{ type: "output_text", text: deliveredAnswer }] };
-  try {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await post(config, "xai/grok-4.5", [...encryptedInput(), finalMessage], headers);
-      expect(response.status).toBe(200);
-      expect((await response.json() as { output: unknown[] }).output).toEqual([]);
-      expect(providerBodies).toHaveLength(0);
-    }
-    const followUp = await post(config, "xai/grok-4.5", [
-      ...encryptedInput(), finalMessage,
-      { type: "message", role: "user", content: "Now explain your result." },
-    ], headers);
-    expect(followUp.status).toBe(200);
-    await followUp.text();
-    expect(providerBodies).toHaveLength(1);
-    expect(providerBodies[0]).toContain("Now explain your result.");
-    expect(inspectedBodies).toHaveLength(3);
-    for (const inspected of inspectedBodies) {
-      expect(inspected).toContain("Read the assignment.");
-      expect(inspected).not.toContain(FERNET_TASK);
-    }
-    expect(recoveries).toBe(1);
-  } finally {
-    factory.mockRestore();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await post(config, "kiro-test/gpt-5.6-sol", [...encryptedInput(), finalMessage], headers, undefined, { tools });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { output: unknown[] }).output).toEqual([]);
+    expect(upstreamBodies).toHaveLength(1);
   }
+  const followUp = await post(config, "kiro-test/gpt-5.6-sol", [
+    ...encryptedInput(), finalMessage,
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Now explain your result." }] },
+  ], headers, undefined, { tools });
+  expect(followUp.status).toBe(200);
+  await followUp.text();
+  expect(upstreamBodies).toHaveLength(2);
+  expect(upstreamBodies[1]).toContain("Now explain your result.");
+  expect(upstreamBodies[1]).toContain("Read the assignment.");
+  expect(upstreamBodies[1]).not.toContain(FERNET_TASK);
+  expect(recoveries).toBe(1);
 });
 
 test("fresh recovery only handles the current tail, leaving uncached history unchanged", async () => {
