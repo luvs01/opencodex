@@ -327,18 +327,16 @@ export function loadPersistedCodexRuntime(
 }
 
 /**
- * True only when the operator intentionally pinned this runtime.
+ * True unless the record explicitly identifies an automatically discovered runtime.
  *
- * A record with no origin is NOT pinned: every such file predates this field
- * and was written by resolveAndPersistCodexRuntime, which is auto-discovery.
- * Reading a missing origin as an intentional pin would leave issue 4204
- * unfixed on exactly the installs that have it — the still-runnable 0.135.0
- * CLI that kept winning over a 0.153.4 Desktop runtime sitting right there.
+ * Records without an origin predate provenance tracking and are ambiguous:
+ * both automatic discovery and `doctor --fix-codex-runtime` wrote that shape.
+ * Preserve the operator's possible explicit choice rather than replacing it.
  */
 export function persistedCodexRuntimeIsPinned(
   state: DeepReadonly<PersistedCodexRuntimeState> | null | undefined,
 ): boolean {
-  return state?.origin === "pinned";
+  return state != null && state.origin !== "discovered";
 }
 
 /**
@@ -890,7 +888,7 @@ function resolveCodexRuntimeUncached(deps: ResolveCodexRuntimeDeps = {}): Resolv
       selected = valid.find(item => sameRuntimeCommand(item.command, persisted.command)) ?? selected;
       // An explicit pin is the user's decision and this change must never
       // silently replace it — issue 4204 says so in as many words. Stick.
-      // An unpinned record (missing origin, or origin "discovered") may hand
+      // An explicitly discovered record may hand
       // over to a strictly newer valid candidate. Unknown (null) versions on
       // either side are not evidence of an upgrade: compareCodexVersions treats
       // null as less-than, which would otherwise make any known alternative
@@ -943,13 +941,17 @@ export function resolveAndPersistCodexRuntime(
   // cache key, so an unconditional rewrite made every caller re-run the ~1s
   // `codex --version` probe even when the resolved runtime was byte-identical.
   const persistedRuntime = loadPersistedCodexRuntime(deps);
-  const selectionUnchanged = persistedRuntime !== null
+  const selectionMatches = persistedRuntime !== null
     && persistedRuntime.command === result.runtime.command
     && persistedRuntime.source === result.runtime.source
     && (persistedRuntime.selectedVersion ?? null) === (result.runtime.version ?? null);
+  // Origin-less records may have been written by the legacy doctor fix path.
+  // Backfill an unchanged record as pinned so its conservative interpretation
+  // is durable instead of leaving the provenance ambiguity in place.
+  const selectionUnchanged = selectionMatches && persistedRuntime.origin !== undefined;
   if (result.runtime.command && result.runtime.source !== "fallback" && !selectionUnchanged) {
     try {
-      persistCodexRuntime(result.runtime, deps, "discovered");
+      persistCodexRuntime(result.runtime, deps, selectionMatches ? "pinned" : "discovered");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const persistError = redactUserPath(redactSecretString(message)).slice(0, 200);

@@ -846,7 +846,7 @@ describe("resolveCodexRuntime", () => {
     expect(loadPersistedCodexRuntime({ configDir })?.updatedAt).toBe(firstStamp);
   });
 
-  test("treats missing persisted and resolved versions as the same selection", () => {
+  test("backfills an origin-less matching selection as pinned when both versions are missing", () => {
     const configDir = tempConfigDir();
     const statePath = join(configDir, "codex-runtime.json");
     writeFileSync(statePath, JSON.stringify({
@@ -868,11 +868,12 @@ describe("resolveCodexRuntime", () => {
         runtime: { command: "codex", version: null, source: "environment" },
         failures: cached.failures,
       }, deps);
-      const before = readFileSync(statePath, "utf8");
-
       resolveAndPersistCodexRuntime(deps);
 
-      expect(readFileSync(statePath, "utf8")).toBe(before);
+      const migrated = loadPersistedCodexRuntime({ configDir });
+      expect(migrated?.command).toBe("codex");
+      expect(migrated?.selectedVersion).toBeNull();
+      expect(migrated?.origin).toBe("pinned");
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
@@ -1349,40 +1350,33 @@ describe("unpinned discovered runtime handover (issue 4204)", () => {
     writeFileSync(join(configDir, "codex-runtime.json"), JSON.stringify(payload));
   }
 
-  test("a still-runnable persisted 0.135.0 with no origin yields to 0.153.4 and reports supersededDiscovered", () => {
-    // Issue 4204: resolveAndPersistCodexRuntime wrote every automatic selection
-    // without an origin, so a still-runnable 0.135.0 CLI kept winning over a
-    // 0.153.4 Desktop runtime sitting on PATH. The catalog clamp then observed
-    // the old ladder and stripped max/ultra.
+  test("an origin-less legacy runtime is conservatively retained as a possible operator pin", () => {
+    // Before provenance tracking, both automatic resolution and the deliberate
+    // doctor fix path wrote this shape. The resolver cannot safely distinguish
+    // them, so it must preserve the possible operator selection.
     const configDir = tempConfigDir();
     writeLegacyPersisted(configDir, "C:\\old\\codex.exe", "0.135.0");
-    expect(persistedCodexRuntimeIsPinned(loadPersistedCodexRuntime({ configDir }))).toBe(false);
+    expect(persistedCodexRuntimeIsPinned(loadPersistedCodexRuntime({ configDir }))).toBe(true);
     const execFileSync: RuntimeExecFile = (file) => {
       const text = String(file);
       if (text.includes("old")) return "codex-cli 0.135.0";
       if (text.includes("new")) return "codex-cli 0.153.4";
       return "codex-cli 0.120.0";
     };
-    const result = resolveCodexRuntime({
+    const result = resolveAndPersistCodexRuntime({
       configDir,
       env: { PATH: "C:\\new" },
       platform: "win32",
       existsSync: () => true,
       execFileSync,
     });
-    expect(result.runtime.command).toContain("new");
-    expect(result.runtime.version).toBe("0.153.4");
-    expect(result.supersededDiscovered?.from).toEqual({
-      command: "C:\\old\\codex.exe",
-      version: "0.135.0",
-      source: "configured",
-    });
-    expect(result.supersededDiscovered?.to.command).toContain("new");
-    expect(result.supersededDiscovered?.to.version).toBe("0.153.4");
-    expect(result.supersededDiscovered?.reason).toBe(
-      "discovered runtime 0.135.0 superseded by newer runtime 0.153.4",
-    );
+    expect(result.runtime.command).toBe("C:\\old\\codex.exe");
+    expect(result.runtime.version).toBe("0.135.0");
+    expect(result.supersededDiscovered).toBeUndefined();
+    expect(result.newerAvailable?.command).toContain("new");
+    expect(result.newerAvailable?.version).toBe("0.153.4");
     expect(result.replacedConfigured).toBeUndefined();
+    expect(loadPersistedCodexRuntime({ configDir })?.origin).toBe("pinned");
   });
 
   test("origin pinned still resolves to 0.135.0 and reports no handover", () => {
@@ -1505,7 +1499,7 @@ describe("unpinned discovered runtime handover (issue 4204)", () => {
     const withoutOrigin = parsePersistedCodexRuntime(JSON.stringify(base));
     expect(withoutOrigin?.command).toBe("C:\\old\\codex.exe");
     expect(withoutOrigin?.origin).toBeUndefined();
-    expect(persistedCodexRuntimeIsPinned(withoutOrigin)).toBe(false);
+    expect(persistedCodexRuntimeIsPinned(withoutOrigin)).toBe(true);
 
     expect(parsePersistedCodexRuntime(JSON.stringify({ ...base, origin: "pinned" }))?.origin).toBe("pinned");
     expect(parsePersistedCodexRuntime(JSON.stringify({ ...base, origin: "discovered" }))?.origin).toBe("discovered");
@@ -1556,7 +1550,7 @@ describe("Codex App handover without PATH-wide discovery (issue 4204)", () => {
     // stopped at the still-runnable 0.135.0 under Programs\OpenAI and never
     // probed the 0.153.4 the Desktop app was running out of LOCALAPPDATA.
     const configDir = tempConfigDir();
-    writePersisted(configDir);
+    writePersisted(configDir, "discovered");
     const result = resolveCodexRuntime(appDeps(configDir));
     expect(result.runtime.command).toBe(APP_EXE);
     expect(result.runtime.version).toBe("0.153.4");

@@ -74,6 +74,13 @@ The prefilter is only an optimization, not final process-membership authority.
 
 ## Explicit Codex CLI installation observation
 
+Codex runtime selection state records whether a choice was explicitly pinned or
+automatically discovered. Legacy records without that provenance are ambiguous because
+both discovery and `doctor --fix-codex-runtime` wrote them; resolution conservatively
+retains them as pins and backfills `origin: "pinned"` when the selected runtime is
+otherwise unchanged. Only an explicit `origin: "discovered"` record may hand over to a
+strictly newer discovered runtime.
+
 `src/cli/codex-cli-update.ts` dispatches the opt-in Windows x64 `attest` operation to
 `src/codex/cli-installation-identity.ts`. With no options, `src/codex/cli-installation-targets.ts`
 derives the four inputs from the proof-bound launcher snapshot: the configured candidate or
