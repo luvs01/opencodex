@@ -332,6 +332,24 @@ describe("remote catalog coordinated installation", () => {
     expect([statSync(first.catalogPath).mtimeMs, statSync(cachePath).mtimeMs]).toEqual(before);
   });
 
+  test("a top-level-only catalog update keeps an already-synchronized cache", async () => {
+    const codexHome = home();
+    const first = await pullRemoteCatalog("https://hub.example/v1/catalog", {
+      codexHome, fetchImpl: async () => response(catalog),
+    });
+    const cachePath = join(codexHome, "models_cache.json");
+    const cacheBefore = readFileSync(cachePath);
+    const updated = { ...catalog, version: 2 };
+
+    const second = await pullRemoteCatalog("https://hub.example/v1/catalog", {
+      codexHome, fetchImpl: async () => response(updated),
+    });
+
+    expect(second).toMatchObject({ status: "updated", catalogWritten: true, cacheSynced: false });
+    expect(JSON.parse(readFileSync(first.catalogPath, "utf8"))).toEqual(updated);
+    expect(readFileSync(cachePath)).toEqual(cacheBefore);
+  });
+
   test("lock contention is typed and preserves last-known-good files", async () => {
     const codexHome = home();
     // Materialize K, then hold BEGIN IMMEDIATE from a separate connection while pull attempts it.

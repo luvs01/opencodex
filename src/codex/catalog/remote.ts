@@ -7,7 +7,7 @@ import { replaceActiveCodexCatalog } from "../internal/catalog-writer";
 import { resetCodexAppServerCatalogStateCache } from "../app-server-processes";
 import { getCodexHome } from "../paths";
 import { readCodexCatalogPathForHome } from "./parsing";
-import { invalidateCodexModelsCacheWithPermit } from "./sync";
+import { syncCodexModelsCacheWithPermit } from "./sync";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_MODELS = 2_000;
@@ -245,12 +245,12 @@ export async function pullRemoteCatalog(input: string, options: PullRemoteCatalo
     const lockedCurrent = existsSync(catalogPath) ? readFileSync(catalogPath) : null;
     if (lockedCurrent?.equals(candidate)) return { catalogWritten: false, cacheSynced: false };
     replaceActiveCodexCatalog(permit, codexHome, { path: catalogPath, content: fetched.content });
-    const cacheSynced = invalidateCodexModelsCacheWithPermit(permit, codexHome, { allowWhenDesiredDisabled: true });
-    if (!cacheSynced) {
+    const cacheSync = syncCodexModelsCacheWithPermit(permit, codexHome, { allowWhenDesiredDisabled: true });
+    if (cacheSync.status !== "written" && cacheSync.status !== "unchanged") {
       restorePreviousCatalog(permit, codexHome, catalogPath, lockedCurrent);
       throw new RemoteCatalogError("write_failed", "Remote catalog cache synchronization failed");
     }
-    return { catalogWritten: true, cacheSynced: true };
+    return { catalogWritten: true, cacheSynced: cacheSync.status === "written" };
   });
   if (outcome.kind !== "completed") return mapSerializationFailure(outcome);
   return {

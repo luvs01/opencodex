@@ -649,11 +649,17 @@ export async function syncCatalogModels(
   };
 }
 
-export function invalidateCodexModelsCacheWithPermit(
+export type CodexModelsCacheSyncResult =
+  | { status: "written" }
+  | { status: "unchanged" }
+  | { status: "skipped"; reason: "desired_disabled" | "no_catalog" }
+  | { status: "failed" };
+
+export function syncCodexModelsCacheWithPermit(
   permit: CatalogWritePermit,
   owningCodexHome: string,
   options?: CodexCatalogSyncOptions,
-): boolean {
+): CodexModelsCacheSyncResult {
   try {
     // This permit is a REACQUISITION: refreshCodexModelCatalog's commit released
     // K before this rewrite runs, so the commit-path desired-state check cannot
@@ -661,9 +667,11 @@ export function invalidateCodexModelsCacheWithPermit(
     // routed cache write — re-read intent under this permit, same as the commit.
     // The catalog-only sync override applies here too so an explicit refresh
     // keeps the cache consistent with the catalog it just wrote.
-    if (!shouldSyncCodexOnStart(loadConfig()) && options?.allowWhenDesiredDisabled !== true) return false;
+    if (!shouldSyncCodexOnStart(loadConfig()) && options?.allowWhenDesiredDisabled !== true) {
+      return { status: "skipped", reason: "desired_disabled" };
+    }
     const catalogPath = readCodexCatalogPathForHome(owningCodexHome);
-    if (!existsSync(catalogPath)) return false;
+    if (!existsSync(catalogPath)) return { status: "skipped", reason: "no_catalog" };
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
     const models = catalog.models ?? catalog;
     const cachePath = join(owningCodexHome, "models_cache.json");
@@ -707,16 +715,24 @@ export function invalidateCodexModelsCacheWithPermit(
     // catalog reproduced byte-identically — the settled case — the warning still
     // claimed "Disk catalog/cache were updated" and told the operator their Codex
     // model list might be stale, when nothing on disk had changed and Codex held the
-    // same model set the file already described. Returning `false` here makes
-    // `cacheSynced` mean what its name and its consumers already assume, and what
-    // `pullRemoteCatalog` and the early returns in `refreshCodexModelCatalog`
-    // already assert: a write happened.
-    if (!preparedBytesDifferFromDisk(preparedCache)) return false;
+    // same model set the file already described. The compatibility boolean wrapper
+    // therefore returns false, keeping `cacheSynced` reserved for a real write. This
+    // typed result lets transactional callers distinguish that benign no-op from a
+    // failed synchronization.
+    if (!preparedBytesDifferFromDisk(preparedCache)) return { status: "unchanged" };
     replaceCodexModelsCache(permit, owningCodexHome, preparedCache);
-    return true;
+    return { status: "written" };
   } catch {
-    return false;
+    return { status: "failed" };
   }
+}
+
+export function invalidateCodexModelsCacheWithPermit(
+  permit: CatalogWritePermit,
+  owningCodexHome: string,
+  options?: CodexCatalogSyncOptions,
+): boolean {
+  return syncCodexModelsCacheWithPermit(permit, owningCodexHome, options).status === "written";
 }
 
 export function invalidateCodexModelsCache(options?: CodexCatalogSyncOptions): boolean {

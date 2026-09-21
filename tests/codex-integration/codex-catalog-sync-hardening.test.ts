@@ -1365,6 +1365,28 @@ describe("Codex catalog sync hardening", () => {
     expect(out.bytesUnchanged).toBe(true);
   }, 20_000);
 
+  test("sync-cache reports an already-current cache as a successful skip", () => {
+    const catalogPath = join(codexHome, "catalog.json");
+    writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
+    writeFileSync(catalogPath, JSON.stringify({ models: [nativeEntry("gpt-5.5", 0)] }, null, 2) + "\n");
+    const env = { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: opencodexHome };
+    const invoke = () => spawnSync(process.execPath, ["src/cli/index.ts", "sync-cache", "--json"], {
+      cwd: repoRoot, env, encoding: "utf8",
+    });
+
+    const first = invoke();
+    const second = invoke();
+    expect(first.status, first.stderr).toBe(0);
+    expect(second.status, second.stderr).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({
+      ok: true,
+      wrote: false,
+      skipped: true,
+      outcome: "completed",
+      skippedReason: "unchanged",
+    });
+  }, 20_000);
+
   test("the no-op guard compares bytes, so a malformed byte decoding to U+FFFD is still repaired", () => {
     // The guard above must not preserve corruption. `readFileSync(path, "utf8")`
     // substitutes U+FFFD for every invalid byte, so a catalog holding a bare 0x80

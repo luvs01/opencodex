@@ -170,6 +170,9 @@ Entitlement-specific rosters (Qoder, Devin, Cursor) additionally bind their cach
 irreversible credential fingerprint: a credential switch observes neither the fresh nor the stale
 roster recorded under the previous credential, and a failed discovery's cooldown neither supplies
 the previous credential's stale roster nor suppresses the next credential's first discovery.
+Models-cache synchronization reports writes, byte-identical no-ops, policy skips, and failures as
+distinct outcomes internally. Transactional catalog installs accept an already-current cache as
+synchronized without claiming it was rewritten, while preserving rollback for actual failures.
 
 A Devin live row spreads its measured `inputModalities` before
 `catalogHintsFromProviderConfig`, so exact `modelCapabilities` declarations, the legacy
