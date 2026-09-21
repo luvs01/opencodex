@@ -4,12 +4,19 @@
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { syncModelsToCodex } from "../codex/sync";
+import { configuredContextWindow } from "../codex/catalog/provider-fetch";
 import { hasOwnProvider, isValidProviderName, loadConfig, saveConfig } from "../config";
-import { canonicalizeReasoningEfforts, isDeclaredReasoningEffort } from "../reasoning-effort";
-import { encodedModelIdCollides, routedSlug, slugEquals } from "../providers/slug-codec";
+import {
+  canonicalizeReasoningEfforts,
+  configuredReasoningEfforts,
+  isDeclaredReasoningEffort,
+  modelRecordValue,
+} from "../reasoning-effort";
+import { encodedModelIdCollides, resolveSlugSelection, routedSlug } from "../providers/slug-codec";
+import { isModelsRuntimeSubcommand } from "./models-runtime-subcommands";
 import { knownModelIdsForProvider } from "../router";
 import { findLiveProxy } from "../server/proxy-liveness";
-import type { OcxConfig, OcxCustomModel } from "../types";
+import { modelInList, type OcxConfig, type OcxCustomModel } from "../types";
 
 const ADD_USAGE = "Usage: ocx models add <provider> <modelId> [--display-name <name>] [--context-window <tokens>] [--modalities text,image,audio] [--reasoning-efforts <none,minimal,low,medium,high,xhigh,max,ultra>] [--default-reasoning-effort <level>]";
 const REMOVE_USAGE = "Usage: ocx models remove <customId|provider/modelId> [--yes]";
@@ -80,6 +87,11 @@ interface ModelEntry {
   reasoningEfforts: string[] | null;
 }
 
+/**
+ * Collect static configured models for all providers or one selected provider.
+ * Keep each provider's default model first and resolve metadata through shared helpers.
+ * Live-discovered models are not fetched by this listing.
+ */
 function collectModels(config: OcxConfig, providerFilter?: string): ModelEntry[] {
   const entries: ModelEntry[] = [];
   const providers = providerFilter
@@ -89,24 +101,35 @@ function collectModels(config: OcxConfig, providerFilter?: string): ModelEntry[]
   for (const [provName, prov] of Object.entries(providers)) {
     if (!prov) continue;
     const seen = new Set<string>();
-    const contextWindows = prov.modelContextWindows ?? {};
     const inputModalities = prov.modelInputModalities ?? {};
-    const reasoningEfforts = prov.modelReasoningEfforts ?? {};
-    const globalContext = prov.contextWindow ?? null;
 
+    /** Append one model with resolved metadata, ignoring duplicates within this provider. */
     const addModel = (model: string, isDefault: boolean) => {
       if (seen.has(model)) return;
       seen.add(model);
 
-      const noVision = prov.noVisionModels?.includes(model);
-      const modalities = inputModalities[model] ?? (noVision ? ["text"] : null);
-      const efforts = reasoningEfforts[model] ?? prov.reasoningEfforts ?? null;
+      // Resolve exactly as the runtime does, or this command reports capabilities the
+      // proxy will not honour: `isModelTextOnly` matches noVisionModels with modelInList
+      // and reads modelInputModalities with modelRecordValue, so a `gpt-oss` entry covers
+      // `gpt-oss:120b`. A bare lookup reported that model as unclassified on every field.
+      // noVisionModels is checked first because `isModelTextOnly` returns true on that
+      // match before it ever reads modelInputModalities: a `gpt-oss` noVision entry beats
+      // an exact `gpt-oss:120b` entry that lists "image", and the proxy rejects the image.
+      const noVision = modelInList(prov.noVisionModels, model);
+      const modalities = noVision ? ["text"] : (modelRecordValue(inputModalities, model) ?? null);
+      // Same reason, for the ladder: `configuredReasoningEfforts` is what the catalog
+      // (`provider-fetch`) and the effort cap (`effort-policy`) resolve through, and it
+      // does three things this expression did not — it returns [] for a noReasoningModels
+      // match, drops levels Codex does not declare, and re-adds tiers the wire map proves
+      // the model emits. Restating two of its five lines here reported a ladder the proxy
+      // strips, and unsanitized junk as a supported level.
+      const efforts = configuredReasoningEfforts(prov, model) ?? null;
 
       entries.push({
         provider: provName,
         model,
         isDefault,
-        contextWindow: contextWindows[model] ?? globalContext,
+        contextWindow: configuredContextWindow(prov, model) ?? null,
         inputModalities: modalities,
         reasoningEfforts: efforts,
       });
@@ -260,11 +283,34 @@ async function handleCustomRemove(args: string[]): Promise<void> {
 
   const config = loadConfig();
   const existing = config.customModels ?? [];
-  const matchingIndexes = existing.flatMap((model, index) => (
-    target.includes("/")
-      ? slugEquals(target, model.provider, model.modelId)
-      : model.id === target
-  ) ? [index] : []);
+  // Slug matching goes through the shared resolver so this command sees the same collision
+  // class catalog filtering and persisted sync see (#2491). `slugEquals` compares the raw and
+  // encoded spellings of ONE id, so a selector written in the native slash form matched only
+  // that row while the dash form matched both — the two relations disagreed on the same
+  // config. Removal stays exact-or-refuse: an ambiguous selector still aborts below, which is
+  // the right default for a destructive command.
+  const separator = target.indexOf("/");
+  const selectedProvider = separator >= 0 ? target.slice(0, separator) : undefined;
+  // Resolve ONCE against the provider's whole roster, then map the decision back onto rows.
+  // Calling the resolver per row with a singleton roster hid every cross-row fact it needs:
+  // a self-namespaced `acme/turbo` and a sibling `turbo` each matched their own singleton,
+  // so the command saw two matches and aborted as ambiguous even though the selector names
+  // one row exactly.
+  const rosterMatched = selectedProvider === undefined
+    ? undefined
+    : resolveSlugSelection(
+      selectedProvider,
+      target,
+      existing.filter(model => model.provider === selectedProvider).map(model => model.modelId),
+    );
+  // Deliberately admit the whole matched set rather than narrowing to `exact`: an encoded
+  // selector that spans a real collision must still abort below. Removal stays exact-or-refuse.
+  const admitted = new Set(rosterMatched?.matched ?? []);
+  const matchingIndexes = existing.flatMap((model, index) => {
+    if (selectedProvider === undefined) return model.id === target ? [index] : [];
+    if (model.provider !== selectedProvider) return [];
+    return admitted.has(model.modelId) ? [index] : [];
+  });
   if (matchingIndexes.length === 0) fail(`custom model "${target}" not found`);
   if (matchingIndexes.length > 1) {
     fail(`custom model selector "${target}" is ambiguous; use the custom model id`);
@@ -405,7 +451,7 @@ export async function handleModels(args: string[]): Promise<void> {
     handleCustomList(rest);
     return;
   }
-  if (["live", "edit", "enable", "disable", "provider", "selected", "context", "shadow"].includes(subcommand ?? "")) {
+  if (isModelsRuntimeSubcommand(subcommand)) {
     const { handleModelsRuntimeCommand } = await import("./models-runtime");
     const code = await handleModelsRuntimeCommand(subcommand!, rest);
     if (code !== null) process.exitCode = code;

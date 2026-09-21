@@ -32,6 +32,19 @@ import { WINSW_SERVICE_ID } from "./lib/winsw";
 /** Short: this runs inside admission, and a slow answer is the same as none. */
 export const SERVICE_PROBE_TIMEOUT_MS = 2_000;
 
+/**
+ * The one query that is allowed to be slow: the full `schtasks` listing.
+ *
+ * 2s is the right budget for a targeted query and the wrong one for enumerating
+ * every task on the machine — measured at 12.3s on a host with 401 of them, which
+ * killed the listing and left ownership unprovable (#2914). This is not a general
+ * relaxation: the targeted queries keep the 2s ceiling, and after the
+ * locale-independent absence check above, a healthy host decides before the
+ * listing runs at all. Only a host that has already exhausted the cheap evidence
+ * pays this, and for it the alternative is not a fast answer but no answer.
+ */
+export const SERVICE_PROBE_LISTING_TIMEOUT_MS = 20_000;
+
 export type ServiceManagerBackend = "launchd" | "systemd" | "scheduler" | "winsw";
 
 export interface ServiceManagerClaim {
@@ -70,13 +83,68 @@ export interface ProbeRunner {
  * Windows probe runner: preserves schtasks stdout/stderr as raw bytes so the
  * UTF-16LE task XML is not corrupted by a UTF-8 decode.
  */
-export type RawProbeRunner = (file: string, args: readonly string[]) => {
+export type RawProbeRunner = (
+  file: string,
+  args: readonly string[],
+  options?: { readonly timeoutMs?: number },
+) => {
   status: number | null;
   stdout: Buffer;
   stderr: Buffer;
   timedOut: boolean;
   spawnFailed: boolean;
 };
+
+type RawProbeResult = ReturnType<RawProbeRunner>;
+
+/**
+ * Startup-local memo for the expensive full Task Scheduler listing.
+ *
+ * The targeted `/tn ... /xml` query is deliberately NOT cached: it is the
+ * race-sensitive evidence that a task appeared between two ownership checks.
+ * A listing may be reused only when that fresh targeted query returned exactly
+ * the same bytes and status as the query that caused the listing. If the
+ * targeted evidence changes, the old absence proof is stale and another
+ * listing is required rather than turning uncertainty into absence.
+ *
+ * Only a SUCCESSFUL listing is retained. A stall or spawn failure is not
+ * evidence of anything, and caching it made one transient 20s timeout poison the
+ * rest of the startup: the targeted query is byte-identical on the next
+ * inspection, so the identity check passed, the listing was never retried, and
+ * ownership stayed unprovable for the whole run — refusing the write that #2914
+ * exists to allow.
+ */
+export interface WindowsTaskListingCache {
+  getOrRun(targetedQuery: RawProbeResult, run: () => RawProbeResult): RawProbeResult;
+}
+
+function rawProbeIdentity(result: RawProbeResult): string {
+  return [
+    result.status === null ? "null" : String(result.status),
+    result.timedOut ? "1" : "0",
+    result.spawnFailed ? "1" : "0",
+    result.stdout.toString("base64"),
+    result.stderr.toString("base64"),
+  ].join("\u0000");
+}
+
+/** Create one bounded cache for the synchronous ownership phase of one startup. */
+export function createWindowsTaskListingCache(): WindowsTaskListingCache {
+  let identity: string | null = null;
+  let result: RawProbeResult | null = null;
+  return {
+    getOrRun(targetedQuery, run) {
+      const nextIdentity = rawProbeIdentity(targetedQuery);
+      if (result !== null && identity === nextIdentity) return result;
+      const next = run();
+      if (!next.timedOut && !next.spawnFailed && next.status === 0) {
+        identity = nextIdentity;
+        result = next;
+      }
+      return next;
+    },
+  };
+}
 
 export const defaultProbeRunner: ProbeRunner = (file, args) => {
   const result = spawnSync(file, [...args], {
@@ -94,11 +162,11 @@ export const defaultProbeRunner: ProbeRunner = (file, args) => {
   };
 };
 
-export const defaultRawProbeRunner: RawProbeRunner = (file, args) => {
+export const defaultRawProbeRunner: RawProbeRunner = (file, args, options) => {
   const result = spawnSync(file, [...args], {
     encoding: "buffer",
     windowsHide: true,
-    timeout: SERVICE_PROBE_TIMEOUT_MS,
+    timeout: options?.timeoutMs ?? SERVICE_PROBE_TIMEOUT_MS,
   });
   return {
     status: result.status,
@@ -122,6 +190,8 @@ export interface ProbeDeps {
   readonly winswStatus?: () => "started" | "stopped" | "nonexistent" | "unknown";
   /** Test seam for redirected Windows legacy-codepage output. */
   readonly windowsLocale?: string;
+  /** Startup-local full-listing cache; targeted task queries always bypass it. */
+  readonly windowsTaskListingCache?: WindowsTaskListingCache;
 }
 
 const LABEL = "com.opencodex.proxy";
@@ -177,6 +247,86 @@ function unitEnvValue(body: string, key: string): string | null {
     if (match) return match[1];
   }
   return null;
+}
+
+/**
+ * Did `systemctl --user` fail because the session bus could not be reached at all?
+ *
+ * These are the shapes reported on #2114 and #1939. The distinction that matters is
+ * "the question never left the machine" versus "systemd answered and said no" — only
+ * the former licenses reading the disk instead.
+ *
+ * **Locale caveat, stated rather than hidden:** systemd localizes these strings, so a
+ * non-English host will not match and keeps the old `unknown`. That is the safe
+ * direction — it fences rather than admits — but it does mean the fix does not reach
+ * every affected user. Forcing `LC_ALL=C` on the probe would remove the caveat and is
+ * the obvious follow-up; it is not done here because it changes every systemctl call
+ * this module makes, not just this branch.
+ */
+function busUnreachable(stderr: string): boolean {
+  const err = stderr.trim();
+  return err.includes("Failed to connect to bus")
+    || err.includes("Failed to connect to user scope bus")
+    || err.includes("Failed to get D-Bus connection")
+    || err.includes("DBUS_SESSION_BUS_ADDRESS")
+    || err.includes("System has not been booted with systemd");
+}
+
+/**
+ * Ownership from the unit file alone, for when the bus cannot answer (#2114).
+ *
+ * A unit file is proof of installation that does not require a running bus, and the homes
+ * it names are what ownership is actually decided on. What the disk cannot tell us is
+ * whether systemd has the unit LOADED, so this reports `registration: "absent"` — the
+ * honest reading of "no running manager has it" — rather than inventing a live state.
+ *
+ * A foreign home therefore still blocks, which is the whole reason this consults the disk
+ * instead of widening the exit code.
+ */
+function systemdUserUnitSearchPaths(home: string): string[] {
+  // systemd's user search path is not one directory. Checking only the canonical one and
+  // calling the rest absent is a fail-open: with the bus down a foreign unit in any other
+  // search dir is invisible, and "no answer" would be read as "no owner".
+  const xdgConfig = process.env.XDG_CONFIG_HOME?.trim();
+  const xdgData = process.env.XDG_DATA_HOME?.trim();
+  const dirs = [
+    xdgConfig ? join(xdgConfig, "systemd", "user") : join(home, ".config", "systemd", "user"),
+    join(home, ".config", "systemd", "user"),
+    xdgData ? join(xdgData, "systemd", "user") : join(home, ".local", "share", "systemd", "user"),
+    join(home, ".local", "share", "systemd", "user"),
+  ];
+  return [...new Set(dirs)].map(dir => join(dir, `${TASK}.service`));
+}
+
+function inspectSystemdOffline(home: string): ServiceManagerInstallation {
+  const candidates = systemdUserUnitSearchPaths(home);
+  const found = candidates.filter(path => artifactPresence(path) === "present");
+  if (candidates.some(path => artifactPresence(path) === "unreadable")) {
+    return unknown("the session bus is unreachable and a systemd unit could not be read");
+  }
+  if (found.length === 0) return { kind: "absent" };
+  if (found.length > 1) {
+    return unknown("the session bus is unreachable and more than one systemd unit file claims this proxy");
+  }
+  const definitionPath = found[0]!;
+  let body: string;
+  try {
+    body = readFileSync(definitionPath, "utf-8");
+  } catch (error) {
+    return unknown(`the session bus is unreachable and the systemd unit could not be read: ${String(error)}`);
+  }
+  return {
+    kind: "present",
+    claims: [{
+      backend: "systemd",
+      definitionPath,
+      homes: {
+        codexHome: unitEnvValue(body, "CODEX_HOME"),
+        opencodexHome: unitEnvValue(body, "OPENCODEX_HOME"),
+      },
+      registration: "absent",
+    }],
+  };
 }
 
 function inspectLaunchd(deps: Required<Pick<ProbeDeps, "run" | "uid" | "home">>): ServiceManagerInstallation {
@@ -243,7 +393,7 @@ function inspectLaunchd(deps: Required<Pick<ProbeDeps, "run" | "uid" | "home">>)
   };
 }
 
-function systemdProperty(out: string, key: string): string | null {
+export function systemdProperty(out: string, key: string): string | null {
   for (const line of out.split("\n")) {
     const match = line.match(new RegExp(`^${key}=(.*)$`));
     if (match) return match[1].trim();
@@ -269,6 +419,15 @@ function inspectSystemd(deps: Required<Pick<ProbeDeps, "run" | "home">>): Servic
   if (shown.status !== 0) {
     // A missing unit still exits ZERO and says not-found; a non-zero status means
     // the question never reached the bus.
+    //
+    // That is evidence about the BUS, not evidence that a foreign service owns this home
+    // (#2114). Calling it `unknown` fences native-main for the whole process, so a laptop
+    // with no session bus answers every native request with a 503 until `ocx restart`.
+    //
+    // Widening on the exit code alone would fail open, because with the bus down systemctl
+    // cannot see a foreign unit either. So ask the disk, which needs no bus, and fall back
+    // to `unknown` for every other non-zero exit.
+    if (busUnreachable(shown.stderr)) return inspectSystemdOffline(deps.home);
     return unknown(`systemctl show exited ${String(shown.status)}: ${shown.stderr.trim()}`);
   }
 
@@ -446,7 +605,22 @@ function windowsTaskListContains(body: string, taskName: string): boolean {
   });
 }
 
-/** English hosts provide a decisive fast path; other locales fall back to a full listing. */
+/**
+ * The English message: a fast path on an English host, and nothing more.
+ *
+ * It cannot match a localized host — on zh-CN schtasks answers with the CP936
+ * bytes of `错误: 系统找不到指定的文件。` — which is why absence there has to be
+ * settled by the locale-neutral listing below (#2914). Adding more translated
+ * substrings would only cover the languages someone thought of, and each one is
+ * a chance to read a DIFFERENT refusal as absence.
+ *
+ * Deriving the host's own not-found wording from a control query looks like the
+ * general fix and is not: schtasks exits 1 for both "not found" and "access
+ * denied", so a locked-down host answers the control and the real query
+ * identically, and comparing them yields a false `absent` — the one direction
+ * that lets an unattended write proceed into a home another process owns.
+ * `tests/codex-integration/codex-service-manager-probe.test.ts` covers exactly that host.
+ */
 const SCHTASKS_TASK_NOT_FOUND_EN = /cannot find the file specified/i;
 
 /**
@@ -458,7 +632,8 @@ const SCHTASKS_TASK_NOT_FOUND_EN = /cannot find the file specified/i;
  * fallback, and only a successful list without our task proves absence.
  */
 function probeWindowsTaskRegistration(
-  deps: Required<Pick<ProbeDeps, "runRaw">> & Pick<ProbeDeps, "windowsLocale">,
+  deps: Required<Pick<ProbeDeps, "runRaw">>
+    & Pick<ProbeDeps, "windowsLocale" | "windowsTaskListingCache">,
 ): {
   registered: "present" | "absent" | "unknown";
   registeredXml: string;
@@ -485,7 +660,14 @@ function probeWindowsTaskRegistration(
     return { registered: "absent", registeredXml: "" };
   }
 
-  const listed = deps.runRaw(schtasks, ["/query", "/fo", "CSV", "/nh"]);
+  const runListing = () => deps.runRaw(
+    schtasks,
+    ["/query", "/fo", "CSV", "/nh"],
+    { timeoutMs: SERVICE_PROBE_LISTING_TIMEOUT_MS },
+  );
+  const listed = deps.windowsTaskListingCache
+    ? deps.windowsTaskListingCache.getOrRun(queried, runListing)
+    : runListing();
   if (listed.spawnFailed || listed.timedOut || listed.status !== 0) {
     return { registered: "unknown", registeredXml: "" };
   }
@@ -529,7 +711,7 @@ function probeWinswRegistration(
 
 function inspectWindows(
   deps: Required<Pick<ProbeDeps, "runRaw" | "home">>
-    & Pick<ProbeDeps, "configDir" | "winswStatus" | "windowsLocale">,
+    & Pick<ProbeDeps, "configDir" | "winswStatus" | "windowsLocale" | "windowsTaskListingCache">,
 ): ServiceManagerInstallation {
   const configDir = windowsConfigDirPath(deps);
   const taskXmlPath = join(configDir, "opencodex-service-task.xml");
@@ -592,7 +774,19 @@ function inspectWindows(
   }
 
   if (task === "absent") {
-    return schedulerRegistered
+    if (!schedulerRegistered) return { kind: "absent" };
+    if (!registration.registeredXml.trim()) {
+      return unknown("Task Scheduler is registered but its definition XML could not be read");
+    }
+    const launcherArg = windowsTaskArguments(registration.registeredXml);
+    if (!launcherArg) {
+      return unknown("Task Scheduler holds opencodex-proxy but its task XML is missing");
+    }
+    const launcherPath = /"([^"]+)"/.exec(launcherArg)?.[1];
+    if (!launcherPath) {
+      return unknown("Task Scheduler holds opencodex-proxy but its task XML is missing");
+    }
+    return windowsPathInsideConfigDir(launcherPath, configDir)
       ? unknown("Task Scheduler holds opencodex-proxy but its task XML is missing")
       : { kind: "absent" };
   }
@@ -729,6 +923,16 @@ function walkWinswChain(
   const registration = probeWinswRegistration(deps);
 
   if (xml === "absent" && exe === "absent" && registration === "absent") return { kind: "absent" };
+  // A query we could not ask is a question about a service that cannot exist: WinSW is an
+  // optional backend, and with neither its XML nor its exe on disk there is nothing for a
+  // registration to belong to. Fencing here on an `sc.exe` timeout is one of the two
+  // triggers behind #2108, where a scheduler-only install answers 503 until `ocx restart`.
+  //
+  // The disk outranks the unaskable query only when BOTH assets are gone. Either one
+  // present means a real install may be there and the old `unknown` still holds.
+  if (registration === "unknown" && xml === "absent" && exe === "absent") {
+    return { kind: "absent" };
+  }
   if (registration === "unknown") {
     return unknown("the native WinSW service registration could not be verified");
   }
@@ -787,6 +991,7 @@ export function inspectServiceManagerInstallation(deps: ProbeDeps = {}): Service
       configDir: deps.configDir,
       winswStatus: deps.winswStatus,
       windowsLocale: deps.windowsLocale,
+      windowsTaskListingCache: deps.windowsTaskListingCache,
     });
   }
   return unknown(`no service manager probe for platform ${platform}`);

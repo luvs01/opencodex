@@ -2,38 +2,135 @@ import { createHash, type Hash } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
+import type { CodexAffinityMove, CodexAffinityReason } from "../codex/routing";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { sanitizeLogMetadataString } from "../lib/redact";
 import { usageDisplayTotalTokens } from "./totals";
+import { normalizeAttemptDeliverySummary } from "./attempt-delivery";
+import {
+  isRequestCloseReason,
+  isRequestTerminalStatus,
+  type RequestCloseReason,
+  type RequestTerminalStatus,
+} from "./request-outcome";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
-import { CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
+import type { CodexWsStageRecord } from "../server/responses/codex-ws-wire";
+import {
+  ATTEMPT_RECOVERY_KIND_ROSTER,
+  ATTEMPT_RECOVERY_WITHHELD_ROSTER,
+  REQUEST_FAILURE_CAUSES,
+  REQUEST_FAILURE_STAGES,
+  REQUEST_TRANSPORT_PHASES,
+  type AttemptRecoveryKind,
+  type AttemptRecoveryWithheld,
+  type AttemptDeliverySummary,
+  type RequestFailureCause,
+  type RequestFailureStage,
+  type RequestSpendTotals,
+} from "./telemetry-contract";
+
+// Re-exported so every existing importer keeps its path. The declarations moved to a leaf the
+// dashboard can import without pulling node:fs and the config barrel into the browser build.
+export { ATTEMPT_RECOVERY_KIND_ROSTER, ATTEMPT_RECOVERY_WITHHELD_ROSTER, REQUEST_FAILURE_CAUSES, REQUEST_FAILURE_STAGES };
+export type { AttemptRecoveryKind, AttemptRecoveryWithheld, RequestFailureCause, RequestFailureStage, RequestSpendTotals };
+
+export interface PersistedClaudeCompatibilityLog {
+  decision: "shadow";
+  featureCodes: ClaudeFeatureCode[];
+  reason?: string;
+}
+
+/** Disk and in-memory callers share a closed-code projection; free-form reasons are discarded. */
+export function normalizeClaudeCompatibilityUsageLog(value: unknown): PersistedClaudeCompatibilityLog | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (row.decision !== "shadow") return undefined;
+  const featureCodes = normalizeClaudeFeatureCodes(row.featureCodes);
+  const reason = claudeCompatibilityReason(featureCodes, true);
+  if (!reason) return undefined;
+  return { decision: "shadow", featureCodes, reason };
+}
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
-export type CodexUsageAccountLogLabel = "main" | `p${string}`;
+/**
+ * A persisted account label: a Codex pool account (`main`/`p<hex6>`) or a non-Codex OAuth
+ * provider account (`o<hex6>`, #2699).
+ *
+ * The old name `CodexUsageAccountLogLabel` is kept as an alias because it is exported and used
+ * across modules; the two predicates below are what callers should choose between.
+ */
+export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}` | `k${string}`;
+export type CodexUsageAccountLogLabel = UsageAccountLogLabel;
 
-export function isCodexUsageAccountLogLabel(value: unknown): value is CodexUsageAccountLogLabel {
+/**
+ * Accepts EITHER label family. This is the predicate the persistence writers use, so widening
+ * it here is what stops six separate call sites from silently dropping an `o`-label -- including
+ * two in the live request path (`request-log.ts:972` and `:1187`).
+ *
+ * The name is unchanged deliberately: renaming it would touch every call site for no behavior,
+ * and the widened contract is what every one of those sites wanted.
+ */
+export function isCodexUsageAccountLogLabel(value: unknown): value is UsageAccountLogLabel {
+  return value === "main" || (typeof value === "string" && ACCOUNT_LOG_LABEL_RE.test(value));
+}
+
+/** Strictly a Codex pool label. Use when the Codex-only distinction actually matters. */
+export function isCodexPoolAccountLogLabel(value: unknown): value is "main" | `p${string}` {
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
+/** Request-time upstream credential class, never a credential or account identifier. */
+export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
+
 /**
- * Recovery kinds recorded per attempt in the usage log; the GUI renders localized labels
- * for these wire values.
+ * Where a row's cache-token detail came from.
+ *
+ * Strict-client normalization emits zero-default token-detail objects on every bridged wire
+ * (`responsesUsage` in src/bridge.ts), so a `cached_tokens: 0` read back off that wire is a
+ * wire-compatibility artifact and not a measured cache miss. The three values stay distinct all
+ * the way to the summary because folding `synthesized` or `unknown` into `observed` is what
+ * lets a pool that discarded every warm prefix still report a plausible cache hit rate (#4546).
  */
-export type AttemptRecoveryKind =
-  | "transient-5xx"
-  | "connection-reset"
-  | "oauth-401"
-  | "key-429"
-  | "rate-limit-429"
-  | "anthropic-oauth-429"
-  | "image-413"
-  | "empty-completion";
+export type CacheTelemetryProvenance = "observed" | "synthesized" | "unknown";
+
+const KNOWN_CACHE_PROVENANCE = new Set<CacheTelemetryProvenance>([
+  "observed", "synthesized", "unknown",
+]);
+
+export function isKnownCacheTelemetryProvenance(value: unknown): value is CacheTelemetryProvenance {
+  return typeof value === "string" && KNOWN_CACHE_PROVENANCE.has(value as CacheTelemetryProvenance);
+}
+
+/**
+ * Classify one usage record's cache detail.
+ *
+ * `wireParsed` means the counts were read back off a response wire rather than reported raw by
+ * the adapter. An all-zero cache detail from that source cannot be told apart from the zero
+ * defaults the normalizer writes, so it is `synthesized`; the same shape reported raw is a real
+ * zero and stays `observed`. A record with no cache fields at all is `unknown`, which is not a
+ * zero either.
+ */
+export function classifyCacheTelemetryProvenance(
+  usage: OcxUsage | undefined,
+  options: { wireParsed?: boolean } = {},
+): CacheTelemetryProvenance {
+  if (!usage) return "unknown";
+  const present = [usage.cachedInputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens]
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (present.length === 0) return "unknown";
+  if (present.some(value => value > 0)) return "observed";
+  return options.wireParsed === true ? "synthesized" : "observed";
+}
 
 export interface PersistedUsageAttempt {
   ordinal: number;
   provider: string;
+  /** Absent on historic attempts and routes whose subscription attribution is unknown. */
+  credentialSource?: UsageCredentialSource;
   model: string;
   adapter: string;
   status: number;
@@ -48,13 +145,30 @@ export interface PersistedUsageAttempt {
   firstOutputMs?: number;
   sendCount: number;
   recoveryKinds: AttemptRecoveryKind[];
+  /**
+   * Recoveries this attempt was eligible for and did not make. Absent on ordinary attempts so
+   * old rows keep their exact shape.
+   */
+  recoveryWithheld?: AttemptRecoveryWithheld[];
   usageStatus: UsageStatus;
+  /**
+   * True when the proxy answered this turn locally and issued no upstream request. It travels on
+   * the attempt itself rather than as a `finishRequestAttempt` argument because that function is
+   * called from six places, and a new parameter would silently default to the wrong answer at any
+   * one of them that was missed. Absent on ordinary attempts so old rows keep their exact shape.
+   */
+  locallyAnswered?: boolean;
   /** Stable non-PII identity for the Codex pool account that served this attempt. */
   accountLogLabel?: CodexUsageAccountLogLabel;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
   errorCode?: string;
+  /**
+   * Provenance of this attempt's cache detail. Absent on rows written before the distinction
+   * existed, where `classifyCacheTelemetryProvenance` reconstructs the pre-existing reading.
+   */
+  cacheProvenance?: CacheTelemetryProvenance;
   /** Installation-local exact Compatibility Lab route-subject digest for this attempt. */
   labRouteSubjectId?: string;
   /** Target-specific reasoning intent and exact adapter-normalized wire parameter. */
@@ -64,10 +178,97 @@ export interface PersistedUsageAttempt {
   reasoningWireValue?: string | number | boolean;
   /** Adapter-produced tier fact for this physical attempt; absent on pre-B0 rows. */
   tierOutcome?: AttemptTierOutcome;
+  /**
+   * #4191: content-free stage record of a Codex WS upstream exchange that
+   * served this attempt (frame size, counters, close code, versions). Absent
+   * on HTTP-transport attempts and pre-instrumentation rows. Numbers,
+   * booleans, and semver strings only — never reason text, headers, or
+   * account identifiers.
+   */
+  codexWsStage?: CodexWsStageRecord;
+  /**
+   * What this attempt delivered, as five bounded counts (#3983). Absent on attempts whose
+   * transport does not pass through the Responses bridge and on pre-instrumentation rows.
+   */
+  deliverySummary?: AttemptDeliverySummary;
+  /**
+   * How far this attempt's exchange got and why it failed, in the shared vocabulary (#2366).
+   *
+   * Both values are closed roster members, so the pair can be a metric label and a grouping key
+   * without a masking pass. Absent on a completed attempt and on every row written before the
+   * attribution existed. The resend verdict these two imply is NOT stored: it is derived at read
+   * time, so a stored row can never carry a verdict the current table would no longer reach.
+   */
+  failureStage?: RequestFailureStage;
+  failureCause?: RequestFailureCause;
+}
+
+/**
+ * What one logical request spent upstream, and why (#4546, devlog 040 slice D).
+ *
+ * `sendCount` counts physical sends per ATTEMPT, which answers the wrong question: a user turn
+ * that failed over twice and fanned out to three combo targets is one turn, and the number an
+ * operator needs is the total that reached upstream carrying the full prompt. These fields are
+ * that total, decomposed by how much of it is explained.
+ */
+export interface PersistedRequestSpend extends RequestSpendTotals {
+  /** Budget profile that produced `reserved`, so a count can be read against the policy it obeyed. */
+  policyVersion?: string;
+  /**
+   * Why the pool binding moved during this request. A move discards the warmed prompt-cache
+   * prefix, so the reason belongs next to the send count rather than a page away from it.
+   */
+  moveReasons?: CodexAffinityReason[];
+}
+
+const MAX_PERSISTED_MOVE_REASONS = 8;
+const LOGICAL_REQUEST_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+export function isLogicalRequestId(value: unknown): value is string {
+  return typeof value === "string" && LOGICAL_REQUEST_ID_RE.test(value);
+}
+
+/**
+ * A spend record is trusted only when every count is a non-negative integer and the decomposition
+ * holds. A hand-edited row that reports more settled spend than it sent would understate exactly
+ * the quantity the record exists to expose, so the whole record is dropped instead.
+ */
+export function normalizeRequestSpend(value: unknown): PersistedRequestSpend | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const spend = value as Record<string, unknown>;
+  const count = (raw: unknown): number | null =>
+    typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : null;
+  const sends = count(spend.sends);
+  const settled = count(spend.settled);
+  const unresolved = count(spend.unresolved);
+  if (sends === null || settled === null || unresolved === null) return undefined;
+  if (settled > sends) return undefined;
+  const reserved = "reserved" in spend ? count(spend.reserved) : undefined;
+  if (reserved === null) return undefined;
+  const moveReasons = Array.isArray(spend.moveReasons)
+    ? [...new Set(spend.moveReasons.filter(isKnownAffinityReason))].slice(0, MAX_PERSISTED_MOVE_REASONS)
+    : [];
+  return {
+    sends,
+    settled,
+    unresolved,
+    ...(reserved !== undefined ? { reserved } : {}),
+    ...(typeof spend.policyVersion === "string" && spend.policyVersion
+      ? { policyVersion: capMetadataString(spend.policyVersion) }
+      : {}),
+    ...(moveReasons.length > 0 ? { moveReasons } : {}),
+  };
 }
 
 export interface PersistedUsageEntry {
+  requestedAlias?: string;
   requestId: string;
+  /**
+   * Identity of the ONE logical request this row belongs to (#4546), minted by
+   * `createRequestExecutionBudget` at ingress. `requestId` identifies a log row; a retry layer,
+   * a repair leg and a combo child are all the same logical request, and only this field says so.
+   */
+  logicalRequestId?: string;
   timestamp: number;
   provider: string;
   model: string;
@@ -84,6 +285,8 @@ export interface PersistedUsageEntry {
   conversationId?: string;
   resolvedModel?: string;
   requestedModel?: string;
+  /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
+  shadowCallRewrittenFrom?: string;
   /** Reasoning effort / service-tier metadata for GUI Logs after restart. */
   requestedEffort?: string;
   /** Adapter-normalized tier and exact upstream parameter emitted for this request. */
@@ -108,19 +311,93 @@ export interface PersistedUsageEntry {
   usage?: OcxUsage;
   totalTokens?: number;
   attempts?: PersistedUsageAttempt[];
+  /** Aggregated upstream spend for this logical request; additive, older rows omit it. */
+  spend?: PersistedRequestSpend;
+  /** Provenance of this row's cache detail; absent rows are reconstructed, never assumed observed. */
+  cacheProvenance?: CacheTelemetryProvenance;
   // Failure diagnostics (devlog/_plan/260716_claudecode_hardening/030): persisted for
   // status>=400 or non-completed terminals so incidents survive the in-memory ring buffer.
   errorCode?: string;
-  terminalStatus?: string;
-  closeReason?: "terminal" | "client_cancel" | "non_stream" | "body_stall" | "body_overflow";
+  /**
+   * Closed, like `closeReason` beside it has always been. It was `string` while it was only
+   * rendered; it is a grouping-key slot now, and the value is assembled from an upstream
+   * terminal frame, so an open type here is the one way upstream text could reach that key.
+   */
+  terminalStatus?: RequestTerminalStatus;
+  closeReason?: RequestCloseReason;
   /** Already redacted + capped at capture (request-log.ts redactSecretString().slice(0,500)). */
   upstreamError?: string;
+  /** Where the terminal/failure was observed; absent on historic rows. */
+  transportPhase?: "pre_headers" | "mid_stream" | "terminal_sse";
+  /** Whether the terminal came from upstream or a proxy-generated tail. */
+  terminalSource?: "upstream" | "synthetic";
+  /**
+   * What happened to this request's Codex pool binding, and why (#4546). A move discards the
+   * prompt-cache prefix warmed on the previous account, so it is recorded as an event rather
+   * than left to be inferred from account labels across rows. Additive; older rows omit it.
+   */
+  affinity?: CodexAffinityMove;
+  affinityReason?: CodexAffinityReason;
+  /**
+   * Set when this request dropped account-bound continuation after a Codex pool
+   * account change. Never an account identifier.
+   */
+  conversationStateScrub?: "account-change";
   /**
    * Bounded route-decision trace (RI-01): why this provider/model/account was
    * selected. Additive field; old rows without it parse unchanged. Never
    * contains prompts, credentials, or hidden reasoning.
    */
   routeDecision?: RouteDecisionTraceV1;
+  /** Closed Claude protocol codes only; absent on older rows. */
+  claudeCompatibility?: PersistedClaudeCompatibilityLog;
+  /**
+   * How far this request got and why it failed (#2366). Projected from the attempt that ended
+   * the request so every surface reads the answer off the same row. Absent on a completed
+   * request and on rows written before the attribution existed.
+   */
+  failureStage?: RequestFailureStage;
+  failureCause?: RequestFailureCause;
+}
+
+/**
+ * Attribution for the logical request, projected from the attempt that ended it (#2366).
+ *
+ * Carried on the entry as well as the attempt because the three surfaces that have to agree read
+ * the entry: a projection that had to reach into `attempts` to answer "why did this fail" would
+ * be reading a different row from the exporter, which is the disagreement the landed terminal
+ * classifier already removed once.
+ */
+export interface PersistedRequestFailureAttribution {
+  failureStage?: RequestFailureStage;
+  failureCause?: RequestFailureCause;
+}
+
+const KNOWN_REQUEST_FAILURE_STAGES: ReadonlySet<string> = new Set(REQUEST_FAILURE_STAGES);
+const KNOWN_REQUEST_FAILURE_CAUSES: ReadonlySet<string> = new Set(REQUEST_FAILURE_CAUSES);
+
+/**
+ * Same closed-set discipline as `isKnownTransportPhase`, with the set DERIVED from the roster
+ * rather than restated. The recovery vocabulary was written twice once -- as a union and as the
+ * read-back whitelist -- and a member present in only one of them is written to disk and dropped
+ * on the next read, which loses exactly the field that says why the row failed.
+ */
+export function isKnownRequestFailureStage(value: unknown): value is RequestFailureStage {
+  return typeof value === "string" && KNOWN_REQUEST_FAILURE_STAGES.has(value);
+}
+
+export function isKnownRequestFailureCause(value: unknown): value is RequestFailureCause {
+  return typeof value === "string" && KNOWN_REQUEST_FAILURE_CAUSES.has(value);
+}
+
+/** The stage/cause pair a normalizer keeps, dropping either half that is not a roster member. */
+export function normalizeRequestFailureAttribution(
+  raw: { failureStage?: unknown; failureCause?: unknown },
+): PersistedRequestFailureAttribution {
+  return {
+    ...(isKnownRequestFailureStage(raw.failureStage) ? { failureStage: raw.failureStage } : {}),
+    ...(isKnownRequestFailureCause(raw.failureCause) ? { failureCause: raw.failureCause } : {}),
+  };
 }
 
 const KNOWN_USAGE_SURFACES = new Set<NonNullable<PersistedUsageEntry["surface"]>>([
@@ -158,6 +435,45 @@ export function isKnownInboundProtocol(value: unknown): value is NonNullable<Per
   return typeof value === "string" && KNOWN_INBOUND_PROTOCOLS.has(value as NonNullable<PersistedUsageEntry["inboundProtocol"]>);
 }
 
+const KNOWN_TRANSPORT_PHASES: ReadonlySet<string> = new Set(REQUEST_TRANSPORT_PHASES);
+
+export function isKnownTransportPhase(value: unknown): value is NonNullable<PersistedUsageEntry["transportPhase"]> {
+  return typeof value === "string" && KNOWN_TRANSPORT_PHASES.has(value);
+}
+
+const KNOWN_TERMINAL_SOURCES = new Set<NonNullable<PersistedUsageEntry["terminalSource"]>>([
+  "upstream", "synthetic",
+]);
+
+export function isKnownTerminalSource(value: unknown): value is NonNullable<PersistedUsageEntry["terminalSource"]> {
+  return typeof value === "string" && KNOWN_TERMINAL_SOURCES.has(value as NonNullable<PersistedUsageEntry["terminalSource"]>);
+}
+
+/**
+ * The persisted entry is built by an explicit whitelist, so a field the writer sets but this
+ * normalizer does not name is dropped without a word. #4592 added the affinity record at the
+ * call site and it never reached disk for exactly that reason.
+ */
+const KNOWN_AFFINITY_MOVES = new Set<NonNullable<PersistedUsageEntry["affinity"]>>([
+  "reused", "held", "detour", "rebound", "new_bind", "cleared",
+]);
+const KNOWN_AFFINITY_REASONS = new Set<NonNullable<PersistedUsageEntry["affinityReason"]>>([
+  "healthy", "quota_headroom", "quota_refusal", "transient", "transient_hold_expired",
+  "unusable", "paused", "plan_excluded", "cooldown", "quota_avoided", "generation",
+  "expired", "model_lane",
+]);
+const KNOWN_CONVERSATION_STATE_SCRUBS = new Set<NonNullable<PersistedUsageEntry["conversationStateScrub"]>>([
+  "account-change",
+]);
+
+export function isKnownAffinityMove(value: unknown): value is NonNullable<PersistedUsageEntry["affinity"]> {
+  return typeof value === "string" && KNOWN_AFFINITY_MOVES.has(value as NonNullable<PersistedUsageEntry["affinity"]>);
+}
+
+export function isKnownAffinityReason(value: unknown): value is NonNullable<PersistedUsageEntry["affinityReason"]> {
+  return typeof value === "string" && KNOWN_AFFINITY_REASONS.has(value as NonNullable<PersistedUsageEntry["affinityReason"]>);
+}
+
 export function usageLogPath(configDir?: string): string {
   return join(configDir ?? getConfigDir(), "usage.jsonl");
 }
@@ -176,8 +492,20 @@ function isEstimatedUsageProvider(providerOrAdapter: string): boolean {
     || providerOrAdapter === "cursor" || providerOrAdapter.startsWith("cursor-");
 }
 
-export function usageForFinalLog(provider: string, usage: OcxUsage | undefined): OcxUsage | undefined {
+export function usageForFinalLog(
+  provider: string,
+  usage: OcxUsage | undefined,
+  /**
+   * True when the proxy answered this turn locally and issued no upstream request. Such a turn's
+   * zero counts are EXACT, so the provider-wide estimated marking must not apply: Kiro and Cursor
+   * are marked estimated because their adapters can only guess a real inference's usage, and a
+   * turn with no inference has nothing to guess. Without this, a no-send turn is indistinguishable
+   * from a real one whose usage frame never arrived.
+   */
+  locallyAnswered = false,
+): OcxUsage | undefined {
   if (!usage) return undefined;
+  if (locallyAnswered) return usage;
   if (usage.estimated || isEstimatedUsageProvider(provider)) return { ...usage, estimated: true };
   return usage;
 }
@@ -208,16 +536,8 @@ function normalizeUsageValue(usage: OcxUsage | undefined): OcxUsage | undefined 
   };
 }
 
-const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
-  "transient-5xx",
-  "connection-reset",
-  "oauth-401",
-  "key-429",
-  "rate-limit-429",
-  "anthropic-oauth-429",
-  "image-413",
-  "empty-completion",
-]);
+const ATTEMPT_RECOVERY_KINDS: ReadonlySet<AttemptRecoveryKind> = new Set(ATTEMPT_RECOVERY_KIND_ROSTER);
+const ATTEMPT_RECOVERY_WITHHELD: ReadonlySet<AttemptRecoveryWithheld> = new Set(ATTEMPT_RECOVERY_WITHHELD_ROSTER);
 const USAGE_STATUSES = new Set<UsageStatus>([
   "reported",
   "unreported",
@@ -275,7 +595,8 @@ function normalizeAttemptTierOutcome(raw: unknown): AttemptTierOutcome | null {
   if ("wireKind" in outcome
     && outcome.wireKind !== null
     && outcome.wireKind !== "service-tier"
-    && outcome.wireKind !== "anthropic-speed") return null;
+    && outcome.wireKind !== "anthropic-speed"
+    && outcome.wireKind !== "cursor-variant") return null;
   if ("wireValue" in outcome && outcome.wireValue !== null && typeof outcome.wireValue !== "string") return null;
   if ("fastDowngradeReason" in outcome
     && (typeof outcome.fastDowngradeReason !== "string"
@@ -290,7 +611,10 @@ function normalizeAttemptTierOutcome(raw: unknown): AttemptTierOutcome | null {
   const responseServiceTier = sanitizeLogMetadataString(outcome.responseServiceTier);
   return {
     ...(outcome.canonical === "priority" ? { canonical: "priority" as const } : {}),
-    ...(outcome.wireKind === null || outcome.wireKind === "service-tier" || outcome.wireKind === "anthropic-speed"
+    ...(outcome.wireKind === null
+      || outcome.wireKind === "service-tier"
+      || outcome.wireKind === "anthropic-speed"
+      || outcome.wireKind === "cursor-variant"
       ? { wireKind: outcome.wireKind }
       : {}),
     ...(outcome.wireValue === null
@@ -338,26 +662,46 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
   const tierOutcome = "tierOutcome" in attempt
     ? normalizeAttemptTierOutcome(attempt.tierOutcome)
     : undefined;
+  const codexWsStage = "codexWsStage" in attempt
+    ? normalizeCodexWsStageRecord(attempt.codexWsStage)
+    : undefined;
+  const deliverySummary = "deliverySummary" in attempt
+    ? normalizeAttemptDeliverySummary(attempt.deliverySummary)
+    : undefined;
   const recoveryKinds = Array.isArray(attempt.recoveryKinds)
     ? [...new Set(attempt.recoveryKinds.filter(
       (value): value is AttemptRecoveryKind => typeof value === "string"
         && ATTEMPT_RECOVERY_KINDS.has(value as AttemptRecoveryKind),
     ))]
     : [];
+  // Same shape as `recoveryKinds`: unknown values are dropped rather than failing the row, so a
+  // log written by a newer build stays readable by an older one.
+  const recoveryWithheld = Array.isArray(attempt.recoveryWithheld)
+    ? [...new Set(attempt.recoveryWithheld.filter(
+      (value): value is AttemptRecoveryWithheld => typeof value === "string"
+        && ATTEMPT_RECOVERY_WITHHELD.has(value as AttemptRecoveryWithheld),
+    ))]
+    : [];
   return {
     ordinal: attempt.ordinal as number,
     provider: attempt.provider,
+    ...(attempt.provider === "xai"
+      && (attempt.credentialSource === "grok-oauth" || attempt.credentialSource === "xai-api-key")
+      ? { credentialSource: attempt.credentialSource }
+      : {}),
     model: attempt.model,
     adapter: attempt.adapter,
     status: attempt.status,
     durationMs: attempt.durationMs,
     // Absent by default; only the literal `true` marker survives the round trip.
     ...(attempt.streamAborted === true ? { streamAborted: true } : {}),
+    ...(attempt.locallyAnswered === true ? { locallyAnswered: true } : {}),
     ...(isNonNegativeFiniteNumber(attempt.firstOutputMs)
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
     sendCount: attempt.sendCount as number,
     recoveryKinds,
+    ...(recoveryWithheld.length ? { recoveryWithheld } : {}),
     usageStatus: attempt.usageStatus as UsageStatus,
     ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
@@ -370,6 +714,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       ? { totalTokens: attempt.totalTokens }
       : {}),
     ...(typeof attempt.errorCode === "string" ? { errorCode: attempt.errorCode } : {}),
+    ...(isKnownCacheTelemetryProvenance(attempt.cacheProvenance)
+      ? { cacheProvenance: attempt.cacheProvenance }
+      : {}),
     ...(isLabRouteSubjectId(attempt.labRouteSubjectId)
       ? { labRouteSubjectId: attempt.labRouteSubjectId }
       : {}),
@@ -388,6 +735,48 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
         : { reasoningWireValue: attempt.reasoningWireValue }
       : {}),
     ...(tierOutcome ? { tierOutcome } : {}),
+    ...(codexWsStage ? { codexWsStage } : {}),
+    ...(deliverySummary ? { deliverySummary } : {}),
+    ...normalizeRequestFailureAttribution(attempt),
+  };
+}
+
+/**
+ * #4191: a persisted stage record is trusted only when every field matches the
+ * exchange's own shapes. Anything else — a hand-edited number as a string, an
+ * injected free-form field — drops the whole record rather than passing
+ * attacker text into the DTO.
+ */
+function normalizeCodexWsStageRecord(value: unknown): CodexWsStageRecord | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const stage = value as Record<string, unknown>;
+  for (const key of ["upstreamFrames", "controlFrames", "relayedEvents", "pings", "pongs"] as const) {
+    if (!isNonNegativeFiniteNumber(stage[key])) return undefined;
+  }
+  if (!(stage.requestBytes === null || isNonNegativeFiniteNumber(stage.requestBytes))) return undefined;
+  if (!(stage.firstFrameMs === null || isNonNegativeFiniteNumber(stage.firstFrameMs))) return undefined;
+  if (!(stage.elapsedMs === null || isNonNegativeFiniteNumber(stage.elapsedMs))) return undefined;
+  if (!(stage.closeCode === null || (typeof stage.closeCode === "number"
+    && Number.isInteger(stage.closeCode) && stage.closeCode >= 1000 && stage.closeCode <= 4999))) {
+    return undefined;
+  }
+  if (typeof stage.sent !== "boolean" || typeof stage.reused !== "boolean") return undefined;
+  if (typeof stage.ocxVersion !== "string" || !stage.ocxVersion || stage.ocxVersion.length > 32) return undefined;
+  if (typeof stage.bunVersion !== "string" || !stage.bunVersion || stage.bunVersion.length > 32) return undefined;
+  return {
+    requestBytes: stage.requestBytes as number | null,
+    sent: stage.sent,
+    upstreamFrames: stage.upstreamFrames as number,
+    controlFrames: stage.controlFrames as number,
+    relayedEvents: stage.relayedEvents as number,
+    firstFrameMs: stage.firstFrameMs as number | null,
+    elapsedMs: stage.elapsedMs as number | null,
+    pings: stage.pings as number,
+    pongs: stage.pongs as number,
+    closeCode: stage.closeCode as number | null,
+    reused: stage.reused,
+    ocxVersion: stage.ocxVersion,
+    bunVersion: stage.bunVersion,
   };
 }
 
@@ -427,11 +816,26 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const tierOutcome = entry.tierOutcome ? normalizeAttemptTierOutcome(entry.tierOutcome) : undefined;
   const callerServiceTier = sanitizeLogMetadataString(entry.callerServiceTier);
   const responseServiceTier = sanitizeLogMetadataString(entry.responseServiceTier);
+  const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
+  const transportPhase = isKnownTransportPhase(entry.transportPhase) ? entry.transportPhase : undefined;
+  const terminalSource = isKnownTerminalSource(entry.terminalSource) ? entry.terminalSource : undefined;
+  const affinity = isKnownAffinityMove(entry.affinity) ? entry.affinity : undefined;
+  // A reason without a move describes nothing, so it is only kept alongside one.
+  const affinityReason = affinity !== undefined && isKnownAffinityReason(entry.affinityReason)
+    ? entry.affinityReason
+    : undefined;
+  const conversationStateScrub = typeof entry.conversationStateScrub === "string"
+    && KNOWN_CONVERSATION_STATE_SCRUBS.has(entry.conversationStateScrub)
+    ? entry.conversationStateScrub
+    : undefined;
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
+  const spend = normalizeRequestSpend(entry.spend);
   return {
     requestId: entry.requestId,
+    ...(isLogicalRequestId(entry.logicalRequestId) ? { logicalRequestId: entry.logicalRequestId } : {}),
     timestamp: entry.timestamp,
     provider: entry.provider,
     model: entry.model,
@@ -453,6 +857,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
       ? { requestedEffort: capMetadataString(entry.requestedEffort) }
       : {}),
@@ -494,26 +899,99 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(entry.usage ? { usage: normalizeUsageValue(entry.usage) } : {}),
     ...(typeof entry.totalTokens === "number" ? { totalTokens: entry.totalTokens } : {}),
     ...(Array.isArray(entry.attempts) ? { attempts } : {}),
+    ...(spend ? { spend } : {}),
+    ...(isKnownCacheTelemetryProvenance(entry.cacheProvenance)
+      ? { cacheProvenance: entry.cacheProvenance }
+      : {}),
+    ...(transportPhase ? { transportPhase } : {}),
+    ...(terminalSource ? { terminalSource } : {}),
+    ...(affinity ? { affinity } : {}),
+    ...(affinityReason ? { affinityReason } : {}),
+    ...(conversationStateScrub ? { conversationStateScrub } : {}),
     ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
-    ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
-    ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
+    // Validated rather than copied on truthiness, like the inbound protocol and transport phase
+    // above. Harmless while these were only rendered; not harmless once the terminal status is
+    // a grouping-key slot, because the string is assembled from an upstream frame.
+    ...(isRequestTerminalStatus(entry.terminalStatus) ? { terminalStatus: entry.terminalStatus } : {}),
+    ...(isRequestCloseReason(entry.closeReason) ? { closeReason: entry.closeReason } : {}),
     ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
     ...(routeDecision ? { routeDecision } : {}),
+    ...(claudeCompatibility ? { claudeCompatibility } : {}),
+    ...normalizeRequestFailureAttribution(entry),
   };
 }
 
-function ensureUsageLogDir(): void {
+// Bound hot-path filesystem hardening to once per second while ensuring an external mode
+// widening cannot suppress write-triggered repair for the lifetime of the process.
+const USAGE_LOG_PERMISSION_RECHECK_MS = 1_000;
+
+type UsageLogPermissionCheck = {
+  path: string;
+  checkedAt: number;
+};
+
+let ensuredUsageLogDir: UsageLogPermissionCheck | null = null;
+let ensuredUsageLogFile: UsageLogPermissionCheck | null = null;
+
+function usageLogPermissionCheckIsCurrent(
+  check: UsageLogPermissionCheck | null,
+  path: string,
+  now: number,
+): boolean {
+  return check?.path === path
+    && now >= check.checkedAt
+    && now - check.checkedAt < USAGE_LOG_PERMISSION_RECHECK_MS;
+}
+
+function ensureUsageLogDir(now: number): void {
   const dir = getConfigDir();
+  if (usageLogPermissionCheckIsCurrent(ensuredUsageLogDir, dir, now)) return;
   recordOwnedConfigPath(dir, usageLogPath());
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   try { chmodSync(dir, 0o700); } catch { /* best-effort on platforms that ignore chmod */ }
+  ensuredUsageLogDir = { path: dir, checkedAt: now };
+}
+
+/**
+ * One owner hook, run after an append lands.
+ *
+ * A slot rather than a direct call, because the only consumer -- ledger retention -- reads this
+ * module's revision helpers, and importing it back here would be a static cycle. The hook runs
+ * INSIDE the synchronous append call stack on purpose: that is what makes "no in-process append
+ * can interleave with a compaction" true rather than merely likely.
+ */
+let afterUsageLedgerAppend: (() => void) | null = null;
+
+export function setUsageLedgerAppendHook(hook: (() => void) | null): void {
+  afterUsageLedgerAppend = hook;
 }
 
 export function appendUsageEntry(entry: PersistedUsageEntry): void {
-  ensureUsageLogDir();
+  const line = `${JSON.stringify(normalizeUsageEntry(entry))}\n`;
   const path = usageLogPath();
-  appendFileSync(path, `${JSON.stringify(normalizeUsageEntry(entry))}\n`, { encoding: "utf-8", mode: 0o600 });
-  try { chmodSync(path, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
+  const now = Date.now();
+  const doAppend = (): void => {
+    ensureUsageLogDir(now);
+    const filePermissionsCurrent = usageLogPermissionCheckIsCurrent(ensuredUsageLogFile, path, now);
+    appendFileSync(path, line, { encoding: "utf-8", mode: 0o600 });
+    if (!filePermissionsCurrent) {
+      try { chmodSync(path, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
+      ensuredUsageLogFile = { path, checkedAt: now };
+    }
+  };
+  try {
+    doAppend();
+  } catch (error: any) {
+    if (error?.code === "ENOENT") {
+      ensuredUsageLogDir = null;
+      ensuredUsageLogFile = null;
+      doAppend();
+      afterUsageLedgerAppend?.();
+      return;
+    }
+    throw error;
+  }
+  afterUsageLedgerAppend?.();
 }
 
 export type UsageLogRevision = {
@@ -707,6 +1185,8 @@ export function resetUsageReadCacheForTests(): void {
   managementUsageReadInflight?.abort.abort();
   managementUsageReadInflight = null;
   retainedUsageSnapshot = null;
+  ensuredUsageLogDir = null;
+  ensuredUsageLogFile = null;
 }
 
 function readExactly(fd: number, length: number, position: number): Buffer | null {
@@ -921,6 +1401,10 @@ async function readUsageEntriesIncrementally(
     // A shrink means truncation or replacement-in-place; the retained rows may no
     // longer correspond to file contents, so refuse to extend them.
     if (size < retained.coveredThroughBytes) return null;
+    // Retained-state reuse is only an optimization. A burst larger than the configured
+    // window must re-anchor through the bounded full-tail reader instead of reading and
+    // parsing every byte appended since the previous poll.
+    if (size - retained.coveredThroughBytes > maxReadBytes) return null;
     // Verify the retained REGION is unchanged before anything is reused. Identity keeps
     // dev/ino/birthtime, and an append and an in-place rewrite both move mtime/ctime
     // forward, so only the bytes themselves settle it.
@@ -1132,6 +1616,14 @@ export async function readUsageEntriesForManagement(): Promise<PersistedUsageEnt
   return (await readUsageSnapshotForManagement()).entries;
 }
 
+/** Keep legacy optional fields permissive, but reject rows that cannot be safely attributed. */
+export function normalizePersistedUsageRow(value: unknown): PersistedUsageEntry | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (typeof row.requestId !== "string" || typeof row.provider !== "string") return undefined;
+  return normalizeUsageEntry(row as unknown as PersistedUsageEntry);
+}
+
 export function readUsageEntries(): PersistedUsageEntry[] {
   const path = usageLogPath();
   if (!existsSync(path)) return [];
@@ -1140,10 +1632,8 @@ export function readUsageEntries(): PersistedUsageEntry[] {
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const parsed = JSON.parse(line) as PersistedUsageEntry;
-      if (parsed && typeof parsed === "object" && typeof parsed.requestId === "string") {
-        entries.push(normalizeUsageEntry(parsed));
-      }
+      const parsed = normalizePersistedUsageRow(JSON.parse(line));
+      if (parsed) entries.push(parsed);
     } catch {
       /* keep reading after a partially written or hand-edited line */
     }
@@ -1156,10 +1646,8 @@ function parseUsageLines(lines: string[]): PersistedUsageEntry[] {
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const parsed = JSON.parse(line) as PersistedUsageEntry;
-      if (parsed && typeof parsed === "object" && typeof parsed.requestId === "string") {
-        entries.push(normalizeUsageEntry(parsed));
-      }
+      const parsed = normalizePersistedUsageRow(JSON.parse(line));
+      if (parsed) entries.push(parsed);
     } catch {
       /* skip partial / hand-edited lines */
     }

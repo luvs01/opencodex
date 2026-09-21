@@ -18,6 +18,7 @@ import {
 import { isAbsolute, join, resolve } from "node:path";
 
 import { resolveTrustedWindowsPowerShellExe } from "../lib/windows-elevation";
+import { WINDOWS_PRINCIPAL_LOOKUP_TIMEOUT_MS } from "../lib/windows-user-principal";
 
 import type {
   ResolveCodexCoordinatorDatabasePath,
@@ -36,8 +37,30 @@ const SID_PATTERN = /^S-1-(?:\d+-)+\d+$/i;
  * Hard budget for the Windows identity-lookup PowerShell child. These lookups
  * run at startup and on config writes; a hung child must fail the lookup
  * (recoverable — the caller refuses) rather than wedge the proxy indefinitely.
+ *
+ * 30s, and the same on a desktop as in CI. The split below used to give desktops
+ * 8s, on the theory that only a shared runner is contended enough to need more.
+ * A zh-CN Windows 10 host measured 3.2s for the SID expression and 4.6s for the
+ * `Add-Type` LocalAppData expression — per spawn, with a bare
+ * `powershell.exe -NoProfile -Command exit` costing ~3s where a typical desktop
+ * pays ~150ms — so ordinary spawn jitter breached 8s intermittently and `ocx sync`
+ * failed with "Windows effective-account lookup timed out" (#2914).
+ *
+ * That is the same contention the CI branch was widened for, which is what makes
+ * the split vestigial rather than merely conservative: it encoded an assumption
+ * about WHERE contention happens, and the assumption was wrong. Antivirus
+ * real-time scanning, a loaded Task Scheduler, and cold PowerShell startup do not
+ * care whether the machine is a runner.
+ *
+ * The contract this budget protects is unchanged: a genuinely hung child still
+ * fails the lookup and the caller still refuses rather than writing. Only the
+ * ceiling moved, and it moved for the case where the lookup would have succeeded.
  */
-const WINDOWS_POWERSHELL_LOOKUP_TIMEOUT_MS = 8_000;
+const WINDOWS_POWERSHELL_LOOKUP_TIMEOUT_MS = WINDOWS_PRINCIPAL_LOOKUP_TIMEOUT_MS;
+
+function windowsIdentityLookupTimeoutMs(): number {
+  return WINDOWS_POWERSHELL_LOOKUP_TIMEOUT_MS;
+}
 
 /**
  * FOLDERID_LocalAppData, and the flag that makes the lookup ignore the caller's
@@ -108,7 +131,7 @@ function windowsIdentityPowerShellSpawnOptions(): {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    timeout: WINDOWS_POWERSHELL_LOOKUP_TIMEOUT_MS,
+    timeout: windowsIdentityLookupTimeoutMs(),
     windowsHide: true,
   };
 }
@@ -416,6 +439,18 @@ function resolveWindowsRuntimeRoot(identity: Extract<UserIdentity, { platform: "
 }
 
 /**
+ * Resolve the canonical, effective-user runtime root shared by Codex lock domains.
+ *
+ * This is a directory, not a final lock or database path. Callers create their
+ * own named child so independent exclusion domains cannot self-contend.
+ */
+export function resolveEffectiveUserRuntimeRoot(identity: UserIdentity): string {
+  return identity.platform === "posix"
+    ? resolvePosixRuntimeRoot(identity.uid)
+    : resolveWindowsRuntimeRoot(identity);
+}
+
+/**
  * Windows path identity is case-insensitive; everywhere else it is exact.
  *
  * The lock modules compare a requested lock path against its own realpath, and
@@ -441,9 +476,7 @@ export const resolveCodexCoordinatorDatabasePath: ResolveCodexCoordinatorDatabas
   if (!isAbsolute(canonicalCodexHome)) {
     refuse("The canonical CODEX_HOME must be an absolute path.");
   }
-  const root = identity.platform === "posix"
-    ? resolvePosixRuntimeRoot(identity.uid)
-    : resolveWindowsRuntimeRoot(identity);
+  const root = resolveEffectiveUserRuntimeRoot(identity);
   const locks = join(root, "native-write-locks");
   if (identity.platform === "posix") ensurePrivatePosixDirectory(locks, identity.uid);
   else {
@@ -475,9 +508,7 @@ export const resolveCodexCatalogSerializationDatabasePath:
     if (!isAbsolute(canonicalCodexHome)) {
       refuse("The canonical CODEX_HOME must be an absolute path.");
     }
-    const root = identity.platform === "posix"
-      ? resolvePosixRuntimeRoot(identity.uid)
-      : resolveWindowsRuntimeRoot(identity);
+    const root = resolveEffectiveUserRuntimeRoot(identity);
     const locks = join(root, "catalog-write-locks");
     if (identity.platform === "posix") ensurePrivatePosixDirectory(locks, identity.uid);
     else {
@@ -514,9 +545,7 @@ export const resolveCodexHistorySerializationDatabasePath:
     if (!isAbsolute(canonicalStateDbPath)) {
       refuse("The canonical Codex state database must be an absolute path.");
     }
-    const root = identity.platform === "posix"
-      ? resolvePosixRuntimeRoot(identity.uid)
-      : resolveWindowsRuntimeRoot(identity);
+    const root = resolveEffectiveUserRuntimeRoot(identity);
     const locks = join(root, "history-write-locks");
     if (identity.platform === "posix") ensurePrivatePosixDirectory(locks, identity.uid);
     else {
