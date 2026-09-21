@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { getConfigDir, loadConfig } from "../config";
+import { withConfigMutationLockSync } from "../config/mutation-lock";
 import { hardenReusedServiceApiToken, readServiceApiTokenState, serviceApiTokenFilePath } from "../lib/service-secrets";
 import { tokenCollidesWithAdmin } from "../lib/admin-secrets";
 import { randomBytes } from "node:crypto";
@@ -228,35 +229,42 @@ function persistServiceApiToken(token: string): string {
  * connected to a hub the same file holds that hub's issued client key, which must not be
  * overwritten by a local install.
  *
+ * Provisioning runs inside the cross-process config mutation lock: client-key rotation
+ * replaces `service-api-token` and records the new fingerprint under the same lock, so a
+ * reuse republish or a fresh write here can never interleave with a committed rotation and
+ * silently roll its bytes back.
+ *
  * The PATH is logged; the value never is, and never reaches argv, a unit file or a plist.
  */
 export function writeServiceApiTokenFile(): ProvisionedServiceApiToken | null {
-  const token = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
-  if (token) {
-    // Last line of defence: every install/repair path funnels through here, so a
-    // collision cannot reach disk regardless of which caller ran (#2696).
-    assertNotAdminToken(token);
-    const path = persistServiceApiToken(token);
-    console.log(`🔐 Data-plane token taken from OPENCODEX_API_AUTH_TOKEN and stored at ${path} (owner-only).`);
-    return { path, origin: "env" };
-  }
-  if (isLoopbackHostname(loadConfig().hostname)) return null;
-  const existing = hardenReusedServiceApiToken(token => assertNotAdminToken(token, process.env, "file"));
-  if (existing.kind === "present") {
-    // The collision check is NOT only for the env branch. A file that already holds the admin
-    // token -- hand-pasted before #2696, or written by the very incident this unit closes --
-    // was silently accepted here, so `ocx status` reported `present (file)` and the hub
-    // crash-looped at boot with no command pointing at the cause.
-    const path = serviceApiTokenFilePath();
-    // No log line: repair/restart hit this on every run and an unconditional notice about a
-    // credential file trains operators to ignore the one that matters.
-    return { path, origin: "file" };
-  }
-  if (existing.kind === "unsafe") throw new Error(`${existing.reason}: ${serviceApiTokenFilePath()}`);
-  const path = persistServiceApiToken(randomBytes(32).toString("hex"));
-  console.log(`🔐 Provisioned an owner-only data-plane token at ${path}; nothing needs to be exported by hand.`);
-  console.log("   Remote machines get their own per-client key — run 'ocx hub invite' instead of copying this file.");
-  return { path, origin: "generated" };
+  return withConfigMutationLockSync(() => {
+    const token = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
+    if (token) {
+      // Last line of defence: every install/repair path funnels through here, so a
+      // collision cannot reach disk regardless of which caller ran (#2696).
+      assertNotAdminToken(token);
+      const path = persistServiceApiToken(token);
+      console.log(`🔐 Data-plane token taken from OPENCODEX_API_AUTH_TOKEN and stored at ${path} (owner-only).`);
+      return { path, origin: "env" };
+    }
+    if (isLoopbackHostname(loadConfig().hostname)) return null;
+    const existing = hardenReusedServiceApiToken(token => assertNotAdminToken(token, process.env, "file"));
+    if (existing.kind === "present") {
+      // The collision check is NOT only for the env branch. A file that already holds the admin
+      // token -- hand-pasted before #2696, or written by the very incident this unit closes --
+      // was silently accepted here, so `ocx status` reported `present (file)` and the hub
+      // crash-looped at boot with no command pointing at the cause.
+      const path = serviceApiTokenFilePath();
+      // No log line: repair/restart hit this on every run and an unconditional notice about a
+      // credential file trains operators to ignore the one that matters.
+      return { path, origin: "file" };
+    }
+    if (existing.kind === "unsafe") throw new Error(`${existing.reason}: ${serviceApiTokenFilePath()}`);
+    const path = persistServiceApiToken(randomBytes(32).toString("hex"));
+    console.log(`🔐 Provisioned an owner-only data-plane token at ${path}; nothing needs to be exported by hand.`);
+    console.log("   Remote machines get their own per-client key — run 'ocx hub invite' instead of copying this file.");
+    return { path, origin: "generated" };
+  });
 }
 
 export function sh(cmd: string): string {

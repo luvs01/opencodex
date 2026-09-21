@@ -62,6 +62,10 @@ export function readServiceApiTokenState(): ServiceApiTokenState {
  * that file, which is the contract `origin: "file"` reports. On POSIX the
  * opened descriptor is also fchmod'd first, so a token-bearing inode a race
  * moved aside is still tightened wherever its entry ended up.
+ *
+ * Callers must run this under `withConfigMutationLockSync`: client-key rotation
+ * replaces the token under that lock, and a republish outside it could rename a
+ * stale token back over a committed rotation.
  */
 export function hardenReusedServiceApiToken(
   validate: (token: string) => void,
