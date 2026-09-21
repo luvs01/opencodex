@@ -189,7 +189,27 @@ function webSearchPairFromItem(item: Rec): { id: string; input: Rec; resultConte
   return { id, input, resultContent, completed };
 }
 
-function messageSnapshot(model: string): Rec {
+/**
+ * `inputTokenFloor` is this proxy's own count of the prompt it forwarded, used only when the
+ * upstream sent no confirmed usage before the first frame.
+ *
+ * Real Anthropic fills `message_start.message.usage.input_tokens` with the turn's prompt size,
+ * and third-party clients read it there — Paseo's context meter takes input from this frame and
+ * output from `message_delta`, so a hardcoded zero showed a nearly-empty ring for a turn whose
+ * `/context` reported ~97k (#4857). #4891 fixed the destinations that report usage up front;
+ * the internal bridge attaches `usage: null` to its lifecycle frames, so those paths had
+ * nothing to report and kept sending zero.
+ *
+ * A floor is a measurement, which is what makes it publishable here: it counts the prompt this
+ * proxy actually sent, the same estimate `claude-messages.ts` already trusts as a log floor. It
+ * is not a claim about upstream's tokenizer, and it is not final — `message_delta` carries the
+ * authoritative count for every reader that waits for it, exactly as before.
+ */
+function messageSnapshot(model: string, confirmedUsage?: Rec, inputTokenFloor?: number): Rec {
+  const usage = confirmedUsage
+    ?? (typeof inputTokenFloor === "number" && Number.isFinite(inputTokenFloor) && inputTokenFloor > 0
+      ? { input_tokens: Math.trunc(inputTokenFloor), output_tokens: 0 }
+      : { input_tokens: 0, output_tokens: 0 });
   return {
     id: `msg_${uuid()}`,
     type: "message",
@@ -198,7 +218,7 @@ function messageSnapshot(model: string): Rec {
     model,
     stop_reason: null,
     stop_sequence: null,
-    usage: { input_tokens: 0, output_tokens: 0 },
+    usage,
   };
 }
 
@@ -212,9 +232,13 @@ interface OpenBlock {
   argsBuf?: string;
   argsBufBytes?: number;
   webSearchArgsEmitted?: boolean;
+  /** True once ordinary function-call arguments were emitted to Anthropic SSE. */
+  toolArgsEmitted?: boolean;
   callId?: string;
   /** Last fixed-size reasoning identity (item + summary/content index) seen by this block. */
   reasoningPartKey?: string;
+  /** Fixed-size item identity; missing IDs only match other missing IDs. */
+  reasoningItemKey?: string;
   thinkingBuf?: string;
   thinkingBufBytes?: number;
   reasoningSig?: string;
@@ -224,7 +248,15 @@ interface OpenBlock {
 export function responsesSseToAnthropicSse(
   upstream: ReadableStream<Uint8Array>,
   model: string,
-  opts: { pingIntervalMs?: number; translatorBudget: TranslatorBudget },
+  opts: {
+    pingIntervalMs?: number;
+    translatorBudget: TranslatorBudget;
+    /**
+     * This proxy's count of the prompt it forwarded, published on `message_start` only when the
+     * upstream sent no confirmed usage before the first frame. See `messageSnapshot` (#4857).
+     */
+    inputTokenFloor?: number;
+  },
 ): ReadableStream<Uint8Array> {
   const translatorBudget = opts.translatorBudget;
   const pingIntervalMs = opts?.pingIntervalMs ?? 20_000;
@@ -242,6 +274,7 @@ export function responsesSseToAnthropicSse(
   let open: OpenBlock | null = null;
   let sawToolUse = false;
   let webSearchRequests = 0;
+  let earlyAnthropicUsage: Rec | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const utf8SliceBytes = (value: string, start: number, end: number): number => {
@@ -278,7 +311,10 @@ export function responsesSseToAnthropicSse(
       const ensureStarted = () => {
         if (started) return;
         started = true;
-        emit("message_start", { type: "message_start", message: messageSnapshot(model) });
+        emit("message_start", {
+          type: "message_start",
+          message: messageSnapshot(model, earlyAnthropicUsage, opts.inputTokenFloor),
+        });
         emit("ping", { type: "ping" });
       };
       // Keepalive pings protect remote deployments behind LB/NAT idle timeouts even
@@ -308,7 +344,21 @@ export function responsesSseToAnthropicSse(
           open.webSearchArgsEmitted = true;
         }
         if (open.kind === "thinking") {
-          const signature = open.reasoningSig ?? encodeReasoningEnvelope({ txt: open.thinkingBuf ?? "" });
+          // Delay the index and all thinking frames until closure so a matching
+          // done envelope can put its redacted blocks first. The existing buffer
+          // remains charged through signature emission, including queued frames.
+          open.index = blockIndex++;
+          emit("content_block_start", {
+            type: "content_block_start", index: open.index,
+            content_block: { type: "thinking", thinking: "", signature: "" },
+          });
+          if (open.thinkingBuf) {
+            emit("content_block_delta", {
+              type: "content_block_delta", index: open.index,
+              delta: { type: "thinking_delta", thinking: open.thinkingBuf },
+            });
+          }
+          const signature = open.reasoningSig ?? encodeReasoningEnvelope({ txt: open.thinkingBuf ?? "" }, translatorBudget);
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
             delta: { type: "signature_delta", signature },
@@ -323,12 +373,13 @@ export function responsesSseToAnthropicSse(
         ensureStarted();
         if (open && open.kind === kind) return;
         closeOpenBlock();
+        if (kind === "thinking") {
+          open = { kind, index: -1, thinkingBuf: "", thinkingBufBytes: 0 };
+          return;
+        }
         const index = blockIndex++;
-        const contentBlock: Rec = kind === "text"
-          ? { type: "text", text: "" }
-          : { type: "thinking", thinking: "", signature: "" };
-        emit("content_block_start", { type: "content_block_start", index, content_block: contentBlock });
-        open = { kind, index, thinkingBuf: "", thinkingBufBytes: 0 };
+        emit("content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } });
+        open = { kind, index };
       };
       const finish = (stopReason: string, usage: unknown) => {
         if (terminated) return;
@@ -386,8 +437,17 @@ export function responsesSseToAnthropicSse(
       const handleFrame = (eventName: string, data: Rec) => {
         switch (eventName) {
           case "response.created":
-            // Transport prelude only. Start Anthropic framing on semantic output or completion.
+          case "response.in_progress": {
+            // Lifecycle preludes do not start Anthropic framing, but some upstreams attach
+            // confirmed input usage before semantic output. Retain only its bounded Anthropic
+            // projection so message_start can report measurements that already arrived.
+            const response = isRec(data.response) ? data.response : {};
+            const usage = isRec(response.usage) ? response.usage : undefined;
+            if (!started && usage && typeof usage.input_tokens === "number") {
+              earlyAnthropicUsage = anthropicUsage(usage);
+            }
             break;
+          }
           case "response.heartbeat":
             if ((controller.desiredSize ?? 0) > 0) emit("ping", { type: "ping" });
             break;
@@ -405,11 +465,13 @@ export function responsesSseToAnthropicSse(
           case "response.reasoning_summary_text.delta":
           case "response.reasoning_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
+            const itemKey = boundedReasoningIdentity(data.item_id);
+            if (open?.kind === "thinking" && open.reasoningItemKey !== itemKey) closeOpenBlock();
             ensureBlock("thinking");
             const active = open;
             if (!active || active.kind !== "thinking") break;
             // The JSON path joins reasoning summary/content parts with "\n\n"
-            // (responsesJsonToAnthropicMessage); mirror that at part and item boundaries
+            // (responsesJsonToAnthropicMessage); mirror that at part boundaries
             // so multi-part summaries do not glue into one run-on paragraph. Frames
             // without part indices produce a constant key and never get a separator.
             const slot = eventName === "response.reasoning_summary_text.delta"
@@ -418,7 +480,7 @@ export function responsesSseToAnthropicSse(
             // Upstream string metadata can be arbitrarily large. Hash strings into fixed-size
             // components while retaining item and part equality, rather than dropping item_id and
             // accidentally joining distinct malformed reasoning items.
-            const partKey = `${boundedReasoningIdentity(data.item_id)}:${slot}`;
+            const partKey = `${itemKey}:${slot}`;
             const needsPartSeparator = active.reasoningPartKey !== undefined
               && active.reasoningPartKey !== partKey;
             const appended = `${needsPartSeparator ? "\n\n" : ""}${data.delta}`;
@@ -436,17 +498,8 @@ export function responsesSseToAnthropicSse(
               reservation.release();
               throw error;
             }
-            if (needsPartSeparator) {
-              emit("content_block_delta", {
-                type: "content_block_delta", index: active.index,
-                delta: { type: "thinking_delta", thinking: "\n\n" },
-              });
-            }
+            active.reasoningItemKey = itemKey;
             active.reasoningPartKey = partKey;
-            emit("content_block_delta", {
-              type: "content_block_delta", index: active.index,
-              delta: { type: "thinking_delta", thinking: data.delta },
-            });
             break;
           }
           case "response.output_item.added": {
@@ -478,6 +531,7 @@ export function responsesSseToAnthropicSse(
               argsBuf: "",
               argsBufBytes: 0,
               webSearchArgsEmitted: false,
+              toolArgsEmitted: false,
             };
             break;
           }
@@ -508,6 +562,14 @@ export function responsesSseToAnthropicSse(
               type: "content_block_delta", index: open.index,
               delta: { type: "input_json_delta", partial_json: data.delta },
             });
+            open.toolArgsEmitted = true;
+            break;
+          }
+          case "response.function_call_arguments.done": {
+            if (!open || open.kind !== "tool_use" || open.bufferWebSearchArgs || open.toolArgsEmitted) break;
+            if (typeof data.arguments !== "string" || data.arguments.length === 0) break;
+            emit("content_block_delta", { type: "content_block_delta", index: open.index, delta: { type: "input_json_delta", partial_json: data.arguments } });
+            open.toolArgsEmitted = true;
             break;
           }
           case "response.output_item.done": {
@@ -555,27 +617,41 @@ export function responsesSseToAnthropicSse(
                   delta: { type: "input_json_delta", partial_json: JSON.stringify(sanitizeWebSearchInput(parsed)) },
                 });
                 open.webSearchArgsEmitted = true;
+              } else if (!open.bufferWebSearchArgs && !open.toolArgsEmitted
+                && typeof item.arguments === "string" && item.arguments.length > 0) {
+                emit("content_block_delta", {
+                  type: "content_block_delta", index: open.index,
+                  delta: { type: "input_json_delta", partial_json: item.arguments },
+                });
+                open.toolArgsEmitted = true;
               }
               closeOpenBlock();
             }
             else if (open && open.kind === "text" && item.type === "message") closeOpenBlock();
             else if (item.type === "reasoning") {
               const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
-              const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+              const env = encrypted ? decodeReasoningEnvelope(encrypted, translatorBudget) : null;
               const red = env?.red ?? [];
-              if (env?.sig && open?.kind !== "thinking") ensureBlock("thinking");
-              if (open?.kind === "thinking") {
-                if (env?.sig) open.reasoningSig = env.sig;
+              const itemKey = boundedReasoningIdentity(item.id);
+              // A late/unrelated done cannot reorder or sign another item's text.
+              if (open?.kind === "thinking" && open.reasoningItemKey !== itemKey) {
                 closeOpenBlock();
               }
               if (red.length > 0) {
                 ensureStarted();
-                closeOpenBlock();
+                if (open?.kind !== "thinking") closeOpenBlock();
               }
               for (const data of red) {
                 const idx = blockIndex++;
                 emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });
                 emit("content_block_stop", { type: "content_block_stop", index: idx });
+              }
+              if (env?.sig && open?.kind !== "thinking") {
+                ensureBlock("thinking");
+              }
+              if (open?.kind === "thinking") {
+                if (env?.sig) open.reasoningSig = env.sig;
+                closeOpenBlock();
               }
             }
             break;
@@ -785,7 +861,7 @@ export function responsesSseToAnthropicSse(
 }
 
 /** Non-streaming: /v1/responses JSON -> Anthropic message JSON. */
-export function responsesJsonToAnthropicMessage(json: unknown, model: string): Rec {
+export function responsesJsonToAnthropicMessage(json: unknown, model: string, translatorBudget?: TranslatorBudget): Rec {
   const body = isRec(json) ? json : {};
   const output = Array.isArray(body.output) ? body.output : [];
   const content: Rec[] = [];
@@ -817,14 +893,14 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
           }
         }
         const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : "";
-        const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+        const env = encrypted ? decodeReasoningEnvelope(encrypted, translatorBudget) : null;
         // Legacy combined envelopes place redacted blocks before the signed block,
         // matching the Anthropic adapter. New bridge output uses separate items.
         for (const data of env?.red ?? []) content.push({ type: "redacted_thinking", data });
         // env.txt may be locally hidden text. Do not expose it here or manufacture
         // a new signed continuity carrier; hidden-summary replay remains limited.
         if (parts.length > 0 || env?.sig) {
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: env?.sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") }) });
+          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: env?.sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") }, translatorBudget) });
         }
         break;
       }
