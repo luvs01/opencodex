@@ -10,6 +10,7 @@ import {
   visionEligibleModelOptions,
   type VisionCandidateModel,
 } from "../../src/vision/eligibility";
+import { requiresVisionPreprocessing } from "../../src/vision/plan";
 
 const emptyConfig: Pick<OcxConfig, "providers"> = { providers: {} };
 
@@ -187,6 +188,21 @@ describe("vision eligibility core", () => {
     const config = configWithProviders({ runtime: provider });
     expect(() => modelAcceptsImageInput(config, { provider: "runtime", id: "vision" })).not.toThrow();
     expect(modelAcceptsImageInput(config, { provider: "runtime", id: "vision" })).toBe(true);
+  });
+
+  test("11d. vendor metadata does not cross a preserved custom destination boundary", () => {
+    const provider = {
+      adapter: "openai-responses",
+      authMode: "key",
+      baseUrl: "https://operator-gateway.example/v1",
+    } as const;
+    const config = configWithProviders({ "zhipu-bigmodel-responses": provider });
+    const candidate = { provider: "zhipu-bigmodel-responses", id: "glm-5.3" };
+
+    // The generated Z.AI bundle calls glm-5.3 text-only, but this preset explicitly permits a
+    // same-named custom endpoint. Its images must neither leave for a sidecar nor be stripped.
+    expect(modelAcceptsImageInput(config, candidate)).toBeUndefined();
+    expect(requiresVisionPreprocessing(config, provider, candidate.id, candidate.provider)).toBe(false);
   });
 
   test("12. only the selected Anthropic OAuth provider contributes Anthropic options", () => {

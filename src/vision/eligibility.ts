@@ -26,6 +26,7 @@ import { getModelMetadataCaseInsensitive, resolveMetadataProvider } from "../gen
 import { nativeInputModalities } from "../codex/catalog/metadata";
 import { SUPPORTED_NATIVE_OPENAI_SLUGS } from "../codex/catalog/native-models";
 import { enrichProviderFromRegistry } from "../providers/derive";
+import { providerMatchesRegistryTransport } from "../providers/registry";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 /**
@@ -280,6 +281,11 @@ function modelAcceptsImageInputWithCache(
   }
   const fromRow = advertisesImageInput(candidate.inputModalities);
   if (fromRow !== undefined) return fromRow;
+  // A preset name is not transport identity. Some fixed key presets intentionally preserve a
+  // same-named custom destination, so vendor metadata is authoritative only while the configured
+  // adapter and endpoint still belong to that registry row. Otherwise the capability is unknown
+  // and request dispatch must preserve the custom destination's image boundary.
+  if (provider !== undefined && !providerMatchesRegistryTransport(candidate.provider, provider)) return undefined;
   return metadataImageInput(candidate.provider, candidate.id);
 }
 
