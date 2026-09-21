@@ -4,15 +4,14 @@ import type { OcxConfig } from "../../src/types";
 import { createWebsocketHandler } from "../../src/server/index/websocket-handler";
 import type { ServeOptionsContext } from "../../src/server/index/serve-options";
 import { NativeSteeringChannel, MAX_NATIVE_STEERS, validateSteeringFrame } from "../../src/server/responses/native-steering";
-import { NativeSteeringReplay, MAX_NATIVE_STEERING_REPLAY_BYTES } from "../../src/server/responses/native-steering-replay";
+import { NativeSteeringReplay, MAX_NATIVE_STEERING_REPLAY_BYTES, nativeSteeringReplayRetainedStoreSnapshot } from "../../src/server/responses/native-steering-replay";
 import { type WsData } from "../../src/server/ws-bridge";
 import { getRequestLogEntries, clearRequestLogsForTests } from "../../src/server/request-log";
 import { runOptionalShutdownHooks } from "../../src/lib/optional-shutdown-hooks";
 import { MAX_ACTIVE_TURNS, tryAdmitTurn } from "../../src/server/lifecycle";
 import { configSchema } from "../../src/config/schema/config-schema";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
-import { configureAppOwnedMemoryBudget, resetAppOwnedMemoryForTests } from "../../src/lib/app-owned-memory";
-import { registerDefaultAppOwnedMemoryStores } from "../../src/lib/app-owned-memory-stores";
+import { appOwnedBytesSnapshot, configureAppOwnedMemoryBudget, registerRetainedStore, resetAppOwnedMemoryForTests } from "../../src/lib/app-owned-memory";
 
 // The websocket handler dispatches through the real request path, so it reaches the shared spend
 // journal and needs the writer lease startServer would have taken. Without it the turn is refused
@@ -301,12 +300,21 @@ test("native controls obey configured inbound and reconstructed outbound body li
 
 test("replay journals share the application-owned memory budget", () => {
   resetAppOwnedMemoryForTests();
-  configureAppOwnedMemoryBudget(500);
-  registerDefaultAppOwnedMemoryStores();
-  const first = new NativeSteeringReplay("x".repeat(200), () => {});
-  expect(() => new NativeSteeringReplay("y".repeat(200), () => {})).toThrow("application-owned memory budget");
-  first.dispose();
-  resetAppOwnedMemoryForTests();
+  registerRetainedStore({
+    id: "native_steering_replay",
+    category: "continuation",
+    snapshot: nativeSteeringReplayRetainedStoreSnapshot,
+    evictOldest: () => 0,
+  });
+  let first: NativeSteeringReplay | undefined;
+  try {
+    first = new NativeSteeringReplay("x".repeat(200), () => {});
+    configureAppOwnedMemoryBudget(appOwnedBytesSnapshot().retainedBytes);
+    expect(() => new NativeSteeringReplay("y".repeat(200), () => {})).toThrow("application-owned memory budget");
+  } finally {
+    first?.dispose();
+    resetAppOwnedMemoryForTests();
+  }
 });
 
 test("HTTP upgrade fallback keeps ordinary streaming and rejects steering explicitly", async () => {
