@@ -67,6 +67,7 @@ export const FORWARD_HEADERS = [
   "session_id",
   "session-id",
   "thread-id",
+  "user-agent",
   "x-client-request-id",
   "x-codex-beta-features",
   "x-codex-installation-id",

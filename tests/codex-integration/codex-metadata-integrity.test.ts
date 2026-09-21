@@ -39,6 +39,7 @@ describe("Codex metadata integrity", () => {
       "session-id",
       "thread-id",
       "chatgpt-account-id",
+      "user-agent",
       "x-codex-parent-thread-id",
     ]) {
       expect(FORWARD_HEADERS).toContain(name);
@@ -175,8 +176,12 @@ describe("Codex metadata integrity", () => {
         authMode: "forward",
       },
     ] satisfies OcxProviderConfig[]) {
+      const selected = headersForCodexAuthContext(
+        new Headers({ "User-Agent": "codex_cli_rs/0.154.0" }),
+        poolAuthContext,
+      );
       const request = await createResponsesPassthroughAdapter(provider).buildRequest(minimalParsed(), {
-        headers: new Headers({ "User-Agent": "codex_cli_rs/0.154.0" }),
+        headers: selected,
       });
       expect(new Headers(request.headers).get("user-agent")).toBe("codex_cli_rs/0.154.0");
     }
