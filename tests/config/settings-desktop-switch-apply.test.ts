@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-test("PUT /api/settings reports Codex write-lock contention as retryable", async () => {
+test("PUT /api/settings reports why Codex desktop switches were not applied", async () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-settings-desktop-switch-"));
   const codexHome = join(root, "codex");
   mkdirSync(codexHome, { recursive: true });
@@ -67,6 +67,38 @@ test("PUT /api/settings reports Codex write-lock contention as retryable", async
       },
     });
     expect(injectionSpy).toHaveBeenCalledTimes(1);
+
+    injectionSpy.mockResolvedValue({
+      success: true,
+      configApplied: false,
+      message: 'Codex routing NOT injected: external model_provider "custom" owns config.toml.',
+    });
+    const externalRequest = new Request("http://127.0.0.1:10100/api/settings", {
+      method: "PUT",
+      headers: { host: "127.0.0.1:10100", "content-type": "application/json" },
+      body: JSON.stringify({ codexClientCompaction: true }),
+    });
+    const externalResponse = await handleManagementAPI(
+      externalRequest,
+      new URL(externalRequest.url),
+      config,
+      {
+        saveConfigPreservingClaudeCode: () => {},
+        getCachedStartupHealth: async () => startupHealthFixture(),
+        createManagementConvergeCodex: catalogConvergenceFactory(() => {}),
+      },
+    );
+
+    expect(externalResponse!.status).toBe(200);
+    expect(await externalResponse!.json()).toMatchObject({
+      codexDesktopSwitches: {
+        codexDesktopAuthless: { effective: null },
+        codexClientCompaction: { effective: null },
+        apply: { applied: false, reason: "external_provider", retryable: false },
+        authSource: { presentsCodexAccount: null },
+      },
+    });
+    expect(injectionSpy).toHaveBeenCalledTimes(2);
   } finally {
     injectionSpy.mockRestore();
     if (previousOcxHome === undefined) delete process.env.OPENCODEX_HOME;

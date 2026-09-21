@@ -11,7 +11,7 @@ export type CodexDesktopSwitchInertReason =
 
 export interface CodexDesktopSwitchState {
   stored: boolean;
-  effective: boolean;
+  effective: boolean | null;
   inertReason?: CodexDesktopSwitchInertReason;
 }
 
@@ -19,6 +19,7 @@ export type CodexDesktopSwitchApplyReason =
   | "not_requested"
   | "proxy_not_running"
   | "integration_disabled"
+  | "external_provider"
   | "write_lock_busy"
   | "injection_refused";
 
@@ -35,7 +36,7 @@ export interface CodexDesktopSwitchReport {
   codexDesktopAuthless: CodexDesktopSwitchState;
   codexClientCompaction: CodexDesktopSwitchState;
   apply: CodexDesktopSwitchApply;
-  authSource: { presentsCodexAccount: boolean; summary: string };
+  authSource: { presentsCodexAccount: boolean | null; summary: string };
 }
 
 type DesktopSwitchConfig = Pick<
@@ -50,9 +51,10 @@ type DesktopSwitchConfig = Pick<
 
 function describeSwitch(
   stored: boolean,
-  effective: boolean,
+  effective: boolean | null,
   config: Pick<OcxConfig, "runtimeRole">,
 ): CodexDesktopSwitchState {
+  if (effective === null) return { stored, effective };
   if (!stored || effective) return { stored, effective };
   return {
     stored,
@@ -68,15 +70,21 @@ export function describeCodexDesktopSwitches(
   apply: CodexDesktopSwitchApply,
 ): CodexDesktopSwitchReport {
   const authlessStored = config.codexDesktopAuthless === true;
-  const authlessEffective = isEffectiveCodexDesktopAuthless(config);
+  const externallyOwned = !apply.applied && apply.reason === "external_provider";
+  const authlessEffective = externallyOwned ? null : isEffectiveCodexDesktopAuthless(config);
   const compactionStored = config.codexClientCompaction === true;
-  const compactionEffective = isEffectiveCodexClientCompaction(config);
+  const compactionEffective = externallyOwned ? null : isEffectiveCodexClientCompaction(config);
 
   return {
     codexDesktopAuthless: describeSwitch(authlessStored, authlessEffective, config),
     codexClientCompaction: describeSwitch(compactionStored, compactionEffective, config),
     apply,
-    authSource: authlessEffective
+    authSource: externallyOwned
+      ? {
+          presentsCodexAccount: null,
+          summary: "An external model provider owns Codex sign-in behavior; its account requirement was not changed.",
+        }
+      : authlessEffective
       ? {
           presentsCodexAccount: false,
           summary: "The Codex app will not require its own account sign-in.",
@@ -111,6 +119,14 @@ export async function applyCodexDesktopSwitches(
       return {
         applied: false,
         reason: "integration_disabled",
+        retryable: false,
+        detail: result.message,
+      };
+    }
+    if (result.success && result.configApplied === false) {
+      return {
+        applied: false,
+        reason: "external_provider",
         retryable: false,
         detail: result.message,
       };

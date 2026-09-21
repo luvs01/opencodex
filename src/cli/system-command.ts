@@ -60,6 +60,7 @@ function desktopSwitchApplyReason(reason: unknown): string {
   if (reason === "not_requested") return "no desktop switch rewrite was requested";
   if (reason === "proxy_not_running") return "the proxy is not running";
   if (reason === "integration_disabled") return "Codex integration is disabled";
+  if (reason === "external_provider") return "an external model provider owns config.toml";
   if (reason === "write_lock_busy") return "the Codex config write lock is busy";
   if (reason === "injection_refused") return "Codex config injection was refused";
   return "the rewrite could not be completed";
@@ -76,8 +77,13 @@ function settingsUpdateLines(
   const lines: string[] = [];
   const appendSwitch = (key: string, label: string): boolean => {
     const state = recordValue(switches[key]);
-    if (!state || typeof state.stored !== "boolean" || typeof state.effective !== "boolean") return false;
+    if (!state || typeof state.stored !== "boolean"
+      || (typeof state.effective !== "boolean" && state.effective !== null)) return false;
     lines.push(`${label}: stored ${state.stored ? "on" : "off"}.`);
+    if (state.effective === null) {
+      lines.push(`${label}: effective state is controlled by the external model provider.`);
+      return true;
+    }
     // The effective value is always stated, even when it matches. Printing it only on a
     // mismatch would make silence ambiguous — the reader could not tell "the stored value is
     // in force" from "this build does not report effective state", and that ambiguity is a
@@ -104,7 +110,10 @@ function settingsUpdateLines(
     lines.push("Codex config: ~/.codex/config.toml was rewritten.");
   } else {
     const detail = typeof apply.detail === "string" && apply.detail.length > 0 ? ` Details: ${apply.detail}` : "";
-    lines.push(`Codex config: ~/.codex/config.toml was not rewritten because ${desktopSwitchApplyReason(apply.reason)}.${detail} Run 'ocx sync' to apply the stored settings.`);
+    const retry = apply.reason === "external_provider"
+      ? ""
+      : " Run 'ocx sync' to apply the stored settings.";
+    lines.push(`Codex config: ~/.codex/config.toml was not rewritten because ${desktopSwitchApplyReason(apply.reason)}.${detail}${retry}`);
   }
   lines.push(`Auth source: ${authSource.summary}`);
   return lines;
