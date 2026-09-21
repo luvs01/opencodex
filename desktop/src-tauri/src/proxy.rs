@@ -142,10 +142,7 @@ fn valid_attestation_proof(
     challenge: &str,
     proof: Option<&str>,
 ) -> bool {
-    let Ok(secret) = URL_SAFE_NO_PAD.decode(&identity.attestation_secret) else {
-        return false;
-    };
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(&secret) else {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(identity.attestation_secret.as_bytes()) else {
         return false;
     };
     mac.update(
@@ -193,7 +190,7 @@ mod tests {
     #[test]
     fn accepts_only_a_proof_bound_to_the_runtime_identity() {
         let challenge = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let proof = "T2FWKlQv-CS_ygbwmxZ5QRJtpqmM7J8i4IQ_LEaW1vg";
+        let proof = "Yr9EKHjeAFfsFMsF8Xsd7J6LxBYnObweKZlLyTMk0Lo";
         assert!(valid_attestation_proof(&identity(), challenge, Some(proof)));
 
         let mut replacement = identity();
