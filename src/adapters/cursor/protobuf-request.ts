@@ -6,6 +6,7 @@ import { namespacedToolName } from "../../types";
 import type { CursorRunRequest } from "./types";
 import { decodeCursorCallId } from "./call-id";
 import { cursorNeedsExternalToolContinuation, isCursorExternalWireModel } from "./discovery";
+import { stripAssistantEchoedToolEnvelope } from "./envelope-echo";
 import { normalizeCursorToolResultText } from "./tool-result-normalize";
 import { debugProviderDiagnostic } from "../../lib/debug";
 import {
@@ -58,6 +59,7 @@ import {
   buildCursorToolDefinitions,
   cursorToolWireName,
   cursorRequestHasShellAlias,
+  cursorRequestUsesCodeMode,
   CURSOR_SHELL_ALIAS_SYSTEM_NOTE,
   OCX_RESPONSES_TOOL_PROVIDER,
 } from "./tool-definitions";
@@ -74,6 +76,8 @@ export const CURSOR_ROUTING_LEVEL_PARAMETER_ID = "optimization";
 export const CURSOR_EXTERNAL_ROOT_BLOB_LIMIT = 192;
 /** Approximate prompt-size guard; tool schemas and protocol framing consume context separately. */
 export const CURSOR_EXTERNAL_ROOT_BYTE_LIMIT = 512 * 1024;
+/** Honest placeholder when native Composer history has a toolCall with no matching toolResult. */
+export const CURSOR_MISSING_TOOL_RESULT = "[missing tool_result for this tool_use in history]";
 /**
  * Byte budget for the serialized arguments named inside ONE replayed tool-result envelope. The
  * invocation identifies the call; the result is the payload. Without an independent cap, a single
@@ -205,11 +209,13 @@ function assistantRootText(
   message: Extract<OcxMessage, { role: "assistant" }>,
   includeThinking: boolean,
 ): string {
-  if (typeof message.content === "string") return message.content;
-  return message.content
-    .map(part => (part.type === "text" ? part.text : includeThinking && part.type === "thinking" ? part.thinking : undefined))
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .join("\n");
+  const raw = typeof message.content === "string"
+    ? message.content
+    : message.content
+      .map(part => (part.type === "text" ? part.text : includeThinking && part.type === "thinking" ? part.thinking : undefined))
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .join("\n");
+  return stripAssistantEchoedToolEnvelope(raw);
 }
 
 // Cursor builds the actual model prompt from rootPromptMessagesJson (turns[] is UI/display metadata),
@@ -222,6 +228,7 @@ function assistantRootText(
 function rootPromptMessages(
   request: CursorRunRequest,
   requestScope: CursorBlobRequestScopeToken,
+  codeMode: boolean,
   /**
    * Calls indexed from the FULL history. The checkpoint path replays only a suffix of
    * `rawMessages`, so a result in that suffix can have its originating call before the cut; indexing
@@ -323,7 +330,12 @@ function rootPromptMessages(
       const replacement = rootBlobCandidate(
         { role: payload.role, content: [{ type: "text", text: marked }] },
         role,
-        { ...opts, messageIndex: previous.entry.messageIndex ?? opts.messageIndex },
+        // `text` must mirror the payload actually stored, not the unmarked text it was built from.
+        // It did not, and every consumer that rebuilds a root from `text` therefore dropped the run
+        // note: truncating a collapsed root silently deleted the "produced N times" line, and so did
+        // the invocation-argument restoration below. The note is the repetition breaker's per-entry
+        // half, so losing it re-primes the self-reinforcing loop the breaker exists to end.
+        { ...opts, text: marked, messageIndex: previous.entry.messageIndex ?? opts.messageIndex },
       );
       entries[entries.indexOf(previous.entry)] = replacement;
       replayRuns.set(role, { text: normalized, entry: replacement, length: runLength });
@@ -389,10 +401,10 @@ function rootPromptMessages(
       if (!echoToolResultInRoot) continue;
       // #1920: the prefix must reflect the NORMALIZED error state (an empty
       // node_repl result is an error even when the runtime said isError=false).
-      const prefix = normalizedToolResult(message, contentToText(message.content)).isError ? "[Tool Error]" : "[Tool Result]";
+      const prefix = normalizedToolResult(message, contentToText(message.content), codeMode).isError ? "[Tool Error]" : "[Tool Result]";
       // The bound compares in full-history space: this loop's `i` is already full-history on the
       // full-replay path, and `knownCallsOffset` re-bases it when only a suffix is replayed.
-      const text = `${prefix}\n${toolResultToText(message, callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i))}`;
+      const text = `${prefix}\n${toolResultToText(message, callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i), codeMode)}`;
       pushDeduped(toolResultRootPayload(text), "toolResult", { messageIndex: i, text }, text);
     }
   }
@@ -692,6 +704,20 @@ function rootPromptMessages(
     historyMessageStart = firstKept?.messageIndex ?? (messages.length);
   }
 
+  // Refund envelope bytes the assembled set left unused to invocation arguments the per-call cap
+  // clipped. Gated on `echoToolResultInRoot`, not `externalModel`: native `composer-2.5` echoes its
+  // results into roots without being an external wire model, so the narrower gate would leave the one
+  // native model that has clipped invocation lines capped for no reason (#4516).
+  if (echoToolResultInRoot && replayedCalls) {
+    selected = restoreClippedInvocationArguments(
+      selected,
+      messages,
+      replayedCalls,
+      knownCallsOffset,
+      carriedRoots.byteLength,
+    );
+  }
+
   return {
     ids: selected.map(entry => storeCursorBlob(entry.data, requestScope)),
     byteLength: selected.reduce((sum, entry) => sum + entry.byteLength, 0),
@@ -715,7 +741,7 @@ function contentText(message: OcxMessage): string {
   if (typeof message.content === "string") return message.content;
   return message.content
     .map(part => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text" || part.type === "document") return part.text;
       if (part.type === "thinking") return part.thinking;
       if (part.type === "image") return undefined;
       return undefined;
@@ -728,7 +754,7 @@ function contentToText(content: OcxToolResultMessage["content"]): string {
   if (typeof content === "string") return content;
   return content
     .map(part => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text" || part.type === "document") return part.text;
       if (part.type === "image") return CURSOR_VISION_IMAGE_HISTORY_MARKER;
       return undefined;
     })
@@ -741,7 +767,7 @@ function historyContentText(message: OcxMessage): string {
   if (message.role === "toolResult" || typeof message.content === "string") return contentText(message);
   return message.content
     .map(part => {
-      if (part.type === "text") return part.text;
+      if (part.type === "text" || part.type === "document") return part.text;
       if (part.type === "thinking") return part.thinking;
       if (part.type === "image") return CURSOR_VISION_IMAGE_HISTORY_MARKER;
       return undefined;
@@ -810,6 +836,9 @@ function decodeResultParts(message: OcxToolResultMessage): DecodedResultPart[] |
   return content.map((part): DecodedResultPart => {
     if (part.type === "text") return { kind: "text", text: part.text };
     if (part.type === "video") return { kind: "text", text: "[video]" };
+    // Without this the document falls through to decodeInlineImage(part.imageUrl) below and is
+    // treated as an image it is not.
+    if (part.type === "document") return { kind: "text", text: part.text };
     const decoded = decodeInlineImage(part.imageUrl);
     return decoded ? { kind: "image", ...decoded } : { kind: "undecodable" };
   });
@@ -829,6 +858,7 @@ function countImages(parts: DecodedResultPart[] | undefined): number {
  */
 function toolResultContentItems(
   message: OcxToolResultMessage,
+  codeMode: boolean,
   decoded?: DecodedResultPart[],
   maxImages = Number.POSITIVE_INFINITY,
   normalizedText?: NormalizedToolResult,
@@ -839,10 +869,10 @@ function toolResultContentItems(
   })];
   if (!parts) {
     const normalized = normalizedText
-      ?? normalizedToolResult(message, typeof message.content === "string" ? message.content : "");
+      ?? normalizedToolResult(message, typeof message.content === "string" ? message.content : "", codeMode);
     return textItem(normalized.text);
   }
-  const normalized = normalizedText ?? normalizedDecodedTextResult(message, parts);
+  const normalized = normalizedText ?? normalizedDecodedTextResult(message, parts, codeMode);
   if (normalized) {
     // #1920/#1866: empty or failure-state Computer Use / node_repl results are
     // normalized before they reach the native wire. Pure-text part arrays use
@@ -965,6 +995,91 @@ function toolInvocationLine(call: Extract<OcxAssistantContentPart, { type: "tool
 }
 
 /**
+ * Second pass over the assembled root set: spend envelope bytes nothing else claimed on invocation
+ * arguments the per-call cap clipped.
+ *
+ * `CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT` is charged while the envelope is still being built, so it
+ * costs a call 2 KiB whether or not anything else wants those bytes. In a small replay nearly the
+ * whole 192-root / 512 KiB envelope goes unused and the cap still bites: a 4,693-byte successful
+ * `write_file` lost its tail inside a 6,011-byte replay, and because the result text does not repeat
+ * the argument, the model could no longer see what it had just written (#4516).
+ *
+ * The cap stays, and admission is still decided on its 2 KiB prefix — it is what keeps a 600 KiB
+ * argument from evicting the output it describes. This pass only refunds leftover aggregate bytes,
+ * after every pruning and truncation decision is already final:
+ *
+ * - newest `toolResult` first, because the argument the model is most likely to still need is the
+ *   one belonging to the call it just made;
+ * - only out of `spare`, so restoring can never push the envelope past its own limit;
+ * - never for an `outputElided` root, whose own output is already gone — widening the invocation
+ *   there would spend the last free bytes describing an answer that is not present;
+ *   this guard is load bearing, and it is not reachable the obvious way. Truncation undershoots
+ *   its own budget by ~28 bytes, far less than a restoration costs, so a root that was merely
+ *   truncated cannot pay. What pays is initiator recovery: after the equal-share pass elides a
+ *   trailing run, recovery drops an elided sibling to fit the user turn, and the bytes it frees
+ *   become spare. It needs the share to land in a narrow window — wide enough that the clipped
+ *   invocation line survives, narrow enough that `output:` does not — and outside it the
+ *   clipped-line lookup below declines the root first. `the skip refuses to widen an elided root
+ *   even when spare would pay` pins a measured instance;
+ * - never by dropping, shrinking or reordering another root, so nothing pruning chose to keep is
+ *   evicted to pay for a wider invocation line.
+ */
+function restoreClippedInvocationArguments(
+  selected: RootBlobCandidate[],
+  messages: readonly OcxMessage[],
+  replayedCalls: Map<string, Extract<OcxAssistantContentPart, { type: "toolCall" }>>,
+  knownCallsOffset: number,
+  carriedBytes: number,
+): RootBlobCandidate[] {
+  let spare = CURSOR_EXTERNAL_ROOT_BYTE_LIMIT
+    - carriedBytes
+    - selected.reduce((sum, entry) => sum + entry.byteLength, 0);
+  if (spare <= 0) return selected;
+  const restored = [...selected];
+  for (let i = restored.length - 1; i >= 0 && spare > 0; i--) {
+    const entry = restored[i];
+    if (!entry || entry.role !== "toolResult" || entry.outputElided === true) continue;
+    if (entry.text === undefined || entry.messageIndex === undefined) continue;
+    const message = messages[entry.messageIndex];
+    if (message?.role !== "toolResult") continue;
+    // Same full-history bound the envelope builder used: `messageIndex` is local to this call's
+    // `rawMessages`, and `knownCallsOffset` re-bases it when only a suffix is replayed.
+    const call = callBefore(
+      replayedCalls,
+      decodeCursorCallId(message.toolCallId),
+      knownCallsOffset + entry.messageIndex,
+    );
+    if (!call) continue;
+    const full = serializeToolCallArguments(call.arguments);
+    if (full === undefined) continue;
+    const clipped = toolCallArgumentsText(call.arguments);
+    if (clipped === full) continue;
+    const name = namespacedToolName(call.namespace, call.name);
+    // Anchored on the preceding newline. `toolResultToText` always emits the invocation after the
+    // `[tool_result]`, `call_id:` and `name:` lines, so the real line is never first — and
+    // `name:` renders the RESULT's tool name, which nothing sanitizes, so an unanchored search could
+    // be satisfied by a crafted tool name and rewrite that header instead of the invocation.
+    const clippedLine = `\ninvoked: ${name} with ${clipped}`;
+    // Absent when truncation already cut through the invocation line itself; there is nothing to
+    // widen in that root, and re-rendering the envelope would undo the output truncation too.
+    if (!entry.text.includes(clippedLine)) continue;
+    // Callback replacement: serialized arguments routinely contain `$&`, `$'` and `$1`, and the
+    // string form of `replace` expands those into the surrounding match instead of inserting them.
+    const widened = entry.text.replace(clippedLine, () => `\ninvoked: ${name} with ${full}`);
+    const candidate = rootBlobCandidate(
+      toolResultRootPayload(widened),
+      "toolResult",
+      { messageIndex: entry.messageIndex, text: widened },
+    );
+    const cost = candidate.byteLength - entry.byteLength;
+    if (cost <= 0 || cost > spare) continue;
+    restored[i] = candidate;
+    spare -= cost;
+  }
+  return restored;
+}
+
+/**
  * History position of each indexed call, keyed by the map `toolCallsByCallId` returned.
  *
  * A side table rather than a wider return type: the map is threaded through two builders and the
@@ -1058,8 +1173,9 @@ function toolCallsByCallId(messages: readonly OcxMessage[]): Map<string, Extract
 function toolResultToText(
   message: OcxToolResultMessage,
   call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
+  codeMode = false,
 ): string {
-  const normalized = normalizedToolResult(message, contentToText(message.content));
+  const normalized = normalizedToolResult(message, contentToText(message.content), codeMode);
   return [
     "[tool_result]",
     `call_id: ${decodeCursorCallId(message.toolCallId)}`,
@@ -1075,12 +1191,16 @@ function toolResultToText(
  * Shared #1920 normalization entry: pure-text results only. Image-bearing or
  * encrypted results pass through untouched (their content is not plain text).
  */
-function normalizedToolResult(message: OcxToolResultMessage, text: string): NormalizedToolResult {
-  if (message.containsEncryptedContent) return { text, isError: message.isError };
+function normalizedToolResult(message: OcxToolResultMessage, text: string, codeMode: boolean): NormalizedToolResult {
+  if (message.containsEncryptedContent
+    || (Array.isArray(message.content) && message.content.some(part => part.type !== "text"))) {
+    return { text, isError: message.isError };
+  }
   return normalizeCursorToolResultText(text, {
     toolName: message.toolName,
     toolNamespace: message.toolNamespace,
     isError: message.isError,
+    codeMode,
   });
 }
 
@@ -1092,9 +1212,10 @@ function normalizedToolResult(message: OcxToolResultMessage, text: string): Norm
 function normalizedDecodedTextResult(
   message: OcxToolResultMessage,
   parts: DecodedResultPart[],
+  codeMode: boolean,
 ): NormalizedToolResult | undefined {
   if (parts.some(part => part.kind !== "text")) return undefined;
-  return normalizedToolResult(message, parts.map(part => part.kind === "text" ? part.text : "").join("\n"));
+  return normalizedToolResult(message, parts.map(part => part.kind === "text" ? part.text : "").join("\n"), codeMode);
 }
 
 function argBytes(value: unknown): Uint8Array {
@@ -1105,10 +1226,25 @@ function argBytes(value: unknown): Uint8Array {
   }
 }
 
+function missingToolResultFor(
+  part: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
+): OcxToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId: part.id,
+    toolName: part.name,
+    ...(part.namespace ? { toolNamespace: part.namespace } : {}),
+    content: CURSOR_MISSING_TOOL_RESULT,
+    isError: true,
+    timestamp: 0,
+  };
+}
+
 function toolCallStep(
   part: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
   requestScope: CursorBlobRequestScopeToken,
   result?: OcxToolResultMessage,
+  codeMode = false,
 ): Uint8Array {
   const args: Record<string, Uint8Array> = {};
   for (const [key, value] of Object.entries(part.arguments ?? {})) args[key] = argBytes(value);
@@ -1130,7 +1266,7 @@ function toolCallStep(
               providerIdentifier: OCX_RESPONSES_TOOL_PROVIDER,
               args,
             }),
-            ...(result ? { result: toolResultPart(result, decodedResult, maxImages) } : {}),
+            ...(result ? { result: toolResultPart(result, codeMode, decodedResult, maxImages) } : {}),
           }),
         },
       }),
@@ -1151,17 +1287,17 @@ function toolCallStep(
   return storeCursorBlob(encoded, requestScope);
 }
 
-function toolResultPart(message: OcxToolResultMessage, decoded?: DecodedResultPart[], maxImages?: number) {
+function toolResultPart(message: OcxToolResultMessage, codeMode: boolean, decoded?: DecodedResultPart[], maxImages?: number) {
   const parts = decoded ?? decodeResultParts(message);
   const normalized = parts
-    ? normalizedDecodedTextResult(message, parts)
-    : normalizedToolResult(message, typeof message.content === "string" ? message.content : "");
+    ? normalizedDecodedTextResult(message, parts, codeMode)
+    : normalizedToolResult(message, typeof message.content === "string" ? message.content : "", codeMode);
   return create(McpToolResultSchema, {
     result: {
       case: "success",
       value: create(McpSuccessSchema, {
         isError: normalized?.isError ?? message.isError,
-        content: toolResultContentItems(message, parts, maxImages, normalized),
+        content: toolResultContentItems(message, codeMode, parts, maxImages, normalized),
       }),
     },
   });
@@ -1199,6 +1335,7 @@ function lastActionIndex(messages: readonly OcxMessage[] | undefined): number {
 function conversationTurns(
   request: CursorRunRequest,
   requestScope: CursorBlobRequestScopeToken,
+  codeMode: boolean,
   historyMessageStart = 0,
   /** Calls indexed from the FULL history; see {@link rootPromptMessages}. */
   knownCalls?: Map<string, Extract<OcxAssistantContentPart, { type: "toolCall" }>>,
@@ -1217,7 +1354,9 @@ function conversationTurns(
   const pendingToolCalls = new Map<string, Extract<OcxAssistantContentPart, { type: "toolCall" }>>();
   const flush = () => {
     if (!current) return;
-    for (const part of pendingToolCalls.values()) current.steps.push(toolCallStep(part, requestScope));
+    for (const part of pendingToolCalls.values()) {
+      current.steps.push(toolCallStep(part, requestScope, missingToolResultFor(part), codeMode));
+    }
     turns.push(storeCursorBlob(toBinary(ConversationTurnStructureSchema, create(ConversationTurnStructureSchema, {
       turn: {
         case: "agentConversationTurn",
@@ -1269,7 +1408,7 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
-        const normalized = normalizedToolResult(message, contentToText(message.content));
+        const normalized = normalizedToolResult(message, contentToText(message.content), codeMode);
         const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
         // Name the invocation here as well, for the same reason the root replay does: a result with
         // no visible originating call reads as an interrupted attempt (devlog 260829 000_rca).
@@ -1285,13 +1424,13 @@ function conversationTurns(
       }
       const priorCall = pendingToolCalls.get(message.toolCallId);
       if (priorCall) {
-        current.steps.push(toolCallStep(priorCall, requestScope, message));
+        current.steps.push(toolCallStep(priorCall, requestScope, message, codeMode));
         pendingToolCalls.delete(message.toolCallId);
       } else {
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: toolResultToText(message) }),
+            value: create(AssistantMessageSchema, { text: toolResultToText(message, undefined, codeMode) }),
           },
         })), requestScope));
       }
@@ -1368,6 +1507,9 @@ function buildPreparedCursorRunRequest(
   options?: { estimateInputTokens?: boolean },
 ): PreparedCursorRunRequest {
   const rawText = activePromptText(request);
+  // Use the same visible catalog as mcp_tools, including tool_choice, for every history path.
+  const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
+  const codeMode = cursorRequestUsesCodeMode(visibleTools, request.toolChoice);
   const lastRole = request.messages.at(-1)?.role;
   const text = lastRole === "user" || lastRole === "developer"
     ? appendCursorGenericToolUseHint(request.tools, rawText)
@@ -1471,7 +1613,7 @@ function buildPreparedCursorRunRequest(
         // against the raw limit left a band of a few hundred bytes below it where the checkpoint was kept,
         // the suffix budget collapsed, and the newest tool result vanished. Adding `systemBytes` moved the
         // band without closing it. Asking pruning what survived cannot drift from what pruning does.
-        const suffixRoots = rootPromptMessages(suffixRequest, requestScope, fullHistoryCalls, suffixStart, carriedRoots);
+        const suffixRoots = rootPromptMessages(suffixRequest, requestScope, codeMode, fullHistoryCalls, suffixStart, carriedRoots);
         const suffixSystemCount = systemPromptBlobs(suffixRequest).length;
         // A tool continuation whose own result did not survive is worthless: that result is the whole
         // reason the turn exists. "Kept SOMETHING" is not enough either — inside the band this fix first
@@ -1543,7 +1685,7 @@ function buildPreparedCursorRunRequest(
           // checkpoint is re-decoded and re-abandoned each turn until TTL, which is wasted work rather
           // than wrong output (audit r8 rounds 3 and 4).
         } else {
-        const suffixTurns = conversationTurns(suffixRequest, requestScope, suffixRoots.historyMessageStart, fullHistoryCalls, suffixStart);
+        const suffixTurns = conversationTurns(suffixRequest, requestScope, codeMode, suffixRoots.historyMessageStart, fullHistoryCalls, suffixStart);
         const suffixHistoryIds = suffixRoots.ids.slice(suffixSystemCount);
         const suffixHistorySerialized = suffixRoots.serialized.slice(suffixSystemCount);
         conversationState = create(ConversationStateStructureSchema, {
@@ -1573,10 +1715,10 @@ function buildPreparedCursorRunRequest(
     }
   }
   if (!conversationState) {
-    rootPromptMessagesState = rootPromptMessages(request, requestScope);
+    rootPromptMessagesState = rootPromptMessages(request, requestScope, codeMode);
     conversationState = create(ConversationStateStructureSchema, {
       rootPromptMessagesJson: rootPromptMessagesState.ids,
-      turns: conversationTurns(request, requestScope, rootPromptMessagesState.historyMessageStart),
+      turns: conversationTurns(request, requestScope, codeMode, rootPromptMessagesState.historyMessageStart),
       todos: [],
       pendingToolCalls: [],
       previousWorkspaceUris: [],
@@ -1590,7 +1732,6 @@ function buildPreparedCursorRunRequest(
   }
   // Hoisted out of the mcp_tools spread below so the estimate can read the same
   // filtered definitions the wire carries. Both helpers are pure.
-  const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
   const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
   // The envelope is measured HERE, on the final root set, and nowhere else.
   //
