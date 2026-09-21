@@ -1,4 +1,5 @@
 /** Native history/notes JSON relay. No interpretation of encrypted tool arguments or retries. */
+import { applyCallerUserAgentFallback } from "../adapters/openai-responses";
 import { formatErrorResponse } from "../bridge";
 import {
   CodexAccountCooldownError, CodexAuthContextError, CodexMainProfileDrainingError, CodexDirectAuthenticationError,
@@ -131,11 +132,14 @@ async function relayContextHistory(
     logCtx.provider = formatCodexProviderForLog(candidate.providerName, codexLogAccountId(authContext), config);
     // Materialization rechecks the current account policy after async selection.
     // Synthetic lane IDs are local selection metadata, never upstream headers.
-    for (const [key, value] of materializeCodexUpstreamAuth(req.headers, authContext, {
+    const materializedAuthHeaders = materializeCodexUpstreamAuth(req.headers, authContext, {
       config, modelId: "context_history", admission, substituteMainCredential,
-    })) {
-      headers.set(key, value);
+    });
+    for (const [key, value] of materializedAuthHeaders) {
+      if (key !== "user-agent") headers.set(key, value);
     }
+    // Configured provider User-Agent stays authoritative; the caller fingerprint fills the gap.
+    applyCallerUserAgentFallback(headers, materializedAuthHeaders);
     // Check the assembled outbound headers, including configured provider headers.
     validateForwardAdmissionCredential(headers, config);
     // Recheck actual wire identity after async selection/materialization. A replaced

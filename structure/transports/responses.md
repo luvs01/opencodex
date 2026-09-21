@@ -20,7 +20,10 @@ both key and forward modes. A configured provider header with that name wins cas
 when the caller omits it, the adapter invents no client identity. This does not widen the canonical
 forward credential/metadata allowlist beyond that single header or copy any other caller header.
 The web-search and vision sidecar replays apply the same precedence: the caller fingerprint fills
-the name only when the provider's configured headers do not already carry it.
+the name only when the provider's configured headers do not already carry it. So do the standalone
+search, images, live, and context-history relays, which receive the materialized headers rather
+than the caller's originals — each skips `user-agent` in its overlay and defers to the shared
+fallback so a configured provider value still wins.
 
 Retired Codex Spark has no model-specific tool or Responses Lite override; general Lite handling and
 namespace scrubbing remain shared compatibility behavior. Codex quota/reset evidence follows the

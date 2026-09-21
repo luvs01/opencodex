@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { FORWARD_HEADERS, createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
+import { readFileSync } from "node:fs";
+import { applyCallerUserAgentFallback, FORWARD_HEADERS, createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
 import { headersForCodexAuthContext } from "../../src/codex/auth-context";
+import { runWebSearch } from "../../src/web-search/executor";
+import { describeImage } from "../../src/vision/describe";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { repoPath } from "../helpers/repo-root";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
 
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
@@ -222,6 +226,83 @@ describe("Codex metadata integrity", () => {
     expect(new Headers(request.headers).get("user-agent")).toBe("operator-agent/1");
     expect(Object.keys(request.headers)
       .filter(name => name.toLowerCase() === "user-agent")).toHaveLength(1);
+  });
+
+  test("the shared fallback keeps configured User-Agent authoritative on record and Headers overlays", () => {
+    const caller = new Headers({ "user-agent": "codex_cli_rs/0.154.0", authorization: "Bearer pool" });
+    const record: Record<string, string> = { "uSeR-aGeNt": "operator-agent/1" };
+    applyCallerUserAgentFallback(record, caller);
+    expect(new Headers(record).get("user-agent")).toBe("operator-agent/1");
+    const unfilled: Record<string, string> = {};
+    applyCallerUserAgentFallback(unfilled, caller);
+    expect(unfilled["User-Agent"]).toBe("codex_cli_rs/0.154.0");
+    const headers = new Headers({ "user-agent": "operator-agent/1" });
+    applyCallerUserAgentFallback(headers, caller);
+    expect(headers.get("user-agent")).toBe("operator-agent/1");
+    const unconfigured = new Headers();
+    applyCallerUserAgentFallback(unconfigured, caller);
+    expect(unconfigured.get("user-agent")).toBe("codex_cli_rs/0.154.0");
+  });
+
+  test("every direct relay that overlays materialized headers defers User-Agent to the shared fallback", () => {
+    for (const file of [
+      "src/server/search.ts", "src/server/images.ts",
+      "src/server/live.ts", "src/server/context-history.ts",
+    ]) {
+      const source = readFileSync(repoPath(file), "utf8");
+      expect(source).toContain("applyCallerUserAgentFallback(");
+      expect(source).toMatch(/(?:name|key) !== "user-agent"/);
+    }
+  });
+
+  test("web-search and vision sidecars keep a configured User-Agent over the caller value", async () => {
+    const selected = new Headers({ "user-agent": "codex_cli_rs/0.154.0", authorization: "Bearer pool" });
+    const seen: Headers[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      return new Response("upstream error", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const provider: OcxProviderConfig = {
+        adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "forward", headers: { "uSeR-aGeNt": "operator-agent/1" },
+      };
+      const settings = { model: "gpt-5.5-mini", reasoning: "low" as const, timeoutMs: 1_000 };
+      await runWebSearch("q", { type: "web_search" }, provider, selected, settings);
+      await describeImage("https://example.com/i.png", undefined, "ctx", provider, selected, settings);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen.length).toBe(2);
+    for (const headers of seen) {
+      expect(headers.get("user-agent")).toBe("operator-agent/1");
+      expect([...headers.keys()].filter(name => name === "user-agent")).toHaveLength(1);
+    }
+  });
+
+  test("web-search and vision sidecars fill User-Agent from the caller when unconfigured", async () => {
+    const selected = new Headers({ "user-agent": "codex_cli_rs/0.154.0", authorization: "Bearer pool" });
+    const seen: Headers[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      return new Response("upstream error", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const provider: OcxProviderConfig = {
+        adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward",
+      };
+      const settings = { model: "gpt-5.5-mini", reasoning: "low" as const, timeoutMs: 1_000 };
+      await runWebSearch("q", { type: "web_search" }, provider, selected, settings);
+      await describeImage("https://example.com/i.png", undefined, "ctx", provider, selected, settings);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen.length).toBe(2);
+    for (const headers of seen) {
+      expect(headers.get("user-agent")).toBe("codex_cli_rs/0.154.0");
+    }
   });
 
   test("the preserved User-Agent is the value received by the HTTP upstream", async () => {

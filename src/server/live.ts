@@ -1,3 +1,4 @@
+import { applyCallerUserAgentFallback } from "../adapters/openai-responses";
 import { codexCompatibleUrl } from "../codex/context-compat";
 /**
  * /v1/live and /v1/realtime/calls relay (issue #371).
@@ -699,7 +700,11 @@ export async function resolveLiveRelay(
       return denial;
     }
     if (provider.headers) Object.assign(headers, provider.headers);
-    for (const [name, value] of forward.headers) headers[name] = value;
+    for (const [name, value] of forward.headers) {
+      if (name !== "user-agent") headers[name] = value;
+    }
+    // Configured provider User-Agent stays authoritative; the caller fingerprint fills the gap.
+    applyCallerUserAgentFallback(headers, forward.headers);
     logCtx.model = "gpt-live";
     return {
       headers,

@@ -10,6 +10,7 @@
  * That fallback never runs while a forward candidate exists, and never borrows a different
  * paid backend than the one the operator named.
  */
+import { applyCallerUserAgentFallback } from "../adapters/openai-responses";
 import { formatErrorResponse } from "../bridge";
 import {
   CodexAccountCooldownError,
@@ -174,7 +175,11 @@ export async function handleSearch(
 
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (upstream.provider.headers) Object.assign(headers, upstream.provider.headers);
-  for (const [name, value] of upstream.headers) headers[name] = value;
+  for (const [name, value] of upstream.headers) {
+    if (name !== "user-agent") headers[name] = value;
+  }
+  // Configured provider User-Agent stays authoritative; the caller fingerprint fills the gap.
+  applyCallerUserAgentFallback(headers, upstream.headers);
   const url = `${upstream.provider.baseUrl}/alpha/search`;
   const timeoutMs = config.search?.timeoutMs ?? SEARCH_UPSTREAM_TIMEOUT_MS;
   const linkedSignal = signalWithTimeout(timeoutMs, req.signal);

@@ -12,6 +12,7 @@
  * codex's images client parses `{created, data:[{b64_json}]}` strictly and Debug-prints
  * error bodies into the model-visible failure, so upstream errors must stay legible.
  */
+import { applyCallerUserAgentFallback } from "../adapters/openai-responses";
 import { formatErrorResponse } from "../bridge";
 import {
   CodexAccountCooldownError,
@@ -739,7 +740,11 @@ export async function handleImages(
     }
     const { provider } = forward;
     if (provider.headers) Object.assign(headers, provider.headers);
-    for (const [name, value] of forward.headers) headers[name] = value;
+    for (const [name, value] of forward.headers) {
+      if (name !== "user-agent") headers[name] = value;
+    }
+    // Configured provider User-Agent stays authoritative; the caller fingerprint fills the gap.
+    applyCallerUserAgentFallback(headers, forward.headers);
     // The ChatGPT codex backend takes bare paths (matches the adapter's `${baseUrl}/responses`).
     url = `${provider.baseUrl}/images/${endpoint}`;
   } else if (forwardAuthError) {

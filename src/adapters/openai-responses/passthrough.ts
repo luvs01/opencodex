@@ -85,15 +85,22 @@ export const FORWARD_HEADERS = [
  * Preserve the caller fingerprint unless the provider explicitly owns that header. The one
  * non-credential caller header this adapter forwards is applied here rather than in the
  * FORWARD_HEADERS overlay loops so a configured provider header always wins case-insensitively.
- * Exported so the web-search and vision sidecars apply the same precedence on their replays.
+ * Exported so the web-search and vision sidecars and the standalone search/images/live/context
+ * relays apply the same precedence on their replays. Accepts either the mutable header record
+ * most callers build or a `Headers` object (context-history materializes into one).
  */
 export function applyCallerUserAgentFallback(
-  headers: Record<string, string>,
+  headers: Record<string, string> | Headers,
   callerHeaders: Headers,
 ): void {
-  if (Object.keys(headers).some(name => name.toLowerCase() === "user-agent")) return;
+  const present = headers instanceof Headers
+    ? headers.has("user-agent")
+    : Object.keys(headers).some(name => name.toLowerCase() === "user-agent");
+  if (present) return;
   const userAgent = callerHeaders.get("user-agent");
-  if (userAgent) headers["User-Agent"] = userAgent;
+  if (!userAgent) return;
+  if (headers instanceof Headers) headers.set("user-agent", userAgent);
+  else headers["User-Agent"] = userAgent;
 }
 
 /** Replace every `input_image` part under a routed-compaction body with a short marker. */
