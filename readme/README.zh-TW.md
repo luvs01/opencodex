@@ -95,6 +95,19 @@ ocx start                         # 代理 + 儀表板位於 localhost:10100
 行動裝置連線的會話不會在對話中途跳帳號——但配額重新評估、failover、
 帳號排除、親和性到期，或 401/403 與 429 復原，仍可能重新綁定。當其中一個帳號——通常是你的 Codex Desktop 登入——只應在其他帳號用盡後才被用到時，請為帳號設定選取順序。
 
+### macOS 選單列應用程式
+
+請從[發行頁面](https://github.com/lidge-jun/opencodex/releases)下載 macOS、Windows 或 Linux 桌面應用程式。
+
+無需開啟儀表板即可查看代理狀態、用量與供應商配額的原生伴侶應用程式。原始碼位於
+[`app/`](../app)（Swift + AppKit，沒有第三方相依套件）。請從[發行頁面](https://github.com/lidge-jun/opencodex/releases)
+下載，或使用 `bun run prepare-sidecar && bun run prepare-widget && bunx tauri build` 在本機建置。
+
+應用程式未經公證且使用 ad hoc 簽章，首次啟動時請按右鍵並選擇「開啟」。詳情請參閱
+[macOS 選單列應用程式指南](https://lidge-jun.github.io/opencodex/guides/macos-menu-bar/)。
+
+應用程式也包含 macOS 14 以上的小工具，可顯示代理狀態、今日用量與配額。
+
 ### 贊助
 
 贊助讓 opencodex 能跟上每一次上游協議變更。有興趣？
@@ -121,13 +134,13 @@ ocx start                         # 代理 + 儀表板位於 localhost:10100
 <details>
 <summary>Docker Compose</summary>
 
-本儲存庫提供 digest 釘選、非 root 的 Compose 建置。主機已安裝 Git 與 Bun 時，
-每次建置映像前先產生權威相容性清單，再透過 stdin 初始化一次資料平面權杖並啟動 hub：
+本儲存庫提供 digest 釘選、非 root 的 Compose 建置。建置會根據選定的 Git 快照自行產生並驗證
+權威相容性清單。本機 clone 需要 Git 與 Docker Compose；遠端 Git context 需要 Docker Compose。
+兩種方式都不需要主機上的 Bun，也不需要準備步驟。透過 stdin 初始化一次資料平面權杖並啟動 hub：
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
-bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
@@ -138,11 +151,27 @@ curl --fail --silent http://127.0.0.1:10100/readyz
 預設主機綁定為 `127.0.0.1:10100`。遠端公開必須明確指定
 `OPENCODEX_BIND_ADDRESS=<LAN-or-Tailscale-IP> docker compose up -d`；`0.0.0.0` 會加入
 所有主機介面。請用防火牆與已認證的 TLS／tailnet 前端限制存取。
-產生的 JSON 不會被追蹤；它會複製進映像，且不含 `.git`。
-原始碼變更後請重新產生，產生與建置之間不要改原始碼。
-建置會拒絕過期清單、缺少或不相符的檔案、多餘原始碼檔案，以及符號連結。
+產生的 JSON 不會被追蹤。建置 context 只會納入 `.git/index` 與 `.git/HEAD`，也就是
+`git ls-files` 讀取的清單；大小約為 1 MB，而不是完整的 object store。這些檔案只能透過唯讀 mount
+在建置專用的 manifest 階段看到，因此沒有任何 `COPY` 會包含 `.git`。主機上已有的 manifest 只有在
+通過驗證後才會接受；否則建置會自行產生。建置會拒絕過期清單、缺少或不相符的檔案、多餘原始碼檔案，以及符號連結。
 它會核對建置上下文與複製進去的執行檔案上每一筆記錄的 SHA-256，包括
 `package.json`、`bun.lock`，以及特別納入的 `scripts/model-metadata.source.json`。
+
+遠端 Git context 需要 BuildKit 保留 Git metadata。以下 Compose 建置片段會選擇遠端快照，
+並傳入所需的內建參數：
+
+```yaml
+services:
+  hub:
+    pull_policy: build
+    build:
+      context: https://github.com/lidge-jun/opencodex.git#main
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
+```
 
 權杖與可變狀態留在名為 `ocx-state` 的 volume；映像、Compose 檔、環境變數或 shell 引數都不會放入憑證。見
 [Remote Hub 部署指南](https://opencodex.me/zh-tw/guides/remote-hub/) 以了解供應商
@@ -286,7 +315,7 @@ Qwen Cloud、Qoder Global 與 CN（官方 PAT + CLI）、SiliconFlow 等等。�
 
 ```bash
 ocx init                       # 互動式設定（寫入設定、接上 Codex、提供 shim）
-ocx start [--port 10100]       # 在前景啟動代理
+ocx start [--port 10100] [--socks5 [host:port] | --socks5-off]  # SOCKS5 預設為 socks5://127.0.0.1:10808
 ocx stop                       # 停止並還原原生 Codex
 ocx service [install|repair|restart|start|stop|status|uninstall|remove]  # 背景服務
 ocx codex-shim install         # 每次啟動 `codex` 時按需啟動代理
@@ -301,8 +330,8 @@ ocx v2 <...>                   # 多代理 v1/v2 介面控制
 ocx update [--tag preview]     # 更新 opencodex
 ```
 
-未釘選連接埠的啟動，在偏好連接埠被占用時可能改選其他空閒連接埠；明確的 `--port`
-絕不會跳號。完整參考：[CLI 文件](https://opencodex.me/zh-tw/reference/cli/)。
+偏好的連接埠被占用時，啟動會停止並指出占用者，而不會改用其他連接埠，因此絕不會在第一個代理旁留下另一個
+執行中的代理。請釋放該連接埠，或用 `--port` 指定其他連接埠。完整參考：[CLI 文件](https://opencodex.me/zh-tw/reference/cli/)。
 
 ### 健康狀態與就緒
 

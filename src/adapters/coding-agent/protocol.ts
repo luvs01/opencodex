@@ -21,6 +21,30 @@ export const MAX_STREAM_LINE_BYTES = 8 * 1024 * 1024;
 export const MAX_STREAM_TOTAL_BYTES = 64 * 1024 * 1024;
 /** Hard ceiling on projected conversation history text (characters) to prevent runaway memory. */
 export const MAX_PROJECTED_HISTORY_CHARS = 200_000;
+/**
+ * Chars-per-token ratio for deriving the projected-history ceiling from the model context
+ * window. Sits between the English/code (~4 chars per token) and CJK (~1.5) extremes: the
+ * ceiling is a runaway-memory bound and a coarse guard against cutting history the window can
+ * hold, not a token accounting - the caller-side compaction line stays the token authority.
+ */
+const PROJECTED_HISTORY_CHARS_PER_TOKEN = 3;
+/** Absolute ceiling on a window-derived history cap, so runaway metadata cannot unbound stdin. */
+const MAX_PROJECTED_HISTORY_DERIVED_CHARS = 4_000_000;
+
+/**
+ * Projected-history character ceiling for a turn, derived from the declared model context
+ * window. A missing or non-finite window keeps the legacy flat cap, and the derivation never
+ * lowers the cap below it: small windows change nothing, while large windows scale (a 1M-token
+ * model keeps 3M characters) until the hard ceiling. The flat 200k cap predates window
+ * metadata and cut long replays to roughly 50k-130k tokens of content regardless of the model.
+ */
+export function projectedHistoryCharLimit(contextWindowTokens: number | undefined): number {
+  if (typeof contextWindowTokens !== "number" || !Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) {
+    return MAX_PROJECTED_HISTORY_CHARS;
+  }
+  const derived = contextWindowTokens * PROJECTED_HISTORY_CHARS_PER_TOKEN;
+  return Math.min(Math.max(derived, MAX_PROJECTED_HISTORY_CHARS), MAX_PROJECTED_HISTORY_DERIVED_CHARS);
+}
 
 export class CodingAgentStreamLimitError extends Error {
   constructor(message: string) {
@@ -308,7 +332,7 @@ function formatMessageForHistory(message: OcxMessage): string {
   if (message.role === "user") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" ? p.text : `[${p.type}]`)).join("\n");
+      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : `[${p.type}]`)).join("\n");
     return `USER:\n${text}`;
   }
   if (message.role === "assistant") {
@@ -328,7 +352,7 @@ function formatMessageForHistory(message: OcxMessage): string {
   if (message.role === "toolResult") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" ? p.text : "[image]")).join("");
+      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : "[image]")).join("");
     const status = message.isError ? " (error)" : "";
     return `TOOL RESULT (call_id: ${message.toolCallId})${status}:\n${text}`;
   }
@@ -355,6 +379,8 @@ export function buildInputLines(message: OcxMessage): string[] {
         else if (part.type === "image") {
           const image = imagePart(part.imageUrl);
           if (image) content.push(image);
+        } else if (part.type === "document") {
+          content.push(textPart(part.text));
         } else {
           content.push(textPart("[video]"));
         }
@@ -378,7 +404,7 @@ export function buildSystemPrompt(parsed: OcxParsedRequest): string | undefined 
     if (message.role !== "developer") continue;
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(part => (part.type === "text" ? part.text : "")).join("");
+      : message.content.map(part => (part.type === "text" || part.type === "document" ? part.text : "")).join("");
     if (text.trim()) parts.push(text);
   }
   return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -395,7 +421,7 @@ export function buildSystemPrompt(parsed: OcxParsedRequest): string | undefined 
  * prior conversation turns are structured as bounded context text with tool results as text,
  * clearly demarcated from the current user request. Codex retains tool control; vendor tools are never invoked.
  */
-export function buildConversationInput(parsed: OcxParsedRequest): string[] {
+export function buildConversationInput(parsed: OcxParsedRequest, options: { maxHistoryChars?: number } = {}): string[] {
   const nonDev = parsed.context.messages.filter(m => m.role !== "developer");
   if (nonDev.length === 0) {
     return [JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "" }] } })];
@@ -409,7 +435,24 @@ export function buildConversationInput(parsed: OcxParsedRequest): string[] {
   const historyMessages = nonDev.slice(0, -1);
   const currentMessage = nonDev[nonDev.length - 1]!;
 
-  const imageBlocks: WireContentPart[] = [];
+  // History images are collected BEFORE the current message's so the attached blocks
+  // follow conversation order. The projected prose says "Prior conversation context"
+  // then "Current user request", so emitting current-turn images first contradicted
+  // the text the model reads alongside them.
+  const historyImageBlocks: WireContentPart[] = [];
+  for (const msg of historyMessages) {
+    if (!Array.isArray(msg.content)) continue;
+    // Tool results carry images too — a screenshot returned by a tool was previously
+    // flattened to the literal text "[image]" and the carrier discarded.
+    if (msg.role !== "user" && msg.role !== "toolResult") continue;
+    for (const part of msg.content) {
+      if (part.type !== "image") continue;
+      const img = imagePart(part.imageUrl);
+      if (img) historyImageBlocks.push(img);
+    }
+  }
+
+  const currentImageBlocks: WireContentPart[] = [];
   let currentRequestText = "";
 
   if (currentMessage.role === "user") {
@@ -421,7 +464,10 @@ export function buildConversationInput(parsed: OcxParsedRequest): string[] {
         if (part.type === "text") textParts.push(part.text);
         else if (part.type === "image") {
           const image = imagePart(part.imageUrl);
-          if (image) imageBlocks.push(image);
+          if (image) currentImageBlocks.push(image);
+          else textParts.push("[image omitted: unsupported reference]");
+        } else if (part.type === "document") {
+          textParts.push(part.text);
         } else {
           textParts.push("[video]");
         }
@@ -429,31 +475,40 @@ export function buildConversationInput(parsed: OcxParsedRequest): string[] {
       currentRequestText = textParts.join("\n");
     }
   } else if (currentMessage.role === "toolResult") {
-    const text = typeof currentMessage.content === "string"
-      ? currentMessage.content
-      : currentMessage.content.map(p => (p.type === "text" ? p.text : "[image]")).join("");
+    let text: string;
+    if (typeof currentMessage.content === "string") {
+      text = currentMessage.content;
+    } else {
+      const segments: string[] = [];
+      for (const part of currentMessage.content) {
+        if (part.type === "text") { segments.push(part.text); continue; }
+        if (part.type === "image") {
+          // Carry the real image instead of flattening it to a marker. The provenance
+          // note stays so the prose still reads coherently and the model can tell which
+          // attachment the tool produced; the bytes travel as an image block, never as text.
+          const image = imagePart(part.imageUrl);
+          if (image) { currentImageBlocks.push(image); segments.push("[image attached below]"); }
+          else segments.push("[image omitted: unsupported reference]");
+          continue;
+        }
+        if (part.type === "document") { segments.push(part.text); continue; }
+        segments.push("[video]");
+      }
+      text = segments.join("");
+    }
     const status = currentMessage.isError ? " (error)" : "";
     currentRequestText = `TOOL RESULT (call_id: ${currentMessage.toolCallId})${status}:\n${text}\n\nPlease proceed based on the above tool result.`;
   } else {
     currentRequestText = formatMessageForHistory(currentMessage);
   }
 
-  // Also collect any images from history messages so multimodal attachments are never dropped:
-  for (const msg of historyMessages) {
-    if (msg.role === "user" && Array.isArray(msg.content)) {
-      for (const part of msg.content) {
-        if (part.type === "image") {
-          const img = imagePart(part.imageUrl);
-          if (img) imageBlocks.push(img);
-        }
-      }
-    }
-  }
+  const imageBlocks: WireContentPart[] = [...historyImageBlocks, ...currentImageBlocks];
 
+  const maxHistoryChars = options.maxHistoryChars ?? MAX_PROJECTED_HISTORY_CHARS;
   let historyText = historyMessages.map(formatMessageForHistory).filter(Boolean).join("\n\n");
-  if (historyText.length > MAX_PROJECTED_HISTORY_CHARS) {
+  if (historyText.length > maxHistoryChars) {
     historyText = `[Earlier conversation history truncated for length...]\n\n` +
-      historyText.slice(historyText.length - MAX_PROJECTED_HISTORY_CHARS);
+      historyText.slice(historyText.length - maxHistoryChars);
   }
 
   const combinedText = `Prior conversation context:\n\n${historyText}\n\nCurrent user request:\n\n${currentRequestText}`;

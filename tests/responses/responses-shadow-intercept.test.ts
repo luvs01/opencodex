@@ -14,11 +14,18 @@ import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { repoPath } from "../helpers/repo-root";
 
 const originalFetch = globalThis.fetch;
+let releaseSpendHome: (() => void) | undefined;
+// Taken only by rows that reach upstream through the direct handler helper.
+const takeSpendHome = (): void => { releaseSpendHome = acquireOwnedSpendHome(); };
 
 afterEach(() => {
+  // Released first so a failed dispatch cannot leak the writer lease into the next row.
+  releaseSpendHome?.();
+  releaseSpendHome = undefined;
   globalThis.fetch = originalFetch;
 });
 
@@ -138,6 +145,7 @@ async function post(
 
 describe("shadow call intercept request path (issue #311)", () => {
   test("rewrites a gpt-5.6-luna helper call without overriding configured effort (#2706)", async () => {
+    takeSpendHome();
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
@@ -158,6 +166,7 @@ describe("shadow call intercept request path (issue #311)", () => {
   });
 
   test("a self-target is a no-op instead of an intercept loop (#2706)", async () => {
+    takeSpendHome();
     const bodies: Array<Record<string, unknown>> = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
@@ -184,6 +193,7 @@ describe("shadow call intercept request path (issue #311)", () => {
   });
 
   test("rewrites a gpt-5.6-luna turn request too (#1684)", async () => {
+    takeSpendHome();
     const bodies: Array<Record<string, unknown>> = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
@@ -207,6 +217,7 @@ describe("shadow call intercept request path (issue #311)", () => {
   // Recording the operator-configured prefix instead of the caller's raw string removes the
   // class, rather than adding one more pattern to a deny-list.
   test("the recorded marker is the configured prefix, never the caller's raw model string", async () => {
+    takeSpendHome();
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async () => new Response(JSON.stringify({
       choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
@@ -223,6 +234,7 @@ describe("shadow call intercept request path (issue #311)", () => {
   });
 
   test("a configured non-default prefix is recorded as itself", async () => {
+    takeSpendHome();
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async () => new Response(JSON.stringify({
       choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
@@ -297,14 +309,14 @@ function chatOk(text: string): Response {
 
 describe("a combo shadow-call target enters the failover loop (#4129)", () => {
   test("carries helper conversation isolation into concrete combo children", () => {
-    const core = readFileSync(repoPath("src/server/responses/core.ts"), "utf8");
-    const comboDispatch = core.slice(
-      core.indexOf("const comboId = !options.comboAttempt"),
-      core.indexOf("let unreadableEncryptedAgentTask"),
+    const prepare = readFileSync(repoPath("src/server/responses/request-prepare.ts"), "utf8");
+    const comboDispatch = prepare.slice(
+      prepare.indexOf("const comboId = !options.comboAttempt"),
+      prepare.indexOf("let unreadableEncryptedAgentTask"),
     );
-    const parsedHandoff = core.slice(
-      core.indexOf("if (cursorClientThreadId) parsed._cursorClientThreadId"),
-      core.indexOf("} catch (err)", core.indexOf("if (cursorClientThreadId) parsed._cursorClientThreadId")),
+    const parsedHandoff = prepare.slice(
+      prepare.indexOf("if (cursorClientThreadId) parsed._cursorClientThreadId"),
+      prepare.indexOf("} catch (err)", prepare.indexOf("if (cursorClientThreadId) parsed._cursorClientThreadId")),
     );
 
     expect(comboDispatch).toContain("shadowCallIntercepted,");
@@ -314,6 +326,7 @@ describe("a combo shadow-call target enters the failover loop (#4129)", () => {
   });
 
   test("a helper call rewritten to a combo hops past a 429 to the second target", async () => {
+    takeSpendHome();
     const urls: string[] = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async (url: unknown) => {
@@ -345,6 +358,7 @@ describe("a combo shadow-call target enters the failover loop (#4129)", () => {
   });
 
   test("a combo whose first target intersects the source still routes as a combo", async () => {
+    takeSpendHome();
     const urls: string[] = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async (url: unknown) => {
@@ -378,6 +392,7 @@ describe("a combo shadow-call target enters the failover loop (#4129)", () => {
   });
 
   test("a non-combo replacement still takes the ordinary late intercept", async () => {
+    takeSpendHome();
     const urls: string[] = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async (url: unknown) => {
