@@ -16,17 +16,28 @@ description: デフォルトのプロバイダーの選択、モデルの解決�
 
 opencodex は、要求されたモデルを次の順序で解決します。
 
-1. 設定済みの `<account-selector>/<native-openai-model>` namespace。対応する保存済み Codex アカウントだけに routing され、無効または利用不能な exact target は fail closed します。
-2. 正規の `combo/<id>` または構成されたコンボ エイリアス。正規 ID は、エイリアスが一致する前に優先されます。
-3. 構成されたプロバイダーを示すプレフィックスを持つ明示的な `<provider>/<model>` 名前空間。
-4. `gpt-*`、`o1-*`、`o3-*`、`o4-*` などのベア ネイティブ OpenAI ファミリ ID。
-正規対応の `openai` プロバイダー。
-5. プロバイダーの `defaultModel` と完全に一致します。
-6. 既知のプロバイダー ファミリ モデル プレフィックス。
-7. プロバイダーの構成された `models` リスト内の正確なモデル。
-8. `defaultProvider`、要求されたモデル ID を保持します。
+1. 設定済みの `policy/<id>` または routing-profile alias。policy evaluator を実行して選択した候補へ routing します。未解決の `policy/<id>` は後続のルールへフォールスルーします。
+2. 設定済みの `<account-selector>/<native-openai-model>` namespace。対応する保存済み Codex アカウントだけに routing され、無効または利用不能な exact target は fail closed します。
+3. 正規の `combo/<id>` または構成されたコンボ エイリアス。正規 ID は、エイリアスが一致する前に優先されます。
+4. 構成されたプロバイダーを示すプレフィックスを持つ明示的な `<provider>/<model>` 名前空間。
+5. `gpt-*`、`o1-*`、`o3-*`、`o4-*` などのベア ネイティブ OpenAI ファミリ ID。
+   正規対応の `openai` プロバイダー。
+6. プロバイダーの `defaultModel` と完全に一致します。
+7. 既知のプロバイダー ファミリ モデル プレフィックス。
+8. プロバイダーの構成された `models` リスト内の正確なモデル。
+9. `defaultProvider`、要求されたモデル ID を保持します。
 
 無効なプロバイダーは除外されます。無効なプロバイダーの明示的な名前空間は、フォールスルーではなく失敗します。プロバイダー エントリは、複数のプロバイダーに一致する可能性のあるルールの JSON 挿入順序でチェックされるため、ベア モデルがあいまいな可能性がある場合は明示的な名前空間を使用します。
+
+### ブロック対象モデルのリダイレクト
+
+`blockedModelRedirects` は、完全一致する解決済みモデル ID の置換を指定する任意のトップレベル `Record<string, string>` で、デフォルトでは未設定です。上記の解決順序の後に適用されます。一致した場合、すでに選択されたプロバイダーとアカウントのルートは維持され、上流モデル ID のみが置き換えられ、ルート理由として `blocked-model-redirect` が記録されます。このキーを省略すると、ルーティングは変更されません。
+
+```json
+{
+  "blockedModelRedirects": { "gpt-5.6-terra": "gpt-5.6-luna" }
+}
+```
 
 ## Codex アカウントの明示的な selector
 
@@ -44,17 +55,25 @@ selector の後には bare native OpenAI-family id だけを指定できます�
 が存在しない selector は表示されません。selector の検証、衝突規則、privacy guidance は
 [プロバイダーの構成](/reference/configuration/providers/)を参照してください。
 
+Codex Auth ページではこの picker 動作を opt-in できます。無効化すると selector-qualified row は非表示に
+なり通常の GPT row が戻りますが、mapping と exact `<selector>/<model>` routing は残るため、再有効化で
+同じ公開 label が復元されます。mutation は bounded catalog refresh より先に保存され、`ocx sync` warning は
+picker catalog の convergence だけが保留中で routing change は失われていないことを示します。
+
 ## コンボ (`config.combos`)
 
-各コンボ キーは `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` に一致する ID です。これは常に `combo/<id>` として直接アドレス指定可能であり、1 つの `alias` を公開することもあります。エイリアスは一意である必要があり、`combo/` 名前空間を占有することはできず、`gpt-*`、`o1-*`、`o3-*`、`o4-*`、または `codex-*` などの予約されたベア ネイティブ ファミリを使用することはできません。
+各コンボ キーは `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` に一致する ID です。これは常に `combo/<id>` として直接アドレス指定可能であり、1 つの `alias` を公開することもあります。エイリアスは一意である必要があり、`combo/` 名前空間を占有することはできず、通常は `gpt-*`、`o1-*`、`o3-*`、`o4-*`、または `codex-*` などの予約された bare native family を使用できません。明示的な `nativeAlias: true` Desktop 互換契約だけが例外です。
 
 |キー |タイプ |デフォルト |意味 |
 | --- | --- | --- | --- |
 | `targets` | `{ provider: string; model: string; weight?: number }[]` |必須 |具体的なルートを指示しました。 `weight` は 1 ～ 10000 で、デフォルトは `1` です。 |
-| `strategy?` | `"failover" \| "round-robin"` | `"failover"` |選択戦略。ターゲットの順序はフェイルオーバーの優先順位です。重みはスムーズな重み付きラウンドロビンを形成します。 |
+| `strategy?` | `"failover" \| "round-robin" \| "random" \| "least-used" \| "reset-window"` | `"failover"` |選択戦略。ターゲットの順序は `failover` の優先順位となり、`weight` は `round-robin` と `random` の抽選に影響し、`least-used` は記録された成功数に従い、`reset-window` は最も早いクォータリセットに従います。 |
 | `stickyLimit?` | `number` | `1` |成功したリクエストは 1 つのラウンドロビン バッチに保持されます。範囲は 1 ～ 100。 |
-| `defaultEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max" \| "ultra" \| null` |設定を解除する |呼び出し元が努力を省略し、選択されたターゲットが要求されたラングをアドバタイズする場合にのみ適用されます。 |
+| `defaultEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max" \| "ultra" \| null` |設定を解除する | `defaultEffort` は、コンボの既定値が null でなく、対象の対応リストが既知で空でない場合に、省略された `reasoning.effort` を補います。設定値に対応していればその値を使い、そうでなければ設定値以下で最も高い段階を選びます。それもなければ最も低い対応段階を使います。不明または空のリストでは既定値を省略します。 |
+| `reasoningEffortMode?` | `"strict" \| "adaptive"` | `"strict"` | `"strict"` は空リストを含む既知の対応リストの共通部分を公開し、`"adaptive"` は空リストを除外します。不明なリストは両モードで共通部分を制限しません。送信時、明示的な空リストは両モードで effort/thinking 制御を削除し、不明なリストでは adaptive のみ削除します。`reasoning.summary` は保持されます。既知の空でない対象の effort 解決と対象の選択・順序は変わりません。 |
 | `alias?` | `string` | — |正規のピッカー スラグの代わりのオプションのパブリック モデル ID。 |
+| `nativeAlias?` | `boolean` | `false` | 現在サポートされている bare native id に限り、その未修飾 id で優先します。アカウント修飾およびプロバイダー修飾の OpenAI ルートは別のままです。 |
+| `displayName?` | `string` | — | catalog 表示専用ラベル。native alias では空でない値が必須です。 |
 
 ```json
 {
@@ -91,7 +110,7 @@ selector の後には bare native OpenAI-family id だけを指定できます�
 
 CLI: `ocx route policy list`、`ocx route policy show <id>`、`ocx route policy dry-run <id> --model-context <tokens> --tools`、`ocx route policy evaluate <id>`。
 
-コンボは明示的な順序・重み付きターゲットのルーティングとフェイルオーバーです。ポリシープロファイルは、候補間の証拠に基づく選択です。
+コンボでは、明示的なターゲットを `failover`、`round-robin`、`random`、`least-used`、`reset-window` のいずれかでルーティングします。設定された戦略がターゲットを決定し、再試行可能な失敗時にはリスト内の次のターゲットへ進みます。ポリシープロファイルは、候補間の証拠に基づく選択です。
 
 ## リクエスト履歴とルーティング分析
 

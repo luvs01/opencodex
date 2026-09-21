@@ -4,6 +4,7 @@ import type { ComboCatalogOmission } from "./catalog/aggregation";
 import { CODEX_MODELS_CACHE_PATH } from "./paths";
 import { atomicWriteFile } from "../config";
 import type { OcxConfig } from "../types";
+import type { CodexCatalogSyncOptions } from "./catalog/sync";
 
 export interface CodexCatalogRefreshResult {
   added: number;
@@ -12,6 +13,7 @@ export interface CodexCatalogRefreshResult {
   catalogWritten: boolean;
   cacheSynced: boolean;
   comboOmissions: ComboCatalogOmission[];
+  refreshOutcome?: "committed" | "refused";
   /** Desired OFF observed under K during the catalog commit; no cache write either. */
   skippedReason?: "desired_disabled";
 }
@@ -42,12 +44,13 @@ export function syncCodexModelsCacheFromCatalog(catalogPath: string): void {
 export async function refreshCodexModelCatalog(
   config: OcxConfig,
   deps: RefreshDeps = defaultDeps,
+  options?: CodexCatalogSyncOptions,
 ): Promise<CodexCatalogRefreshResult> {
-  const result = await deps.syncCatalogModels(config);
+  const result = await deps.syncCatalogModels(config, options);
   const catalogExists = deps.existsSync(result.path);
   const catalogWritten = result.catalogWritten === true;
   const comboOmissions = result.comboOmissions ?? [];
-  if (result.skippedReason === "desired_disabled") {
+  if (result.skippedReason === "desired_disabled" || result.refreshOutcome === "refused") {
     // The commit path observed OFF under K. Invalidate nothing: rewriting the
     // models cache here would be exactly the routed-cache write the skip refused.
     return { ...result, catalogExists, catalogWritten: false, cacheSynced: false, comboOmissions };
@@ -55,6 +58,6 @@ export async function refreshCodexModelCatalog(
   if (!catalogExists) {
     return { ...result, catalogExists, catalogWritten: false, cacheSynced: false, comboOmissions };
   }
-  const cacheSynced = deps.invalidateCodexModelsCache();
+  const cacheSynced = deps.invalidateCodexModelsCache(options);
   return { ...result, catalogExists, catalogWritten, cacheSynced, comboOmissions };
 }
