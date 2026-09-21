@@ -1,22 +1,49 @@
+import { existsSync, readFileSync } from "node:fs";
+import {
+  deleteConfigTopLevelKey,
+  getConfigPath,
+  saveConfigPreservingClaudeCode,
+  withConfigMutationLockSync,
+} from "../config";
 import { removeCodexAccountCredential } from "./account-store";
 import { clearAccountNeedsReauth } from "./account-runtime-state";
-import { getMainChatgptAccountId } from "./auth-collision";
+import { getMainChatgptAccountId, readCodexTokensResult } from "./auth-collision";
 import { MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan } from "./main-account";
 import { clearAccountQuota } from "./quota";
 import { clearCodexUpstreamHealthForAccount, clearThreadAccountMapForAccount } from "./routing";
+
+import { clearCodexPoolRefreshFailure } from "./pool-refresh-backoff";
 import { invalidateCodexWebSocketsForAccount } from "./websocket-registry";
-import { clearMainAccountCredentialPresence, clearMainAccountInfoCache } from "./main-account-cache";
+import { clearMainAccountCredentialPresence, clearMainAccountInfoCache, observeMainQuotaCredential, observeMainQuotaIdentity } from "./main-account-cache";
+import { extractAccountIdClaims } from "../oauth/chatgpt";
 import { forgetCodexAccountPause } from "./account-pause";
 import { clearCodexAccountPin, forgetCodexAccountPriority } from "./account-priority";
+import { forgetCodexQuotaAutoRefreshAccount } from "./quota-auto-refresh-state";
+import { codexAccountNamespaceEntries, codexAccountPickerEnabled } from "./account-namespaces";
 import type { OcxConfig } from "../types";
 
 let observedMainChatgptAccountId: string | undefined;
+
+export class CodexAccountDeleteCleanupError extends Error {
+  constructor() {
+    super("Account deletion was saved, but local credential cleanup did not complete. Retry removal.");
+    this.name = "CodexAccountDeleteCleanupError";
+  }
+}
+
+export class CodexAccountDeleteRollbackError extends Error {
+  constructor() {
+    super("Account deletion failed and the previous config could not be restored. Restart before retrying.");
+    this.name = "CodexAccountDeleteRollbackError";
+  }
+}
 
 export function purgeCodexAccountRuntimeState(accountId: string): void {
   clearAccountNeedsReauth(accountId);
   clearAccountQuota(accountId);
   clearThreadAccountMapForAccount(accountId);
   clearCodexUpstreamHealthForAccount(accountId);
+  clearCodexPoolRefreshFailure(accountId);
   if (accountId === MAIN_CODEX_ACCOUNT_ID) {
     clearMainAccountInfoCache();
     clearMainAccountCredentialPresence();
@@ -42,10 +69,46 @@ export function reconcileMainCodexAccountRuntimeState(): boolean {
   if (currentAccountId === null) return false;
   const previousAccountId = observedMainChatgptAccountId;
   observedMainChatgptAccountId = currentAccountId;
-  if (previousAccountId === undefined || previousAccountId === currentAccountId) return false;
+  if (previousAccountId === undefined || previousAccountId === currentAccountId) {
+    observeMainQuotaIdentity(currentAccountId);
+    return false;
+  }
 
   purgeMainCodexAccountRuntimeState();
+  observeMainQuotaIdentity(currentAccountId);
   return true;
+}
+
+/**
+ * Rebuild the memory-only policy binding from a startup-owned, recovered auth path.
+ * The caller holds the native owner and exclusive claim; an incoming bearer is never evidence.
+ * A failed read creates no binding and cannot revoke a prior verified observation or its block.
+ * Only a valid replacement observation or confirmed account transition supersedes that evidence.
+ */
+export function initializeMainAccountPolicyBinding(authPath: string): boolean {
+  // Startup observes the pinned owned path inside the exclusive claim: bound the read so a
+  // replaced non-regular or oversized file cannot stall startup inside that claim.
+  const result = readCodexTokensResult(authPath, { bounded: true });
+  if (result.status !== "ok") return false;
+  const { tokens } = result;
+  if (typeof tokens.access_token !== "string" || !tokens.access_token
+    || typeof tokens.account_id !== "string" || !tokens.account_id) return false;
+  if (tokens.id_token != null && typeof tokens.id_token !== "string") return false;
+  const accountId = tokens.account_id;
+  // An owned file may contain an opaque bearer, but every decoded identity must agree —
+  // including the two account-id encodings within a single token.
+  const idTokenClaims = extractAccountIdClaims(tokens.id_token);
+  const accessTokenClaims = extractAccountIdClaims(tokens.access_token);
+  if (idTokenClaims.conflict || accessTokenClaims.conflict) return false;
+  const idTokenAccountId = idTokenClaims.accountId;
+  const accessTokenAccountId = accessTokenClaims.accountId;
+  if ((idTokenAccountId !== undefined && idTokenAccountId !== accountId)
+    || (accessTokenAccountId !== undefined && accessTokenAccountId !== accountId)) return false;
+  const previousAccountId = observedMainChatgptAccountId;
+  observedMainChatgptAccountId = accountId;
+  if (previousAccountId !== undefined && previousAccountId !== accountId) purgeMainCodexAccountRuntimeState();
+  observeMainQuotaIdentity(accountId);
+  return observeMainQuotaCredential(tokens.access_token, accountId) !== undefined;
 }
 
 /**
@@ -57,11 +120,15 @@ export function applyConfirmedMainCodexAccountTransition(
   toAccountId: string,
 ): boolean {
   if (!fromAccountId || !toAccountId || fromAccountId === toAccountId) {
-    if (toAccountId) observedMainChatgptAccountId = toAccountId;
+    if (toAccountId) {
+      observedMainChatgptAccountId = toAccountId;
+      observeMainQuotaIdentity(toAccountId);
+    }
     return false;
   }
   observedMainChatgptAccountId = toAccountId;
   purgeMainCodexAccountRuntimeState();
+  observeMainQuotaIdentity(toAccountId);
   return true;
 }
 
@@ -70,14 +137,85 @@ export function resetMainCodexAccountIdentityTrackingForTests(): void {
   clearMainAccountCredentialPresence();
 }
 
-export function deleteCodexAccount(runtimeConfig: OcxConfig, accountId: string): void {
-  removeCodexAccountCredential(accountId);
-  runtimeConfig.codexAccounts = (runtimeConfig.codexAccounts ?? [])
-    .filter(account => account.isMain || account.id !== accountId);
-  forgetCodexAccountPause(runtimeConfig, accountId);
-  forgetCodexAccountPriority(runtimeConfig, accountId);
-  clearCodexAccountPin(runtimeConfig, accountId);
-  if (runtimeConfig.activeCodexAccountId === accountId) runtimeConfig.activeCodexAccountId = undefined;
-  purgeCodexAccountRuntimeState(accountId);
-  invalidateCodexWebSocketsForAccount(accountId);
+function restoreRuntimeConfig(target: OcxConfig, snapshot: OcxConfig): void {
+  for (const key of Object.keys(target) as Array<keyof OcxConfig>) delete target[key];
+  Object.assign(target, snapshot);
+}
+
+function assertPersistedConfigUnchanged(configPath: string, previousBytes: Buffer): void {
+  if (!readFileSync(configPath).equals(previousBytes)) {
+    throw new CodexAccountDeleteRollbackError();
+  }
+}
+
+/**
+ * Delete a stored account while retaining its selector binding.
+ *
+ * When the runtime config is backed by an existing config.json, commit the config deletion before
+ * credentials or runtime state are destroyed. Transient callers intentionally skip durable config
+ * persistence because they have no durable account row to protect. The whole sequence shares the
+ * config mutation coordinator so a cooperating writer cannot re-add a persisted account between
+ * the durable config commit and credential cleanup.
+ *
+ * Returns true when a picker-visible row disappeared and the catalog must converge.
+ */
+export function deleteCodexAccount(runtimeConfig: OcxConfig, accountId: string): boolean {
+  let cleanupFailed = false;
+  const pickerVisibilityChanged = withConfigMutationLockSync(() => {
+    const previousConfig = structuredClone(runtimeConfig);
+    const configPath = getConfigPath();
+    const hasPersistedConfig = existsSync(configPath);
+    const previousPersistedConfig = hasPersistedConfig ? readFileSync(configPath) : undefined;
+    const hadStoredAccount = (runtimeConfig.codexAccounts ?? [])
+      .some(account => !account.isMain && account.id === accountId);
+    const hadVisiblePickerBinding = hadStoredAccount
+      && codexAccountPickerEnabled(runtimeConfig)
+      && codexAccountNamespaceEntries(runtimeConfig)
+        .some(([, boundAccountId]) => boundAccountId === accountId);
+
+    runtimeConfig.codexAccounts = (runtimeConfig.codexAccounts ?? [])
+      .filter(account => account.isMain || account.id !== accountId);
+    forgetCodexAccountPause(runtimeConfig, accountId);
+    forgetCodexAccountPriority(runtimeConfig, accountId);
+    if (runtimeConfig.codexQuotaAutoRefresh?.[accountId]) {
+      const retained = { ...runtimeConfig.codexQuotaAutoRefresh };
+      delete retained[accountId];
+      if (Object.keys(retained).length > 0) runtimeConfig.codexQuotaAutoRefresh = retained;
+      else deleteConfigTopLevelKey(runtimeConfig, "codexQuotaAutoRefresh");
+    }
+    clearCodexAccountPin(runtimeConfig, accountId);
+    if (runtimeConfig.activeCodexAccountId === accountId) runtimeConfig.activeCodexAccountId = undefined;
+
+    if (previousPersistedConfig !== undefined) {
+      try {
+        // Persist first for durable configs. Destructive cleanup below must never run for a
+        // deletion that failed to commit. Transient configs intentionally skip this write.
+        saveConfigPreservingClaudeCode(runtimeConfig);
+      } catch (error) {
+        restoreRuntimeConfig(runtimeConfig, previousConfig);
+        try {
+          assertPersistedConfigUnchanged(configPath, previousPersistedConfig);
+        } catch {
+          throw new CodexAccountDeleteRollbackError();
+        }
+        throw error;
+      }
+    }
+
+    try {
+      removeCodexAccountCredential(accountId);
+      purgeCodexAccountRuntimeState(accountId);
+      invalidateCodexWebSocketsForAccount(accountId);
+    } catch {
+      // Do not throw through the mutation coordinator after config.json committed: that would roll
+      // back only the SQLite generation transaction, not the already-atomic file replacement.
+      cleanupFailed = true;
+    }
+
+    return hadVisiblePickerBinding;
+  });
+
+  forgetCodexQuotaAutoRefreshAccount(accountId);
+  if (cleanupFailed) throw new CodexAccountDeleteCleanupError();
+  return pickerVisibilityChanged;
 }

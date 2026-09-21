@@ -5,6 +5,8 @@ import { loadConfig } from "../config";
 import { resolveCodexHomeDir } from "./home";
 import { extractAccountId } from "../oauth/chatgpt";
 import { isSelectableCodexPoolAccount } from "./account-id";
+import { codexPlanKey } from "./plan";
+import { MAX_AUTH_BYTES, readBounded } from "./native-profile-store";
 
 export interface CodexTokens {
   access_token: string;
@@ -30,12 +32,21 @@ function hasErrnoCode(error: unknown, code: string): boolean {
 /**
  * Reads the Codex CLI credential file and classifies the outcome. Reads once instead of doing an
  * `existsSync` pre-check, so a file replaced between check and read cannot be misread as absent.
+ * An already-owned lifecycle may supply its pinned auth path instead of resolving ambient home.
+ * `bounded` opts into the native-profile bounded reader (regular file, size-capped, no-follow,
+ * non-blocking) for startup observation paths that run inside the owner claim; bounded violations
+ * classify as `unreadable`. Legacy callers keep the unbounded read.
  * Never returns or logs the raw error or any token material.
  */
-export function readCodexTokensResult(): CodexTokenReadResult {
+export function readCodexTokensResult(
+  authPath = join(resolveCodexHomeDir(), "auth.json"),
+  options?: { bounded?: boolean },
+): CodexTokenReadResult {
   let raw: string;
   try {
-    raw = readFileSync(join(resolveCodexHomeDir(), "auth.json"), "utf-8");
+    raw = options?.bounded === true
+      ? readBounded(authPath, MAX_AUTH_BYTES).toString("utf-8")
+      : readFileSync(authPath, "utf-8");
   } catch (error) {
     return { status: hasErrnoCode(error, "ENOENT") ? "missing" : "unreadable" };
   }
@@ -78,8 +89,9 @@ function normalizedEmail(email: string | undefined | null): string | null {
   return trimmed || null;
 }
 
-function isWorkspacePlan(plan: string | undefined | null): boolean {
-  return !!plan && /team|business|enterprise|workspace|edu/i.test(plan);
+function isWorkspacePlan(plan: unknown): boolean {
+  const key = codexPlanKey(plan);
+  return !!key && /team|business|enterprise|workspace|edu/.test(key);
 }
 
 // Main login and managed pool accounts are separate duplicate buckets.
@@ -88,7 +100,7 @@ function isWorkspacePlan(plan: string | undefined | null): boolean {
 export function checkAccountIdCollision(
   chatgptAccountId: string,
   email?: string | null,
-  plan?: string | null,
+  plan?: unknown,
   excludeAccountId?: string | null,
 ): { collision: true; reason: string } | { collision: false } {
   const candidateEmail = normalizedEmail(email);

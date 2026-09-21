@@ -7,13 +7,14 @@ import {
 import { AddCodexAccountPickStep } from "./add-codex-account-pick-step";
 import { AddCodexAccountWaitingStep } from "./add-codex-account-waiting-step";
 import { useAddCodexAccountOAuth } from "./use-add-codex-account-oauth";
+import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
 
 export default function AddCodexAccountModal({
   apiBase, onClose, onAdded, reauthAccountId,
 }: {
   apiBase: string;
   onClose: () => void;
-  onAdded: () => void;
+  onAdded: (completion: CodexAccountMutationCompletion) => void;
   reauthAccountId?: string;
 }) {
   const t = useT();
@@ -62,6 +63,7 @@ export default function AddCodexAccountModal({
             error={ui.error}
             onIdChange={value => dispatch({ type: "set-id", id: value })}
             onStartOAuth={() => { void startOAuth(ui.id); }}
+            onStartDeviceOAuth={() => { void startOAuth(ui.id, { device: true }); }}
             onClose={closeModal}
           />
         )}
@@ -69,6 +71,8 @@ export default function AddCodexAccountModal({
           <AddCodexAccountWaitingStep
             reauthAccountId={reauthAccountId}
             authUrl={ui.authUrl}
+            deviceCode={ui.deviceCode}
+            instructions={ui.instructions}
             manualCode={ui.manualCode}
             manualCodeBusy={manualCodeBusy}
             manualCodeWaiting={manualCodeWaiting}
@@ -76,6 +80,7 @@ export default function AddCodexAccountModal({
             statusTone={ui.statusTone}
             flowId={ui.flowId}
             error={ui.error}
+            onSwitchToDevice={() => { void startOAuth(ui.id, { device: true }); }}
             onManualCodeChange={value => dispatch({ type: "set-manual-code", manualCode: value })}
             onSubmitManualCode={() => { void submitManualCode(); }}
             onClose={closeModal}

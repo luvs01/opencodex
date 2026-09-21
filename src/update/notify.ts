@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isatty } from "node:tty";
 import { createInterface } from "node:readline/promises";
 import { atomicWriteFile, getConfigDir } from "../config";
 import { hasStarPromptRun } from "../cli/star-prompt";
+import { selfLaunchArgv } from "../lib/self-launch-argv";
 import {
   type Channel,
   currentVersion,
@@ -121,8 +123,13 @@ export function isSourceBuildVersion(v: string): boolean {
 }
 
 /** The interactive/TTY + install-method gate shared with the star prompt. */
-function interactiveGuardOk(): boolean {
-  return !(process.env.OCX_SERVICE || !process.stdin.isTTY || !process.stdout.isTTY);
+export function interactiveGuardOk(): boolean {
+  try {
+    return !(process.env.OCX_SERVICE || !isatty(0) || !isatty(1));
+  } catch {
+    /* best-effort */
+    return false;
+  }
 }
 
 /**
@@ -166,9 +173,10 @@ function cacheIsStale(cache: VersionCache | null): boolean {
 export function triggerBackgroundRefreshIfStale(channel: Channel, cache: VersionCache | null): void {
   if (!cacheIsStale(cache)) return;
   try {
-    const entry = process.argv[1];
-    if (!entry || !existsSync(entry)) return;
-    const child = spawn(process.execPath, [entry, "__refresh-version", channel], {
+    const commandArgs = ["__refresh-version", channel];
+    const args = selfLaunchArgv(commandArgs);
+    if (args.length > commandArgs.length && (!args[0] || !existsSync(args[0]))) return;
+    const child = spawn(process.execPath, args, {
       detached: true,
       stdio: "ignore",
       windowsHide: true,

@@ -1,12 +1,10 @@
-import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
+import type { CodexAccountMode, OcxConfig, OcxProviderConfig, ProviderCostOverlay } from "../types";
 import { OPENAI_PROVIDER_TIER_VERSION } from "../types";
+import { openaiResponsesUrl } from "../adapters/openai-responses-url";
+import { MAX_COST4_RATE } from "../usage/expected-prices";
+import { OPENAI_CODEX_PROVIDER_ID, LEGACY_OPENAI_MULTI_PROVIDER_ID, LEGACY_CHATGPT_PROVIDER_ID, CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "./openai-tiers-destination";
+export { OPENAI_CODEX_PROVIDER_ID, LEGACY_OPENAI_MULTI_PROVIDER_ID, OPENAI_API_PROVIDER_ID, LEGACY_CHATGPT_PROVIDER_ID, CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider, supportsNativeResponsesCompactEndpoint, isOpenAiOperatedResponsesDestination, destinationDecodesNativeCompactionBlob } from "./openai-tiers-destination";
 
-export const OPENAI_CODEX_PROVIDER_ID = "openai";
-export const LEGACY_OPENAI_MULTI_PROVIDER_ID = "openai-multi";
-export const OPENAI_API_PROVIDER_ID = "openai-apikey";
-export const LEGACY_CHATGPT_PROVIDER_ID = "chatgpt";
-
-export const CODEX_FORWARD_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const LEGACY_OPENAI_MULTI_PREFIX = `${LEGACY_OPENAI_MULTI_PROVIDER_ID}/`;
 
 function canonicalCodexForwardProvider(mode: CodexAccountMode): OcxProviderConfig {
@@ -16,41 +14,6 @@ function canonicalCodexForwardProvider(mode: CodexAccountMode): OcxProviderConfi
     authMode: "forward",
     codexAccountMode: mode,
   };
-}
-
-function normalizedBaseUrl(value: string): string | undefined {
-  try {
-    const url = new URL(value.trim());
-    if (url.username || url.password || url.search || url.hash) return undefined;
-    const path = url.pathname.replace(/\/+$/, "");
-    return `${url.origin}${path}`;
-  } catch {
-    return undefined;
-  }
-}
-
-export function isCanonicalOpenAiForwardProvider(provider: OcxProviderConfig): boolean {
-  return provider.adapter === "openai-responses"
-    && provider.authMode === "forward"
-    && normalizedBaseUrl(provider.baseUrl) === CODEX_FORWARD_BASE_URL;
-}
-
-const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
-
-/**
- * Whether this provider can serve `POST /responses/compact`. The canonical ChatGPT
- * backend can, and so can the official OpenAI API — but an arbitrary gateway that
- * merely speaks the Responses wire cannot, and calling it there fails compaction
- * with an unhelpful error instead of falling back to a routed summary (#422).
- */
-export function supportsNativeResponsesCompactEndpoint(
-  providerName: string,
-  provider: OcxProviderConfig,
-): boolean {
-  if (isCanonicalOpenAiForwardProvider(provider)) return true;
-  return providerName === OPENAI_API_PROVIDER_ID
-    && provider.adapter === "openai-responses"
-    && normalizedBaseUrl(provider.baseUrl) === OPENAI_API_BASE_URL;
 }
 
 export interface OpenAiTierMigrationProjection {
@@ -69,11 +32,17 @@ export class OpenAiTierMigrationCollisionError extends Error {
   }
 }
 
-function managedLegacyMultiOverlay(provider: OcxProviderConfig): Pick<OcxProviderConfig, "disabled" | "selectedModels"> | null {
-  const allowed = new Set(["adapter", "authMode", "baseUrl", "disabled", "selectedModels"]);
+function managedLegacyMultiOverlay(
+  provider: OcxProviderConfig,
+): Pick<OcxProviderConfig, "disabled" | "selectedModels" | "modelCosts"> | null {
+  const allowed = new Set(["adapter", "authMode", "baseUrl", "disabled", "selectedModels", "modelCosts"]);
   if (!Object.keys(provider).every(key => allowed.has(key))) return null;
   if (!isCanonicalOpenAiForwardProvider(provider)) return null;
   if (provider.disabled !== undefined && typeof provider.disabled !== "boolean") return null;
+  // Keep the migration self-contained: a malformed overlay is a collision, not
+  // something to carry into the canonical row (importing config.ts here would
+  // create an import cycle — config.ts already imports this module).
+  if (provider.modelCosts !== undefined && !validLegacyOverlayCosts(provider.modelCosts)) return null;
   if (provider.selectedModels !== undefined && (
     !Array.isArray(provider.selectedModels)
     || provider.selectedModels.some(model => typeof model !== "string")
@@ -81,7 +50,24 @@ function managedLegacyMultiOverlay(provider: OcxProviderConfig): Pick<OcxProvide
   return {
     ...(provider.disabled !== undefined ? { disabled: provider.disabled } : {}),
     ...(provider.selectedModels !== undefined ? { selectedModels: [...provider.selectedModels] } : {}),
+    ...(provider.modelCosts !== undefined ? { modelCosts: provider.modelCosts } : {}),
   };
+}
+
+/** Shape check for a legacy overlay: a plain record of complete non-negative finite Cost4 rows. */
+function validLegacyOverlayCosts(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const fields = ["input", "output", "cacheRead", "cacheWrite"] as const;
+  return Object.values(value as Record<string, unknown>).every(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const rates = entry as Record<string, unknown>;
+    return Object.keys(rates).length === fields.length
+      && fields.every(key => Object.hasOwn(rates, key)
+        && typeof rates[key] === "number"
+        && Number.isFinite(rates[key])
+        && (rates[key] as number) >= 0
+        && (rates[key] as number) <= MAX_COST4_RATE);
+  });
 }
 
 function rewriteLegacyOpenAiSelectedId(value: string): string {
@@ -95,6 +81,28 @@ function rewriteLegacyOpenAiModelList(values: string[] | undefined): string[] | 
   return [...new Set(values.map(rewriteLegacyOpenAiSelectedId))];
 }
 
+/**
+ * Rewrite legacy `openai-multi/<model>` keys in a modelCosts overlay so the
+ * prices still match after the migration resolves logs as provider `openai`
+ * with the bare model id. Keys without the legacy prefix pass through.
+ */
+function rewriteLegacyOpenAiCostKeys(costs: Record<string, ProviderCostOverlay> | undefined): Record<string, ProviderCostOverlay> {
+  // Null-prototype map so prototype-named model ids (e.g. "__proto__") are
+  // stored as own properties instead of invoking the inherited setter.
+  const rewritten = Object.create(null) as Record<string, ProviderCostOverlay>;
+  if (costs) {
+    for (const [key, value] of Object.entries(costs)) {
+      const canonicalKey = rewriteLegacyOpenAiSelectedId(key);
+      // A bare <model> key always wins over its openai-multi/<model> equivalent
+      // inside the same row, regardless of JSON property order.
+      if (key === canonicalKey || !Object.hasOwn(rewritten, canonicalKey)) {
+        rewritten[canonicalKey] = value;
+      }
+    }
+  }
+  return rewritten;
+}
+
 function mergeLegacyOpenAiProviderRows(
   openai: OcxProviderConfig | undefined,
   legacyMulti: OcxProviderConfig | undefined,
@@ -104,12 +112,22 @@ function mergeLegacyOpenAiProviderRows(
     ...(openai?.selectedModels ?? []),
     ...(legacyMulti?.selectedModels ?? []),
   ]);
+  // Both rows can carry disjoint overlays; merge them (canonical openai wins on
+  // key conflicts) so legacy Multi prices are not silently dropped. Keys are
+  // rewritten first so `openai-multi/<model>` entries still resolve after the
+  // provider is canonicalized to `openai`.
+  const modelCosts = {
+    ...rewriteLegacyOpenAiCostKeys(legacyMulti?.modelCosts),
+    ...rewriteLegacyOpenAiCostKeys(openai?.modelCosts),
+  };
+  const hasModelCosts = Object.keys(modelCosts).length > 0;
   const formerRows = [openai, legacyMulti].filter((row): row is OcxProviderConfig => row !== undefined);
   const disabled = formerRows.length > 0 && formerRows.every(row => row.disabled === true);
   return {
     ...canonicalCodexForwardProvider(mode),
     ...(disabled ? { disabled: true } : {}),
     ...(selectedModels && selectedModels.length > 0 ? { selectedModels } : {}),
+    ...(hasModelCosts ? { modelCosts } : {}),
   };
 }
 

@@ -1,8 +1,10 @@
 import { useState } from "react";
-import type { ComboEffort, ComboStrategy, ComboTarget } from "../combo-workspace-data";
-import { COMBO_EFFORTS, newComboTarget } from "../combo-workspace-data";
+import type { ComboEffort, ComboStrategy, ComboTarget, ProviderQuotaStates } from "../combo-workspace-data";
+import { comboImagesSupported } from "../combo-capabilities";
+import { COMBO_EFFORTS, COMBO_STRATEGIES, COMBO_STRATEGY_LABEL_KEYS, newComboTarget } from "../combo-workspace-data";
 import { IconArrowDown, IconArrowUp, IconGrip, IconPlus, IconTrash } from "../icons";
 import { useT } from "../i18n/shared";
+import { Switch } from "../ui";
 import { formatProviderDisplayName } from "../provider-icons";
 import type { ModelOption, ProviderOption } from "./combo-workspace-types";
 import { clampedNumberInput, enabledProviders, modelsForProvider } from "./combo-workspace-utils";
@@ -19,10 +21,7 @@ export function StrategySeg({
   const t = useT();
   return (
     <div className="cwi-strategy-seg" role="radiogroup" aria-label={t("cws.strategy")}>
-      {([
-        ["failover", "cws.strategy.failover"],
-        ["round-robin", "cws.strategy.roundRobin"],
-      ] as const).map(([id, key]) => (
+      {COMBO_STRATEGIES.map((id) => (
         <button
           key={id}
           type="button"
@@ -32,7 +31,7 @@ export function StrategySeg({
           disabled={disabled}
           onClick={() => onChange(id)}
         >
-          {t(key)}
+          {t(COMBO_STRATEGY_LABEL_KEYS[id])}
         </button>
       ))}
     </div>
@@ -83,17 +82,78 @@ export function EffortSelect({
   );
 }
 
+
+export function ComboCapabilities({
+  targets,
+  models,
+  imageInput,
+  reasoningEffortMode,
+  disabled,
+  onChange,
+}: {
+  targets: ComboTarget[];
+  models: ModelOption[];
+  imageInput: "auto" | "disabled";
+  reasoningEffortMode: "strict" | "adaptive";
+  disabled?: boolean;
+  onChange: (patch: { imageInput?: "auto" | "disabled"; reasoningEffortMode?: "strict" | "adaptive" }) => void;
+}) {
+  const t = useT();
+  const imagesSupported = comboImagesSupported(targets, models);
+  // Default: checked (auto) when supported; force off when any target lacks image.
+  const effectiveOn = imagesSupported && imageInput !== "disabled";
+
+  return (
+    <section className="cwi-capabilities" aria-label={t("cws.capabilities")}>
+      <span className="field-label">{t("cws.capabilities")}</span>
+      <div className="cwi-capability-row">
+        <div>
+          <span className="cwi-capability-label">{t("cws.capability.imageInput")}</span>
+          <p className="muted cwi-capability-hint">
+            {imagesSupported ? t("cws.capability.imageInputHint") : t("cws.capability.imageInputUnavailable")}
+          </p>
+        </div>
+        <Switch
+          on={effectiveOn}
+          onClick={() => {
+            if (!imagesSupported) return;
+            onChange({ imageInput: imageInput === "auto" ? "disabled" : "auto" });
+          }}
+          disabled={disabled || !imagesSupported}
+          label={t("cws.capability.imageInput")}
+        />
+      </div>
+      <div className="cwi-capability-row">
+        <div>
+          <span className="cwi-capability-label">{t("cws.capability.adaptiveEffort")}</span>
+          <p className="muted cwi-capability-hint">{t("cws.capability.adaptiveEffortHint")}</p>
+        </div>
+        <Switch
+          on={reasoningEffortMode === "adaptive"}
+          onClick={() => {
+            onChange({ reasoningEffortMode: reasoningEffortMode === "adaptive" ? "strict" : "adaptive" });
+          }}
+          disabled={disabled}
+          label={t("cws.capability.adaptiveEffort")}
+        />
+      </div>
+    </section>
+  );
+}
+
 export function TargetEditor({
   targets,
   strategy,
   providers,
   models,
+  providerQuotaStates,
   onChange,
 }: {
   targets: ComboTarget[];
   strategy: ComboStrategy;
   providers: ProviderOption[];
   models: ModelOption[];
+  providerQuotaStates: ProviderQuotaStates;
   onChange: (next: ComboTarget[]) => void;
 }) {
   const t = useT();
@@ -127,6 +187,7 @@ export function TargetEditor({
         const modelSelectDisabled = !row.provider;
         const dragging = dragIndex === index;
         const dropTarget = overIndex === index && dragIndex !== null && dragIndex !== index;
+        const quotaState = providerQuotaStates[row.provider.trim()] ?? "unknown";
         return (
           <div
             key={row.clientKey ?? `${row.provider}:${row.model}`}
@@ -222,7 +283,7 @@ export function TargetEditor({
                 <option key={id} value={id}>{id}</option>
               ))}
             </select>
-            {strategy === "round-robin" && (
+            {(strategy === "round-robin" || strategy === "random") && (
               <input
                 className="input mono"
                 type="number"
@@ -237,6 +298,12 @@ export function TargetEditor({
                 }}
               />
             )}
+            <span
+              className={`cwi-quota-badge cwi-quota-badge--${quotaState}`}
+              aria-label={t(`cws.quota.${quotaState}`)}
+            >
+              {t(`cws.quota.${quotaState}`)}
+            </span>
             <div className="cwi-target-actions">
               <button
                 type="button"
