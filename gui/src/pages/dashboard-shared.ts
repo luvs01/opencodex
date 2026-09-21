@@ -8,6 +8,7 @@ import {
 import { readJsonOrThrow } from "../fetch-json";
 import type { TKey } from "../i18n/shared";
 import type { StartupHealthStatus } from "../startup-health-ui";
+import { shadowSourceModelList } from "./shadow-call-source";
 
 export type DashboardSection = "overview" | "providers" | "models";
 
@@ -47,6 +48,9 @@ export interface ProviderInfo { name: string; adapter: string; baseUrl: string; 
 export interface ModelInfo { id: string; provider: string; namespaced: string; owned_by?: string; reasoningEfforts?: string[] }
 export interface SettingsData {
   codexAutoStart: boolean;
+  codexDesktopAuthless?: boolean;
+  codexClientCompaction?: boolean;
+  catalogRefreshPending?: boolean;
   /** Whether a login may open a browser on the machine running the proxy. */
   oauthOpenBrowser?: boolean;
   port: number;
@@ -119,12 +123,13 @@ export interface SidecarPatch {
   };
 }
 export interface ShadowCallData { enabled: boolean; model: string; sourceModels?: string[] }
-export interface UsageSummary30d { summary: { requests: number; totalTokens: number; coverageRatio: number } }
+export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: { requests: number; totalTokens: number; coverageRatio: number } };
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "npm" | "bun" | "source";
 export type UpdateJobStatus = "running" | "restarting" | "succeeded" | "failed";
 export interface SyncResult {
   ok: boolean;
+  status?: "applied" | "skipped" | "catalog-only" | "refused";
   added: number;
   catalogPath: string | null;
   catalogExists: boolean;
@@ -240,7 +245,7 @@ export function visionTimeoutPatch(timeoutMs: number): SidecarPatch {
 
 /**
  * Dashboard names for the runtime timeout contract in `src/vision/timeout-bounds.ts`.
- * Pinned by `tests/vision-sidecar-timeout-bounds.test.ts`.
+ * Pinned by `tests/gui/vision-sidecar-timeout-bounds.test.ts`.
  */
 export const VISION_TIMEOUT_MS_DEFAULT = DEFAULT_VISION_TIMEOUT_MS;
 export const VISION_TIMEOUT_MS_MAX = MAX_VISION_TIMEOUT_MS;
@@ -380,9 +385,28 @@ export function visionModelOptions(
 }
 
 /** Options for shadow-call replacement models use the proxy's canonical routing id. */
-export function shadowCallModelOptions(models: ModelInfo[], current: string | undefined) {
-  const out = [{ value: "", label: "—" }, ...models.map(model => ({ value: model.namespaced, label: model.namespaced }))];
-  if (current && !out.some(option => option.value === current)) out.push({ value: current, label: current });
+export function shadowCallModelOptions(models: ModelInfo[], current: string | undefined, sourceModels?: string[]) {
+  const sourcePrefixes = shadowSourceModelList(sourceModels);
+  const sourceIdentities = sourcePrefixes.flatMap(prefix => {
+    const source = models.find(model => model.namespaced.startsWith(prefix))
+      ?? models.find(model => model.id.startsWith(prefix));
+    return source ? [{ provider: source.provider, modelId: prefix }] : [];
+  });
+  const intersecting = models.filter(model => sourceIdentities.some(source =>
+    model.provider === source.provider && model.id.startsWith(source.modelId)));
+  const invalidSelectors = new Set([
+    ...sourcePrefixes.flatMap(prefix => [prefix, `openai/${prefix}`]),
+    ...intersecting.flatMap(model => [model.namespaced, `${model.provider}/${model.id}`]),
+  ]);
+  const out = [
+    { value: "", label: "—" },
+    ...models
+      .filter(model => !invalidSelectors.has(model.namespaced))
+      .map(model => ({ value: model.namespaced, label: model.namespaced })),
+  ];
+  if (current && !invalidSelectors.has(current) && !out.some(option => option.value === current)) {
+    out.push({ value: current, label: current });
+  }
   return out;
 }
 

@@ -91,12 +91,20 @@ Routing and catalog visibility are separate controls:
   deliberately inert for them.
 - `provider.disabled: true` removes that provider from catalog discovery. Explicit
   `provider/model` requests fail, and `defaultModel` / `models[]` scans skip it.
+- Routed catalog rows are cloned from the Codex-native template, so native-only delivery flags are
+  stripped during normalization: `supports_websockets`, `supports_reasoning_summaries`, and
+  `supports_experimental_context`. A routed provider never inherits the experimental-context
+  contract; inheriting it made Codex compact after nearly every step on long routed threads.
 - `providerContextCaps` applies per-provider Codex-visible context caps. `contextCapValue` is the
   dashboard default (350,000 by default), but it does nothing by itself until a provider is
-  present in `providerContextCaps`. Changing the dashboard value re-points every enabled provider
+  present in `providerContextCaps`. Changing the dashboard value updates every enabled cap
   only when "apply to every routed provider" is toggled on; otherwise each provider keeps its own
-  cap. Caps only lower a known context window; they never raise one or change the upstream model's
-  actual limit.
+  cap. Ordinary known windows can only be lowered; native models that support a longer window
+  can expand up to their own supported ceiling. Caps never change the upstream model's actual limit.
+  Switching a cap off retains its selection in `providerContextCapValues`, including after reload;
+  switching it on restores that selection. A remembered selection never applies a limit while disabled.
+  Sending `{ "setAll": true }` without `value` enables all configured providers at the current
+  global value and replaces their remembered selections.
 
 ```json
 {

@@ -10,10 +10,13 @@
  */
 
 import {
+  CODE_MODE_HOST_RECOVERY_PREFIX,
   EMPTY_EXEC_OUTPUT_MESSAGE,
   EMPTY_EXEC_OUTPUT_REGEX,
   FAILED_EXEC_OUTPUT_MESSAGE,
-  FAILED_EXEC_OUTPUT_REGEX,
+  annotateCodeModeHostFailure,
+  isCodexCodeModeExecResult,
+  isFailedEmptyExecWrapper,
   isCodexExecBridgeTool,
 } from "../exec-tool-result-normalize";
 
@@ -23,7 +26,7 @@ import {
  * `Script failed`, so restore that arm here rather than widening the shared one.
  */
 function isEmptyOrFailedExecWrapper(text: string): boolean {
-  return EMPTY_EXEC_OUTPUT_REGEX.test(text) || FAILED_EXEC_OUTPUT_REGEX.test(text);
+  return EMPTY_EXEC_OUTPUT_REGEX.test(text) || isFailedEmptyExecWrapper(text);
 }
 
 const COMPUTER_USE_TOOL_NAMES = new Set([
@@ -83,7 +86,13 @@ export interface NormalizedToolResultText {
  */
 export function normalizeCursorToolResultText(
   text: string,
-  options: { toolName?: string; toolNamespace?: string; isError?: boolean } = {},
+  options: {
+    toolName?: string;
+    toolNamespace?: string;
+    isError?: boolean;
+    /** True only when the request's visible catalog is Codex code mode. */
+    codeMode?: boolean;
+  } = {},
 ): NormalizedToolResultText {
   const isError = options.isError === true;
   const computerUse = isNodeReplOrComputerUseTool(options.toolName, options.toolNamespace);
@@ -99,12 +108,23 @@ export function normalizeCursorToolResultText(
       // A `Script failed` wrapper is empty but NOT a success: reporting it as an empty success
       // would erase the only failure signal. Text classification stays separate from Cursor's
       // isError policy, which the Computer Use branch above owns.
-      text: FAILED_EXEC_OUTPUT_REGEX.test(text.trim()) ? FAILED_EXEC_OUTPUT_MESSAGE : EMPTY_EXEC_OUTPUT_MESSAGE,
+      text: isFailedEmptyExecWrapper(text.trim()) ? FAILED_EXEC_OUTPUT_MESSAGE : EMPTY_EXEC_OUTPUT_MESSAGE,
       isError: false,
       changed: true,
     };
   }
-  if (!isError) {
+  // Replayed guidance and successful wrappers must not enter the legacy substring matcher.
+  if (text.includes(CODE_MODE_HOST_RECOVERY_PREFIX)
+    || /^(?:Script completed|Command finished|Execution finished)\b/.test(text.trimStart())) {
+    return { text, isError, changed: false };
+  }
+  // The request's visible catalog establishes provenance; the name alone also matches structured
+  // exec tools. Host guidance preserves Cursor's original error status.
+  if (options.codeMode === true && isCodexCodeModeExecResult(options.toolName, options.toolNamespace)) {
+    const hostFailure = annotateCodeModeHostFailure(text, options);
+    if (hostFailure !== undefined) return { text: hostFailure, isError, changed: true };
+  }
+  if (computerUse && !isError) {
     for (const { marker, guidance } of RUNTIME_FAILURE_GUIDANCE) {
       if (text.includes(marker)) {
         return { text: `${text}\n[recovery: ${guidance}]`, isError: true, changed: true };
