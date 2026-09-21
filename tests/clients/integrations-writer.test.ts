@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildClientContribution, type ExportModel } from "../../src/clients/config-export";
-import { fileIO, type IntegrationIO } from "../../src/integrations/config-io";
+import { assertIntegrationWriteOwnership, fileIO, type IntegrationIO } from "../../src/integrations/config-io";
 import { canonicalContribution, fingerprint } from "../../src/integrations/ownership";
 import { protectedContributionFingerprint } from "../../src/integrations/ownership-policy";
 import { INTEGRATION_CLIENTS } from "../../src/integrations/registry";
@@ -93,6 +95,14 @@ function installOmp(): string {
   return configPath;
 }
 
+function installOmo(): string {
+  const spec = INTEGRATION_CLIENTS.omo;
+  mkdirSync(spec.detectDir(TEST_ENV, home), { recursive: true });
+  const configPath = spec.configPath(TEST_ENV, home);
+  mkdirSync(dirname(configPath), { recursive: true });
+  return configPath;
+}
+
 function installDsh(): string {
   const spec = INTEGRATION_CLIENTS.dsh;
   mkdirSync(spec.detectDir(TEST_ENV, home), { recursive: true });
@@ -149,6 +159,48 @@ function reverseJsonObjectKeys(value: unknown): unknown {
 }
 
 describe("apply", () => {
+  // The symlink regressions skip Windows: creating one there needs a privilege
+  // the hosted runners do not grant, and the boundary under test — lstat
+  // classification and rename-replacement of the named entry — is the shared
+  // code path every platform takes.
+  test.skipIf(process.platform === "win32")("refuses an omo catalog symlink without changing its target", () => {
+    const configPath = installOmo();
+    const victim = join(dirname(home), "victim.json");
+    const original = '{"security":{"mode":"strict"}}\n';
+    writeFileSync(victim, original);
+    symlinkSync(victim, configPath);
+
+    expect(readIntegrationState(input({ clientId: "omo" })).state).toBe("unsafe");
+    const result = applyIntegration(input({ clientId: "omo" }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unsafe");
+    expect(readFileSync(victim, "utf8")).toBe(original);
+    expect(store.listOperations("omo")).toHaveLength(0);
+  });
+
+  test.skipIf(process.platform === "win32")("an omo symlink swap before commit cannot replace its target", () => {
+    const configPath = installOmo();
+    const checked = '{"notes":"client-owned"}\n';
+    writeFileSync(configPath, checked);
+    const victim = join(dirname(home), "victim.json");
+    const original = '{"security":{"mode":"strict"}}\n';
+    writeFileSync(victim, original);
+    const captureSnapshot = store.captureSnapshot.bind(store);
+    store.captureSnapshot = (clientId, opId, before) => {
+      const snapshot = captureSnapshot(clientId, opId, before);
+      unlinkSync(configPath);
+      symlinkSync(victim, configPath);
+      return snapshot;
+    };
+
+    const result = applyIntegration(input({ clientId: "omo" }));
+
+    expect(result.ok).toBe(false);
+    expect(readFileSync(victim, "utf8")).toBe(original);
+    expect(store.readRecords().omo).toBeUndefined();
+  });
+
   test("refuses Kimi TOML date rewrites without changing the file or ownership store", () => {
     const spec = INTEGRATION_CLIENTS.kimi;
     mkdirSync(spec.detectDir(TEST_ENV, home), { recursive: true });
@@ -549,6 +601,29 @@ describe("apply", () => {
     if (!result.ok) expect(result.reason).toBe("conflict");
   });
 
+  test("a hand-edited ZCode provider kind stays a hard conflict (#4295)", () => {
+    // The export moved from `openai-compatible` to `openai` so ZCode dials the proxy's
+    // native Responses route. `kind` is not a refreshable path, so a user who sets it
+    // back by hand must keep owning that decision instead of having it silently
+    // rewritten — the same protection `options` already has above.
+    const configPath = installZcode();
+    const request = input({ clientId: "zcode" });
+    expect(applyIntegration(request).ok).toBe(true);
+
+    const document = JSON.parse(readFileSync(configPath, "utf8")) as {
+      provider: Record<string, { kind: string }>;
+    };
+    expect(document.provider.opencodex!.kind).toBe("openai");
+    document.provider.opencodex!.kind = "openai-compatible";
+    writeFileSync(configPath, `${JSON.stringify(document, null, 2)}\n`);
+
+    const status = readIntegrationState(request);
+    expect(status).toMatchObject({ state: "conflict", reason: "foreign-edit" });
+    const result = applyIntegration(request);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("conflict");
+  });
+
   test("a malformed recorded ZCode policy cannot widen refreshable drift (#2389)", () => {
     const configPath = installZcode();
     const request = input({ clientId: "zcode" });
@@ -690,6 +765,26 @@ describe("apply", () => {
     expect(readFileSync(configPath, "utf8")).toContain("1e999");
   });
 
+  test("Gajae refresh preserves loopback auth and incorporates catalog additions", () => {
+    const configPath = installGajae();
+    expect(applyIntegration(input({ clientId: "gajae" })).ok).toBe(true);
+    const initial = readFileSync(configPath, "utf8");
+    expect(initial).toContain("apiKey:");
+    expect(initial).not.toContain("apiKeyEnv:");
+
+    const refreshed = applyIntegration({ ...input({ clientId: "gajae" }), models: [
+      ...MODELS,
+      { namespaced: "gpt-5.6-terra", provider: "openai", id: "gpt-5.6-terra", contextWindow: 372_000 },
+    ] });
+    expect(refreshed.ok).toBe(true);
+    const after = readFileSync(configPath, "utf8");
+    expect(after).toContain("gpt-5.6-terra");
+    expect(after).toContain("apiKey:");
+    expect(after).not.toContain("apiKeyEnv:");
+    expect(disableIntegration(input({ clientId: "gajae" })).ok).toBe(true);
+    expect(readFileSync(configPath, "utf8")).not.toContain("opencodex:");
+  });
+
   test("yaml clients still refuse a sibling edit rather than risk user comments", () => {
     const configPath = installGajae();
     expect(applyIntegration(input({ clientId: "gajae" })).ok).toBe(true);
@@ -746,6 +841,24 @@ describe("apply", () => {
 });
 
 describe("disable", () => {
+  test.skipIf(process.platform === "win32")("refuses a symlinked managed target and leaves its target alone", () => {
+    const configPath = installOmo();
+    const applied = applyIntegration(input({ clientId: "omo" }));
+    expect(applied.ok).toBe(true);
+    const victim = join(dirname(home), "victim.json");
+    const original = '{"security":{"mode":"strict"}}\n';
+    writeFileSync(victim, original);
+    unlinkSync(configPath);
+    symlinkSync(victim, configPath);
+
+    const result = disableIntegration(input({ clientId: "omo" }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unsafe");
+    expect(readFileSync(victim, "utf8")).toBe(original);
+    expect(store.readRecords().omo).toBeDefined();
+  });
+
   test("removes only our block and leaves the rest byte-identical", () => {
     const configPath = installHermes();
     const original = "providers:\n  other:\n    api: http://elsewhere\nunknown_top: keep-me\n";
@@ -1035,6 +1148,24 @@ describe("Hermes source preservation", () => {
 });
 
 describe("restore", () => {
+  test.skipIf(process.platform === "win32")("refuses a symlinked managed target and leaves its target alone", () => {
+    const configPath = installOmo();
+    const applied = applyIntegration(input({ clientId: "omo" }));
+    expect(applied.ok).toBe(true);
+    const opId = store.listOperations("omo")[0]!.opId;
+    const victim = join(dirname(home), "victim.json");
+    const original = '{"security":{"mode":"strict"}}\n';
+    writeFileSync(victim, original);
+    unlinkSync(configPath);
+    symlinkSync(victim, configPath);
+
+    const result = restoreIntegration({ ...input({ clientId: "omo" }), opId });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unsafe");
+    expect(readFileSync(victim, "utf8")).toBe(original);
+  });
+
   test("undoes an apply back to the exact prior bytes", () => {
     const configPath = installHermes();
     const original = "providers:\n  other:\n    api: http://elsewhere\n";
@@ -1406,5 +1537,50 @@ describe("overwriting a conflict on purpose", () => {
     expect(after.providers["opencodex-legacy"]).toBeUndefined();
     expect(after.providers.opencodex).toBeDefined();
     expect(store.readRecords().opencode!.fragmentPaths).not.toContainEqual(["providers", "opencodex-legacy"]);
+  });
+});
+
+describe("integration write ownership guard (#4197)", () => {
+  const target = "/srv/dsh-data/settings.yaml";
+
+  test("refuses to replace a file owned by another uid", () => {
+    expect(() => assertIntegrationWriteOwnership(target, {
+      effectiveUid: () => 1000,
+      ownerUid: () => 987,
+    })).toThrow(/belongs to uid 987 while opencodex runs as uid 1000/);
+  });
+
+  test("names the path and both uids so the operator can act on it", () => {
+    let message = "";
+    try {
+      assertIntegrationWriteOwnership(target, { effectiveUid: () => 1000, ownerUid: () => 987 });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain(target);
+    expect(message).toContain("transfer ownership");
+  });
+
+  test("allows a file this process already owns", () => {
+    expect(() => assertIntegrationWriteOwnership(target, {
+      effectiveUid: () => 1000,
+      ownerUid: () => 1000,
+    })).not.toThrow();
+  });
+
+  test("allows an absent target, which has no owner to dispossess", () => {
+    expect(() => assertIntegrationWriteOwnership(target, {
+      effectiveUid: () => 1000,
+      ownerUid: () => undefined,
+    })).not.toThrow();
+  });
+
+  test("skips the check where the runtime exposes no effective uid", () => {
+    // Windows reaches the write through hardenSecretPath instead; a uid comparison there would be
+    // a guess, and a guess that refuses is worse than no guard.
+    expect(() => assertIntegrationWriteOwnership(target, {
+      effectiveUid: () => undefined,
+      ownerUid: () => 987,
+    })).not.toThrow();
   });
 });
