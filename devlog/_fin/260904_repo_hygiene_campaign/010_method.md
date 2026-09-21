@@ -22,12 +22,21 @@ report "unmerged" for work that is fully shipped. T3 asks the only question that
 is actually load-bearing — is there any difference left in the files this branch
 claims to change.
 
-Rename detection must be disabled while collecting that path set. Otherwise a
-rename contributes only its destination: if `dev` independently contains the
-same destination but retains the source, the restricted second diff is empty
-even though the complete tip trees differ. `--no-renames` emits both the deleted
-source and added destination, so the source-side difference prevents a false
-LANDED verdict.
+**Correction, recorded after the campaign closed.** The executed run collected
+the path set with rename detection on, which undercounts it: a rename
+contributes only its destination, so if `dev` independently contains the same
+destination but retains the source, the restricted second diff is empty even
+though the complete tip trees differ. `--no-renames` emits both the deleted
+source and the added destination, so the source-side difference prevents a
+false LANDED verdict. The command above shows the corrected form; the executed
+form is the one recorded in `000_plan.md`.
+
+The six deletions T3 authorized ("content already on `dev`") were not
+revalidated under the corrected test — the per-branch ledger was scratch space
+and the refs were deleted on 2026-09-04, so they cannot be re-scored from this
+record. A false LANDED under rename detection requires a branch that renamed a
+path `dev` also gained while retaining the source, so the residual risk is
+narrow but nonzero, and future runs of T3 must keep `--no-renames`.
 
 T4 is deliberately narrow. It fires only for throwaway prefixes
 (`pr*`, `rb-`, `jrb-`, `mtp/`, `big-`, `cf-`, `ocx-`, `wip/`, `backup/`,
