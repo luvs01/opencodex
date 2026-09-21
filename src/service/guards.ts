@@ -11,6 +11,7 @@ import { diagnoseService } from "./diagnostics";
 import type { ServiceDiagnostic } from "./diagnostics";
 import { currentCodexHome, currentOpenCodexHome, normalizePathForCompare, readServiceInstallState } from "./state";
 import { resolveCodexSqliteHome } from "../codex/paths";
+import { isLoopbackHostname } from "../codex/loopback-target";
 import { win32 } from "node:path";
 
 /**
@@ -71,11 +72,6 @@ export function assertServiceEnvironmentMatchesInstall(): void {
       );
     }
   }
-}
-
-function isLoopbackHostname(hostname: string | undefined): boolean {
-  const normalized = (hostname ?? "127.0.0.1").trim().toLowerCase();
-  return normalized === "" || normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
 }
 
 /**
