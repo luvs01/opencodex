@@ -10,14 +10,14 @@ konuştuğunu ve isteklerin nasıl doğrulandığını söyler.
 
 Yeni OAuth dışı bağlantılar, modelleri göstermeden önce güvenilir bir model listesini bekler. Models sekmesinde en az 20 benzersiz model satırı varsa tüm model anahtarları başlangıçta OFF olur; sağlayıcının kendisi ACTIVE kalır. Gerçekte OAuth veya ChatGPT girişi kullanan bağlantılar varsayılanlarını korur.
 
-Bu kural yalnızca yeni sağlayıcı kaydında uygulanır. Güncellemeler, yeniden giriş ve anahtar değişimi mevcut seçimleri sıfırlamaz. İlk ayardan sonra gerekli modelleri Models üzerinden veya aşağıdaki CLI komutlarıyla açın. Sonradan gelen yeni modellerin ayrı politikası değişmez. `<model-id>` yerine listedeki bir ID yazın.
+Bu kural yalnızca yeni sağlayıcı kaydında uygulanır. Güncellemeler, yeniden giriş ve anahtar değişimi mevcut seçimleri sıfırlamaz. İlk ayardan sonra gerekli modelleri Models üzerinden veya aşağıdaki CLI komutlarıyla açın. Sonradan gelen yeni modellerin ayrı politikası değişmez.
 
 ```sh
 ocx models live --provider openrouter
-ocx models enable '<model-id>'
-ocx models disable '<model-id>'
 ocx models provider openrouter on
 ```
+
+Tekil model değişimleri için `ocx models --help` çıktısına bakın. `native` işaretli satırlarda `--native` gerekir — `/` içeren ID'ler için zorunludur, aksi halde eğik çizgi `provider/model` olarak okunur. Model ID'leri güvenilmez upstream verisidir; birini asla bir kabuk komut dizesine yapıştırmayın.
 
 Arayüzde kayıt veya OAuth girişi tamamlanınca Models sayfasını açan bir bilgilendirme penceresi gösterilir. CLI model yönetimi komutlarını yazdırır; JSON sonraki adımları içerir. `--no-wait` tamamlanmış değil, bekleyen girişi bildirir. Canlı model komutlarından önce proxy’yi `ocx start` ile başlatın.
 

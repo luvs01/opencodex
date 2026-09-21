@@ -9,14 +9,14 @@ description: 供應商項目、認證、端點、模型目錄、配額、context
 
 新的非 OAuth 連線會先等待可靠的模型清單，再公開模型。如果 Models 分頁中去重後的模型列達到20個，所有模型開關初始為 OFF，但供應商本身保持 ACTIVE。實際驗證方式為 OAuth 或 ChatGPT 登入的連線保留預設值。
 
-只在首次註冊供應商時套用；更新、重新登入與更換金鑰不會重設既有選擇。初始化後，可在 Models 或使用以下 CLI 指令啟用所需模型。後續新增模型的獨立政策不變。請將 `<model-id>` 換成清單中的 ID。
+只在首次註冊供應商時套用；更新、重新登入與更換金鑰不會重設既有選擇。初始化後，可在 Models 或使用以下 CLI 指令啟用所需模型。後續新增模型的獨立政策不變。
 
 ```sh
 ocx models live --provider openrouter
-ocx models enable '<model-id>'
-ocx models disable '<model-id>'
 ocx models provider openrouter on
 ```
+
+個別模型的切換請參閱 `ocx models --help`。標記為 `native` 的列需要加 `--native`；包含 `/` 的 ID 必須使用，否則斜線會被解析為 `provider/model`。模型 ID 屬於不可信的上游資料，切勿將其貼到 shell 指令字串中。
 
 在介面中完成註冊或 OAuth 登入後，提示視窗可開啟 Models 頁面。CLI 會輸出模型管理指令，JSON 也包含後續步驟。`--no-wait` 表示登入仍在等待中，並非已完成。使用即時模型指令前，請先執行 `ocx start` 啟動代理。
 

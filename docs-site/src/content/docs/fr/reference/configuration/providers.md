@@ -10,14 +10,14 @@ authentifiées.
 
 Une nouvelle connexion sans OAuth attend une liste de modèles fiable avant de les exposer. Si l’onglet Models contient au moins 20 lignes distinctes, tous les interrupteurs de modèles sont initialement OFF ; le fournisseur reste ACTIVE. Les connexions utilisant effectivement OAuth ou la connexion ChatGPT conservent leurs valeurs par défaut.
 
-Cette règle ne s’applique qu’à l’inscription d’un nouveau fournisseur. Les mises à jour, reconnexions et remplacements de clé préservent les choix existants. Après l’initialisation, activez les modèles souhaités dans Models ou avec les commandes ci-dessous. La politique distincte concernant les nouveaux modèles reste inchangée. Remplacez `<model-id>` par un ID de la liste.
+Cette règle ne s’applique qu’à l’inscription d’un nouveau fournisseur. Les mises à jour, reconnexions et remplacements de clé préservent les choix existants. Après l’initialisation, activez les modèles souhaités dans Models ou avec les commandes ci-dessous. La politique distincte concernant les nouveaux modèles reste inchangée.
 
 ```sh
 ocx models live --provider openrouter
-ocx models enable '<model-id>'
-ocx models disable '<model-id>'
 ocx models provider openrouter on
 ```
+
+Pour les modèles individuels, consultez `ocx models --help`. Les lignes marquées `native` prennent `--native`, obligatoire pour les ID contenant `/` — sinon la barre oblique est lue comme `provider/model`. Les ID de modèles sont des données amont non fiables ; ne les collez jamais dans une chaîne de commande shell.
 
 Après une inscription ou une connexion OAuth dans l’interface, une boîte de dialogue permet d’ouvrir Models. La CLI affiche les commandes de gestion des modèles, aussi présentes dans les étapes suivantes du JSON. `--no-wait` indique une connexion en attente, pas terminée. Lancez le proxy avec `ocx start` avant les commandes de modèles en direct.
 

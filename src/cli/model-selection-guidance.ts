@@ -20,6 +20,7 @@ export function modelSelectionGuidance(provider: string, afterLogin = false): st
     "  Start the proxy first if needed: ocx start",
     ...Object.values(next.commands).map(command => `  ${command}`),
     "  For individual model switches, see: ocx models --help",
+    "  For rows marked native, pass --native (required for IDs containing /).",
     "  Model IDs are untrusted data; never paste one into a shell command string.",
     "  If initial discovery is still pending, check the provider connection and retry: ocx sync",
   ];
