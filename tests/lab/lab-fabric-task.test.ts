@@ -261,8 +261,37 @@ const patch: SyntheticPatchV1 = {
 };
 
 export function execute(_input: FabricPatchExecutorInput): Promise<SyntheticPatchV1> {
-  process.stdout.write(JSON.stringify({ type: "result", patch }) + "\\n");
-  process.exit(1);
+  process.stdout.write(JSON.stringify({ type: "result", patch }) + "\\n", () => process.exit(1));
+  return new Promise(() => {});
+}
+`);
+  return createHostIssuedFabricPatchExecutor(modulePath, async () => correctSyntheticPatch());
+}
+
+function fabricOrphanedPipePatchExecutor(home: string): TrustedFabricPatchExecutor {
+  const dir = join(home, "fabric-executors");
+  mkdirSync(dir, { recursive: true });
+  const modulePath = join(dir, "orphaned-pipe-patch.ts");
+  writeFileSync(modulePath, `
+import { spawn } from "node:child_process";
+import type { FabricPatchExecutorInput, SyntheticPatchV1 } from "${repoImport("src/lab/fabric/types")}";
+import { SYNTHETIC_AFTER_UTF8, SYNTHETIC_VALUE_PATH } from "${repoImport("src/lab/fabric/constants")}";
+
+const patch: SyntheticPatchV1 = {
+  schemaVersion: 1,
+  operations: [{ op: "replace", path: SYNTHETIC_VALUE_PATH, contentUtf8: SYNTHETIC_AFTER_UTF8 }],
+};
+
+export function execute(_input: FabricPatchExecutorInput): Promise<SyntheticPatchV1> {
+  // A detached descendant holds the inherited stdio open after this process
+  // exits, so the parent's "close" event cannot arrive on its own.
+  const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 4000)"], {
+    stdio: ["ignore", "inherit", "inherit"],
+    detached: true,
+  });
+  descendant.unref();
+  process.stdout.write(JSON.stringify({ type: "result", patch }) + "\\n", () => process.exit(0));
+  return new Promise(() => {});
 }
 `);
   return createHostIssuedFabricPatchExecutor(modulePath, async () => correctSyntheticPatch());
@@ -798,6 +827,7 @@ export async function execute() {
     const home = tempHome();
     process.env.OPENCODEX_HOME = home;
     const { executor, marker } = fabricEarlyResultPatchExecutor(home);
+    const startedAt = Date.now();
     const result = await runFabricSyntheticPatchTaskForRoute({
       routeContext: fabricMockRoute(),
       destination: await fabricDestination(home),
@@ -806,16 +836,18 @@ export async function execute() {
     });
     expect(result.outcome.outcome).not.toBe("pass");
     expect(result.outcome.failure?.code).toBe("timeout");
-    // The fixture's late write fires after totalTimeoutMs + 500; wait past it so a
-    // surviving child cannot escape detection.
-    await Bun.sleep(FAST_FABRIC_ISOLATION.totalTimeoutMs + 750);
+    // The fixture's late write lands totalTimeoutMs + 500 after the child starts.
+    // The task settles near that deadline, so only the remainder must elapse —
+    // a fixed totalTimeoutMs sleep would overflow the test timeout under CI scaling.
+    await Bun.sleep(Math.max(1_000, FAST_FABRIC_ISOLATION.totalTimeoutMs + 750 - (Date.now() - startedAt)));
     expect(existsSync(marker)).toBe(false);
-  }, 20_000);
+  }, 45_000);
 
   test("producer error remains supervised until the child exits", async () => {
     const home = tempHome();
     process.env.OPENCODEX_HOME = home;
     const { executor, marker } = fabricEarlyErrorPatchExecutor(home);
+    const startedAt = Date.now();
     const result = await runFabricSyntheticPatchTaskForRoute({
       routeContext: fabricMockRoute(),
       destination: await fabricDestination(home),
@@ -824,9 +856,11 @@ export async function execute() {
     });
     expect(result.outcome.outcome).not.toBe("pass");
     expect(result.outcome.failure?.code).toBe("harness_failure");
-    await Bun.sleep(FAST_FABRIC_ISOLATION.totalTimeoutMs + 750);
+    // Same bounded wait as above: the child settles fast, so the marker deadline
+    // is still roughly a full budget away under CI-scaled isolation limits.
+    await Bun.sleep(Math.max(1_000, FAST_FABRIC_ISOLATION.totalTimeoutMs + 750 - (Date.now() - startedAt)));
     expect(existsSync(marker)).toBe(false);
-  }, 20_000);
+  }, 45_000);
 
   test("producer result is rejected when the child exits nonzero", async () => {
     const home = tempHome();
@@ -839,6 +873,18 @@ export async function execute() {
     });
     expect(result.outcome.outcome).not.toBe("pass");
     expect(result.outcome.failure?.code).toBe("harness_failure");
+  }, 20_000);
+
+  test("producer result resolves when a descendant still holds the pipes", async () => {
+    const home = tempHome();
+    process.env.OPENCODEX_HOME = home;
+    const result = await runFabricSyntheticPatchTaskForRoute({
+      routeContext: fabricMockRoute(),
+      destination: await fabricDestination(home),
+      patchExecutor: fabricOrphanedPipePatchExecutor(home),
+      configDir: home,
+    });
+    expect(result.outcome.outcome).toBe("pass");
   }, 20_000);
 
   test("activity resets inactivity deadline within total budget", async () => {

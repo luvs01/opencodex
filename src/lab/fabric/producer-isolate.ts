@@ -15,6 +15,13 @@ import { FabricTaskError } from "./types";
 
 const CHILD_ENTRY = join(dirname(fileURLToPath(import.meta.url)), "producer-child.ts");
 
+/**
+ * Bounded drain window between a child's `exit` and our decision. `close` also
+ * waits for the child's stdio to end, and a descendant holding an inherited pipe
+ * can delay it forever — so a missing `close` must not keep the run pending.
+ */
+const EXIT_DRAIN_MS = 250;
+
 type FabricProducerIsolationLimits = {
   totalTimeoutMs: number;
   inactivityTimeoutMs: number;
@@ -112,6 +119,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     let childClosed = false;
     let receivedResult: SyntheticPatchV1 | undefined;
     let killReason: FabricTaskError | undefined;
+    let reapTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (fn: () => void) => {
       // A latched failure owns settlement, but scratch cleanup must wait for close.
@@ -119,6 +127,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       settled = true;
       clearTimeout(totalTimer);
       clearTimeout(inactivityTimer);
+      if (reapTimer) clearTimeout(reapTimer);
       if (killReason) reject(killReason);
       else fn();
     };
@@ -255,8 +264,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       settleTimeout(new FabricTaskError(error.message, "harness_failure", "harness"));
     });
 
-    child.on("close", (code, signal) => {
-      childClosed = true;
+    const decide = (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
       if (killReason) {
         finish(() => reject(killReason!));
@@ -270,17 +278,15 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
           /* fall through */
         }
       }
-      // A stored result is accepted only when the child exited normally.
+      // A stored result is accepted only when the child exited normally. A
+      // signaled or nonzero exit without a latched reason is a harness failure —
+      // parent-owned kills always carry a killReason, so this is never a timeout.
       if (code !== 0 || signal) {
-        if (signal === "SIGKILL") {
-          finish(() => reject(new FabricTaskError("total timeout exceeded", "timeout", "environment")));
-        } else {
-          finish(() => reject(new FabricTaskError(
-            `isolated producer exited (${code ?? signal ?? "unknown"})`,
-            "harness_failure",
-            "harness",
-          )));
-        }
+        finish(() => reject(new FabricTaskError(
+          `isolated producer exited (${code ?? signal ?? "unknown"})`,
+          "harness_failure",
+          "harness",
+        )));
         return;
       }
       if (receivedResult) {
@@ -288,6 +294,30 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         return;
       }
       finish(() => reject(new FabricTaskError("isolated producer returned no result", "harness_failure", "harness")));
+    };
+
+    child.on("exit", (code, signal) => {
+      if (childClosed || settled) return;
+      // The direct child is dead, but `close` also waits for its stdio to end.
+      // Bound the drain so a descendant holding an inherited pipe cannot keep
+      // the run pending, then settle from the recorded exit status.
+      reapTimer = setTimeout(() => {
+        if (reapTimer) {
+          clearTimeout(reapTimer);
+          reapTimer = undefined;
+        }
+        if (childClosed || settled) return;
+        childClosed = true;
+        try { child.stdout?.destroy(); } catch { /* already closed */ }
+        try { child.stderr?.destroy(); } catch { /* already closed */ }
+        decide(code, signal);
+      }, EXIT_DRAIN_MS);
+    });
+
+    child.on("close", (code, signal) => {
+      if (childClosed) return;
+      childClosed = true;
+      decide(code, signal);
     });
 
     const payload = JSON.stringify({

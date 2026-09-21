@@ -43,6 +43,12 @@ class DeadlineChild extends EventEmitter {
     this.closed = true;
     this.emit("close", code, signal);
   }
+
+  exit(code: number | null = 0, signal: NodeJS.Signals | null = null): void {
+    // The process died; `close` is deliberately withheld to model a descendant
+    // still holding the inherited pipes.
+    this.emit("exit", code, signal);
+  }
 }
 
 type CapturedTimer = { callback: () => void; delay: number; cleared: boolean };
@@ -397,7 +403,44 @@ describe("isolated fabric producer deadline admission", () => {
       h.result();
       await h.pending();
       h.child.close(null, "SIGKILL");
-      await h.rejection("timeout");
+      await h.rejection("harness_failure", "harness", "isolated producer exited (SIGKILL)");
+    });
+  });
+
+  test("a held-open pipe cannot keep a clean exit pending", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result();
+      h.child.exit(0);
+      await h.pending();
+      expect(h.timers).toHaveLength(3);
+      h.timers[2]!.callback();
+      await h.success();
+      expect(h.child.stdout.destroyed).toBe(true);
+      expect(h.child.stderr.destroyed).toBe(true);
+    });
+  });
+
+  test("a latched failure still settles when close never follows exit", async () => {
+    await withProducer(async (h) => {
+      h.at(1_100);
+      h.timers[0]!.callback();
+      expect(h.child.signals).toEqual(["SIGKILL"]);
+      h.child.exit(null, "SIGKILL");
+      await h.pending();
+      h.timers[2]!.callback();
+      await h.rejection("inactivity_timeout");
+    });
+  });
+
+  test("a nonzero exit without close still rejects after drain", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result();
+      h.child.exit(1);
+      await h.pending();
+      h.timers[2]!.callback();
+      await h.rejection("harness_failure", "harness", "isolated producer exited (1)");
     });
   });
 });

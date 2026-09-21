@@ -124,6 +124,22 @@ Live projection preserves the frozen `RouteSubjectV1` schema. Claim-gated scenar
 
 The two machine-readable Live V1 authority copies are required to be byte-identical. Runtime loading fails closed on byte drift before parsing. Scenario limits use `perArtifactBytes` as the single per-artifact execution-limit key; the artifact policy retains its independent per-artifact policy ceiling.
 
+## CL-07 producer supervision
+
+An isolated fabric producer child is supervised through process exit, not through
+its protocol stream: a parsed `result` line is stored, never settled, so an
+executor cannot end its supervision early and keep mutating its scratch tree.
+Protocol `error` lines, stream failures, and expired budgets latch a kill reason,
+SIGKILL the child, and settle only at the run's decision point — so scratch
+cleanup can never race a live producer. A stored result is accepted only when the
+child exited cleanly (`code 0`, no signal); a nonzero or signaled exit is a
+harness failure, and an already-latched failure always wins settlement. Process
+termination is tracked on `exit` separately from `close`, because `close` also
+waits for the child's stdio: a bounded drain (`EXIT_DRAIN_MS`) lets in-flight
+protocol data arrive, then the parent drops its stream ends and decides from the
+recorded exit status, so a descendant still holding an inherited pipe cannot keep
+a run pending.
+
 ## Scope guard
 
 CL-03 does not expose a management CLI/API or UI. Those surfaces remain CL-04+ work. Production request routing must not synchronously trigger Compatibility Lab probing or rebuild Lab evidence.
