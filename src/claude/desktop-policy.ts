@@ -59,6 +59,24 @@ const defaultPolicyProbeRunner: ClaudeDesktopPolicyProbeRunner = (file, args) =>
   };
 };
 
+/**
+ * Translates an `execFile` callback into the probe contract. Exit codes arrive
+ * as numeric `error.code`; spawn failures carry a string errno; a timeout kill
+ * surfaces as `killed`/`SIGTERM` rather than `ETIMEDOUT`.
+ */
+export function classifyExecFileProbeResult(
+  error: (Error & { readonly code?: number | string; readonly killed?: boolean }) | null,
+  stdout: Uint8Array | undefined,
+): ClaudeDesktopPolicyProbeResult {
+  const errorCode = error?.code;
+  return {
+    status: error === null ? 0 : typeof errorCode === "number" ? errorCode : null,
+    stdout: stdout === undefined ? "" : decodeWindowsTextBytes(stdout),
+    timedOut: errorCode === "ETIMEDOUT" || error?.killed === true,
+    spawnFailed: error !== null && typeof errorCode !== "number" && errorCode !== "ETIMEDOUT",
+  };
+}
+
 const defaultAsyncPolicyProbeRunner: ClaudeDesktopPolicyAsyncProbeRunner = (file, args) => new Promise((resolve) => {
   execFile(file, [...args], {
     encoding: "buffer",
@@ -66,13 +84,7 @@ const defaultAsyncPolicyProbeRunner: ClaudeDesktopPolicyAsyncProbeRunner = (file
     timeout: POLICY_PROBE_TIMEOUT_MS,
     windowsHide: true,
   }, (error, stdout) => {
-    const errorCode = (error as NodeJS.ErrnoException | null)?.code;
-    resolve({
-      status: error === null ? 0 : typeof errorCode === "number" ? errorCode : null,
-      stdout: stdout ? decodeWindowsTextBytes(stdout) : "",
-      timedOut: errorCode === "ETIMEDOUT" || (error !== null && "killed" in error && error.killed === true),
-      spawnFailed: error !== null && typeof errorCode !== "number" && errorCode !== "ETIMEDOUT",
-    });
+    resolve(classifyExecFileProbeResult(error, stdout));
   });
 });
 
@@ -165,7 +177,7 @@ const POLICY_CACHE_TTL_MS = 30_000;
 export function createCachedClaudeDesktopPolicyProbe(
   probe: () => Promise<ClaudeDesktopPolicyState>,
   ttlMs = POLICY_CACHE_TTL_MS,
-  now = Date.now,
+  now = performance.now,
 ): () => Promise<ClaudeDesktopPolicyState> {
   let cached: { state: ClaudeDesktopPolicyState; expiresAt: number } | undefined;
   let refresh: Promise<ClaudeDesktopPolicyState> | undefined;
@@ -191,7 +203,9 @@ const cachedProductionProbe = createCachedClaudeDesktopPolicyProbe(
 export function getCachedClaudeDesktopPolicy(
   options: Omit<ClaudeDesktopPolicyProbeOptions, "run"> = {},
 ): Promise<ClaudeDesktopPolicyState> {
-  if (options.platform === undefined || options.platform === process.platform) return cachedProductionProbe();
+  const cacheable = options.resolveSystemDirectory === undefined
+    && (options.platform === undefined || options.platform === process.platform);
+  if (cacheable) return cachedProductionProbe();
   return probeClaudeDesktopPolicyAsync(options);
 }
 
