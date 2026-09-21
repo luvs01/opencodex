@@ -125,8 +125,8 @@ Claude Desktop은 서로 배타적인 두 모드 중 하나로 OpenCodex를 사�
 
 - **1P(퍼스트파티, 기본값)**: Desktop 자체는 건드리지 않아요. claude.ai 로그인, 채팅 탭, 커넥터,
   원격 제어가 그대로 유지됩니다. OpenCodex는 `~/.claude/settings.json`의 `env`에
-  `HTTPS_PROXY=http://127.0.0.1:<공개 포트+100>`과 `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem`
-  두 값만 씁니다. Desktop이 Code 탭용으로 실행하는 Claude Code(서브에이전트 포함)와 터미널의
+  `HTTPS_PROXY=http://opencodex:<설치별 토큰>@127.0.0.1:<공개 포트+100>`과 `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem`
+  두 값만 씁니다(토큰은 `~/.opencodex/claude-intercept/proxy-token`에 소유자 전용으로 저장돼요). Desktop이 Code 탭용으로 실행하는 Claude Code(서브에이전트 포함)와 터미널의
   `claude` CLI만 이 값을 읽어 로컬 인터셉트 프록시를 거치고, `POST /v1/messages`·`count_tokens`만
   OpenCodex가 처리하며 나머지 `api.anthropic.com` 경로는 그대로 Anthropic으로 전달돼요. CA는 OS
   신뢰 저장소에 설치되지 않습니다.

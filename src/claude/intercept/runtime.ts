@@ -5,6 +5,7 @@ import { CLAUDE_INTERCEPT_HOSTS, startConnectProxy, type ConnectProxyHandle } fr
 import { startClaudeInterceptListener } from "./listener";
 import { claudeInterceptCaCertPath, ensureLocalInterceptCa, issueLocalInterceptLeaf } from "./local-ca";
 import { ensureClaudeInterceptProxyToken } from "./proxy-auth";
+import { buildClaudeInterceptEnv, migrateClaudeInterceptSettings } from "./settings";
 
 /**
  * Lifecycle for the Claude intercept pair (CONNECT proxy + TLS listener).
@@ -71,6 +72,15 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   const ca = ensureLocalInterceptCa(configDir);
   const authToken = ensureClaudeInterceptProxyToken(configDir);
   const leaf = issueLocalInterceptLeaf(ca, CLAUDE_INTERCEPT_HOSTS);
+  // Refresh an env we already own (e.g. a pre-auth proxy URL left by an upgrade) before the
+  // authenticated proxy takes over the port — a plain `ocx start` after an update would
+  // otherwise 407 every CONNECT until the next `ocx ensure` or apply. Only `stale` state is
+  // rewritten, so installs that never applied first-party are untouched.
+  try {
+    const proxyPort = claudeInterceptProxyPort(options.config, options.publicPort);
+    migrateClaudeInterceptSettings(buildClaudeInterceptEnv(proxyPort, claudeInterceptCaCertPath(configDir), authToken));
+  } catch { // no-excuse-ok: catch -- a skipped rewrite degrades to the pre-migration behaviour, and ensure/apply retries it.
+  }
   const listener = startClaudeInterceptListener<T>({
     leaf,
     dispatch: options.dispatch,

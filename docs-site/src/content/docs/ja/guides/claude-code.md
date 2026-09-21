@@ -102,8 +102,9 @@ Claude Desktop は排他的な 2 つのモードのどちらかで OpenCodex を
 
 - **1P（ファーストパーティ、デフォルト）**: Desktop 本体は変更しません。claude.ai のログイン、
   チャットタブ、コネクタ、リモート操作はそのまま動きます。OpenCodex は `~/.claude/settings.json` の
-  `env` に `HTTPS_PROXY=http://127.0.0.1:<公開ポート+100>` と
-  `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem` の 2 つだけを書きます。Desktop が
+  `env` に `HTTPS_PROXY=http://opencodex:<インストール毎のトークン>@127.0.0.1:<公開ポート+100>` と
+  `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem` の 2 つだけを書きます（トークンは
+  `~/.opencodex/claude-intercept/proxy-token` に所有者専用で保存されます）。Desktop が
   Code タブ用に起動する Claude Code（サブエージェント含む）とターミナルの `claude` CLI だけがこれを読み、
   ローカルのインターセプトプロキシを通ります。`POST /v1/messages` と `count_tokens` のみ OpenCodex が
   処理し、他の `api.anthropic.com` パスはそのまま Anthropic に中継されます。CA は OS の信頼ストアには

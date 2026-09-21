@@ -130,8 +130,9 @@ Claude Desktop utilise OpenCodex dans l'un de deux modes mutuellement exclusifs.
 - **First-party (par défaut)** : Desktop lui-même n'est pas reconfiguré. La connexion claude.ai,
   l'onglet Chat, les connecteurs et le contrôle à distance continuent de fonctionner. OpenCodex
   n'écrit que deux valeurs dans le bloc `env` de `~/.claude/settings.json` :
-  `HTTPS_PROXY=http://127.0.0.1:<port public+100>` et
-  `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem`. Seuls Claude Code lancé par Desktop
+  `HTTPS_PROXY=http://opencodex:<jeton propre à l'installation>@127.0.0.1:<port public+100>` et
+  `NODE_EXTRA_CA_CERTS=~/.opencodex/claude-intercept/ca.pem` ; le jeton est conservé en accès
+  propriétaire sous `~/.opencodex/claude-intercept/proxy-token`. Seuls Claude Code lancé par Desktop
   pour l'onglet Code (sous-agents compris) et la CLI `claude` du terminal les lisent et passent par le
   proxy d'interception local ; seuls `POST /v1/messages` et `count_tokens` sont traités par OpenCodex,
   les autres chemins de `api.anthropic.com` sont relayés tels quels vers Anthropic. L'AC n'est jamais
