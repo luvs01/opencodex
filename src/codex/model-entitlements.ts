@@ -1,19 +1,35 @@
 import { createHash } from "node:crypto";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import type { OcxConfig } from "../types";
+import type { CodexAccountCredentialRecord, OcxConfig } from "../types";
 import { isSelectableCodexPoolAccount } from "./account-id";
-import { getValidCodexToken, readCodexAccountRecord } from "./account-store";
+import {
+  beginCodexAccountGenerationLiveCheck,
+  getValidCodexToken,
+  loadCodexAccountRecordSnapshot,
+} from "./account-store";
 import {
   getMainAccountToken,
   getValidMainAccountToken,
   MAIN_CODEX_ACCOUNT_ID,
   type NativeMainRefreshDependencies,
 } from "./main-account";
-import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
+import { withNativeMainCredentialAdmission } from "./native-main-admission";
+import {
+  ACCOUNT_GATED_NATIVE_OPENAI_MODELS,
+  NATIVE_GPT6_ASTRA_MODEL,
+} from "./catalog/native-models";
 import { loadPersistedCodexRuntime } from "./runtime";
 import { codexRuntimeStateEpoch } from "./runtime";
 import upstreamModelsSnapshot from "./data/upstream-models.json";
 import { codexCredentialMutationEpoch } from "./credential-mutation-epoch";
+import {
+  clearObservedCodexModelDenial,
+  forgetObservedCodexModelDenialsForAccount,
+  observedDeniedCodexAccountIdsForModel,
+  recordObservedCodexModelDenial,
+  setObservedDenialGenerationCheck,
+  resetObservedCodexModelDenialsForTests,
+} from "./observed-model-denials";
 
 const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models";
 
@@ -149,6 +165,13 @@ export function compareClientVersionsForTests(left: string, right: string): numb
 }
 
 /** Numeric-segment comparison. Only used to pick the highest floor in a known-good set. */
+// Prerelease and build suffixes are deliberately NOT ordered. Splitting on [.+-] turns the
+// suffix into a non-finite segment that reads as 0, so `0.144.0-rc.1` sorts at or above
+// `0.144.0` rather than below it, the inverse of semver. That is tolerable because every
+// version this ranks against is a release version: the gated floor, the measured minimum, and
+// the snapshot's `minimal_client_version` rows. A prerelease runtime is therefore passed
+// through exactly as it was before the floor bound tier 2, so this is not a new hazard. Order
+// the suffix properly before reusing this anywhere a prerelease has to sort below its release.
 function compareClientVersions(left: string, right: string): number {
   const l = left.split(/[.+-]/).map(Number);
   const r = right.split(/[.+-]/).map(Number);
@@ -165,9 +188,10 @@ function compareClientVersions(left: string, right: string): number {
  *
  * 1. the inbound request's own `client_version` — the only value certainly describing the
  *    client being answered;
- * 2. the selected Codex runtime version, for background sync where no request exists.
- *    Retained sync refreshes runtime evidence before discovery, which is what makes this
- *    usable here; the persisted file itself carries no freshness guarantee.
+* 2. the selected Codex runtime version, for callers with no request of their own — but never
+ *    below `GATED_MODEL_CLIENT_VERSION_FLOOR`. Retained sync refreshes runtime evidence before
+ *    discovery, which is what makes this usable here; the persisted file itself carries no
+ *    freshness guarantee.
  * 3. the floor this build's own bundled roster records for the models being gated
  *    (`GATED_MODEL_CLIENT_VERSION_FLOOR`).
  *
@@ -177,6 +201,25 @@ function compareClientVersions(left: string, right: string): number {
  * fix is meant to restore. The floor is not invented: it is the version this build's own
  * snapshot states the gated models require, so asking under it is the narrowest question
  * that can still return them.
+ *
+ * The floor binds tier 2 as well, and that is the whole of #3436. #3022 gave tier 3 the
+ * measured minimum but left tier 2 to speak for itself, so a host whose persisted runtime was
+ * REAL but OLD — 0.141.0 against a measured 0.144.0 — asked upstream under a version upstream
+ * filters on, got an honest roster with no gpt-5.6, and lost sol/terra/luna everywhere. That
+ * made an outdated CLI strictly worse than no CLI at all, since the runtime-less host already
+ * asked at the floor and kept its models. The clamp only ever raises: a runtime at or above
+ * the floor is preserved exactly, because a newer client can drive models the floor cannot
+ * name.
+ *
+ * Which tier answers is a question about WHICH QUESTION IS BEING ASKED, not about background
+ * versus request path — `isDirectCallerEntitledToCodexModel` and both authorization paths in
+ * `auth-context.ts` are inbound requests that reach tier 2 because they carry no version:
+ *
+ * - No inbound version: the caller is asking whether the ACCOUNT owns the model. Upstream
+ *   only incidentally filters that answer by version, so ask at no less than the floor.
+ * - An inbound version: the caller is asking what THAT CLIENT may use. Answer verbatim, even
+ *   when it is older than the floor. Clamping there would advertise rows the client told us
+ *   it cannot drive (#2548) and would turn an honest `unknown` into a cached `denied`.
  *
  * There is deliberately no `0.0.0`-style fallback. A placeholder describes a client that
  * predates every gated model, which is what made upstream answer with an empty roster and
@@ -195,7 +238,23 @@ export function resolveCodexEntitlementClientVersion(
   const selected = bypass
     ? readRuntimeVersion(loadRuntime)
     : memoizedPersistedRuntimeVersion(loadRuntime, options.now ?? Date.now());
-  return selected ?? GATED_MODEL_CLIENT_VERSION_FLOOR;
+  return raisedToGatedFloor(selected);
+}
+
+/**
+ * The gated floor as a lower bound rather than a fallback.
+ *
+ * Applied only on the way out of the resolver. `readRuntimeVersion` and
+ * `memoizedPersistedRuntimeVersion` keep reporting what is actually on disk, because
+ * `selectedVersion` is probe evidence that runtime identity, catalog cache keys,
+ * `X-Codex-Version` and install provenance all read for their own reasons. Clamping the
+ * persisted value itself would corrupt every one of them to fix one question.
+ */
+function raisedToGatedFloor(selected: string | null): string {
+  if (selected === null) return GATED_MODEL_CLIENT_VERSION_FLOOR;
+  return compareClientVersions(selected, GATED_MODEL_CLIENT_VERSION_FLOOR) >= 0
+    ? selected
+    : GATED_MODEL_CLIENT_VERSION_FLOOR;
 }
 const MODEL_ROSTER_TTL_MS = 5 * 60_000;
 
@@ -274,6 +333,37 @@ const MODEL_ROSTER_VERSIONS_PER_ACCOUNT_MAX = 4;
  * roster.
  */
 const MODEL_ROSTER_FLIGHTS_PER_ACCOUNT_MAX = 4;
+
+/**
+ * Distinct caller-selected roster versions admitted per account in one roster window.
+ *
+ * The cache budget and the flight budget both bound STATE, not WORK. A caller that cycles
+ * `client_version` and waits for each answer misses the cache by design and misses the flight
+ * key by design, so it can renew an authenticated upstream request under EVERY stored account
+ * token as often as it likes, and the gated-model checks it displaces fail closed while it does.
+ *
+ * DISTINCT VERSIONS are counted, never attempts. One legitimate client retrying a single version
+ * through an upstream outage comes back every 15s on the failure TTL; charging each attempt would
+ * spend the whole allowance on that one version and then refuse it for the rest of the 5-minute
+ * window, turning a recovered upstream into several more minutes without gated models.
+ */
+const MODEL_ROSTER_VERSION_MISSES_PER_ACCOUNT_MAX = 4;
+
+interface AccountVersionMissBudget {
+  credentialIdentity: string;
+  /** Version -> when this version stops occupying the allowance. */
+  versions: Map<string, number>;
+}
+
+/**
+ * One row per ACCOUNT, not per credential identity.
+ *
+ * A Pool access-token refresh increments the generation, so an identity-keyed map would gain a
+ * permanent row per generation for the lifetime of the process: a protection against renewable
+ * work would have introduced an unbounded cache. A generation change replaces the row instead,
+ * which is also the right budget semantics — new credential, new allowance.
+ */
+const accountModelsMisses = new Map<string, AccountVersionMissBudget>();
 const DIRECT_CALLER_ACCOUNT_PREFIX = "__direct_codex__:";
 
 export interface CodexModelEntitlementCredentialSnapshot {
@@ -350,6 +440,12 @@ export interface CodexModelEntitlementResolveOptions {
   readonly excludeAccountIds?: ReadonlySet<string>;
   /** Ensure-only fence; ordinary request resolvers retain their established flight identity. */
   readonly credentialMutationEpoch?: number;
+  /**
+   * Internal plumbing from `withNativeMainCredentialAdmission`: releases the
+   * native-main lifecycle lease once the credential phase settles, before any
+   * upstream roster fetch, so a profile drain never waits on network work.
+   */
+  readonly releaseNativeMainCredentialLease?: () => void;
 }
 
 export interface CodexEntitlementFreshnessOptions extends Pick<
@@ -363,6 +459,8 @@ export interface CodexEntitlementFreshnessOptions extends Pick<
   | "signal"
 > {
   readonly waitMs?: number;
+  /** Test seam for the native-main admission fence around the refresh workset. */
+  readonly nativeMainCredentialAdmission?: typeof withNativeMainCredentialAdmission;
 }
 
 const accountModelsCache = new Map<string, CachedAccountModels>();
@@ -446,36 +544,77 @@ function boundedCacheSet(accountId: string, value: CachedAccountModels): void {
   evictClass(accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX));
 }
 
+/**
+ * An identity resolver scoped to one caller's pass, reading each backing store at most once.
+ *
+ * The identity check itself is unchanged -- same prefix rule, same tombstone and missing-credential
+ * rejection, same `pool:<generation>:<chatgptAccountId>` shape -- but the READ is hoisted. Per-id
+ * resolution reloads and reparses the whole `codex-accounts.json` every call, so a loop over cache
+ * entries paid one full-store read per entry: the denial reader admits 64 accounts with four client
+ * versions each, which is up to 256 synchronous reads to score a single warm flagship request.
+ *
+ * Both stores are read lazily, so a pass that touches only Direct callers, or only native main,
+ * still opens nothing it does not need. Neither backing read is memoized across passes: a resolver
+ * lives for one synchronous loop, and that loop has no suspension point, so nothing this process
+ * does can change the file underneath it. A snapshot is therefore not staler than per-entry reads
+ * would have been -- it is strictly more coherent, because a foreign writer landing mid-loop can no
+ * longer give the earlier entries one generation and the later ones another.
+ */
+function credentialIdentityResolver(): (accountId: string) => string | undefined {
+  let records: Readonly<Record<string, CodexAccountCredentialRecord>> | undefined;
+  let mainRead = false;
+  let mainIdentity: string | undefined;
+  return (accountId: string): string | undefined => {
+    if (accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)) {
+      return `direct:${accountId.slice(DIRECT_CALLER_ACCOUNT_PREFIX.length)}`;
+    }
+    if (accountId === MAIN_CODEX_ACCOUNT_ID) {
+      if (!mainRead) {
+        const token = getMainAccountToken();
+        mainIdentity = token ? `main:${token.chatgptAccountId}` : undefined;
+        mainRead = true;
+      }
+      return mainIdentity;
+    }
+    records ??= loadCodexAccountRecordSnapshot();
+    const record = records[accountId];
+    if (!record?.credential || record.deletedAt != null) return undefined;
+    return `pool:${record.generation}:${record.credential.chatgptAccountId}`;
+  };
+}
+
+/** Single-id resolution. Identical to one call through a fresh {@link credentialIdentityResolver}. */
 function currentCredentialIdentity(accountId: string): string | undefined {
-  if (accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)) {
-    return `direct:${accountId.slice(DIRECT_CALLER_ACCOUNT_PREFIX.length)}`;
-  }
-  if (accountId === MAIN_CODEX_ACCOUNT_ID) {
-    const token = getMainAccountToken();
-    return token ? `main:${token.chatgptAccountId}` : undefined;
-  }
-  const record = readCodexAccountRecord(accountId);
-  if (!record?.credential || record.deletedAt != null) return undefined;
-  return `pool:${record.generation}:${record.credential.chatgptAccountId}`;
+  return credentialIdentityResolver()(accountId);
 }
 
 async function accountCredentialSnapshot(
   accountId: string,
-  options: Pick<CodexModelEntitlementResolveOptions, "nativeMainRefreshDependencies" | "signal"> = {},
+  options: Pick<
+    CodexModelEntitlementResolveOptions,
+    "nativeMainRefreshDependencies" | "releaseNativeMainCredentialLease" | "signal"
+  > = {},
 ): Promise<CodexModelEntitlementCredentialSnapshot | null> {
   if (accountId === MAIN_CODEX_ACCOUNT_ID) {
-    const token = await getValidMainAccountToken({
-      signal: options.signal,
-      ...(options.nativeMainRefreshDependencies ?? {}),
-    });
-    return token
-      ? {
-        accountId,
-        accessToken: token.accessToken,
-        chatgptAccountId: token.chatgptAccountId,
-        credentialIdentity: `main:${token.chatgptAccountId}`,
-      }
-      : null;
+    try {
+      const token = await getValidMainAccountToken({
+        signal: options.signal,
+        ...(options.nativeMainRefreshDependencies ?? {}),
+      });
+      return token
+        ? {
+          accountId,
+          accessToken: token.accessToken,
+          chatgptAccountId: token.chatgptAccountId,
+          credentialIdentity: `main:${token.chatgptAccountId}`,
+        }
+        : null;
+    } finally {
+      // The lifecycle lease fences only this credential read; releasing here —
+      // on success and on a credential-ownership failure alike — keeps a
+      // profile drain from waiting on the roster fetches that follow.
+      options.releaseNativeMainCredentialLease?.();
+    }
   }
   try {
     const token = await getValidCodexToken(accountId);
@@ -575,6 +714,13 @@ async function fetchAccountModels(
       return unconfirmedAccountModels(credential, clientVersion, now, { kind: "parsed-empty" });
     }
     const hasUnknownGatedAbsence = [...ACCOUNT_GATED_NATIVE_MODEL_MINIMUM_CLIENT_VERSIONS]
+      // Reachable only through tier 1, an inbound client_version below the floor. Every other
+      // resolution is now structurally >= every recorded minimum, because the floor is the max
+      // of the derived value and the same measured constant these minimums hold. So this is the
+      // escape hatch for a self-declared old client, not live protection on the background path:
+      // there, an absence really was asked for at an adequate version and is a denial. If
+      // upstream ever raises its true requirement above the measured constant, that constant is
+      // the only thing standing between an entitled account and a five-minute cached denial.
       .some(([modelId, minimum]) => (
         !models.has(modelId) && compareClientVersions(clientVersion, minimum) < 0
       ));
@@ -620,6 +766,7 @@ async function modelsForCredential(
   fetcher: typeof fetch,
   now: number,
   clientVersion: string,
+  trustedClientVersion: string,
   credentialMutationEpoch?: number,
 ): Promise<CachedAccountModels> {
   const cached = accountModelsCache.get(cacheKeyFor(credential.accountId, clientVersion));
@@ -648,6 +795,21 @@ async function modelsForCredential(
       confirmed: false,
     };
   }
+  // Cache hits, joined flights and capacity refusals start no upstream request. Charge only
+  // after capacity admission; the locally selected runtime version remains exempt.
+  if (
+    !credential.accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)
+    && clientVersion !== trustedClientVersion
+    && !admitVersionMiss(credential, clientVersion, now)
+  ) {
+    return {
+      credentialIdentity: credential.credentialIdentity,
+      clientVersion,
+      expiresAt: now,
+      models: new Set(),
+      confirmed: false,
+    };
+  }
   const flight = fetchAccountModels(credential, fetcher, now, clientVersion)
     .then(result => {
       if (
@@ -664,6 +826,30 @@ async function modelsForCredential(
     });
   accountModelsFlights.set(flightKey, flight);
   return flight;
+}
+
+/** Whether this caller-selected version may open a new upstream request for the account. */
+function admitVersionMiss(
+  credential: CodexModelEntitlementCredentialSnapshot,
+  clientVersion: string,
+  now: number,
+): boolean {
+  const stored = accountModelsMisses.get(credential.accountId);
+  const budget = stored && stored.credentialIdentity === credential.credentialIdentity
+    ? stored
+    : { credentialIdentity: credential.credentialIdentity, versions: new Map<string, number>() };
+  for (const [version, expiresAt] of budget.versions) {
+    if (expiresAt <= now) budget.versions.delete(version);
+  }
+  const alreadyCharged = budget.versions.has(clientVersion);
+  const admitted = alreadyCharged
+    || budget.versions.size < MODEL_ROSTER_VERSION_MISSES_PER_ACCOUNT_MAX;
+  // A repeat keeps its ORIGINAL expiry. Refreshing it here would let a caller hold one version
+  // open indefinitely, and it is the retry case this distinction exists to protect.
+  if (admitted && !alreadyCharged) budget.versions.set(clientVersion, now + MODEL_ROSTER_TTL_MS);
+  if (budget.versions.size === 0) accountModelsMisses.delete(credential.accountId);
+  else accountModelsMisses.set(credential.accountId, budget);
+  return admitted;
 }
 
 function candidateAccountIds(config: Pick<OcxConfig, "codexAccounts">): string[] {
@@ -715,6 +901,11 @@ function needsEntitlementRefresh(
   const cached = accountModelsCache.get(cacheKeyFor(accountId, clientVersion));
   if (cached && cached.credentialIdentity !== credentialIdentity) {
     invalidateCodexModelEntitlementsForAccount(accountId);
+    // The credential itself changed, so evidence gathered under the previous one answers for a
+    // different subscription. This is the only call site that knows that: the two gated-model
+    // sites in `core-codex-account.ts` invalidate a STALE roster for an unchanged credential,
+    // and clearing observed refusals there would discard the very evidence #4906 is about.
+    forgetObservedCodexModelDenialsForAccount(accountId);
   } else if (cached && cached.expiresAt > now) {
     return false;
   }
@@ -739,38 +930,58 @@ async function refreshCodexEntitlementWorkset(
   mutationEpoch: number,
   options: CodexEntitlementFreshnessOptions,
 ): Promise<void> {
-  const credentialSnapshot = options.credentialSnapshot ?? accountCredentialSnapshot;
-  const observations = await Promise.all(workset.map(async accountId => {
-    const credential = await credentialSnapshot(accountId, options);
-    return {
-      accountId,
-      credential,
-      absenceObservedAt: options.now ?? Date.now(),
-    };
-  }));
-  const credentials = observations.flatMap(observation => observation.credential
-    ? [observation.credential]
-    : []);
-  if (credentials.length > 0) {
-    await resolveCodexModelEntitlements(config, {
-      ...options,
-      clientVersion,
-      credentialMutationEpoch: mutationEpoch,
-      credentials,
-    });
-  }
+  const run = async (
+    excludedAccountIds: ReadonlySet<string>,
+    releaseMainLease?: () => void,
+  ): Promise<void> => {
+    // An excluded main is filtered before the snapshot phase, not just before the
+    // roster fetch: it never produces an absence observation, so a denied
+    // admission cannot memoize a credential read that never happened.
+    const admittedWorkset = excludedAccountIds.size === 0
+      ? workset
+      : workset.filter(accountId => !excludedAccountIds.has(accountId));
+    const credentialSnapshot = options.credentialSnapshot ?? accountCredentialSnapshot;
+    const observations = await Promise.all(admittedWorkset.map(async accountId => {
+      const credential = await credentialSnapshot(accountId, {
+        ...options,
+        releaseNativeMainCredentialLease: releaseMainLease,
+      });
+      return {
+        accountId,
+        credential,
+        absenceObservedAt: options.now ?? Date.now(),
+      };
+    }));
+    // The lease fences only the credential phase; release before roster fetches
+    // so a profile drain never waits on upstream network work.
+    releaseMainLease?.();
+    const credentials = observations.flatMap(observation => observation.credential
+      ? [observation.credential]
+      : []);
+    if (credentials.length > 0) {
+      await resolveCodexModelEntitlements(config, {
+        ...options,
+        clientVersion,
+        credentialMutationEpoch: mutationEpoch,
+        credentials,
+      });
+    }
 
-  for (const observation of observations) {
-    if (observation.credential) continue;
-    const capturedIdentity = identityVector.get(observation.accountId) ?? null;
-    if (codexCredentialMutationEpoch() !== mutationEpoch) continue;
-    if ((currentCredentialIdentity(observation.accountId) ?? null) !== capturedIdentity) continue;
-    boundedNegativeCredentialMemoSet(observation.accountId, {
-      credentialIdentity: capturedIdentity,
-      mutationEpoch,
-      expiresAt: observation.absenceObservedAt + MODEL_ROSTER_NEGATIVE_CREDENTIAL_TTL_MS,
-    });
-  }
+    for (const observation of observations) {
+      if (observation.credential) continue;
+      const capturedIdentity = identityVector.get(observation.accountId) ?? null;
+      if (codexCredentialMutationEpoch() !== mutationEpoch) continue;
+      if ((currentCredentialIdentity(observation.accountId) ?? null) !== capturedIdentity) continue;
+      boundedNegativeCredentialMemoSet(observation.accountId, {
+        credentialIdentity: capturedIdentity,
+        mutationEpoch,
+        expiresAt: observation.absenceObservedAt + MODEL_ROSTER_NEGATIVE_CREDENTIAL_TTL_MS,
+      });
+    }
+  };
+  if (!workset.includes(MAIN_CODEX_ACCOUNT_ID)) return run(new Set<string>());
+  const admission = options.nativeMainCredentialAdmission ?? withNativeMainCredentialAdmission;
+  return admission(run);
 }
 
 function waitForEntitlementEnsureFlight(
@@ -805,8 +1016,10 @@ export async function ensureCodexEntitlementFreshness(
     );
     const candidates = normalizedCandidateAccountIds(config);
     const mutationEpoch = codexCredentialMutationEpoch();
+    // Same hoist as the denial pass: this prologue is synchronous and reads once per candidate.
+    const identityOf = credentialIdentityResolver();
     const identityEntries = candidates.map(accountId => (
-      [accountId, currentCredentialIdentity(accountId) ?? null] as const
+      [accountId, identityOf(accountId) ?? null] as const
     ));
     const identityVector = new Map(identityEntries);
     const workset = candidates.filter(accountId => needsEntitlementRefresh(
@@ -859,8 +1072,9 @@ export function getCodexModelEntitlementStatus(
   clientVersion?: string | null,
 ): CodexModelEntitlementStatus {
   const version = resolveCodexEntitlementClientVersion(clientVersion);
+  const identityOf = credentialIdentityResolver();
   const accounts = candidateAccountIds(config).flatMap(accountId => {
-    const credentialIdentity = currentCredentialIdentity(accountId);
+    const credentialIdentity = identityOf(accountId);
     return credentialIdentity ? [{ accountId, credentialIdentity }] : [];
   });
   if (accounts.length === 0) return { status: "unavailable" };
@@ -935,6 +1149,10 @@ export async function resolveCodexModelEntitlements(
     ? [...options.credentials].filter(credential => !options.excludeAccountIds?.has(credential.accountId))
     : (await Promise.all(allowedAccountIds.map(accountId => credentialSnapshot(accountId, options))))
       .filter((value): value is CodexModelEntitlementCredentialSnapshot => value !== null);
+  // The credential phase is the only part the native-main lease fences. The
+  // real snapshot releases it as soon as the main token settles; this boundary
+  // release keeps the guarantee when a seam snapshot never invokes it.
+  options.releaseNativeMainCredentialLease?.();
   const results = await Promise.all(credentials.map(async credential => ({
     credential,
     result: await modelsForCredential(
@@ -942,6 +1160,10 @@ export async function resolveCodexModelEntitlements(
       fetcher,
       now,
       clientVersion,
+      resolveCodexEntitlementClientVersion(
+        null,
+        options.loadPersistedRuntime ?? loadPersistedCodexRuntime,
+      ),
       options.credentialMutationEpoch,
     ),
   })));
@@ -1000,6 +1222,7 @@ export async function isDirectCallerEntitledToCodexModel(
     options.fetcher ?? fetch,
     options.now ?? Date.now(),
     clientVersion,
+    clientVersion,
   );
   return codexModelEntitlementStateForRoster(
     result.models,
@@ -1031,6 +1254,161 @@ export function availableAccountGatedNativeModels(
       && codexModelEntitlementStateForAccount(snapshot, accountId, modelId) === "granted"
     ))
   )));
+}
+
+/**
+ * Native models that stay unconditionally VISIBLE while their per-account availability still
+ * varies.
+ *
+ * This is deliberately not `ACCOUNT_GATED_NATIVE_OPENAI_MODELS` and must never become it. That set
+ * fails closed on ABSENCE of evidence: membership hides the row from the catalog and refuses the
+ * request before dispatch, which is exactly what the owner decision of 2026-09-04 removed the
+ * flagships from. A timed-out fetch or a shard that has not caught up would make the model vanish
+ * from the picker, and "opencodex lost my model" is a worse failure than one upstream 400.
+ *
+ * This set carries the opposite polarity. It admits only a CONFIRMED DENIAL as evidence, and it
+ * feeds an ordering preference rather than a refusal, so absent or stale evidence changes nothing.
+ * That is the distinction #4768 asked for: a pool holding a Plus account and a Free account should
+ * stop handing Sol/Astra to the Free account whose own authenticated roster already says it cannot
+ * serve them, without gating the model on evidence that may never arrive.
+ */
+export const ENTITLEMENT_PREFERRED_NATIVE_OPENAI_MODELS: ReadonlySet<string> = new Set([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  NATIVE_GPT6_ASTRA_MODEL,
+]);
+
+/**
+ * Accounts whose OWN authenticated roster definitively omits `modelId`, read synchronously from
+ * evidence discovery has already gathered.
+ *
+ * Synchronous and cache-only by contract. The gated path may await `resolveCodexModelEntitlements`
+ * because a gated model is rare and already pays a bounded discovery call; the flagships are the
+ * most commonly requested models in the product, and putting an authenticated upstream fetch per
+ * account on that request path would trade one occasional 400 for latency on every turn. The cache
+ * this reads is warmed anyway: `modelsForCredential` stores each account's FULL roster, and
+ * background catalog sync (`src/codex/catalog/retained-sync.ts`) and convergence already resolve
+ * entitlements for every pool account.
+ *
+ * Returns `undefined` rather than an empty set when nothing is denied, so a caller cannot confuse
+ * "no account is denied" with "no evidence exists" — both mean the same thing here, which is that
+ * selection must be left exactly as it was.
+ *
+ * Only `denied` counts. `unknown` covers an unconfirmed account, a roster fetched under a client
+ * version too old to return the model, and an expired or credential-stale entry; none of those is
+ * proof that the account lacks the model, and treating them as proof is how 2.36.0 removed
+ * sol/terra/luna from accounts that owned them (#3022).
+ */
+export function cachedDeniedCodexAccountIdsForModel(
+  modelId: string | undefined,
+  now = Date.now(),
+  options: { excludeAccountIds?: ReadonlySet<string> } = {},
+): ReadonlySet<string> | undefined {
+  if (!modelId || !ENTITLEMENT_PREFERRED_NATIVE_OPENAI_MODELS.has(modelId)) return undefined;
+  const denied = new Set<string>();
+  const granted = new Set<string>();
+  // One resolver for the whole pass: the loop below runs once per cached (account, client version)
+  // entry, and resolving an identity per entry meant a full account-store read per entry.
+  const identityOf = credentialIdentityResolver();
+  for (const [key, entry] of accountModelsCache) {
+    const accountId = accountIdOfCacheKey(key);
+    // A forwarded Direct credential is one request's caller, never a pool candidate.
+    if (accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)) continue;
+    // The caller's read fence, honoured BEFORE `identityOf` below, because that is the read: for
+    // native main it resolves the physical stored token. A request that is forbidden to read main
+    // -- a profile switch draining it, or a request-owned credential that owns no main state --
+    // must not reread account storage just to score an ordering preference. Dropping the account
+    // leaves it UNKNOWN rather than denied, which is the same outcome as having no cached roster
+    // for it and changes no selection. The resolver reads lazily for the same reason: an excluded
+    // account `continue`s here, so its store is never opened at all.
+    if (options.excludeAccountIds?.has(accountId)) continue;
+    if (entry.expiresAt <= now) continue;
+    // A credential we can currently read AND that differs is proof the entry answers for a
+    // different account than this id now names, so its denial is not evidence about the current
+    // one. An UNREADABLE credential is not proof of anything, and the same unknown-is-not-denied
+    // discipline that governs rosters governs identities: it leaves the entry in place rather
+    // than manufacturing a reason to ignore it.
+    const identity = identityOf(accountId);
+    if (identity !== undefined && identity !== entry.credentialIdentity) continue;
+    const state = codexModelEntitlementStateForRoster(
+      entry.models,
+      entry.confirmed,
+      entry.clientVersion,
+      modelId,
+    );
+    if (state === "granted") granted.add(accountId);
+    else if (state === "denied") denied.add(accountId);
+  }
+  // The roster is not the only evidence, and on this path it is usually the weaker one. A cached
+  // roster expires in five minutes and nothing on the flagship request path refetches it, so
+  // absent an ongoing catalog sync the loop above contributes nothing at all. An upstream
+  // refusal does not expire on that schedule and is not a snapshot of a pending answer: it is
+  // the account's own Codex surface naming this model and declining it (#4906).
+  // The caller's read fence is passed IN rather than applied to the result, so an excluded
+  // account is skipped before the credential-generation validation reads account storage
+  // (#4952). An excluded account must stay UNKNOWN rather than denied, so a profile switch or
+  // a request-owned credential produces the same selection it does today.
+  const observedDenied = observedDeniedCodexAccountIdsForModel(modelId, now, {
+    ...(options.excludeAccountIds ? { excludeAccountIds: options.excludeAccountIds } : {}),
+  });
+  for (const accountId of observedDenied ?? []) denied.add(accountId);
+  // One account holds one entry per client version, and upstream filters the roster by that
+  // version. So the same account can legitimately carry a granted entry under a current client
+  // and a denied one under an older client that predates the model. Positive evidence is
+  // authoritative regardless of which version asked for it -- the same rule
+  // `codexModelEntitlementStateForRoster` applies within a single entry -- so a grant anywhere
+  // clears the denial rather than being outvoted by whichever entry the map happened to yield
+  // last. It outranks an observed refusal for the same reason: a confirmed roster that lists the
+  // model is the newer answer, and a rollout that reaches an account must not be held back by a
+  // refusal it has already superseded.
+  for (const accountId of granted) denied.delete(accountId);
+  return denied.size > 0 ? denied : undefined;
+}
+
+/**
+ * Record an authenticated upstream refusal as this account's own evidence about `modelId`.
+ *
+ * Scoped to {@link ENTITLEMENT_PREFERRED_NATIVE_OPENAI_MODELS} because that is the set whose
+ * availability varies per account while the row stays visible, and it is the set
+ * {@link cachedDeniedCodexAccountIdsForModel} will read back. A model outside it either has no
+ * per-account variance or is gated by the fail-closed roster path, where an ordering preference
+ * would change nothing.
+ *
+ * The caller must have matched the exact allow-listed refusal body first. A status alone is not
+ * admissible here: 400 covers every malformed request too, and remembering one of those as an
+ * entitlement fact would steer routing away from a perfectly capable account.
+ */
+// Denial evidence is credential-scoped (#4952). The store stays a leaf module, so the
+// liveness predicate is injected here, where the account store is already a dependency.
+setObservedDenialGenerationCheck(beginCodexAccountGenerationLiveCheck);
+
+export function recordCodexModelDenialEvidence(
+  accountId: string | null | undefined,
+  modelId: string | undefined,
+  generation: number | null | undefined,
+  now = Date.now(),
+): void {
+  if (!accountId || !modelId) return;
+  if (!ENTITLEMENT_PREFERRED_NATIVE_OPENAI_MODELS.has(modelId)) return;
+  // A caller that cannot name a credential generation records ACCOUNT-scoped evidence rather
+  // than none. The one production context in that position is `main-pool`, whose credential
+  // lives in `auth.json` and has no pool generation; discarding its refusals would revert
+  // #4906 for the stored main login (#4952). Request-owned `main` never reaches here — its
+  // `accountId` is null and the guard above returns.
+  recordObservedCodexModelDenial(accountId, modelId, typeof generation === "number" ? generation : undefined, now);
+}
+
+/** Drop the refusal evidence for a pair the account has just served successfully. */
+export function clearCodexModelDenialEvidence(
+  accountId: string | null | undefined,
+  modelId: string | undefined,
+  generation: number | null | undefined,
+): void {
+  if (!accountId || !modelId) return;
+  // Mirror of the write: an account-scoped success clears account-scoped evidence. It cannot
+  // clear a credential-scoped entry that names a newer generation, and vice versa (#4952).
+  clearObservedCodexModelDenial(accountId, modelId, typeof generation === "number" ? generation : undefined);
 }
 
 /** Synchronous projection for management/catalog readers after a discovery pass. */
@@ -1066,6 +1444,11 @@ export function cachedAvailableAccountGatedNativeModels(
 
 export function isCodexModelEntitlementSnapshotCurrent(snapshot: CodexModelEntitlementSnapshot): boolean {
   for (const [accountId, identity] of snapshot.credentialIdentities) {
+    // Deliberately per-id, unlike the passes above. This is a fail-closed publication gate asking
+    // whether a snapshot is STILL current, so the freshest possible answer per account is the
+    // point of the read. A pass-wide snapshot would be a coherence win everywhere else and a
+    // small weakening here: it could answer "current" for a later account from a record a
+    // concurrent reauth had already replaced.
     if (currentCredentialIdentity(accountId) !== identity) return false;
   }
   return true;
@@ -1078,14 +1461,17 @@ export function invalidateCodexModelEntitlementsForAccount(accountId: string | n
   for (const key of [...accountModelsCache.keys()]) {
     if (accountIdOfCacheKey(key) === accountId) accountModelsCache.delete(key);
   }
+  accountModelsMisses.delete(accountId);
 }
 
 export function resetCodexModelEntitlementCacheForTests(): void {
   accountModelsCache.clear();
   accountModelsFlights.clear();
+  accountModelsMisses.clear();
   negativeCredentialMemo.clear();
   entitlementEnsureFlights.clear();
   runtimeVersionMemo = null;
+  resetObservedCodexModelDenialsForTests();
 }
 
 /** Test-only snapshot for proving publication fences, which cache lookup intentionally masks. */

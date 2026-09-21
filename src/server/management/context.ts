@@ -6,18 +6,41 @@ import type { StartupHealth } from "../../codex/autostart-health";
 import type { StartupInstallAction } from "../startup-action-control";
 import type { ManagementPrincipal, ManagementSessionControl } from "../management-auth";
 import type { CatalogModel } from "../../codex/catalog";
+import type { refreshOwnedCatalogIntegrations } from "../../integrations/catalog-refresh";
 import type { Paths as CodexPromptPaths } from "../../codex/prompt-layers";
 import type { injectGrokConfig } from "../../grok/inject";
 import type { removeDesktop3pStandardPivot, writeDesktop3pConfig } from "../../claude/desktop-3p";
 import type { probeClaudeDesktopPolicy } from "../../claude/desktop-policy";
 import type { RuntimePortState } from "../../config/process-state";
+import type { CursorInstall } from "../../integrations/cursor-detect";
+import type { CursorEffortTable } from "../../integrations/cursor-effort-table";
 import type { CatalogDisposition, ConvergeCodex } from "../../codex/convergence-types";
 import type {
   performCodexRestart,
   readCodexAppServerState,
 } from "../../codex/app-server-restart-service";
+import type { RequestMetricsSnapshotter } from "../request-metrics";
+
+import type { RemoteWorkspaceHub } from "../../remote-control/workspace-hub";
+import type { RemoteWorkspaceSessionService } from "../../remote-control/workspace-sessions";
+
+export type RemoteWorkspaceHubApi = Pick<RemoteWorkspaceHub,
+  "identity" | "createPairingGrant" | "assertPairingSourceAllowed" | "pairDevice"
+  | "authenticateDeviceToken" | "attachConnection" | "updateDeviceCapabilities"
+  | "detachConnection" | "listDevices" | "revokeDevice" | "closeAllConnections">;
+export type RemoteWorkspaceSessionsApi = Pick<RemoteWorkspaceSessionService,
+  "availability" | "list" | "create" | "prompt" | "submitPrompt" | "stop" | "shutdown">;
 
 export interface ManagementApiDeps {
+  /** Read-only process-local aggregate metrics; absent keeps the scrape route unavailable. */
+  requestMetrics?: RequestMetricsSnapshotter;
+  remoteWorkspaceHub?: RemoteWorkspaceHubApi;
+  remoteWorkspaceSessions?: RemoteWorkspaceSessionsApi;
+  /** The listener retains and awaits teardown only after this optional subsystem activates. */
+  remoteWorkspaceStopping?: () => boolean;
+  onRemoteWorkspaceShutdown?: (shutdown: () => Promise<void>) => void;
+  /** Isolates automatic owned-client writes in route tests. */
+  refreshOwnedCatalogIntegrations?: typeof refreshOwnedCatalogIntegrations;
   /** Platform seam for capability projections; does not alter host-level startup behavior. */
   platform?: NodeJS.Platform;
   toggleCodexMultiAgentV2?: (enabled: boolean) => void;
@@ -58,6 +81,7 @@ export interface ManagementApiDeps {
    * on the developer's real runtime state file.
    */
   readRuntimePort?: (pid: number) => RuntimePortState | null;
+  loadCursorEffortTable?: (install: CursorInstall | undefined) => CursorEffortTable | null;
   clearThreadAccountMap?: () => void;
   clearProviderQuotaCache?: () => void;
   primeCodexPoolQuotas?: (config: OcxConfig, reason: string) => Promise<void> | void;

@@ -38,7 +38,7 @@ import {
 import { routeModel, type RouteResult } from "../router";
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 import { codexAccountNamespaceForModel } from "./account-namespace-match";
-import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
+import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS, NATIVE_MAIN_DRAIN_SENTINEL_MODELS } from "./catalog/native-models";
 import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
 import {
   getUpstreamHostHealth,
@@ -59,6 +59,8 @@ export type SubagentPoolAccountPreview = (
 export type SubagentModelEligibleAccountIds = (
   modelId: string | undefined,
 ) => ReadonlySet<string> | undefined;
+/** Additional resolved routes that a restricted fallback caller has independently approved. */
+export type SubagentFallbackRouteEligibility = (route: RouteResult) => boolean;
 let subagentQuotaPrimeForTests: SubagentQuotaPrimeFn | null = null;
 let quotaPrimeInFlight: Promise<void> | null = null;
 
@@ -328,9 +330,17 @@ export function isSubagentModelUnavailable(
   // preserve the credential fence. If no non-main candidate can serve an unqualified
   // gated model, retain main only as a read-free sentinel: final auth owns the atomic
   // claim and returns maintenance instead of letting a routed fallback bypass it.
+  //
+  // The predicate is its OWN set, not the account-gated one. The sentinel protects the atomic
+  // main claim during a drain, which has nothing to do with entitlement; it read the gated set
+  // only because the two happened to hold the same slugs. Ungating the flagships (2026-09-04)
+  // would have flipped this false and let a drain silently rewrite the operator's configured
+  // subagent model instead of reporting maintenance -- a different model answering than was
+  // chosen. The set is explicit rather than every supported native, so gpt-5.5 and friends keep
+  // their existing fall-back-and-answer behaviour.
   const preserveDrainingMainCandidate = route.codexAccountId === undefined
     && candidateAccountUsabilityOptions?.nativeMainSelectionOnly === true
-    && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(route.modelId);
+    && NATIVE_MAIN_DRAIN_SENTINEL_MODELS.has(route.modelId);
   if (!preserveDrainingMainCandidate) return true;
   const drainingMainUsabilityOptions: CodexAccountUsabilityOptions = {
     ...candidateAccountUsabilityOptions,
@@ -356,13 +366,21 @@ export function selectAvailableSubagentModel(
   poolAccountPreview?: SubagentPoolAccountPreview,
   modelEligibleAccountIdsForModel?: SubagentModelEligibleAccountIds,
   resolvedChain?: readonly string[],
+  restrictedRouteEligible?: SubagentFallbackRouteEligibility,
 ): { model: string; rewritten: boolean; skipped: string[] } {
   const chain = resolvedChain ?? normalizedChain(primary, config, extraFallback, trailingFallback);
   const skipped: string[] = [];
   for (const candidate of chain) {
     if (nativeFallbackOnly) {
       const route = tryRouteFallbackModel(config, candidate);
-      if (!route || !isCanonicalOpenAiForwardProvider(route.provider)) {
+      if (
+        !route
+        || route.combo !== undefined
+        || (
+          !isCanonicalOpenAiForwardProvider(route.provider)
+          && restrictedRouteEligible?.(route) !== true
+        )
+      ) {
         skipped.push(candidate);
         continue;
       }
@@ -607,6 +625,7 @@ export function applySubagentModelFallback(
   poolAccountPreview?: SubagentPoolAccountPreview,
   modelEligibleAccountIdsForModel?: SubagentModelEligibleAccountIds,
   resolvedFallbackChain?: readonly string[] | null,
+  restrictedRouteEligible?: SubagentFallbackRouteEligibility,
 ): { from?: string; to?: string; skipped?: string[] } | null {
   if (!isThreadSpawnRequest(headers)) return null;
   const fallbackChain = resolvedFallbackChain === undefined
@@ -625,6 +644,7 @@ export function applySubagentModelFallback(
     poolAccountPreview,
     modelEligibleAccountIdsForModel,
     fallbackChain,
+    restrictedRouteEligible,
   );
   if (!selection.rewritten) return selection.skipped.length > 0
     ? { from: parsed.modelId, to: parsed.modelId, skipped: selection.skipped }
@@ -885,8 +905,120 @@ export function hasCodexAgentModelFallbackField(role: string, codexHome = CODEX_
 }
 
 /** Roles whose TOML still carries `model_fallback`, including empty arrays. */
-export function scanCodexAgentRolesWithTomlModelFallback(codexHome = CODEX_HOME): string[] {
-  return listCodexAgentRoles(codexHome).filter(role => hasCodexAgentModelFallbackField(role, codexHome));
+export function scanCodexAgentRolesWithTomlModelFallback(
+  codexHome = CODEX_HOME,
+  onListError?: (cause: unknown) => void,
+): string[] {
+  try {
+    return listCodexAgentRoles(codexHome).filter(role => hasCodexAgentModelFallbackField(role, codexHome));
+  } catch (cause) {
+    onListError?.(cause);
+    return [];
+  }
+}
+
+const TOML_MODEL_KEY = /^\s*(?:model|"model"|'model')\s*=/;
+
+/**
+ * TOML-aware read of the root `model` pin, or null when there is none.
+ *
+ * Distinct from {@link readCodexAgentModel}, which matches one exact unindented double-quoted
+ * line. That is fine for resolving a fallback chain opencodex itself wrote, but it is the wrong
+ * question for a diagnostic: the file being judged was written by somebody else, so `model = 'x'`,
+ * an indented key, or a trailing comment are all valid TOML that Codex honours and that a
+ * stricter matcher would report as unpinned.
+ *
+ * It shares the scanner used for `model_fallback` for the reason that matters here: an imported
+ * role file keeps its instructions in a multiline string, and that string contains the very words
+ * this scan looks for. A line matcher would read a key out of prose.
+ *
+ * Table context is not tracked, matching the `model_fallback` parse. A `model` key under a later
+ * table header would be read as the root pin; Codex role files are flat in practice, and for a
+ * warning the conservative direction is to stay quiet.
+ */
+function parseTomlModelPin(content: string): string | null {
+  const lines = content.split(/\r?\n/);
+  const state: TomlScanState = { inMultilineString: null, arrayDepth: 0 };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (state.inMultilineString) {
+      const end = findTomlMultilineStringEnd(line, 0, state.inMultilineString[0]!);
+      if (end === -1) continue;
+      state.inMultilineString = null;
+      scanTomlLine(line.slice(end + 3), state);
+      continue;
+    }
+    if (state.arrayDepth === 0) {
+      const key = line.match(TOML_MODEL_KEY);
+      if (key) {
+        const rest = `${line.slice(key[0].length)}\n${lines.slice(i + 1).join("\n")}`;
+        let at = 0;
+        while (at < rest.length && (rest[at] === " " || rest[at] === "\t")) at += 1;
+        if (rest[at] !== '"' && rest[at] !== "'") return null;
+        const value = parseTomlStringAt(rest, at)?.value.trim() ?? "";
+        return value === "" ? null : value;
+      }
+    }
+    scanTomlLine(line, state);
+  }
+  return null;
+}
+
+/** Filename prefix opencodex gives the Claude agents it generates. */
+const OPENCODEX_DERIVED_ROLE_PREFIX = "ocx-";
+
+/**
+ * Body markers that survive the Codex desktop external-agent import.
+ *
+ * The import carries the generated Claude agent's instructions across, so both the provenance
+ * marker and the routing directive end up inside the role TOML. `ocx-route:` is matched without
+ * its `<!--` comment prefix on purpose: the same import text-replaces "Claude Code" with "Codex"
+ * inside that body, so anything around the directive should be assumed rewritten.
+ */
+const OPENCODEX_DERIVED_ROLE_MARKERS = ["generated-by: opencodex", "ocx-route:"] as const;
+
+/**
+ * Roles that look opencodex-derived but pin no model, so Codex runs them on the parent model.
+ *
+ * opencodex does not write Codex role TOMLs. These arrive when the Codex desktop external-agent
+ * import converts `~/.claude/agents/ocx-*.md` into `$CODEX_HOME/agents/ocx-*.toml`, dropping the
+ * `model:` frontmatter because a `claude-ocx-native--` id is not a Codex model and keeping only the
+ * instructions. The surviving `ocx-route` directive cannot make up the difference: it is honoured
+ * only on the Claude `/v1/messages` path and is inert on `/v1/responses`. So the role file names
+ * one model while every spawn runs on another, which is invisible until someone diffs
+ * `session_meta.agent_role` against `turn_context.model` (#4790).
+ *
+ * Detection is a heuristic for a warning, deliberately not an ownership claim. Nothing here
+ * authorizes writing to, repairing, or removing these files, and the marker-based ownership rules
+ * that govern the files opencodex does write are unchanged.
+ */
+export function scanOpencodexDerivedCodexAgentRolesWithoutModelPin(
+  codexHome = CODEX_HOME,
+  onListError?: (cause: unknown) => void,
+): string[] {
+  const findings: string[] = [];
+  let roles: string[];
+  try {
+    roles = listCodexAgentRoles(codexHome);
+  } catch (cause) {
+    onListError?.(cause);
+    return [];
+  }
+  for (const role of roles) {
+    let content: string;
+    try {
+      content = readFileSync(join(codexHome, "agents", `${role}.toml`), "utf8");
+    } catch {
+      // An unreadable file is not evidence of a missing pin.
+      continue;
+    }
+    const derived = role.startsWith(OPENCODEX_DERIVED_ROLE_PREFIX)
+      || OPENCODEX_DERIVED_ROLE_MARKERS.some(marker => content.includes(marker));
+    if (!derived) continue;
+    if (parseTomlModelPin(content) !== null) continue;
+    findings.push(role);
+  }
+  return findings.sort();
 }
 
 export function listCodexAgentRoles(codexHome = CODEX_HOME): string[] {
