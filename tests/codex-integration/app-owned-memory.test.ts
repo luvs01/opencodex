@@ -16,7 +16,7 @@ import { MAX_STORED_RESPONSE_BYTES } from "../../src/responses/state";
 import { IMAGE_NORMALIZE_CACHE_MAX_BYTES } from "../../src/adapters/anthropic-image-normalize";
 import { VISION_DESCRIPTION_CACHE_MAX_BYTES } from "../../src/vision";
 import { ANTIGRAVITY_REPLAY_MAX_TOTAL_BYTES } from "../../src/adapters/google-antigravity-replay";
-import { MAX_NATIVE_STEERING_REPLAY_TOTAL_BYTES } from "../../src/server/responses/native-steering-replay";
+import { MAX_NATIVE_CONTROL_REPLAY_TOTAL_BYTES } from "../../src/server/responses/native-steering-replay";
 import {
   clearRequestLogsForTests,
   evictOldestRequestLogForBudget,
@@ -88,7 +88,7 @@ describe("app-owned retained memory", () => {
       + IMAGE_NORMALIZE_CACHE_MAX_BYTES
       + VISION_DESCRIPTION_CACHE_MAX_BYTES
       + ANTIGRAVITY_REPLAY_MAX_TOTAL_BYTES
-      + MAX_NATIVE_STEERING_REPLAY_TOTAL_BYTES;
+      + MAX_NATIVE_CONTROL_REPLAY_TOTAL_BYTES;
     expect(boundedStoreBytes).toBeLessThan(APP_OWNED_WORST_CASE_PINNED_BYTES);
   });
 

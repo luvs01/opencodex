@@ -54,7 +54,7 @@ import { translatorObservedBufferSnapshot } from "./translator-budget";
 import { imageFulfillmentTailSnapshot } from "../images/fulfill";
 import { oauthMutationTailSnapshot } from "../oauth/store";
 import { grokApplyFlightSnapshot } from "../server/management/agent-settings-routes";
-import { nativeSteeringReplayRetainedStoreSnapshot } from "../server/responses/native-steering-replay";
+import { nativeControlReplayRetainedStoreSnapshot } from "../server/responses/native-steering-replay";
 
 function ringSnapshot(metrics: { entries: number; bytes: number; oldestAt: number | null }): RetainedStoreSnapshot {
   return {
@@ -189,9 +189,9 @@ export const APP_OWNED_RETAINED_STORE_REGISTRATIONS = [
     evictOldest: evictOldestResponseContinuationForBudget,
   },
   {
-    id: "native_steering_replay",
+    id: "native_control_replay",
     category: "continuation",
-    snapshot: nativeSteeringReplayRetainedStoreSnapshot,
+    snapshot: nativeControlReplayRetainedStoreSnapshot,
     evictOldest: () => 0,
   },
 ] as const satisfies readonly RetainedStoreRegistration[];

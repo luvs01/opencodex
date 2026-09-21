@@ -12,20 +12,44 @@ import {
  */
 export const MAX_NATIVE_STEERING_REPLAY_BYTES = 32 * 1024 * 1024;
 /**
- * Aggregate ceiling across every live journal. The operator budget is an eviction
- * target that can be raised to 4 GiB; pinned steering state keeps its own finite
- * admission cap so the documented pin-capable aggregate stays below the process-owned
- * 512 MiB worst case.
+ * Aggregate ceiling across every live steering and injection journal. The operator
+ * budget is an eviction target that can be raised to 4 GiB; pinned control journals
+ * keep their own finite admission cap so the documented pin-capable aggregate stays
+ * below the process-owned 512 MiB worst case.
  */
-export const MAX_NATIVE_STEERING_REPLAY_TOTAL_BYTES = 128 * 1024 * 1024;
-let aggregateCapBytes = MAX_NATIVE_STEERING_REPLAY_TOTAL_BYTES;
-const activeReplays = new Set<NativeSteeringReplay>();
+export const MAX_NATIVE_CONTROL_REPLAY_TOTAL_BYTES = 128 * 1024 * 1024;
+let aggregateCapBytes = MAX_NATIVE_CONTROL_REPLAY_TOTAL_BYTES;
+const activeReplays = new Set<{ readonly retainedBytes: number }>();
 
 /** Account active journals as pinned state: protocol safety forbids evicting pending input. */
-export function nativeSteeringReplayRetainedStoreSnapshot(): RetainedStoreSnapshot {
+export function nativeControlReplayRetainedStoreSnapshot(): RetainedStoreSnapshot {
   let bytes = 0;
   for (const replay of activeReplays) bytes += replay.retainedBytes;
   return { count: activeReplays.size, bytes, evictableBytes: 0, pinnedBytes: bytes, oldestAt: null };
+}
+
+/** Track one live control journal (steering or injection) and return its detach hook. */
+export function registerNativeControlReplayJournal(journal: { readonly retainedBytes: number }): () => void {
+  activeReplays.add(journal);
+  return () => { activeReplays.delete(journal); };
+}
+
+/**
+ * Shared pinned-memory admission for one journal's current retained bytes. Bytes the
+ * retained-store registry already sees are measured in place; a journal still in its
+ * constructor is priced as a new proposal. Reclaimable owners are demoted before
+ * refusal, so cache occupancy alone never fails a journal.
+ */
+export function admitNativeControlReplayJournal(journal: { readonly retainedBytes: number }): void {
+  const replayBytes = nativeControlReplayRetainedStoreSnapshot().bytes
+    + (activeReplays.has(journal) ? 0 : journal.retainedBytes);
+  if (replayBytes > aggregateCapBytes) {
+    throw new Error("Native control replay exceeded the pinned journal ceiling.");
+  }
+  const registeredBytes = appOwnedBytesSnapshot().stores.native_control_replay?.bytes ?? 0;
+  if (!admitAppOwnedPinnedBytes(replayBytes - registeredBytes)) {
+    throw new Error("Native control replay exceeded the application-owned memory budget.");
+  }
 }
 type Frame = Record<string, unknown>;
 /** Accept JSON object envelopes without treating arrays as records. */
@@ -54,6 +78,7 @@ export class NativeSteeringReplay implements NativeSteeringReplayObserver {
   private explicitInput: unknown[] = [];
   private explicitBytes = 0;
   private disposed = false;
+  private unregisterAccounting?: () => void;
 
   get retainedBytes(): number { return this.bytes; }
 
@@ -62,22 +87,12 @@ export class NativeSteeringReplay implements NativeSteeringReplayObserver {
     this.prefix = [...inputItems(input)];
     this.bytes = Buffer.byteLength(JSON.stringify(this.prefix));
     this.check();
-    activeReplays.add(this);
+    this.unregisterAccounting = registerNativeControlReplayJournal(this);
   }
   /** Reject overflow rather than silently truncating retained conversation input. */
   private check(): void {
     if (this.bytes > MAX_NATIVE_STEERING_REPLAY_BYTES) throw new Error("Native steering replay exceeded its bounded history budget; input was not silently truncated.");
-    const replayBytes = nativeSteeringReplayRetainedStoreSnapshot().bytes
-      + (activeReplays.has(this) ? 0 : this.bytes);
-    if (replayBytes > aggregateCapBytes) {
-      throw new Error("Native steering replay exceeded the pinned steering journal ceiling.");
-    }
-    // Only bytes the registry cannot already see are a proposal. Admission evicts
-    // reclaimable state before it refuses, so cache occupancy alone never fails a journal.
-    const registeredBytes = appOwnedBytesSnapshot().stores.native_steering_replay?.bytes ?? 0;
-    if (!admitAppOwnedPinnedBytes(replayBytes - registeredBytes)) {
-      throw new Error("Native steering replay exceeded the application-owned memory budget.");
-    }
+    admitNativeControlReplayJournal(this);
   }
   /** Reserve replay bytes before send and return a rollback for synchronous failure. */
   submitted(frame: Frame): () => void {
@@ -154,7 +169,8 @@ export class NativeSteeringReplay implements NativeSteeringReplayObserver {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    activeReplays.delete(this);
+    this.unregisterAccounting?.();
+    this.unregisterAccounting = undefined;
     this.prefix = [];
     this.previousOutput = [];
     this.submissions = [];
@@ -165,6 +181,6 @@ export class NativeSteeringReplay implements NativeSteeringReplayObserver {
 }
 
 /** Test-only: shrink the aggregate pinned-journal ceiling (null restores the documented cap). */
-export function setNativeSteeringReplayTotalCapForTests(capBytes: number | null): void {
-  aggregateCapBytes = capBytes ?? MAX_NATIVE_STEERING_REPLAY_TOTAL_BYTES;
+export function setNativeControlReplayTotalCapForTests(capBytes: number | null): void {
+  aggregateCapBytes = capBytes ?? MAX_NATIVE_CONTROL_REPLAY_TOTAL_BYTES;
 }
