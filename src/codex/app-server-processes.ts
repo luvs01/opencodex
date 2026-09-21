@@ -17,8 +17,8 @@ import {
 import { readCodexCatalogPath } from "./catalog/parsing";
 
 export const STALE_CODEX_APP_SERVER_HINT =
-  "If Codex still shows an older model list, restart its long-lived app-server process after sync (ocx sync --restart-codex). "
-  + "On Windows the desktop app itself may also need a full restart (ocx sync --restart-desktop-app).";
+  "If Codex still shows an older model list, run `ocx sync --restart-codex`: it restarts the long-lived app-server "
+  + "processes and fully restarts the Codex desktop app, whose model picker is what actually holds the stale list.";
 
 /** Attach the shared dashboard hint only after a catalog or models_cache write. */
 export function attachStaleAppServerHint<T extends {
@@ -44,9 +44,14 @@ const CODEX_TARGET_TRIPLE_BODY = "[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+
  * `"C:\Program Files\...\codex.exe" app-server` still reach GetOwner.
  * Also admits official target-triple basenames such as
  * `codex-x86_64-pc-windows-msvc.exe`.
+ *
+ * The optional `.opencodex-real` sits where `backupPathFor` actually puts it — after
+ * the stem and BEFORE the extension — and deliberately not before the triple. Written
+ * the other way it admits `codex.opencodex-real-x86_64-pc-windows-msvc.exe`, a name
+ * nothing produces, and pays GetOwner for it.
  */
 export const WINDOWS_CODEX_BASENAME_CANDIDATE_RE = new RegExp(
-  `(^|[/\\\\\\s'"=])codex(-${CODEX_TARGET_TRIPLE_BODY})?([.]exe|[.]cmd)?['"]?(\\s|$)`,
+  `(^|[/\\\\\\s'"=])codex(-${CODEX_TARGET_TRIPLE_BODY})?([.]opencodex-real)?([.]exe|[.]cmd|[.]ps1)?['"]?(\\s|$)`,
   "i",
 );
 
@@ -56,6 +61,38 @@ export const WINDOWS_CODEX_CODE_MODE_HOST_CANDIDATE_RE = /codex-code-mode-host/i
 const CODEX_TARGET_TRIPLE_BASENAME_RE = new RegExp(
   `^codex-${CODEX_TARGET_TRIPLE_BODY}(?:\\.exe|\\.cmd)?$`,
 );
+
+/**
+ * Launcher basenames a Codex app-server can be started through, including the
+ * `.opencodex-real` backups the autostart shim creates.
+ *
+ * When the shim installs, `backupPathFor` (`src/codex/shim.ts`) renames the original
+ * launcher by inserting `.opencodex-real` before its extension, so a shimmed host runs
+ * `~/.local/bin/codex.opencodex-real app-server`. Reported by a contributor (#2884) with
+ * `ps` output from an affected host: `--restart-codex` matched nothing and left
+ * app-servers alive holding stale in-memory catalogs.
+ *
+ * An EXACT set, kept separate from the target-triple pattern above rather than folded
+ * into it by stripping the suffix first. That shortcut is unsafe: normalising
+ * `codex-report-generator-worker.opencodex-real` yields a syntactically valid triple
+ * and would make an unrelated process a kill target. A triple binary cannot be a shim
+ * target anyway — Unix discovery accepts only a PATH entry named `codex`, and Windows
+ * refuses a real `codex.exe` outright — so the combination is unreachable, not merely
+ * unlisted.
+ *
+ * `.ps1` and `.cmd` are here because `findWindowsCodexTargets` shims both, and the
+ * extensionless form because Unix discovery and the Git-Bash launcher use it. There is
+ * deliberately no `.opencodex-real.exe`: Windows installation REFUSES to rename a native
+ * `codex.exe`, so that backup cannot exist. Matching it looked like free breadth until a
+ * review round put it plainly — this set decides what receives SIGTERM, and a name no
+ * installation can produce only widens what a coincidence can hit.
+ */
+const CODEX_LAUNCHER_BASENAMES = new Set([
+  "codex", "codex.exe", "codex.cmd",
+  "codex.opencodex-real",
+  "codex.opencodex-real.cmd",
+  "codex.opencodex-real.ps1",
+]);
 
 /** True when a Windows CommandLine is worth paying GetOwner for (current-user scoped later). */
 export function isWindowsCodexCandidateCommandLine(commandLine: string): boolean {
@@ -158,7 +195,7 @@ function tokenBasename(token: string): string {
 
 function isCodexExecutableToken(token: string): boolean {
   const base = tokenBasename(token);
-  return base === "codex" || base === "codex.exe" || base === "codex.cmd"
+  return CODEX_LAUNCHER_BASENAMES.has(base)
     || CODEX_TARGET_TRIPLE_BASENAME_RE.test(base);
 }
 
@@ -282,6 +319,10 @@ export function isCodexAppServerCommandLine(commandLine: string, executable?: st
   let i = 1;
   while (i < tokens.length) {
     const token = tokens[i]!;
+    // `--` ends option parsing, so what follows is a prompt for the interactive TUI, not
+    // a subcommand. `codex -- app-server` starts a session whose first prompt word is
+    // "app-server"; treating it as a match sends SIGTERM to somebody's live session.
+    if (token === "--") return false;
     if (token.startsWith("-")) {
       i = advancePastCodexGlobalOption(tokens, i);
       continue;
@@ -418,9 +459,9 @@ function windowsSnapshotPowerShellCommand(): string {
   // Newlines keep -Command as a real script (space-joined statements need ';').
   // Double-quoted format string so `t expands to a real tab.
   // Codex candidates only: basename token codex / codex.exe / codex.cmd /
-  // official target-triple binaries (optional closing quote after the
-  // basename), or code-mode-host — not incidental substrings like a repo
-  // path with "opencodex".
+  // codex.ps1, their .opencodex-real shim backups, official target-triple
+  // binaries (optional closing quote after the basename), or code-mode-host —
+  // not incidental substrings like a repo path with "opencodex".
   const basenameMatch = powerShellSingleQuotedIgnoreCaseMatch(WINDOWS_CODEX_BASENAME_CANDIDATE_RE.source);
   const codeModeMatch = powerShellSingleQuotedIgnoreCaseMatch(WINDOWS_CODEX_CODE_MODE_HOST_CANDIDATE_RE.source);
   return [
@@ -483,6 +524,31 @@ function defaultListSnapshots(platform: NodeJS.Platform, getuid: () => number | 
   return listUnixProcSnapshots(getuid());
 }
 
+export interface ListProcessSnapshotsOptions {
+  platform?: NodeJS.Platform;
+  getuid?: () => number | undefined;
+}
+
+/**
+ * Raw process snapshots for callers that need to match their own predicate.
+ *
+ * Throws on enumeration failure. That is the contract routing-adoption needs:
+ * a thrown read is "could not enumerate" and must never collapse to an empty
+ * list. listCodexAppServerProcesses maps the same failure to [] for the #476
+ * kill path, which would otherwise print a false adopted for #4550.
+ */
+export function listProcessSnapshots(options: ListProcessSnapshotsOptions = {}): ProcessSnapshot[] {
+  const platform = options.platform ?? process.platform;
+  const getuid = options.getuid ?? (() => {
+    try {
+      return typeof process.getuid === "function" ? process.getuid() : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  return defaultListSnapshots(platform, getuid);
+}
+
 export function listCodexAppServerProcesses(io: CodexAppServerProcessIo = {}): CodexAppServerProcess[] {
   const platform = io.platform ?? process.platform;
   const getuid = io.getuid ?? (() => {
@@ -522,8 +588,8 @@ export function formatStaleCodexAppServerWarning(
   return (
     `WARNING: ${processes.length} Codex app-server process(es) still running (PID${processes.length === 1 ? "" : "s"}: ${pids}). `
     + "Disk catalog/cache were updated, but Codex may keep showing the old model list until those processes restart. "
-    + "Re-run with `ocx sync --restart-codex` (or `ocx sync-cache --restart-codex`) to send SIGTERM only to matching app-server processes. "
-    + "On Windows the desktop app itself may also need a full restart (`ocx sync --restart-desktop-app`). "
+    + "Re-run with `ocx sync --restart-codex` (or `ocx sync-cache --restart-codex`) to restart those processes and the Codex desktop app. "
+    + "Use `--restart-app-server-only` to leave the desktop app running. "
     + "Active turns may be interrupted."
   );
 }
@@ -1135,6 +1201,19 @@ export interface AfterCatalogWriteAppServerOptions {
   restart: boolean;
   log?: Pick<Console, "log" | "error"> | null;
   io?: CodexAppServerProcessIo;
+  /**
+   * Pids already covered by a desktop-app restart in this same command.
+   *
+   * The app-server is a CHILD of the Codex desktop app on every platform, so signalling
+   * it and then quitting the app interrupts the operator's in-flight turn twice in one
+   * command. Excluding the desktop tree leaves the quit to do that work once.
+   *
+   * Standalone app-servers - the npm wrapper pair, SSH bootstraps - are not members of
+   * that tree and are still signalled. An empty list means no exclusion, which is what a
+   * failed discovery or probe yields: a missed exclusion costs an extra interruption, a
+   * wrong one leaves a stale app-server serving a roster that no longer exists.
+   */
+  excludePids?: readonly number[];
 }
 
 export interface AfterCatalogWriteAppServerResult {
@@ -1148,7 +1227,9 @@ export interface AfterCatalogWriteAppServerResult {
 export function afterCatalogWriteHandleAppServers(
   options: AfterCatalogWriteAppServerOptions,
 ): AfterCatalogWriteAppServerResult {
-  const processes = listCodexAppServerProcesses(options.io);
+  const excluded = new Set(options.excludePids ?? []);
+  const processes = listCodexAppServerProcesses(options.io)
+    .filter(process => !excluded.has(process.pid));
   const hint = STALE_CODEX_APP_SERVER_HINT;
   if (processes.length === 0) {
     return { processes, warned: false, hint };

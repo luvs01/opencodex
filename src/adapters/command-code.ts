@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { opendir } from "node:fs/promises";
@@ -8,11 +8,13 @@ import type { AdapterFetchContext, AdapterRequest, ProviderAdapter } from "./bas
 import type { TranslatorBudget } from "../lib/translator-budget";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { debugDroppedFrame } from "../lib/debug";
-import { configuredReasoningEfforts } from "../reasoning-effort";
+import { configuredReasoningEfforts, modelRecordValue } from "../reasoning-effort";
 import { commandCodeReasoningEfforts, refreshCommandCodeReasoningEfforts } from "../providers/command-code-efforts";
 import { identifyRoutedModel } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { parseDataUrl } from "./image";
+import { createAdapterPhysicalSend } from "./physical-send";
+import { SendBudgetExhaustedError } from "../lib/upstream-retry";
 
 // Retain the short ids emitted by the first local integration. New requests use the live catalog's
 // provider-native IDs directly; this map is compatibility-only and is not a model fallback list.
@@ -30,7 +32,7 @@ function canonicalCommandCodeModelId(modelId: string): string {
 /** Flatten tool-result content for the text-only wire output, keeping an `[image]` marker per image part in content order. */
 function toolResultText(content: string | OcxContentPart[]): string {
   if (typeof content === "string") return content;
-  return content.map(part => (part.type === "text" ? part.text : "[image]")).join("");
+  return content.map(part => (part.type === "text" || part.type === "document" ? part.text : "[image]")).join("");
 }
 
 /** Best-effort media type from a remote https URL extension, e.g. image/png. */
@@ -59,7 +61,7 @@ function wireImagePart(imageUrl: string): Record<string, unknown> {
  * (#1383). This builder keeps the pairing invariant:
  *
  * - a `toolResult` that matches a declared assistant call emits the native `tool-result`;
- * - a `toolResult` with no matching declared call degrades to a text carrier so the model
+ * - a `toolResult` with no matching declared call degrades to a user carrier so the model
  *   still sees the outcome without a 400-prone standalone `tool` message;
  * - every declared assistant call that never received a result gets an explicit error
  *   `tool-result`, so the upstream never sees an unpaired call.
@@ -108,6 +110,9 @@ function wireMessages(messages: OcxMessage[]): Array<Record<string, unknown>> {
       continue;
     }
     if (message.role === "toolResult") {
+      const images = typeof message.content === "string" ? [] : message.content
+        .filter(part => part.type === "image")
+        .map(part => wireImagePart((part as { imageUrl: string }).imageUrl));
       const callIndex = pendingCalls.findIndex(call => call.id === message.toolCallId);
       const paired = callIndex >= 0;
       if (paired) pendingCalls.splice(callIndex, 1);
@@ -116,11 +121,11 @@ function wireMessages(messages: OcxMessage[]): Array<Record<string, unknown>> {
         // message lands, or their synthesized results would follow the orphan carrier.
         closePendingCalls();
         // The upstream rejects a standalone tool message whose call was never declared by an
-        // assistant turn. Preserve the outcome as text so the model can still act on it.
+        // assistant turn. Preserve the outcome and images so the model can still act on it.
         const label = message.toolName ? `${message.toolName} (${message.toolCallId})` : message.toolCallId;
         const text = toolResultText(message.content);
         // The orphan result cannot ride a `tool` message; carry it in a user message instead.
-        out.push({ role: "user", content: [{ type: "text", text: `[tool result without adjacent tool call: ${label}]\n${text}` }] });
+        out.push({ role: "user", content: [{ type: "text", text: `[tool result without adjacent tool call: ${label}]\n${text}` }, ...images] });
         continue;
       }
       out.push({ role: "tool", content: [{
@@ -132,9 +137,8 @@ function wireMessages(messages: OcxMessage[]): Array<Record<string, unknown>> {
       // The proprietary wire's tool-result output is text-only; image parts returned by a
       // tool (e.g. Codex view_image) cannot live inside it. Carry them in a follow-up user
       // message using the same image encoding as the user branch so the bytes reach the model.
-      const images = typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image");
       if (images.length > 0) {
-        pendingImageCarriers.push({ role: "user", content: images.map(part => wireImagePart((part as { imageUrl: string }).imageUrl)) });
+        pendingImageCarriers.push({ role: "user", content: images });
       }
       continue;
     }
@@ -145,6 +149,7 @@ function wireMessages(messages: OcxMessage[]): Array<Record<string, unknown>> {
     else for (const part of message.content) {
       if (part.type === "text") content.push({ type: "text", text: part.text });
       else if (part.type === "image") content.push(wireImagePart(part.imageUrl));
+      else if (part.type === "document") content.push({ type: "text", text: part.text });
       else content.push({ type: "text", text: "[video]" });
     }
     out.push({ role: "user", content });
@@ -209,6 +214,27 @@ export const MAX_WORKSPACE_METADATA_ENTRIES = 128;
 /** Derive a bounded project slug from the working directory for the `x-project-slug` header. */
 function projectSlug(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 64) || "workspace";
+}
+
+export function commandCodeSessionId(parsed: OcxParsedRequest): string {
+  // Shared prompt-cache cohorts identify a cache population, not one conversation. Using one
+  // for session affinity would pin unrelated conversations to the same upstream worker.
+  const threadId = parsed._clientThreadId?.trim();
+  const replayId = parsed._reasoningReplayScope?.clientThreadId?.trim();
+  const cacheKey = parsed._promptCacheKeyIsSharedCohort === false
+    ? parsed.options.promptCacheKey?.trim()
+    : undefined;
+  const identity = threadId
+    ? ["thread", threadId]
+    : replayId
+      ? ["replay", replayId]
+      : cacheKey
+        ? ["cache", cacheKey]
+        : undefined;
+  if (!identity) return randomUUID();
+  const hex = createHash("sha256").update(`command-code:${identity[0]}\0${identity[1]}`).digest("hex");
+  // Replace the digest nibbles at the UUID version and variant positions; the skipped hex characters are intentional.
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 interface GitWorkspaceInfo {
@@ -458,13 +484,51 @@ async function fetchCommandCode(request: AdapterRequest, ctx: AdapterFetchContex
   }
 }
 
+/**
+ * Has the operator declared their own ladders authoritative for this provider?
+ *
+ * Comparing a configured row against the shipped table cannot answer this. `providerConfigSeed`
+ * copies the whole table into every materialized preset, and both enrichment and routing keep a
+ * persisted row over the current seed, so a row written by an older release keeps its old value
+ * and starts LOOKING like an operator edit the moment the shipped table is corrected — at which
+ * point the stale row would outrank the correction and disable the rejection repair below.
+ * Provenance has to be declared rather than inferred, so it is: `providerConfigSeed` never
+ * writes this flag, which makes its presence something only a human can have caused.
+ */
+function operatorChoseCommandCodeLadder(provider: OcxProviderConfig, canonicalId: string): boolean {
+  if (provider.modelReasoningEffortsAuthoritative !== true) return false;
+  return modelRecordValue(provider.modelReasoningEfforts, canonicalId) !== undefined;
+}
+
+/**
+ * Resolve the ladder this request may draw a wire effort from.
+ *
+ * The shipped table is a default, not a ceiling the operator cannot reach past. Until this
+ * existed the adapter read `commandCodeReasoningEfforts() ?? configuredReasoningEfforts()`, so a
+ * model with a row ignored configuration outright while a model without one honoured it — and
+ * the catalog disagreed with both, because `configuredReasoningEfforts` is what advertises the
+ * picker. An operator who widened a pinned row saw the wider ladder offered in Codex and then
+ * watched the adapter strip the rung on the way out (#5096).
+ *
+ * An operator who sets `modelReasoningEffortsAuthoritative` now resolves through the same
+ * function the catalog uses, so the picker and the wire agree, and sanitization, tier healing and
+ * learned-refusal dropping apply to it. Every other provider keeps the shipped table, including a
+ * value learned by a profile refresh.
+ */
+function commandCodeEffortLadder(provider: OcxProviderConfig, canonicalId: string): readonly string[] | undefined {
+  if (operatorChoseCommandCodeLadder(provider, canonicalId)) {
+    return configuredReasoningEfforts(provider, canonicalId);
+  }
+  return commandCodeReasoningEfforts(canonicalId) ?? configuredReasoningEfforts(provider, canonicalId);
+}
+
 function supportedCommandCodeEffort(provider: OcxProviderConfig, modelId: string, requested: string | undefined): string | undefined {
   if (!requested || requested === "none") return undefined;
   // Compatibility ids (deepseek-v4-flash / glm-5.2) must resolve to their canonical
   // Command Code id before the effort lookup, or legacy requests silently lose the
   // reasoning effort because the official table is keyed by the canonical ids.
   const canonicalId = canonicalCommandCodeModelId(modelId);
-  const supported = commandCodeReasoningEfforts(canonicalId) ?? configuredReasoningEfforts(provider, canonicalId);
+  const supported = commandCodeEffortLadder(provider, canonicalId);
   if (!supported) return undefined;
   // Only remap xhigh/ultra→max for models whose official profile documents that
   // aliasing (deepseek v4, glm-5.2). Muse Spark's upstream accepts xhigh as a
@@ -472,12 +536,15 @@ function supportedCommandCodeEffort(provider: OcxProviderConfig, modelId: string
   let wire = requested;
   const lower = canonicalId.toLowerCase();
   const needsAlias =
-    lower === "deepseek/deepseek-v4-pro" ||
     lower === "deepseek/deepseek-v4-flash" ||
     lower === "zai-org/glm-5.2";
   if (requested === "xhigh" && !supported.includes("xhigh") && supported.includes("max")) {
     wire = "max";
-  } else if (requested === "ultra" && needsAlias && supported.includes("max")) {
+  } else if (requested === "ultra" && needsAlias && !supported.includes("ultra") && supported.includes("max")) {
+    // The xhigh branch above already refuses to alias a rung the ladder advertises; ultra has to
+    // match it. No shipped row offers ultra, so this changes nothing for the built-in table — but
+    // an authoritative operator ladder that does offer it would otherwise advertise ultra in the
+    // picker and quietly send max, which is the catalog/wire disagreement this file just fixed.
     wire = "max";
   }
   return (supported as readonly string[]).includes(wire) ? wire : undefined;
@@ -523,7 +590,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
         "x-cli-environment": "production",
         "x-taste-learning": "false",
         "x-co-flag": "false",
-        "x-session-id": randomUUID(),
+        "x-session-id": commandCodeSessionId(parsed),
       };
       if (cwd) headers["x-project-slug"] = projectSlug(cwd);
       return {
@@ -534,7 +601,8 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
       };
     },
     async fetchResponse(request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> {
-      const response = await fetchCommandCode(request, ctx, executor);
+      const send = createAdapterPhysicalSend(ctx, executor);
+      const response = await send({ url: request.url, dispatch: physical => fetchCommandCode(request, ctx, physical) });
       if (response.ok) return response;
       const currentEffort = (() => {
         try { return (JSON.parse(request.body) as { params?: { reasoning_effort?: unknown } }).params?.reasoning_effort; } catch { return undefined; }
@@ -551,12 +619,23 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
         try { return (JSON.parse(request.body) as { params?: { model?: unknown } }).params?.model; } catch { return undefined; }
       })();
       if (typeof modelId !== "string") return response;
+      // An operator who wrote this ladder authorized the rung deliberately. Replaying the turn
+      // without it would answer at the provider default and hide a wrong configuration behind a
+      // successful-looking response, so the upstream rejection is what the caller gets. The
+      // downgrade below stays for the shipped table, where the rung was never the caller's idea.
+      if (operatorChoseCommandCodeLadder(provider, canonicalCommandCodeModelId(modelId))) return response;
       const refreshed = await refreshCommandCodeReasoningEfforts(modelId, executor);
       if (!refreshed || refreshed.includes(currentEffort)) return response;
       const retry = requestWithoutReasoningEffort(request);
       if (!retry) return response;
-      try { void response.body?.cancel(); } catch { /* already closed */ }
-      return fetchCommandCode(retry, ctx, executor);
+      try {
+        return await send({ url: retry.url, sendClass: "repair", recovery: "reasoning-effort-downgrade",
+          beforeDispatch: () => { try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ } },
+          dispatch: physical => fetchCommandCode(retry, ctx, physical) });
+      } catch (error) {
+        if (error instanceof SendBudgetExhaustedError) return response;
+        throw error;
+      }
     },
     async *parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
       let sawFinish = false;

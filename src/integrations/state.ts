@@ -8,17 +8,28 @@
  *
  * Design of record: devlog/_fin/260802_client_toggle_api/021 §3.
  */
+import { createClineIO } from "./cline-io";
+import { parseClineDocument } from "./cline-document";
 import { ClientPathError, EXPORT_CLIENTS, opencodeProxyBaseUrl, type ExportModel, type ManagedContribution } from "../clients/config-export";
+import type { ConfigFormat } from "../clients/config-export";
 import type { OcxConfig } from "../types";
 import { PARSE_FAILED, loadTarget, parseConfig, type IntegrationIO } from "./config-io";
 import { SNAPSHOT_RETENTION } from "./journal";
-import { canonicalContribution, fingerprint, type OwnershipRecord } from "./ownership";
+import { AmbiguousSelectorError, parseSegment, readPath, selectIndex, type PathSegment } from "./merge";
+import { canonicalContribution, fingerprint, semanticContribution, type OwnershipRecord } from "./ownership";
 import {
   protectedContributionFingerprint,
   refreshablePathsOf,
+  semanticProtectedContributionFingerprint,
   validRefreshablePaths,
 } from "./ownership-policy";
-import { INTEGRATION_CLIENTS, type IntegrationClientId } from "./registry";
+import {
+  INTEGRATION_CLIENTS,
+  resolveIntegrationPaths,
+  unresolvedPathHintFor,
+  type IntegrationClientId,
+} from "./registry";
+import { resolveIntegrationTarget, type IntegrationTarget } from "./target";
 import { createIntegrationStateStore, type IntegrationStateStore } from "./store";
 
 export type IntegrationState = "absent" | "current" | "stale" | "conflict" | "unsafe";
@@ -29,6 +40,7 @@ export type StateReason =
   | "unowned-key"
   /** A container we would have to write through holds a non-object value. */
   | "blocked-container"
+  | "ambiguous-selector"
   /** A path selector we cannot resolve, e.g. a relative OPENCLAW_CONFIG_PATH. */
   | "unresolvable-path";
 
@@ -40,21 +52,43 @@ export interface IntegrationStatus {
   appliedAt?: string;
   lastOpId?: string;
   reason?: StateReason;
+  /**
+   * The store this client reads instead of `configPath`.
+   *
+   * Present only when the integration is NOT writing that store: either our
+   * block is still in the config file, or the store is not a document whose
+   * shape has been observed. Where the store is written, `configPath` names it
+   * and there is nothing to report beside the state.
+   *
+   * Orthogonal to `state`, which answers "what is on disk, and did we put it
+   * there?" — and answers it correctly here: the block can be byte-for-byte
+   * current in a file the client stopped opening. That pair is not a
+   * contradiction, it is the whole of #5348, so the surface that reports
+   * `current` has to be able to report this beside it.
+   */
+  supersededBy?: string;
   /** Snapshot files retained for this client; -1 when they cannot be inspected. */
   snapshotCount: number;
   /** Pruning is behind, so older (possibly credential-bearing) snapshots remain. */
   retentionDegraded: boolean;
 }
 
-export function readPath(doc: unknown, path: readonly string[]): unknown {
-  let cursor: unknown = doc;
-  for (const key of path) {
-    if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) return undefined;
-    cursor = (cursor as Record<string, unknown>)[key];
-    if (cursor === undefined) return undefined;
-  }
-  return cursor;
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+function assertNever(segment: never): never {
+  throw new Error(`unknown path segment ${JSON.stringify(segment)}`);
+}
+
+/**
+ * The path reader lives with the path grammar, in `merge`, and is re-exported
+ * here because the classifier was its original home and every caller imports
+ * it from this module. One implementation is the point: a reader that resolved
+ * a selector differently from the writer would report one element as ours and
+ * then rewrite another.
+ */
+export { readPath };
 
 /** Does the document carry any fragment we would write? */
 export function hasOurFragments(doc: unknown, contribution: ManagedContribution): boolean {
@@ -76,10 +110,35 @@ export function blockedContainerPath(
   doc: unknown,
   contribution: ManagedContribution,
 ): readonly string[] | null {
+  /*
+   * What a segment needs the value it walks through to BE: a record for a key,
+   * an array for a selector. `typeof null === "object"`, so null is excluded
+   * by both checks rather than walking straight into the dereference below.
+   */
+  const holds = (segment: PathSegment, value: unknown): boolean => {
+    switch (segment.kind) {
+      case "key":
+        return isPlainRecord(value);
+      case "select":
+        return Array.isArray(value);
+      default:
+        return assertNever(segment);
+    }
+  };
+  const step = (segment: PathSegment, value: unknown): unknown => {
+    switch (segment.kind) {
+      case "key":
+        return (value as Record<string, unknown>)[segment.key];
+      case "select":
+        return (value as readonly unknown[])[selectIndex(value as readonly unknown[], segment.criteria)];
+      default:
+        return assertNever(segment);
+    }
+  };
   for (const fragment of contribution.fragments) {
     let cursor: unknown = doc;
     for (let depth = 0; depth < fragment.path.length - 1; depth += 1) {
-      const key = fragment.path[depth]!;
+      const segment = parseSegment(fragment.path[depth]!);
       /*
        * ONLY `undefined` means absent. A missing file parses as `{}`, so an
        * absent prefix reads `undefined` — but a parsed `null` is a value the
@@ -88,14 +147,10 @@ export function blockedContainerPath(
        * "successful" apply.
        */
       if (cursor === undefined) break;
-      // `typeof null === "object"`, so null has to be named explicitly or it
-      // walks straight into the dereference below.
-      if (cursor === null || typeof cursor !== "object" || Array.isArray(cursor)) {
-        return fragment.path.slice(0, depth);
-      }
-      const next = (cursor as Record<string, unknown>)[key];
+      if (!holds(segment, cursor)) return fragment.path.slice(0, depth);
+      const next = step(segment, cursor);
       if (next === undefined) break;
-      if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      if (!holds(parseSegment(fragment.path[depth + 1]!), next)) {
         return fragment.path.slice(0, depth + 1);
       }
       cursor = next;
@@ -153,21 +208,49 @@ function recordedBlockIsOwned(
   if (!observed) return false;
   if (fingerprint(canonicalContribution(observed)) === record.blockFingerprint) return true;
 
+  const observedSemanticFingerprint = fingerprint(semanticContribution(observed));
+  if (
+    typeof record.semanticBlockFingerprint === "string"
+    && observedSemanticFingerprint === record.semanticBlockFingerprint
+  ) return true;
+
+  const desiredFingerprint = fingerprint(canonicalContribution(desired));
+  if (
+    desiredFingerprint === record.blockFingerprint
+    && observedSemanticFingerprint === fingerprint(semanticContribution(desired))
+  ) return true;
+
   if (
     typeof record.protectedBlockFingerprint === "string"
     && validRefreshablePaths(observed, record.refreshablePaths)
     && record.refreshablePaths.length > 0
   ) {
-    return protectedContributionFingerprint(observed, record.refreshablePaths)
-      === record.protectedBlockFingerprint;
+    const observedProtectedFingerprint = protectedContributionFingerprint(
+      observed,
+      record.refreshablePaths,
+    );
+    if (observedProtectedFingerprint === record.protectedBlockFingerprint) return true;
+
+    const observedSemanticProtectedFingerprint = semanticProtectedContributionFingerprint(
+      observed,
+      record.refreshablePaths,
+    );
+    if (
+      typeof record.semanticProtectedBlockFingerprint === "string"
+      && observedSemanticProtectedFingerprint === record.semanticProtectedBlockFingerprint
+    ) return true;
+
+    return protectedContributionFingerprint(desired, record.refreshablePaths)
+        === record.protectedBlockFingerprint
+      && observedSemanticProtectedFingerprint
+        === semanticProtectedContributionFingerprint(desired, record.refreshablePaths);
   }
 
-  const desiredFingerprint = fingerprint(canonicalContribution(desired));
   if (desiredFingerprint !== record.blockFingerprint) return false;
   const legacyPaths = refreshablePathsOf(desired);
   return legacyPaths.length > 0
-    && protectedContributionFingerprint(observed, legacyPaths)
-      === protectedContributionFingerprint(desired, legacyPaths);
+    && semanticProtectedContributionFingerprint(observed, legacyPaths)
+      === semanticProtectedContributionFingerprint(desired, legacyPaths);
 }
 
 /**
@@ -196,6 +279,14 @@ export function classifyIntegration(input: {
    */
   configPath?: string;
   clientId?: IntegrationClientId;
+  /**
+   * Text format of the file being classified, which is not always the client's
+   * config format: a client that moved its providers keeps a second document
+   * whose format is declared with the store. Only the comment-capability of the
+   * format is read here, and reading the wrong one would decide a sibling edit
+   * the wrong way.
+   */
+  format?: ConfigFormat;
 }): { state: IntegrationState; reason?: StateReason } {
   if (input.fileText !== null && !input.fileIsRegular) {
     return { state: "unsafe", reason: "not-regular-file" };
@@ -205,10 +296,62 @@ export function classifyIntegration(input: {
    * Checked BEFORE `absent`: our leaf is missing in exactly this case, so the
    * absent branch would authorize an apply that replaces the user's value.
    */
-  if (blockedContainerPath(input.parsed, input.contribution)) {
-    return { state: "unsafe", reason: "blocked-container" };
+  try {
+    if (blockedContainerPath(input.parsed, input.contribution)) {
+      return { state: "unsafe", reason: "blocked-container" };
+    }
+    // Check every selector before presence/fingerprint short-circuits, including
+    // paths an older ownership record may remove during refresh or disable.
+    const paths = [
+      ...input.contribution.fragments.map(fragment => fragment.path),
+      ...(input.record?.fragmentPaths ?? []),
+    ];
+    for (const path of paths) {
+      if (Array.isArray(path) && path.every(key => typeof key === "string")) {
+        readPath(input.parsed, path);
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof AmbiguousSelectorError)) throw error;
+    return { state: "unsafe", reason: "ambiguous-selector" };
   }
   if (!hasOurFragments(input.parsed, input.contribution)) return { state: "absent" };
+
+  /*
+   * Fragments the desired contribution carries beyond the paths this record names. Both
+   * states appear whenever a client gains a second owned block:
+   *
+   *   - occupied by a value we did not write -> refuse. A refresh merges the WHOLE
+   *     contribution, so without this check applying would replace a block the user wrote
+   *     themselves and report success.
+   *   - empty -> our own block is missing, because the record predates it. Report drift so
+   *     a refresh adds it. Without this the file reads `current` forever and the second
+   *     block never arrives, which is exactly what an older installation hits on upgrade.
+   *
+   * A byte-identical value is ours in substance: adopt it instead of dead-ending a
+   * hand-merged config on a conflict the user can only resolve by deleting our own block.
+   */
+  const recordedPaths = new Set((input.record?.fragmentPaths ?? []).map(path => path.join("\u0000")));
+  let addedPathMissing = false;
+  for (const fragment of input.contribution.fragments) {
+    if (recordedPaths.has(fragment.path.join("\u0000"))) continue;
+    const observed = readPath(input.parsed, fragment.path);
+    if (observed === undefined) {
+      addedPathMissing = true;
+      continue;
+    }
+    const one = (value: unknown): string => fingerprint(canonicalContribution({
+      clientId: (input.clientId ?? input.record?.clientId) as IntegrationClientId,
+      fragments: [{ path: fragment.path, value }],
+    }));
+    if (one(observed) !== one(fragment.value)) return { state: "conflict", reason: "unowned-key" };
+  }
+  /*
+   * No record: whatever occupies our paths is not ours to touch. A byte-identical value
+   * would be ours in substance, but `stale` without a record is not actionable — the writer
+   * reads `createdContainers` off the record to decide what it may prune, so adopting a
+   * hand-merged block needs an apply path that creates one first. Refuse, exactly as before.
+   */
   if (!input.record) return { state: "conflict", reason: "unowned-key" };
   /*
    * A record proves ownership of ONE file. Change HOME, XDG_CONFIG_HOME,
@@ -252,12 +395,22 @@ export function classifyIntegration(input: {
      * stands and re-owns the file. This also lets disable proceed on a
      * drifted file — removal still touches only the recorded fragment paths.
      */
-    if (EXPORT_CLIENTS[clientId].format !== "json") {
+    if ((input.format ?? EXPORT_CLIENTS[clientId].format) !== "json") {
       return { state: "conflict", reason: "foreign-edit" };
     }
     return { state: "stale" };
   }
-  return input.record.blockFingerprint === fingerprint(canonicalContribution(input.contribution))
+  /*
+   * Checked after everything else that could refuse: an owned fragment that no longer
+   * matches, or a sibling edit in a format that cannot be rewritten safely, still wins.
+   * What is left is a block we own on paper and are merely missing on disk.
+   */
+  if (addedPathMissing) return { state: "stale" };
+  const desiredFingerprint = typeof input.record.semanticBlockFingerprint === "string"
+    ? fingerprint(semanticContribution(input.contribution))
+    : fingerprint(canonicalContribution(input.contribution));
+  const recordedFingerprint = input.record.semanticBlockFingerprint ?? input.record.blockFingerprint;
+  return recordedFingerprint === desiredFingerprint
     ? { state: "current" }
     : { state: "stale" };
 }
@@ -272,6 +425,8 @@ export interface IntegrationStateInput {
   /** The whole integration state store, bound to one root. */
   store?: IntegrationStateStore;
   io?: IntegrationIO;
+  /** Internal explicit profile target; never accepted as a caller-provided path. */
+  resolvedPaths?: { configPath: string; detectDir: string };
 }
 
 export function exportContextOf(input: {
@@ -289,7 +444,7 @@ export function exportContextOf(input: {
      * loopback, and every client we write into deserves the same answer the
      * export command already gives.
      */
-    baseUrl: opencodeProxyBaseUrl(input.port, input.config.hostname),
+    baseUrl: opencodeProxyBaseUrl(input.port, input.config.hostname, input.config),
     models: input.models,
     config: input.config,
   };
@@ -336,9 +491,8 @@ function retentionOf(
 export function readIntegrationState(input: IntegrationStateInput): IntegrationStatus {
   const store = input.store ?? createIntegrationStateStore();
   retryPendingPrunesOnce(store);
-  const io = input.io ?? store.io();
+  let io = input.io ?? store.io();
   const spec = INTEGRATION_CLIENTS[input.clientId];
-  const exportSpec = EXPORT_CLIENTS[input.clientId];
   const retention = retentionOf(input.clientId, store);
   /*
    * Resolution can refuse — a relative OPENCLAW_* selector names a file whose
@@ -346,46 +500,75 @@ export function readIntegrationState(input: IntegrationStateInput): IntegrationS
    * every client for its state, so letting that escape would answer 500 for
    * the whole Integrations page because one client is misconfigured.
    */
-  let configPath: string;
   let installed: boolean;
+  let effective: IntegrationTarget;
+  let record: OwnershipRecord | null;
   try {
-    configPath = spec.configPath(input.env, input.home);
-    installed = io.statKind(spec.detectDir(input.env, input.home)) === "dir";
+    // One resolution for both, so a client whose paths come from mutable state
+    // cannot report one account's install beside another account's config path.
+    const paths = input.resolvedPaths ?? resolveIntegrationPaths(input.clientId, input.env, input.home);
+    installed = io.statKind(paths.detectDir) === "dir";
+    if (input.clientId === "cline") io = createClineIO(io, paths.configPath, store);
+    /*
+     * The record is one of the inputs the target is chosen from, so it is read
+     * here rather than after the file. The status this function reports is about
+     * whichever file the next mutation would act on; reading a different one
+     * would let the badge and the switch disagree.
+     */
+    record = store.readRecords()[input.clientId] ?? null;
+    effective = resolveIntegrationTarget({
+      clientId: input.clientId, configPath: paths.configPath, io, record, env: input.env, home: input.home,
+    });
   } catch (error) {
     if (!(error instanceof ClientPathError)) throw error;
+    /*
+     * Two different situations reach here and they are not the same answer.
+     *
+     * A relative `OPENCLAW_CONFIG_PATH` is a misconfiguration: there is nothing
+     * to name, and "cannot verify" is correct. Aside's absent account manifest
+     * is the ORDINARY state of an Aside that has been installed and never
+     * signed into, and answering that with a red danger badge and an empty path
+     * told the user their config was suspect when in fact there is no account
+     * yet. A client that can name where its config would go gets `installed:
+     * false` and that location, which reads as "not installed" in the UI.
+     */
+    const hint = unresolvedPathHintFor(input.clientId, input.env, input.home);
     return {
       clientId: input.clientId,
-      state: "unsafe",
+      state: hint ? "absent" : "unsafe",
       installed: false,
-      configPath: "",
+      configPath: hint,
       reason: "unresolvable-path",
       ...retention,
     };
   }
 
-  const target = loadTarget(io, configPath);
-  if (!target.ok) {
+  const configPath = effective.configPath;
+  const loaded = loadTarget(io, configPath);
+  if (!loaded.ok) {
     return {
       clientId: input.clientId,
       state: "unsafe",
       installed,
       configPath,
-      reason: target.why === "read-failed" ? "unparseable" : "not-regular-file",
+      reason: loaded.why === "read-failed" ? "unparseable" : "not-regular-file",
       ...retention,
     };
   }
 
-  const parsed = parseConfig(target.before, exportSpec.format);
-  const contribution = exportSpec.buildContribution(exportContextOf(input));
-  const record = store.readRecords()[input.clientId] ?? null;
+  const parsed = input.clientId === "cline"
+    ? parseClineDocument(loaded.before)
+    : parseConfig(loaded.before, effective.format);
+  const contribution = effective.buildContribution(exportContextOf(input));
   const { state, reason } = classifyIntegration({
-    fileText: target.before,
+    fileText: loaded.before,
     fileIsRegular: true,
     parsed,
     record,
     contribution,
     configPath,
     clientId: input.clientId,
+    format: effective.format,
   });
 
   return {
@@ -394,6 +577,13 @@ export function readIntegrationState(input: IntegrationStateInput): IntegrationS
     installed,
     configPath,
     ...(reason ? { reason } : {}),
+    /*
+     * Only when the client reads a DIFFERENT file than the one this status is
+     * about. A store we are writing needs no notice; the path already names it.
+     */
+    ...(effective.ineffective && effective.ineffective.store !== configPath
+      ? { supersededBy: effective.ineffective.store }
+      : {}),
     ...(record ? { appliedAt: record.appliedAt, lastOpId: record.opId } : {}),
     ...retention,
   };

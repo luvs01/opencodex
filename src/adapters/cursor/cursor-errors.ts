@@ -46,6 +46,21 @@ export class CursorStreamTruncatedError extends Error {
   }
 }
 
+export const CURSOR_INCOMPLETE_TOOL_CALL_MESSAGE_PREFIX =
+  "Cursor stream ended with incomplete tool call(s):";
+
+/**
+ * True when Cursor ended the stream with a client tool still open. The adapter fail-closes
+ * the current turn (no partial `tool_call_start`) and remints the conversation afterwards
+ * so the next turn does not resume a session left waiting for `mcpResult`.
+ */
+export function isCursorIncompleteToolCallMessage(value: unknown): boolean {
+  const message = typeof value === "string" ? value : errorMessage(value);
+  const lower = message.toLowerCase();
+  return lower.includes(CURSOR_INCOMPLETE_TOOL_CALL_MESSAGE_PREFIX.toLowerCase())
+    || lower.includes("tool call(s) left incomplete");
+}
+
 /**
  * A cancel-shaped stream failure that WE did not request. `cancelCursorRun` is the only place
  * that cancels our own stream, and it sets `expectedClose` first, so a cancel arriving without it
@@ -69,6 +84,50 @@ export class CursorUnexpectedCancelError extends Error {
     const causeCode = errorCode(cause);
     if (causeCode) this.code = causeCode;
   }
+}
+
+/**
+ * The assembled root-blob envelope exceeded what Cursor's external workers accept.
+ *
+ * Raised locally, BEFORE the request is sent. Cursor rejects an oversized replay set with a late
+ * `invalid_argument` only after hydrating every blob, so the upstream failure arrives with no
+ * usable measurement — that is why this carries the counts it measured. Never retryable: replaying
+ * the same over-envelope request reproduces it exactly.
+ *
+ * The measurement is taken on the FINAL root set, after checkpoint and suffix assembly. Bounding
+ * an intermediate set is what let 192 checkpoint roots plus a two-root suffix emit 194 (#1527).
+ */
+export class CursorRootEnvelopeLimitError extends Error {
+  public readonly code = "cursor_root_envelope_limit";
+  public readonly status = 400;
+
+  constructor(
+    public readonly rootCount: number,
+    public readonly rootBytes: number,
+    public readonly maxRootCount: number,
+    public readonly maxRootBytes: number,
+  ) {
+    super(
+      // No "Cursor invalid request:" prefix here: `safeCursorErrorMessage` adds it for
+      // invalid-argument classes, and carrying it in the message produced it twice.
+      "the assembled conversation exceeds the replay envelope "
+      + `(${rootCount} root blobs / ${rootBytes} bytes against a limit of ${maxRootCount} / ${maxRootBytes}). `
+      + "Start a new conversation or reduce the pending tool output.",
+    );
+    this.name = "CursorRootEnvelopeLimitError";
+  }
+}
+
+/**
+ * The envelope failure is local and deterministic; a retry cannot change the outcome.
+ *
+ * A companion `CursorRootMeasurementError` was drafted for the case where a root blob's size
+ * cannot be read, then deleted: an unmeasurable root is legitimate (a resumed conversation
+ * references ids Cursor minted and this process never stored), so the guard counts it instead of
+ * failing. There is no reachable second case, and an unreachable error class cannot be tested.
+ */
+export function isCursorRootEnvelopeError(value: unknown): boolean {
+  return value instanceof CursorRootEnvelopeLimitError;
 }
 
 export function isCursorBenignCancelError(value: unknown): boolean {
@@ -145,6 +204,18 @@ function bareReLooksLikeOverflow(context?: CursorSizeContext): boolean {
   const { estimatedInputTokens, contextWindow } = context;
   if (estimatedInputTokens === undefined || contextWindow === undefined || contextWindow <= 0) return true;
   return estimatedInputTokens >= OVERFLOW_MIN_FRACTION * contextWindow;
+}
+
+/**
+ * True when a transport error is the bare 0-token resource_exhausted overflow shape
+ * (not quota/rate) that should surface for Codex compact or remint on later hits.
+ */
+export function isCursorOverflowRemintCandidate(err: unknown, sizeContext?: CursorSizeContext): boolean {
+  const message = errorMessage(err);
+  if (!message) return false;
+  const lower = message.toLowerCase();
+  if (!isCursorZeroTokenResourceExhausted(lower)) return false;
+  return classifyCursorError(message, sizeContext) === "Cursor context limit exceeded";
 }
 
 export function isCursorZeroTokenResourceExhausted(lowerMessage: string): boolean {
@@ -240,6 +311,21 @@ export function classifyCursorError(message: string, sizeContext?: CursorSizeCon
     lower.includes("authentication") ||
     lower.includes("access denied")
   ) return "Cursor authentication failed";
+
+  // gRPC FAILED_PRECONDITION is deterministic and non-retryable (unlike UNAVAILABLE):
+  // the backend rejected the call because account/plan or policy-consent state does not allow it —
+  // seen live when a plan-gated model (e.g. claude-fable-5) runs on a plan without it.
+  // Leaving it as "Cursor upstream error" (502) made clients retry it as overload.
+  //
+  // This MUST precede the overload keywords. The explicit gRPC status code is a
+  // structured signal from the backend; the keywords are inference over free text. A
+  // plan-gated rejection routinely reads "failed_precondition: model unavailable for
+  // this plan", which matched "unavailable" first and came back as a retryable
+  // overload — the exact misclassification this branch was added to stop. Checking the
+  // code first lets the deterministic signal win over the words around it.
+  if (lower.includes("failed_precondition") || lower.includes("failed precondition")) {
+    return "Cursor invalid request";
+  }
 
   if (
     lower.includes("unavailable") ||

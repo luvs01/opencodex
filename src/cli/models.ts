@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { syncModelsToCodex } from "../codex/sync";
+import { configuredContextWindow } from "../codex/catalog/provider-fetch";
 import { hasOwnProvider, isValidProviderName, loadConfig, saveConfig } from "../config";
 import {
   canonicalizeReasoningEfforts,
@@ -12,6 +13,7 @@ import {
   modelRecordValue,
 } from "../reasoning-effort";
 import { encodedModelIdCollides, resolveSlugSelection, routedSlug } from "../providers/slug-codec";
+import { isModelsRuntimeSubcommand } from "./models-runtime-subcommands";
 import { knownModelIdsForProvider } from "../router";
 import { findLiveProxy } from "../server/proxy-liveness";
 import { modelInList, type OcxConfig, type OcxCustomModel } from "../types";
@@ -85,6 +87,11 @@ interface ModelEntry {
   reasoningEfforts: string[] | null;
 }
 
+/**
+ * Collect static configured models for all providers or one selected provider.
+ * Keep each provider's default model first and resolve metadata through shared helpers.
+ * Live-discovered models are not fetched by this listing.
+ */
 function collectModels(config: OcxConfig, providerFilter?: string): ModelEntry[] {
   const entries: ModelEntry[] = [];
   const providers = providerFilter
@@ -94,10 +101,9 @@ function collectModels(config: OcxConfig, providerFilter?: string): ModelEntry[]
   for (const [provName, prov] of Object.entries(providers)) {
     if (!prov) continue;
     const seen = new Set<string>();
-    const contextWindows = prov.modelContextWindows ?? {};
     const inputModalities = prov.modelInputModalities ?? {};
-    const globalContext = prov.contextWindow ?? null;
 
+    /** Append one model with resolved metadata, ignoring duplicates within this provider. */
     const addModel = (model: string, isDefault: boolean) => {
       if (seen.has(model)) return;
       seen.add(model);
@@ -123,7 +129,7 @@ function collectModels(config: OcxConfig, providerFilter?: string): ModelEntry[]
         provider: provName,
         model,
         isDefault,
-        contextWindow: modelRecordValue(contextWindows, model) ?? globalContext,
+        contextWindow: configuredContextWindow(prov, model) ?? null,
         inputModalities: modalities,
         reasoningEfforts: efforts,
       });
@@ -283,10 +289,27 @@ async function handleCustomRemove(args: string[]): Promise<void> {
   // that row while the dash form matched both — the two relations disagreed on the same
   // config. Removal stays exact-or-refuse: an ambiguous selector still aborts below, which is
   // the right default for a destructive command.
+  const separator = target.indexOf("/");
+  const selectedProvider = separator >= 0 ? target.slice(0, separator) : undefined;
+  // Resolve ONCE against the provider's whole roster, then map the decision back onto rows.
+  // Calling the resolver per row with a singleton roster hid every cross-row fact it needs:
+  // a self-namespaced `acme/turbo` and a sibling `turbo` each matched their own singleton,
+  // so the command saw two matches and aborted as ambiguous even though the selector names
+  // one row exactly.
+  const rosterMatched = selectedProvider === undefined
+    ? undefined
+    : resolveSlugSelection(
+      selectedProvider,
+      target,
+      existing.filter(model => model.provider === selectedProvider).map(model => model.modelId),
+    );
+  // Deliberately admit the whole matched set rather than narrowing to `exact`: an encoded
+  // selector that spans a real collision must still abort below. Removal stays exact-or-refuse.
+  const admitted = new Set(rosterMatched?.matched ?? []);
   const matchingIndexes = existing.flatMap((model, index) => {
-    if (!target.includes("/")) return model.id === target ? [index] : [];
-    const resolved = resolveSlugSelection(model.provider, target, [model.modelId]);
-    return resolved.matched.length > 0 ? [index] : [];
+    if (selectedProvider === undefined) return model.id === target ? [index] : [];
+    if (model.provider !== selectedProvider) return [];
+    return admitted.has(model.modelId) ? [index] : [];
   });
   if (matchingIndexes.length === 0) fail(`custom model "${target}" not found`);
   if (matchingIndexes.length > 1) {
@@ -428,7 +451,7 @@ export async function handleModels(args: string[]): Promise<void> {
     handleCustomList(rest);
     return;
   }
-  if (["live", "edit", "enable", "disable", "provider", "selected", "preset", "context", "shadow"].includes(subcommand ?? "")) {
+  if (isModelsRuntimeSubcommand(subcommand)) {
     const { handleModelsRuntimeCommand } = await import("./models-runtime");
     const code = await handleModelsRuntimeCommand(subcommand!, rest);
     if (code !== null) process.exitCode = code;
