@@ -1,4 +1,5 @@
 import { durableBunRuntime } from "../lib/bun-runtime";
+import { existsSync, readFileSync } from "node:fs";
 import { codexAutoStartEnabled, getConfigPath, readConfigDiagnostics } from "../config";
 import { getPidPath, readPid, readRuntimePort, type RuntimePortState } from "../config/process-state";
 import { diagnoseCodexBundledPlugins, type CodexPluginsDiagnostic } from "../codex/plugins-doctor";
@@ -7,6 +8,8 @@ import type { OcxConfig } from "../types";
 import { diagnoseService, serviceLogPath } from "../service";
 import { collectStartupHealth, type StartupHealth } from "../codex/autostart-health";
 import { getCodexRoutingKind } from "../codex/inject";
+import { missingOwnedCatalogPath } from "../codex/inject/config-toml";
+import { CODEX_CONFIG_PATH } from "../codex/paths";
 import { diagnoseCodexShim } from "../codex/shim";
 import { displayCodexRuntimePath, effortClampAppliesToRuntime, liveRemovedEfforts, loadLastEffortClamp, resolveCodexRuntime } from "../codex/runtime";
 import { packageVersion } from "./help";
@@ -18,6 +21,7 @@ import { effectiveLoopbackListenerPort } from "../codex/loopback-target";
 import { claudeDesktopIntegrationEnabled } from "../codex/desired-state";
 import { claudeDesktopPolicyHealth, probeClaudeDesktopPolicy, type ClaudeDesktopPolicyHealth } from "../claude/desktop-policy";
 import { collectClientConnectionStatus, type ClientConnectionStatus } from "./connect";
+import { readClientConnectionState, sameClientConnectionOwner } from "../client/state";
 import type { HubStateOAuthEntry, HubStateProvider } from "../remote/hub-state";
 import type { HubStateSource } from "../client/hub-state";
 import { readServiceApiTokenState, serviceApiTokenFilePath } from "../lib/service-secrets";
@@ -325,6 +329,35 @@ export function disconnectedRemoteHubStatus(): CliRemoteHubStatus {
 }
 
 /**
+ * The data key this status snapshot may spend, and the cause when it may not.
+ *
+ * A reconnect or a rotation can replace both files between the snapshot and this read, so a
+ * matching cache owner alone does not authorize sending the current token. Withholding is only
+ * half the job: reporting every withheld case as "no usable data-plane token" is false for a
+ * client that reconnected and holds a perfectly good token for a different hub, and a cause the
+ * operator acts on has to be the real one (#4169 is the same defect in the stop path).
+ */
+function boundHubStateToken(
+  current: ReturnType<typeof readClientConnectionState>,
+  token: ReturnType<typeof readServiceApiTokenState>,
+  owner: { serverUrl: string; apiKeyId: string; connectedAt: string },
+): { token: string | null; withheldReason?: string } {
+  if (current.kind !== "connected") {
+    return { token: null, withheldReason: "this client is no longer connected" };
+  }
+  if (!sameClientConnectionOwner(current.value, owner)) {
+    return { token: null, withheldReason: "the saved connection no longer matches the one this status reports" };
+  }
+  if (token.kind !== "present") {
+    return { token: null, withheldReason: "this client has no usable data-plane token" };
+  }
+  if (token.fingerprint !== current.value.tokenFingerprint) {
+    return { token: null, withheldReason: "the data-plane token no longer belongs to the saved connection" };
+  }
+  return { token: token.token };
+}
+
+/**
  * Ask the hub what it can serve, with a bounded read and a cache fallback.
  *
  * `ocx status` must answer while the hub is offline, so the fetch is bounded and a failure is
@@ -340,14 +373,16 @@ export async function collectRemoteHubStatus(
     return disconnectedRemoteHubStatus();
   }
   const { resolveHubState } = await import("../client/hub-state");
-  const token = readServiceApiTokenState();
+  const owner = {
+    serverUrl: connection.serverUrl,
+    apiKeyId: connection.apiKeyId,
+    connectedAt: connection.connectedAt,
+  };
+  const bound = boundHubStateToken(readClientConnectionState(), readServiceApiTokenState(), owner);
   const resolved = await resolveHubState({
-    owner: {
-      serverUrl: connection.serverUrl,
-      apiKeyId: connection.apiKeyId,
-      connectedAt: connection.connectedAt,
-    },
-    token: token.kind === "present" ? token.token : null,
+    owner,
+    token: bound.token,
+    ...(bound.withheldReason ? { withheldTokenReason: bound.withheldReason } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -470,6 +505,65 @@ export function unusedProxyWarningLines(input: {
   ];
 }
 
+/**
+ * The mirror case: routing is ours and nothing is answering it.
+ *
+ * #5261: this state does not merely fail model calls. The root `openai_base_url` we inject
+ * is the base URL of Codex's own built-in openai provider, so with the proxy down a user can
+ * be stopped at Codex sign-in with no mention of opencodex anywhere on the screen. The
+ * injection is on disk and survives reboot, so it does not clear itself.
+ *
+ * The rest of the not-running report offers only ways to bring the proxy BACK, which is the
+ * wrong half of the choice for someone who wants their editor working again now. `ocx restore`
+ * needs no proxy, no management API and no network, so name it here — this report is the
+ * surface such a user is most likely to reach before the config file itself.
+ *
+ * Restricted to routing opencodex owns. `custom-local` is somebody else's gateway, and
+ * `ocx restore` would not remove it.
+ */
+export function deadProxyRoutingAdviceLines(input: {
+  proxyUp: boolean;
+  routingKind: StartupHealth["routingKind"];
+}): string[] {
+  if (input.proxyUp || input.routingKind !== "opencodex-local") return [];
+  return [
+    "Codex is still pointed at this proxy, so sign-in and model requests both fail while it is down.",
+    "To hand Codex back to its own account and endpoints without starting anything: ocx restore",
+  ];
+}
+
+/**
+ * Read the live Codex config and report an opencodex catalog pointer whose file is gone.
+ *
+ * Unreadable or absent config is reported as no finding rather than as a problem: this is a
+ * diagnostic line, and inventing one from missing evidence is worse than staying quiet.
+ */
+export function detectMissingCodexCatalogPath(): string | null {
+  try {
+    if (!existsSync(CODEX_CONFIG_PATH)) return null;
+    return missingOwnedCatalogPath(readFileSync(CODEX_CONFIG_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The one state in this report where Codex is broken independently of the proxy (#5261).
+ *
+ * A `model_catalog_json` naming a file that is gone stops Codex loading its configuration at
+ * all, so it presents as the same blank wall as dead routing while having a different cause and
+ * a different fix. Both are named, because restarting the proxy rewrites the catalog and
+ * restoring removes the pointer, and which one the user wants is their choice, not ours.
+ */
+export function missingCodexCatalogLines(missingCatalogPath: string | null): string[] {
+  if (!missingCatalogPath) return [];
+  return [
+    "⚠️  Codex is pointed at a model catalog that is no longer on disk, so Codex cannot load its config:",
+    `   ${missingCatalogPath}`,
+    "   Regenerate it with 'ocx start', or remove opencodex from Codex with 'ocx restore'.",
+  ];
+}
+
 export async function collectStatus(): Promise<CliStatusView> {
   const configDiagnostics = readConfigDiagnostics();
   const config = configDiagnostics.config;
@@ -477,7 +571,27 @@ export async function collectStatus(): Promise<CliStatusView> {
     desiredEnabled: claudeDesktopIntegrationEnabled(config),
     policy: claudeDesktopPolicyHealth(probeClaudeDesktopPolicy()),
   };
-  const clientConnection = collectClientConnectionStatus();
+  const resolvedRuntime = (() => {
+    try {
+      return resolveCodexRuntime();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const redacted = redactUserPath(redactSecretString(message)).slice(0, 160);
+      return {
+        runtime: { command: "codex", version: null, source: "fallback" as const },
+        failures: [{
+          command: "codex",
+          source: "fallback" as const,
+          reason: `resolve threw: ${redacted}`,
+        }],
+        replacedConfigured: undefined,
+        newerAvailable: undefined,
+      };
+    }
+  })();
+  const clientConnection = collectClientConnectionStatus(Date.now(), undefined, {
+    selectedCodexCommand: resolvedRuntime.runtime.command,
+  });
   // Asked before the local probes below so a connected client's report is hub-sourced from its
   // first line. Bounded and failure-tolerant: an offline hub degrades the remoteHub block, it
   // does not fail `ocx status`.
@@ -535,24 +649,6 @@ export async function collectStatus(): Promise<CliStatusView> {
     routingKind: getCodexRoutingKind(),
   });
   const codexPlugins = diagnoseCodexBundledPlugins();
-  const resolvedRuntime = (() => {
-    try {
-      return resolveCodexRuntime();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const redacted = redactUserPath(redactSecretString(message)).slice(0, 160);
-      return {
-        runtime: { command: "codex", version: null, source: "fallback" as const },
-        failures: [{
-          command: "codex",
-          source: "fallback" as const,
-          reason: `resolve threw: ${redacted}`,
-        }],
-        replacedConfigured: undefined,
-        newerAvailable: undefined,
-      };
-    }
-  })();
   const lastClamp = loadLastEffortClamp();
   const clampActive = effortClampAppliesToRuntime(lastClamp, resolvedRuntime.runtime);
   const codexHome = collectOrcaCodexHomeDiagnostic();

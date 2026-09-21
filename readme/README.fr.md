@@ -92,6 +92,22 @@ Ouvrez **http://localhost:10100** et configurez tout dans le tableau de bord web
 fournisseurs (plus de 40 intégrés, ou n'importe quel point de terminaison compatible OpenAI),
 choisissez les modèles, gérez les comptes. `ocx gui`
 rouvre le tableau de bord à tout moment.
+### Application macOS dans la barre des menus
+
+Téléchargez l’application de bureau pour macOS, Windows ou Linux depuis la
+[page des releases](https://github.com/lidge-jun/opencodex/releases).
+
+Un compagnon natif pour l’état du proxy, l’utilisation et les quotas des fournisseurs sans ouvrir
+le tableau de bord. Le code source se trouve dans [`app/`](../app) (Swift + AppKit, sans dépendance
+tierce). Téléchargez-le depuis la
+[page des releases](https://github.com/lidge-jun/opencodex/releases) ou compilez-le localement avec
+`bun run prepare-sidecar && bun run prepare-widget && bunx tauri build`.
+
+Le premier lancement nécessite un clic droit → Ouvrir, car l’application est signée ad hoc et non
+notarisée. Consultez le [guide de l’application macOS dans la barre des menus](https://lidge-jun.github.io/opencodex/guides/macos-menu-bar/)
+pour l’explication complète.
+
+L’application inclut également un widget macOS 14+ affichant l’état du proxy, l’utilisation du jour et les quotas.
 Il peut également gérer un **groupe de comptes ChatGPT** pour l'authentification Codex. Ajoutez plusieurs
 comptes ChatGPT / Codex et actualisez leurs quotas 5 h / hebdomadaires / 30 j dans le tableau de bord.
 Avec le routage par quota, les nouvelles sessions peuvent utiliser le compte opérationnel le moins sollicité ;
@@ -128,14 +144,15 @@ Voir [SPONSORS.md](../SPONSORS.md).
 <details>
 <summary>Docker Compose</summary>
 
-Le dépôt fournit une construction Compose épinglée par digest, exécutée hors root. Avec Git et Bun installés sur
-l'hôte, générez le manifeste de compatibilité canonique avant chaque construction d'image, puis initialisez
-une seule fois le jeton du plan de données via stdin et démarrez le hub :
+Le dépôt fournit une construction Compose épinglée par digest, exécutée hors root. La construction génère et
+vérifie elle-même le manifeste de compatibilité canonique à partir de l'instantané Git sélectionné. Un clone local
+nécessite Git et Docker Compose ; un contexte Git distant ne nécessite que Docker Compose. Aucun des deux chemins
+ne requiert Bun sur l'hôte ni d'étape de préparation. Initialisez une seule fois le jeton du plan de données via
+stdin et démarrez le hub :
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
-bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
@@ -146,11 +163,28 @@ curl --fail --silent http://127.0.0.1:10100/readyz
 La liaison hôte par défaut est `127.0.0.1:10100`. Une exposition distante exige explicitement
 `OPENCODEX_BIND_ADDRESS=<LAN-or-Tailscale-IP> docker compose up -d` ; `0.0.0.0` active
 toutes les interfaces de l'hôte. Restreignez l'accès avec un pare-feu et une façade TLS/tailnet authentifiée.
-Le JSON généré reste non suivi ; il est copié dans l'image sans y inclure `.git`.
-Régénérez-le après toute modification des sources, et ne changez pas les sources entre la génération et la construction.
-La construction rejette les manifestes obsolètes, les fichiers manquants ou non concordants, les fichiers sources en trop et les liens symboliques.
+Le JSON généré reste non suivi. Le contexte de construction n'admet que `.git/index` et `.git/HEAD` — l'inventaire
+lu par `git ls-files`, soit environ 1 Mo au lieu du magasin d'objets complet — et ils ne sont visibles que par l'étape
+de manifeste réservée à la construction, via un montage en lecture seule ; aucun `COPY` n'inclut donc `.git`. Un manifeste
+déjà généré sur l'hôte n'est accepté qu'après validation ; sinon, la construction le génère elle-même. La construction
+rejette les manifestes obsolètes, les fichiers manquants ou non concordants, les fichiers sources en trop et les liens symboliques.
 Elle vérifie chaque SHA-256 enregistré par rapport au contexte de construction et aux fichiers d'exécution copiés, y compris
 `package.json`, `bun.lock` et le fichier spécifiquement inclus `scripts/model-metadata.source.json`.
+
+Un contexte Git distant exige que BuildKit conserve les métadonnées Git. Cet extrait de configuration Compose
+sélectionne l'instantané distant et transmet l'argument intégré requis :
+
+```yaml
+services:
+  hub:
+    pull_policy: build
+    build:
+      context: https://github.com/lidge-jun/opencodex.git#main
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
+```
 
 Le jeton et l'état mutable restent dans le volume nommé `ocx-state` ; aucun secret n'est placé dans
 l'image, le fichier Compose, l'environnement ou les arguments du shell. Consultez le
@@ -302,7 +336,7 @@ Qwen Cloud, Qoder Global et CN (PAT officiel + CLI), SiliconFlow, et d'autres. L
 
 ```bash
 ocx init                       # configuration interactive (écrit la configuration, relie Codex, propose le shim)
-ocx start [--port 10100]       # démarre le proxy au premier plan
+ocx start [--port 10100] [--socks5 [host:port] | --socks5-off]  # SOCKS5 par défaut : socks5://127.0.0.1:10808
 ocx stop                       # arrête le proxy et restaure Codex natif
 ocx service [install|repair|restart|start|stop|status|uninstall|remove]  # service en arrière-plan
 ocx codex-shim install         # démarre le proxy à la demande dès que `codex` se lance
@@ -317,8 +351,9 @@ ocx v2 <...>                   # contrôle les surfaces multi-agents v1/v2
 ocx update [--tag preview]     # met à jour opencodex
 ```
 
-Les démarrages sans port imposé peuvent choisir un autre port libre si celui qui est préféré est occupé ; un `--port`
-explicite ne change jamais de port. Référence complète : [documentation de la CLI](https://opencodex.me/fr/reference/cli/).
+Si le port préféré est occupé, le démarrage s'arrête et indique le processus qui l'occupe au lieu de passer à un autre port,
+afin de ne jamais laisser un second proxy fonctionner aux côtés du premier. Libérez le port ou indiquez-en un autre avec
+`--port`. Référence complète : [documentation de la CLI](https://opencodex.me/fr/reference/cli/).
 
 ### État de fonctionnement et disponibilité
 
