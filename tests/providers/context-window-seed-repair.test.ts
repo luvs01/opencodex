@@ -10,6 +10,10 @@ function devinConfig(windows: Record<string, number>, adapter = "devin"): OcxCon
   } as unknown as OcxConfig;
 }
 
+function alibabaConfig(provider: "alibaba-token-plan" | "alibaba-token-plan-intl", value: number): OcxConfig {
+  return { providers: { [provider]: { adapter: "openai-chat", modelContextWindows: { "qwen3.8-max": value } } } } as OcxConfig;
+}
+
 describe("stale context window migration", () => {
   test("repairs a window the config inherited from the wrong registry seed", () => {
     // `enrichProviderFromRegistry` is fill-only, so a config saved while the
@@ -34,6 +38,15 @@ describe("stale context window migration", () => {
     expect(projection.config.providers!.devin!.modelContextWindows!["grok-4-5"]).toBe(300_000);
   });
 
+  test.each(["alibaba-token-plan", "alibaba-token-plan-intl"] as const)(
+    "repairs the old qwen3.8-max seed for %s",
+    provider => {
+      const projection = projectStaleContextWindows(alibabaConfig(provider, 983_616));
+      expect(projection.changed).toBe(true);
+      expect(projection.config.providers![provider]!.modelContextWindows!["qwen3.8-max"]).toBe(1_000_000);
+    },
+  );
+
   test("skips a row that no longer carries the registry adapter", () => {
     // A `devin` row retargeted at another transport is not the provider these
     // numbers describe, so rewriting its windows would be a guess.
@@ -52,8 +65,7 @@ describe("stale context window migration", () => {
     // never performs, and an entry for another provider would silently do nothing.
     for (const entry of STALE_CONTEXT_WINDOWS) {
       expect(entry.from).not.toBe(entry.to);
-      expect(entry.provider).toBe("devin");
+      expect(["alibaba-token-plan", "alibaba-token-plan-intl", "devin"]).toContain(entry.provider);
     }
   });
 });
-

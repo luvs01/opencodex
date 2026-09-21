@@ -83,6 +83,9 @@ Because `enrichProviderFromRegistry` fills `noVisionModels` all-or-nothing and f
 frozen into any config saved while it was current. `src/providers/stale-vision-classification-migration.ts`
 repairs exactly those two saved values and runs inside the shared startup repair pass in
 `src/providers/model-rename-startup.ts`. Correcting the registry alone fixes new installs only.
+The same startup pass uses `src/providers/stale-context-window-migration.ts` to replace only exact
+known-bad saved context-window seeds; this includes both Alibaba Token Plan variants' former
+983,616-token `qwen3.8-max` value, while any operator-selected value remains authoritative.
 
 It covers both states that reach a running process, because the sidecar predicate reads
 `noVisionModels` before `modelInputModalities`: the full stale pair (modalities still the stale

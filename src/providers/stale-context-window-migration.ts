@@ -34,15 +34,18 @@ export interface StaleContextWindowProjection {
 }
 
 /**
- * Cognition windows corrected against a live `GetCascadeModelConfigs` response.
+ * Known-bad registry context windows corrected against provider evidence.
  *
- * The shipped table had been assembled from each model's ORIGINAL vendor window
+ * The Alibaba Token Plan correction comes from gateway boundary probes. The
+ * shipped Cognition table had been assembled from each model's ORIGINAL vendor window
  * rather than from what Cognition serves, so the Claude rows claimed 200k against
  * an actual 1M and Grok claimed 256k against 500k. Cognition documents no window
  * anywhere, so the per-account catalog is the only first-party source; these are
  * the degraded-mode figures, and live discovery supersedes them when it runs.
  */
 export const STALE_CONTEXT_WINDOWS: readonly StaleContextWindow[] = [
+  { provider: "alibaba-token-plan", model: "qwen3.8-max", from: 983_616, to: 1_000_000 },
+  { provider: "alibaba-token-plan-intl", model: "qwen3.8-max", from: 983_616, to: 1_000_000 },
   { provider: "devin", model: "swe-1-7", from: 256_000, to: 262_000 },
   { provider: "devin", model: "swe-1-7-lightning", from: 256_000, to: 202_752 },
   { provider: "devin", model: "gpt-5-6-sol", from: 1_050_000, to: 1_000_000 },
@@ -89,4 +92,3 @@ export function projectStaleContextWindows(
 
   return { config, changed: repaired.size > 0, warnings };
 }
-
