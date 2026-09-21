@@ -1100,7 +1100,7 @@ is composed from the following owners in `src/server/responses/`; none is a gene
 | Owner | Responsibility |
 | --- | --- |
 | `request-prepare.ts` | Body parsing, combo handoff, final route, encrypted-task recovery and initial admission. |
-| `request-transport.ts` | Live credential selection, dispatch bindings, adapter replacement and same-target request identity. |
+| `request-transport.ts` | Live credential selection, dispatch bindings, adapter replacement, the Kiro turn-termination scope binding and same-target request identity. |
 | `request-sidecar-auth.ts` | Sidecar credential resolution and vision preprocessing. |
 | `response-effects.ts` | Completion notification, replay publication and live request-tool aliases. |
 | `request-send-budget.ts` | Request-wide send accounting, remaining allowance, the pending recovery permit and the shared ambiguous-resend grant. |

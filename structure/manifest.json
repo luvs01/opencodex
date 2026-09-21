@@ -265,7 +265,7 @@
       "path": "providers/kiro.md",
       "tier": 4,
       "title": "Kiro Provider",
-      "scope": "Kiro parallel-tool hints, Responses text controls, and reasoning round-trip.",
+      "scope": "Kiro parallel-tool hints, Responses text controls, reasoning round-trip, and delivered final-answer termination scope.",
       "documents": [
         "src/responses/"
       ]

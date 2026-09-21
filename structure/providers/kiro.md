@@ -96,6 +96,32 @@ positive value overwrites an earlier one.
 Spend arrives in `meteringEvent` as **credits, not tokens**. No captured response carried
 `tokenUsage` on any event, which is why Kiro usage stays estimated; `meteringEvent` is currently
 ignored because a credit is not a token count.
+## Delivered final-answer termination scope
+
+A delivered `final_answer` may close a Kiro turn only for the exact request that emitted it.
+`src/responses/turn-termination.ts` keeps a process-wide map of delivered-answer fingerprints
+keyed by a bound scope rather than by the parsed request's fields. The scope is bound in
+`src/server/responses/request-transport.ts` after the final adapter is resolved, and only when
+that adapter is `kiro`: the digest covers the conversation lane (`sessionLaneIdFromRequest`, or
+the normalized Cursor conversation id when no lane headers exist), the admission identity, the
+routed provider and model, and the serving account. The composite is hashed before binding, so
+no caller, account or route identifier is retained, and a request with no conversation identity
+binds no scope at all.
+
+A bare log-conversation digest is too wide here: it deliberately coalesces a parent's parallel
+subagents, and a scope that coarse would let one child's delivered answer suppress a sibling's
+unfinished work. Nothing in `request-prepare.ts` binds the scope — including encrypted-task
+recovery, whose reparsed body reaches the same transport binding — so the transport write is the
+only write of the scope.
+
+`rememberDeliveredFinalAnswer` records the trailing `final_answer` text fingerprint at delivery
+(`adapter-delivery.ts`, `run-turn-execution.ts`, `sidecar-execution.ts`), holding it for one hour
+across at most 1,024 scopes. `hasTrailingDeliveredFinalAnswer` in
+`src/adapters/kiro/conversation.ts` matches a later turn only while its trailing assistant text is
+still the recorded answer, so `src/adapters/kiro/payload.ts` withholds the completion tool and
+emits the neutral acknowledgement instead of a continuation prompt
+(`tests/server/server-kiro-completion-e2e.test.ts`).
+
 ## Remote image references
 
 Kiro's wire inlines base64 bytes only, so a remote `https` image reference cannot be

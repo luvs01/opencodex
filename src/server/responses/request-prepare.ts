@@ -51,7 +51,7 @@ import { buildToolBridgeMaps } from "./collaboration";
 import { parseRequest } from "../../responses/parser";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
-import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
+import { rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
 import { observeCacheDiagnosticInbound, rebindCacheDiagnosticBody, requestLogSpeedLabel, readConfiguredCodexServiceTier } from "../request-log";
 import type { RouteResult } from "../../router";
 import {
@@ -784,7 +784,6 @@ export async function prepareResponsesRequest(
               (reparsed as unknown as Record<string, unknown>)[key] = parsed[key];
             }
           }
-          bindTurnTerminationScope(reparsed, resolvedConversationId);
           parsed = reparsed;
           // The recovery mutated `body.input` in place, so `_rawBody` now carries decrypted task
           // text. Bar it from the continuation cache before any recording path can reach it —
