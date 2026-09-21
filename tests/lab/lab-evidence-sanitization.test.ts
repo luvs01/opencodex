@@ -297,6 +297,23 @@ describe("SEC-02 sanitizer boundary", () => {
     expect(sanitizeDiagnostic("ETIMEDOUT gateway")).toBe("ETIMEDOUT [host]");
     expect(sanitizeDiagnostic("EHOSTUNREACH backend")).toBe("EHOSTUNREACH [host]");
     expect(sanitizeDiagnostic("dial tcp redis")).toBe("dial tcp [host]");
+    // `lookup` is the one mid-message position proven to carry the name: Go
+    // writes `dial tcp: lookup <name>: <reason>`.
+    expect(sanitizeDiagnostic("dial tcp: lookup redis")).toBe("dial tcp: lookup [host]");
+    expect(sanitizeDiagnostic("dial tcp: lookup redis: no such host"))
+      .toBe("dial tcp: lookup [host]: no such host");
+  });
+
+  test("timeout and socket prose after a marker survives", () => {
+    // A bare name is licensed only where the grammar proves it is the
+    // destination. Connective prose after a socket marker is not a host:
+    // redacting it destroys the diagnostic and hides nothing.
+    expect(sanitizeDiagnostic("ETIMEDOUT while waiting for response"))
+      .toBe("ETIMEDOUT while waiting for response");
+    expect(sanitizeDiagnostic("ETIMEDOUT operation timed out"))
+      .toBe("ETIMEDOUT operation timed out");
+    expect(sanitizeDiagnostic("ECONNREFUSED connection refused"))
+      .toBe("ECONNREFUSED connection refused");
   });
 
   test("natural-language connect-to prose is left alone", () => {

@@ -156,8 +156,9 @@ const HOSTNAME_RE = /(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}(
 // `ETIMEDOUT after 30 seconds` into `ETIMEDOUT [host] 30 seconds`: a redaction
 // that destroys the diagnostic and hides nothing.
 // Markers differ in confidence, and treating them alike cost accuracy both
-// ways. STRONG markers are resolver/socket errors and `host=`: whatever
-// follows is a host by construction, so a bare `redis` or `localhost` counts.
+// ways. STRONG markers are resolver/socket errors and `host=`: the argument
+// position is a host by construction, so a bare `redis` or `localhost` counts
+// there while the prose that can follow a marker survives.
 // WEAK markers appear in ordinary prose (`upstream provider.metric.p95
 // exceeded`), so they only redact a candidate that is already host-shaped.
 const STRONG_HOST_CONTEXT_RE =
@@ -184,9 +185,10 @@ const DOTTED_NAMESPACE_RE = /^[a-z]+(?:\.[a-z]+)*\.[a-z]+[0-9]*$/i;
  * A stopword list would repeat the delimiter-enumeration mistake, so the
  * candidate is validated instead. A token qualifies when it carries host
  * punctuation (dot, hyphen, underscore, digit) or is a reserved name; a bare
- * English word does not — EXCEPT after a resolver or socket-state marker,
- * where the argument is a name by construction and `ENOTFOUND redis` and
- * `ECONNREFUSED redis` must still redact.
+ * English word does not — EXCEPT in a grammar position proven to hold the
+ * destination of a resolver or socket-state marker, where the argument is a
+ * name by construction and `ENOTFOUND redis` and `ECONNREFUSED redis` must
+ * still redact.
  */
 const RESERVED_HOST_NAMES = new Set(["localhost", "broadcasthost"]);
 const PROSE_AFTER_MARKER = new Set([
@@ -512,17 +514,22 @@ function scrubString(value: string): string {
     if (ported?.[1] && !PROSE_AFTER_MARKER.has(ported[1].toLowerCase())) {
       return m.replace(ported[1], "[host]");
     }
-    // Resolver and socket-state markers license a bare destination name.
-    // Natural-language `connect to` does not: `Unable to connect to your
-    // account` is prose.
+    // A bare destination name is licensed only where the grammar proves the
+    // position is the destination: as the marker's sole argument
+    // (`ECONNREFUSED redis`, `dial tcp redis`) or as the argument of `lookup`
+    // (`dial tcp: lookup redis`). Past an open-ended connective chain nothing
+    // proves the next word is a destination — `ETIMEDOUT while waiting for
+    // response` is prose. Natural-language `connect to` licenses nothing:
+    // `Unable to connect to your account` is prose.
     const destinationContext =
       /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|dial\s+(?:tcp|udp)|lookup|\bhost\b/i.test(m);
-    let bareNamePossible = destinationContext;
-    for (const token of tail.split(/[\s:]+/)) {
-      if (!token) continue;
+    const tokens = tail.split(/[\s:]+/).filter(Boolean);
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i]!;
       if (isHostCandidate(token)) return m.replace(token, "[host]");
-      if (bareNamePossible && isHostCandidate(token, true)) return m.replace(token, "[host]");
-      if (!PROSE_AFTER_MARKER.has(token.toLowerCase())) bareNamePossible = false;
+      const bareLicensed =
+        destinationContext && (tokens.length === 1 || tokens[i - 1]?.toLowerCase() === "lookup");
+      if (bareLicensed && isHostCandidate(token, true)) return m.replace(token, "[host]");
     }
     return m;
   });

@@ -60,11 +60,14 @@ before anything else: `dial tcp redis:6379` needs no further signal.
 
 Otherwise, **strong** markers (`ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`,
 `ETIMEDOUT`, `EHOSTUNREACH`, `dial tcp`, `host=`/`host:`) introduce a
-destination, and a resolver marker licenses even a bare name
-(`getaddrinfo ENOTFOUND redis`). The destination is not assumed adjacent — Go
-writes `dial tcp: lookup <host>: no such host` — so the following few tokens are
-scanned and the first host-shaped one is replaced. A plain English word is not
-host-shaped, so `ETIMEDOUT request after 30 seconds` is untouched.
+destination. The destination is not assumed adjacent — Go writes
+`dial tcp: lookup <host>: no such host` — so the following few tokens are
+scanned and the first host-shaped one is replaced. A bare name counts only in
+a position the grammar proves is the destination — the marker's sole argument
+(`ECONNREFUSED redis`, `dial tcp redis`) or the argument of `lookup`
+(`dial tcp: lookup redis`). Connective prose after a marker survives:
+`ETIMEDOUT request after 30 seconds` and `ETIMEDOUT while waiting for
+response` are both untouched.
 
 **Weak** markers (`upstream`, `connect to`) read as English at least as often as
 they name a host, so they redact only a candidate that is already host-shaped
@@ -79,6 +82,7 @@ Recorded rather than implied, so a reader knows what is not covered:
 |------|----------|
 | Bare service name after natural-language `connect to` with no port at all (`connect to gateway failed`) | not redacted — the phrase is prose too often to trust. A port in either notation (`gateway:443`, `gateway on port 443`) does make it a host |
 | Bare `db.prod-1` outside any network context | not redacted — indistinguishable from a metric namespace |
+| Bare word amid prose after a socket marker (`ETIMEDOUT operation timed out`) | not redacted — only the marker's sole argument or the word after `lookup` is a proven destination position |
 | Standalone UUID, standalone `user_…`, bare-label value (`org: engineering`) | not redacted — indistinguishable from request, trace, and correlation ids |
 | Phone numbers, generic high-entropy blobs | not redacted — no non-destructive pattern |
 | Cisco dotted MAC (`0123.4567.89ab`), ideographic-dot IDN | not redacted — unusual notations |
