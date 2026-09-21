@@ -106,6 +106,11 @@ export function catalogFastRowEligible(
  * selector is accepted while its base is discoverable and otherwise fails honestly rather
  * than being reinterpreted.
  *
+ * Tombstone evidence is bounded per provider; when a catalog outgrows enumeration the
+ * provider's `--fast` namespace is marked ambiguous instead, and `knownIds` answers
+ * "known" for any `ns/…--fast` spelling (or a bare `x--fast` whose base is still that
+ * provider's), so a possibly-real id is never rewritten on partial evidence.
+ *
  * A base is RECOGNIZED here and then judged by routing, which is the component that actually
  * knows whether it can serve it.
  */

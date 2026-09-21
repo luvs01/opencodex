@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { clearModelCache, setCached } from "../../src/codex/model-cache";
+import { clearModelCache, isFastRowNamespaceAmbiguous, MAX_FAST_ROW_TOMBSTONE_IDS, setCached } from "../../src/codex/model-cache";
 import { knownEffortRowIds, parseEffortRowId, parseRequestEffortRowId } from "../../src/server/effort-row";
 import {
   catalogFastRowEligible,
@@ -417,6 +417,54 @@ describe("once-observed fast-id evidence", () => {
     expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow)
       .toEqual({ baseId: "fixture/foo" });
     clearModelCache("fixture");
+  });
+
+  test("an accepted catalog under a new credential retires the previous authority's evidence", () => {
+    // Devin Review on #451: tombstones were keyed by provider alone, so a key rotation kept
+    // account A's `foo--fast` as exact-id evidence and account B's genuine synthetic
+    // selector failed upstream instead of routing `foo` with Fast.
+    const config = configWith({ fixture: provider({ models: ["foo"] }) });
+    setCached("fixture", [
+      { provider: "fixture", id: "foo" } as never,
+      { provider: "fixture", id: "foo--fast" } as never,
+    ], Date.now(), undefined, "account-a");
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    // A republish under the SAME authority keeps the evidence.
+    setCached("fixture", [{ provider: "fixture", id: "foo" } as never], Date.now(), undefined, "account-a");
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow).toBeNull();
+    // A new authority's accepted catalog replaces it before recording its own ids.
+    setCached("fixture", [{ provider: "fixture", id: "foo" } as never], Date.now(), undefined, "account-b");
+    expect(parseSyntheticRowId("fixture/foo--fast", config).fastRow)
+      .toEqual({ baseId: "fixture/foo" });
+    clearModelCache("fixture");
+  });
+
+  test("a provider whose fast-id evidence outgrows its bound refuses rewrites for its namespace", () => {
+    // Devin Review on #451: the set is non-evictable, so unbounded churn would grow daemon
+    // memory without accounting. Past the bound the namespace is marked ambiguous — every
+    // `--fast` spelling under it counts as a possibly-real id — while sibling providers
+    // keep normal grammar behaviour.
+    const config = configWith({
+      fixture: provider({ models: ["base"] }),
+      other: provider({ models: ["base", "solo"] }),
+    });
+    const churn = Array.from(
+      { length: MAX_FAST_ROW_TOMBSTONE_IDS + 1 },
+      (_, i) => ({ provider: "fixture", id: `churn-${i}--fast` }) as never,
+    );
+    setCached("fixture", churn);
+    expect(isFastRowNamespaceAmbiguous("fixture")).toBe(true);
+    // Enumerated ids stay exact, and anything else under fixture's namespace is refused too.
+    expect(parseSyntheticRowId("fixture/churn-0--fast", config).fastRow).toBeNull();
+    expect(parseSyntheticRowId("fixture/base--fast", config).fastRow).toBeNull();
+    expect(parseSyntheticRowId("base--fast", config).fastRow).toBeNull();
+    // A sibling provider's namespace still resolves normally.
+    expect(parseSyntheticRowId("other/base--fast", config).fastRow)
+      .toEqual({ baseId: "other/base" });
+    expect(parseSyntheticRowId("solo--fast", config).fastRow)
+      .toEqual({ baseId: "solo" });
+    clearModelCache("fixture");
+    expect(isFastRowNamespaceAmbiguous("fixture")).toBe(false);
   });
 });
 

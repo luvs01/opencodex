@@ -36,7 +36,7 @@ import { ensureCodexEntitlementFreshness } from "../../codex/model-entitlements"
 import { fetchAllModels } from "./shared";
 import { initialModelSelectionPending, pendingModelSelectionProviders } from "../../providers/initial-model-selection";
 import { catalogFastRowEligible, fastRowId } from "../fast-row";
-import { knownEffortRowIds } from "../effort-row";
+import { isKnownId, knownEffortRowIds } from "../effort-row";
 
 /**
  * One row of the `/api/models` list. Routed rows spread a `CatalogModel`, so the shape is
@@ -214,8 +214,11 @@ export async function listManagementModelRows(
   const rows = [...visibleNative, ...dedupedRouted, ...visibleCustomModels];
   // Include disabled rows and configured aliases before the export visibility filter:
   // a hidden real `x--fast` must never become a synthetic selector for another model.
-  const knownIds = config.fastRows === false ? new Set<string>() : knownEffortRowIds(config);
-  for (const row of rows) knownIds.add(row.namespaced);
+  // knownEffortRowIds may be a predicate — an ambiguous `--fast` namespace cannot enumerate —
+  // so membership goes through isKnownId rather than Set methods.
+  const rowIds = new Set(rows.map(row => row.namespaced));
+  const priorKnownIds = config.fastRows === false ? undefined : knownEffortRowIds(config);
+  const selectorIsKnown = (id: string): boolean => rowIds.has(id) || isKnownId(priorKnownIds, id);
   return rows.map(row => {
     const pending = initialModelSelectionPending(config.providers[row.provider]);
     const modelCosts = Object.hasOwn(config.providers, row.provider)
@@ -226,7 +229,7 @@ export async function listManagementModelRows(
         ? { manualPricing: true } : {}),
       ...(pending ? { disabled: true, initialSelectionPending: true } : {}),
       fastRowAvailable: !row.disabled && !pending
-        && !knownIds.has(fastRowId(row.namespaced)) && catalogFastRowEligible(config, row),
+        && !selectorIsKnown(fastRowId(row.namespaced)) && catalogFastRowEligible(config, row),
     };
   });
 }

@@ -130,8 +130,9 @@ const MODEL_PROVIDER_PATTERNS: Array<{ providerNames: string[]; prefixes: string
  * (src/providers/slug-codec.ts). Union of static config ids, registry seeds, the
  * last-known-good live /models cache (may be empty on a cold start; decode then passes
  * unknown ids through unchanged for an honest upstream error), and the `--fast` ids that
- * cache once published: a real fast-suffixed model keeps its exact-id precedence after its
- * row churns out, or the fast-row grammar would rewrite it to whatever base survives.
+ * cache once published under the provider's current catalog authority: a real
+ * fast-suffixed model keeps its exact-id precedence after its row churns out, or the
+ * fast-row grammar would rewrite it to whatever base survives.
  */
 export function knownModelIdsForProvider(
   provName: string,

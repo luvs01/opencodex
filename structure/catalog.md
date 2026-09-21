@@ -171,6 +171,17 @@ irreversible credential fingerprint: a credential switch observes neither the fr
 roster recorded under the previous credential, and a failed discovery's cooldown neither supplies
 the previous credential's stale roster nor suppresses the next credential's first discovery.
 
+Alongside the rows, each accepted catalog also records per-provider tombstones of the
+`--fast`-suffixed native ids it published (`src/codex/model-cache.ts`). The fast-row grammar
+consumes them through `knownModelIdsForProvider`, so a real `foo--fast` keeps exact-id
+precedence after its own row churns or is evicted — only the authority that published it can
+retire it: config or credential clears drop the evidence, and an accepted publication under a
+different credential fingerprint replaces it before recording new ids. Tombstones are
+deliberately non-evictable, so the set is bounded per provider and counted as pinned bytes in
+the retained-store budget; a provider that outgrows enumeration is marked ambiguous and the
+grammar refuses `--fast` rewrites for every spelling under its namespace rather than keep
+growing or drop evidence silently.
+
 A Devin live row spreads its measured `inputModalities` before
 `catalogHintsFromProviderConfig`, so exact `modelCapabilities` declarations, the legacy
 `modelInputModalities` record and the vision-sidecar rewrite keep precedence and the live

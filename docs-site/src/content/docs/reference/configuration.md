@@ -88,7 +88,10 @@ resolving once the base disappears, instead of silently routing another model. T
 rule protects real ids in the other direction — a model id a provider has actually advertised with
 the `--fast` suffix keeps that identity even after the listing drops it, so a stale saved selection
 fails honestly rather than being rewritten to the surviving base. Changing a provider's credential
-or configuration resets this evidence.
+or configuration resets this evidence, and for account-scoped providers a credential rotation does
+the same once the new account's catalog is accepted. The retained evidence is bounded per provider;
+a catalog that keeps minting distinct `--fast` ids marks that provider's namespace ambiguous and
+every `--fast` selector under it is treated as a real id rather than risk a wrong rewrite.
 
 Native models carry one extra condition: as well as an eligible policy, upstream must advertise the
 Fast tier for that model. This is the same evidence the Codex picker's own toggle is built from, so

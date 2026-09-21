@@ -104,8 +104,8 @@ let lastReconciledGeneration = 0;
 
 /**
  * Native ids ending in the synthetic Fast row marker that a provider's ACCEPTED catalog
- * has published at least once — "once a real `foo--fast`, always evidence against the
- * synthetic grammar".
+ * has published under its current authority — "once a real `foo--fast`, always evidence
+ * against the synthetic grammar".
  *
  * The live cache REPLACES rows on every successful discovery, so a real `--fast`-suffixed
  * model that a provider stops advertising leaves no current-row evidence behind. The
@@ -115,12 +115,38 @@ let lastReconciledGeneration = 0;
  * row churn and budget eviction (they are why an evicted `foo--fast` stays a real id), and
  * they die with the provider's authority — a credential or config change resets the
  * catalog ground truth, and the old authority's observations must not poison the new one.
+ * For the same reason an accepted publication carrying a DIFFERENT credential fingerprint
+ * retires the stored set before its own ids are recorded: entitlement-scoped rosters are
+ * per-account, so the previous account's `--fast` ids are not evidence about the new one.
+ *
+ * The enumerated set is BOUNDED per provider: tombstones are deliberately non-evictable,
+ * so a catalog that keeps minting distinct `--fast` ids would otherwise grow retained
+ * memory without bound. Past the cap the provider's namespace is marked ambiguous — the
+ * grammar then refuses synthetic rewrites for every `--fast` spelling under it rather
+ * than keep enumerating or silently drop evidence.
  *
  * The suffix literal mirrors `FAST_ROW_SUFFIX` in src/server/fast-row.ts; importing it
  * would close a module cycle (fast-row → effort-row → router → this module).
  */
 const FAST_ROW_ID_SUFFIX = "--fast";
-const fastRowTombstones = new Map<string, Set<string>>();
+
+/**
+ * Bound on enumerated tombstone ids per provider. Real catalogs carry a handful of
+ * `--fast` rows at most; reaching this means the provider churns the marker, and the
+ * namespace falls back to ambiguity instead of unbounded retention.
+ */
+export const MAX_FAST_ROW_TOMBSTONE_IDS = 512;
+
+interface FastRowTombstones {
+  /** Credential fingerprint of the catalog authority that produced the evidence. */
+  authorityIdentity?: string;
+  ids: Set<string>;
+  /** Encoded byte size of `ids`, reported to the app-owned memory budget as pinned. */
+  bytes: number;
+  /** `ids` hit its bound: every `--fast` spelling under this provider counts as observed. */
+  ambiguous: boolean;
+}
+const fastRowTombstones = new Map<string, FastRowTombstones>();
 
 /**
  * `--fast`-suffixed ids this provider's catalog has published under the current authority.
@@ -128,7 +154,16 @@ const fastRowTombstones = new Map<string, Set<string>>();
  * identity after its row churns out instead of being rewritten to its base.
  */
 export function getObservedFastRowIds(provider: string): ReadonlySet<string> | undefined {
-  return fastRowTombstones.get(provider);
+  return fastRowTombstones.get(provider)?.ids;
+}
+
+/**
+ * True once this provider's observed `--fast` evidence outgrew its enumeration bound:
+ * the namespace can no longer be listed, so the grammar must treat every `--fast`
+ * spelling under it as a possibly-real id and refuse to rewrite.
+ */
+export function isFastRowNamespaceAmbiguous(provider: string): boolean {
+  return fastRowTombstones.get(provider)?.ambiguous === true;
 }
 
 export function markModelsFetchFailure(
@@ -292,14 +327,28 @@ export function setCached(
   // Tombstones accumulate on ACCEPTED publications only: a rejected write carries evidence
   // from a revoked authority, and a real `--fast` id must be recorded the moment it is
   // advertised, not after the next fetch decides whether to keep it.
-  let tombstones: Set<string> | undefined;
+  let tombstones = fastRowTombstones.get(provider);
+  if (tombstones !== undefined && tombstones.authorityIdentity !== authorityIdentity) {
+    // The credential fingerprint that produced the stored evidence is gone. Evidence is
+    // scoped to the authority that observed it, exactly like the roster rows themselves,
+    // so a previous account's ids must not keep winning exact-id precedence over the
+    // catalog the new authority is about to publish.
+    fastRowTombstones.delete(provider);
+    tombstones = undefined;
+  }
   for (const model of models) {
     if (!model.id.endsWith(FAST_ROW_ID_SUFFIX)) continue;
-    if (!tombstones) {
-      tombstones = fastRowTombstones.get(provider) ?? new Set<string>();
+    if (tombstones === undefined) {
+      tombstones = { ids: new Set(), bytes: 0, ambiguous: false };
+      if (authorityIdentity !== undefined) tombstones.authorityIdentity = authorityIdentity;
       fastRowTombstones.set(provider, tombstones);
     }
-    tombstones.add(model.id);
+    if (tombstones.ids.has(model.id)) continue;
+    if (tombstones.ids.size >= MAX_FAST_ROW_TOMBSTONE_IDS) tombstones.ambiguous = true;
+    else {
+      tombstones.ids.add(model.id);
+      tombstones.bytes += modelCacheEncoder.encode(model.id).byteLength;
+    }
   }
   enforceAppOwnedMemoryBudget();
   // Published and accepted, so anything derived from this provider's rows is now out of date.
@@ -392,11 +441,15 @@ export function reconcileModelCacheGeneration(context: GenerationContext): numbe
 }
 
 export function modelCacheRetainedStoreSnapshot(): RetainedStoreSnapshot {
+  // Tombstone ids are retained by design — eviction must not disarm the grammar — so
+  // they are pinned rather than evictable, but bounded and still counted as retained.
+  let tombstoneBytes = 0;
+  for (const tombstones of fastRowTombstones.values()) tombstoneBytes += tombstones.bytes;
   return {
     count: cache.size,
-    bytes: cacheBytes,
+    bytes: cacheBytes + tombstoneBytes,
     evictableBytes: cacheBytes,
-    pinnedBytes: 0,
+    pinnedBytes: tombstoneBytes,
     oldestAt: oldestCachedAt,
   };
 }
