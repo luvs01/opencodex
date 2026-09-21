@@ -133,8 +133,7 @@ export {
   withExpectedConfigGenerationSync,
 } from "./config/mutation-lock";
 export {
-  armClaudeCodeBaseline,
-  armDetachedConfigBaseline,
+  armClaudeCodeBaseline, armDetachedConfigBaseline,
   adoptPersistedProviderIntoLiveConfig,
   claudeCodeBaselineArmed,
   reconcileLiveConfigFromDisk,
