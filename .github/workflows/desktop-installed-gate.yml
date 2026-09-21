@@ -7,50 +7,17 @@ name: desktop installed-artifact gate
 # publication wiring into release.yml is a separate change.
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Release version whose desktop artifacts the gate installs
-        required: true
-        type: string
-      from-version:
-        description: Older release used for the staged npm runtime and the Linux update phases
-        required: true
-        type: string
-      # Hook inputs are FILE NAMES, never command text. The runner's operator installs
-      # audited executables in a hooks directory (vars.OPENCODEX_GATE_HOOKS_DIR) and a
-      # dispatch picks among them by name; the gate executes the file directly, so this
-      # workflow can never become an arbitrary-shell surface on a persistent runner.
-      consent-hook:
-        description: Name of the runner hook that answers the takeover consent prompt
-        required: false
-        type: string
-      tray-click-hook:
-        description: Name of the runner hook that left-clicks the tray icon
-        required: false
-        type: string
-      tray-quit-hook:
-        description: Name of the runner hook that opens the tray menu and chooses Quit
-        required: false
-        type: string
-      tray-check-hook:
-        description: Name of the runner hook that chooses Check for Updates in the tray
-        required: false
-        type: string
-      tray-install-hook:
-        description: Name of the runner hook that chooses Install update in the tray
-        required: false
-        type: string
-      elevate-accept-hook:
-        description: Name of the runner hook that answers the deb update's elevation prompt (drives the accept path)
-        required: false
-        type: string
+  # repository_dispatch always loads this workflow from the default branch. Unlike
+  # workflow_dispatch, a caller cannot select a branch-owned workflow definition and
+  # thereby route arbitrary steps onto these privileged self-hosted runners.
+  repository_dispatch:
+    types: [desktop-installed-gate]
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-installed-gate-${{ inputs.version }}
+  group: desktop-installed-gate-${{ github.event.client_payload.version }}
   cancel-in-progress: false
 
 jobs:
@@ -58,8 +25,8 @@ jobs:
     runs-on: [self-hosted, opencodex-gate-macos]
     timeout-minutes: 60
     # Required-review environment: no run reaches the GUI runner without a maintainer
-    # approval, and the checkout below pins the driver to the protected dev branch, so a
-    # dispatched ref cannot smuggle modified gate code onto the machine.
+    # approval. repository_dispatch loads the workflow from the default branch, and the
+    # checkout below pins the driver itself to the protected dev branch.
     environment: opencodex-desktop-gate
     defaults:
       run:
@@ -77,7 +44,7 @@ jobs:
       - name: Download the release artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ github.event.client_payload['version'] }}
           GATE_ARTIFACTS: ${{ runner.temp }}/gate-artifacts
         run: |
           mkdir -p "$GATE_ARTIFACTS"
@@ -88,11 +55,11 @@ jobs:
 
       - name: Run the installed-artifact gate
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          FROM_VERSION: ${{ inputs.from-version }}
-          CONSENT_HOOK: ${{ inputs.consent-hook }}
-          TRAY_CLICK_HOOK: ${{ inputs.tray-click-hook }}
-          TRAY_QUIT_HOOK: ${{ inputs.tray-quit-hook }}
+          RELEASE_VERSION: ${{ github.event.client_payload['version'] }}
+          FROM_VERSION: ${{ github.event.client_payload['from-version'] }}
+          CONSENT_HOOK: ${{ github.event.client_payload['consent-hook'] }}
+          TRAY_CLICK_HOOK: ${{ github.event.client_payload['tray-click-hook'] }}
+          TRAY_QUIT_HOOK: ${{ github.event.client_payload['tray-quit-hook'] }}
           GATE_HOOKS_DIR: ${{ vars.OPENCODEX_GATE_HOOKS_DIR }}
           GATE_ARTIFACTS: ${{ runner.temp }}/gate-artifacts
           GATE_WORK: ${{ runner.temp }}/installed-gate
@@ -143,7 +110,7 @@ jobs:
       - name: Download the release artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ github.event.client_payload['version'] }}
           GATE_ARTIFACTS: ${{ runner.temp }}/gate-artifacts
         run: |
           mkdir -p "$GATE_ARTIFACTS"
@@ -154,11 +121,11 @@ jobs:
 
       - name: Run the installed-artifact gate
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          FROM_VERSION: ${{ inputs.from-version }}
-          CONSENT_HOOK: ${{ inputs.consent-hook }}
-          TRAY_CLICK_HOOK: ${{ inputs.tray-click-hook }}
-          TRAY_QUIT_HOOK: ${{ inputs.tray-quit-hook }}
+          RELEASE_VERSION: ${{ github.event.client_payload['version'] }}
+          FROM_VERSION: ${{ github.event.client_payload['from-version'] }}
+          CONSENT_HOOK: ${{ github.event.client_payload['consent-hook'] }}
+          TRAY_CLICK_HOOK: ${{ github.event.client_payload['tray-click-hook'] }}
+          TRAY_QUIT_HOOK: ${{ github.event.client_payload['tray-quit-hook'] }}
           GATE_HOOKS_DIR: ${{ vars.OPENCODEX_GATE_HOOKS_DIR }}
           GATE_ARTIFACTS: ${{ runner.temp }}/gate-artifacts
           GATE_WORK: ${{ runner.temp }}/installed-gate
@@ -218,8 +185,8 @@ jobs:
       - name: Download the release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          FROM_VERSION: ${{ inputs.from-version }}
+          RELEASE_VERSION: ${{ github.event.client_payload['version'] }}
+          FROM_VERSION: ${{ github.event.client_payload['from-version'] }}
           ARTIFACT_SUFFIX: ${{ matrix.suffix }}
           GATE_ARTIFACTS: ${{ runner.temp }}/gate-artifacts
         run: |
@@ -235,16 +202,16 @@ jobs:
 
       - name: Run the installed-artifact gate
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          FROM_VERSION: ${{ inputs.from-version }}
+          RELEASE_VERSION: ${{ github.event.client_payload['version'] }}
+          FROM_VERSION: ${{ github.event.client_payload['from-version'] }}
           GATE_FORMAT: ${{ matrix.format }}
           ARTIFACT_SUFFIX: ${{ matrix.suffix }}
-          CONSENT_HOOK: ${{ inputs.consent-hook }}
-          TRAY_CLICK_HOOK: ${{ inputs.tray-click-hook }}
-          TRAY_QUIT_HOOK: ${{ inputs.tray-quit-hook }}
-          TRAY_CHECK_HOOK: ${{ inputs.tray-check-hook }}
-          TRAY_INSTALL_HOOK: ${{ inputs.tray-install-hook }}
-          ELEVATE_ACCEPT_HOOK: ${{ inputs.elevate-accept-hook }}
+          CONSENT_HOOK: ${{ github.event.client_payload['consent-hook'] }}
+          TRAY_CLICK_HOOK: ${{ github.event.client_payload['tray-click-hook'] }}
+          TRAY_QUIT_HOOK: ${{ github.event.client_payload['tray-quit-hook'] }}
+          TRAY_CHECK_HOOK: ${{ github.event.client_payload['tray-check-hook'] }}
+          TRAY_INSTALL_HOOK: ${{ github.event.client_payload['tray-install-hook'] }}
+          ELEVATE_ACCEPT_HOOK: ${{ github.event.client_payload['elevate-accept-hook'] }}
           GATE_HOOKS_DIR: ${{ vars.OPENCODEX_GATE_HOOKS_DIR }}
           GATE_ARTIFACTS: ${{ runner.temp }}/gate-artifacts
           GATE_WORK: ${{ runner.temp }}/installed-gate

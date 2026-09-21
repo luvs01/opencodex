@@ -463,7 +463,10 @@ describe("installed-artifact gate workflow", () => {
 
   test("it is dispatch-only: a stateful GUI machine must never run because a push happened", () => {
     const triggers = Array.isArray(workflow.on) ? workflow.on : Object.keys(workflow.on ?? {});
-    expect(triggers).toEqual(["workflow_dispatch"]);
+    expect(triggers).toEqual(["repository_dispatch"]);
+    expect((workflow.on as Record<string, { types?: string[] }>).repository_dispatch?.types).toEqual([
+      "desktop-installed-gate",
+    ]);
   });
 
   test("least privilege: read-only contents and nothing else", () => {
@@ -508,8 +511,7 @@ describe("installed-artifact gate workflow", () => {
   });
 
   test("GUI automation inputs are hook names, never command text", () => {
-    const dispatch = (workflow.on as Record<string, { inputs?: Record<string, unknown> }>).workflow_dispatch;
-    const inputNames = Object.keys(dispatch?.inputs ?? {});
+    const inputNames = [...text.matchAll(/client_payload\[['"]([^'"]+)['"]\]/g)].map(match => match[1]);
     expect(inputNames).toContain("consent-hook");
     expect(inputNames).toContain("tray-quit-hook");
     expect(inputNames).toContain("elevate-accept-hook");
