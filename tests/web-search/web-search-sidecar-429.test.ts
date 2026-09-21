@@ -90,4 +90,30 @@ describe("web-search sidecar 429 replays", () => {
     expect(outcome.error).toContain("429");
     expect(recorded).toEqual([429]);
   });
+
+  test("a deadline expiring during pre-retry body cleanup preserves the 429", async () => {
+    // The never-settling body is a worse leak than the other mocks leave behind: restore
+    // fetch so a later file's shared search loop does not inherit a 1s release per retry.
+    const originalFetch = globalThis.fetch;
+    try {
+      let calls = 0;
+      const recorded: Array<number | string> = [];
+      const outcome = await searchWith(async () => {
+        calls += 1;
+        // A cancel() that never settles makes the bounded 1s release run to its cap; the
+        // remaining deadline then cannot fit the backoff, so the wait ends mid-sleep. The
+        // observed 429 must survive that expiry instead of being recorded as a timeout.
+        const body = new ReadableStream<Uint8Array>({
+          start: controller => controller.enqueue(new TextEncoder().encode("rate limited")),
+          cancel: () => new Promise<void>(() => {}),
+        });
+        return new Response(body, { status: 429, headers: { "retry-after": "1" } });
+      }, 1_500, value => recorded.push(value));
+      expect(calls).toBe(1);
+      expect(outcome.error).toContain("429");
+      expect(recorded).toEqual([429]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
