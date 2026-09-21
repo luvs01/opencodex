@@ -147,7 +147,13 @@ export default function ApiKeysWorkspace({
   const selectedRotationId = selected
     ? (rotationSecret?.id === selected.id ? rotationSecret.rotationId : selected.pendingRotation?.id)
     : undefined;
-  const rotationEnabled = Boolean(onRotationStart || onRotationCommit || onRotationAbort);
+  // Each handler is independently optional, so "enabled" holds only when the
+  // key's current state has an action the caller wired: start for an idle key,
+  // commit/abort for a pending one. Rendering the rest offers operations that
+  // can only fail locally.
+  const rotationEnabled = selectedRotationId
+    ? Boolean(onRotationCommit || onRotationAbort)
+    : Boolean(onRotationStart);
   const mutationPending = deleting || renamePending || rotationPending;
 
   const runRotation = async (operation: "start" | "commit" | "abort") => {
@@ -387,12 +393,16 @@ export default function ApiKeysWorkspace({
                         </div>
                       )}
                       <div className="awi-detail-actions">
-                        <button type="button" className="btn btn-sm" disabled={rotationPending} onClick={() => { void runRotation("commit"); }}>
-                          {t("api.rotation.commit")}
-                        </button>
-                        <button type="button" className="btn btn-ghost btn-sm" disabled={rotationPending} onClick={() => { void runRotation("abort"); }}>
-                          {t("api.rotation.abort")}
-                        </button>
+                        {onRotationCommit && (
+                          <button type="button" className="btn btn-sm" disabled={rotationPending} onClick={() => { void runRotation("commit"); }}>
+                            {t("api.rotation.commit")}
+                          </button>
+                        )}
+                        {onRotationAbort && (
+                          <button type="button" className="btn btn-ghost btn-sm" disabled={rotationPending} onClick={() => { void runRotation("abort"); }}>
+                            {t("api.rotation.abort")}
+                          </button>
+                        )}
                       </div>
                     </>
                   ) : (

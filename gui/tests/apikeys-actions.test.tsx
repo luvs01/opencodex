@@ -294,6 +294,56 @@ test("rotation controls stay hidden when the runtime supplies no rotation handle
   expect(container.textContent).not.toContain("Abort rotation");
 });
 
+test("an idle key offers rotation only when its start handler is wired", async () => {
+  // Commit/abort without start: the only action an idle key can take has no
+  // handler, so the whole section hides — a visible Start could only fail.
+  const container = await mount({
+    onRotationCommit: async () => true,
+    onRotationAbort: async () => true,
+  });
+  await openKey(container);
+
+  expect(container.textContent).not.toContain("Key rotation");
+  expect(container.textContent).not.toContain("Start rotation");
+});
+
+test("a pending key renders only the rotation actions that have handlers", async () => {
+  const pendingKey = {
+    id: "k1",
+    name: "alpha",
+    prefix: "ocx_data_aaaaaaaa...",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    pendingRotation: {
+      id: "rotation-1",
+      createdAt: "2026-08-28T00:00:00.000Z",
+      expiresAt: "2026-08-28T00:10:00.000Z",
+    },
+    usage: { requests7d: 0, totalRequests: 0 },
+  };
+
+  // Commit without abort: Commit renders, Abort does not.
+  const container = await mount({
+    keys: [pendingKey],
+    onRotationCommit: async () => true,
+  });
+  await openKey(container);
+  expect(container.textContent).toContain("Commit rotation");
+  expect(container.textContent).not.toContain("Abort rotation");
+
+  await act(async () => { active?.unmount(); active = null; });
+
+  // Start without commit/abort: no action applies to a pending key, so the
+  // section hides rather than offering a Start that cannot help it.
+  const startOnly = await mount({
+    keys: [pendingKey],
+    onRotationStart: async () => true,
+  });
+  await openKey(startOnly);
+  expect(startOnly.textContent).not.toContain("Key rotation");
+  expect(startOnly.textContent).not.toContain("Commit rotation");
+  expect(startOnly.textContent).not.toContain("Abort rotation");
+});
+
 test("a protocol result belongs to its own chip", async () => {
   const container = await mount({
     filteredModels: [{ id: "gpt-5.5", displayName: "gpt-5.5", provider: "openai", native: true }],
