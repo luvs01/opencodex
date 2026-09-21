@@ -19,26 +19,40 @@ import {
   cooldownErrorResponse,
   CodexAuthContextError,
   CodexMainProfileDrainingError,
+  CodexModelAvailabilityError,
   CodexPoolAuthenticationError,
   CodexThreadAffinityExpiredError,
 } from "../codex/auth-context";
 import { formatCodexProviderForLog } from "../codex/routing";
 import { signalWithTimeout } from "../lib/abort";
+import { readBoundedResponseBytes, type BoundedBytesResult } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import type { OcxConfig } from "../types";
 import { resolveFirstUsableOpenAiSidecar, selectImagesProvider } from "../providers/openai-sidecar";
+import { selectProactiveApiKeyTransport } from "../providers/key-failover";
 import { getProviderRegistryEntry } from "../providers/registry";
-import { readJsonRequestBody } from "./request-decompress";
+import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
+import type { DataPlaneAdmission } from "./auth-cors";
+import { admissionScopeDenial } from "./admission-model-scope";
 import type { RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
 import { getValidAccessToken, getOAuthCredentialProjectId } from "../oauth/index";
 import { safeAntigravityHttpErrorMessage } from "../adapters/google-errors";
 import { sanitizeUpstreamErrorText } from "../adapters/upstream-http-error";
 import { ANTIGRAVITY_REQUEST_UA } from "../adapters/google-antigravity-wire";
-import { decodeValidatedImageBase64, MAX_ENCODED_BYTES_PER_IMAGE } from "../images/artifacts";
+import {
+  decodeValidatedImageBase64,
+  fetchPublicHttpsImage,
+  MAX_ENCODED_BYTES_PER_IMAGE,
+  sniffImageExtension,
+  type PinnedDownloadFn,
+} from "../images/artifacts";
+import { findXaiProvider, resolveXaiImageAuthToken } from "../images/plan";
+import { callXaiImages } from "../images/xai-client";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
+import { codexModelAvailabilityErrorResponse } from "./responses/codex-auth-error";
 
 export type ImagesEndpoint = "generations" | "edits";
 
@@ -48,11 +62,73 @@ const IMAGES_UPSTREAM_TIMEOUT_MS = 300_000;
 /**
  * Cap for the buffered upstream response body (100 MiB). Images responses are JSON documents
  * containing base64-encoded images — typically a few MB. This prevents an oversized or malicious
- * response from exhausting process memory.
+ * response from exhausting process memory. The xAI `/v1/images` relay also uses this as the
+ * combined decoded-byte and base64-encoded output budget across the whole batch.
  */
-const IMAGES_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
+export const IMAGES_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
+
+interface ImageResponseBytesOptions {
+  signal?: AbortSignal;
+  /** Smaller values are used only by focused reader tests. */
+  maxBytes?: number;
+}
+
+function cancelUnlockedResponseBody(response: Response | undefined, reason?: unknown): void {
+  const body = response?.body;
+  if (!body || body.locked) return;
+  try {
+    void body.cancel(reason).catch(() => undefined);
+  } catch {
+    // A broken stream can throw synchronously from cancel().
+  }
+}
+
+/**
+ * Read one image relay response as exact raw bytes under the same cap used by
+ * the public handler. A trustworthy Content-Length can reject obvious excess
+ * before attaching a reader; the streaming reader remains authoritative when
+ * the header is absent or understated.
+ */
+export async function readImageResponseBytes(
+  response: Response,
+  options: ImageResponseBytesOptions = {},
+): Promise<BoundedBytesResult> {
+  const signal = options.signal;
+  if (signal?.aborted) {
+    cancelUnlockedResponseBody(response, signal.reason);
+    throw signal.reason;
+  }
+  if (response.body === null) {
+    return { bytes: new Uint8Array(0), oversized: false };
+  }
+
+  const maxBytes = options.maxBytes ?? IMAGES_RESPONSE_MAX_BYTES;
+  const contentLength = response.headers.get("content-length");
+  const declaredBytes = contentLength === null ? Number.NaN : Number(contentLength);
+  if (Number.isSafeInteger(declaredBytes) && declaredBytes > maxBytes) {
+    cancelUnlockedResponseBody(
+      response,
+      new DOMException("Response body size limit reached", "QuotaExceededError"),
+    );
+    return { bytes: new Uint8Array(0), oversized: true };
+  }
+
+  return readBoundedResponseBytes(response, { maxBytes, signal });
+}
 
 const CCA_IMAGE_MODEL = "gemini-3.1-flash-image";
+const XAI_IMAGE_BRIDGE_MODEL = "grok-imagine-image-quality";
+
+/**
+ * The model this request names, or undefined when it names none.
+ *
+ * An absent `model` is relayed as an absent `model`: the upstream picks, so
+ * there is no destination to echo and none a model list can allow.
+ */
+function requestedImageSelector(body: unknown): string | undefined {
+  const model = (body as { model?: unknown } | null)?.model;
+  return typeof model === "string" && model.trim() ? model : undefined;
+}
 
 /**
  * Google Gemini finishReasons that indicate a permanent content/safety block.
@@ -67,6 +143,57 @@ const CCA_BLOCKING_FINISH_REASONS: ReadonlySet<string> = new Set([
   "SPII",
   "RECITATION",
 ]);
+
+function decodedBytesFromBase64(encoded: string): number {
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
+}
+
+/** Largest decoded payload whose base64 form still fits in `remainingEncoded`. */
+function remainingRelayDecodedBytes(spentDecoded: number, spentEncoded: number): number {
+  const remainingDecoded = IMAGES_RESPONSE_MAX_BYTES - spentDecoded;
+  const remainingEncoded = IMAGES_RESPONSE_MAX_BYTES - spentEncoded;
+  if (remainingDecoded <= 0 || remainingEncoded < 4) return 0;
+  return Math.max(0, Math.min(remainingDecoded, 3 * Math.floor(remainingEncoded / 4)));
+}
+
+function wouldExceedRelayBudget(
+  spentDecoded: number,
+  spentEncoded: number,
+  decodedBytes: number,
+  encodedBytes: number,
+): boolean {
+  return spentDecoded + decodedBytes > IMAGES_RESPONSE_MAX_BYTES
+    || spentEncoded + encodedBytes > IMAGES_RESPONSE_MAX_BYTES;
+}
+
+function xaiImageOutputTooLarge(): Response {
+  return formatErrorResponse(
+    502,
+    "upstream_error",
+    `xAI image generation output too large (exceeded ${IMAGES_RESPONSE_MAX_BYTES} bytes)`,
+  );
+}
+
+function xaiImageDownloadFailed(): Response {
+  return formatErrorResponse(502, "upstream_error", "xAI image download failed");
+}
+
+function xaiImageAuthMissing(): Response {
+  return formatErrorResponse(
+    400,
+    "invalid_request_error",
+    "xAI Imagine relay is enabled but no usable Grok CLI OAuth token or xAI API key was found. "
+    + "Run `ocx login xai` or set an xAI API key. The request was not forwarded to ChatGPT.",
+  );
+}
+
+/** Test seam: inject a pinned HTTPS GET so relay tests never open a real socket. */
+let xaiResultPinnedDownload: PinnedDownloadFn | undefined;
+
+export function setXaiResultPinnedDownloadForTests(fn: PinnedDownloadFn | undefined): void {
+  xaiResultPinnedDownload = fn;
+}
 
 /**
  * Race a promise against an abort signal. If the signal aborts first, reject
@@ -94,10 +221,20 @@ async function tryCcaImageGeneration(
   logCtx: RequestLogContext,
   signal: AbortSignal,
   endpoint: ImagesEndpoint,
+  admission: DataPlaneAdmission | undefined,
 ): Promise<Response | undefined> {
   if (endpoint !== "generations") return undefined;
   const provider = config.providers?.["google-antigravity"];
   if (!provider || provider.disabled) return undefined;
+
+  // The destination is decided here, not by the caller: this branch always
+  // bills Antigravity for CCA_IMAGE_MODEL whatever the body named. That is the
+  // pair a scoped key is held to.
+  const denial = admissionScopeDenial(config, admission, requestedImageSelector(body), {
+    providerName: "google-antigravity",
+    modelId: CCA_IMAGE_MODEL,
+  });
+  if (denial) return denial;
 
   const prompt = (body as { prompt?: unknown })?.prompt;
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -178,6 +315,7 @@ async function tryCcaImageGeneration(
     try {
       upstream = await fetch(`${baseUrl}/v1internal:generateContent`, {
         method: "POST",
+        redirect: "manual",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`,
@@ -322,14 +460,200 @@ async function tryCcaImageGeneration(
   }
 }
 
+/**
+ * Codex's client-side image_gen POSTs here. When the Grok Imagine bridge is
+ * opted in, send that request to api.x.ai instead of ChatGPT.
+ */
+async function tryXaiImageRelay(
+  body: unknown,
+  config: OcxConfig,
+  logCtx: RequestLogContext,
+  signal: AbortSignal | undefined,
+  endpoint: ImagesEndpoint,
+  admission: DataPlaneAdmission | undefined,
+): Promise<Response | undefined> {
+  if (config.images?.bridgeEnabled !== true) return undefined;
+  const found = findXaiProvider(config);
+  if (!found) return undefined;
+  const bridgeModel = config.images?.bridgeModel ?? XAI_IMAGE_BRIDGE_MODEL;
+  // The bridge sends this request to the configured xAI provider and the bridge
+  // model regardless of the selector in the body, so that is what the key is
+  // checked against.
+  const denial = admissionScopeDenial(config, admission, requestedImageSelector(body), {
+    providerName: found.name,
+    modelId: bridgeModel,
+  });
+  if (denial) return denial;
+  const obj = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : {};
+  const prompt = typeof obj.prompt === "string" ? obj.prompt
+    : typeof obj.input === "string" ? obj.input
+    : "";
+  if (!prompt.trim()) {
+    return formatErrorResponse(400, "invalid_request_error", "image generation requires a prompt");
+  }
+  const n = typeof obj.n === "number" && Number.isFinite(obj.n) ? Math.max(1, Math.min(4, Math.floor(obj.n))) : 1;
+  const size = typeof obj.size === "string" ? obj.size : undefined;
+  const quality = typeof obj.quality === "string" ? obj.quality : undefined;
+  const aspectRatio = typeof obj.aspect_ratio === "string" ? obj.aspect_ratio : undefined;
+  let imageUrl: string | undefined;
+  if (endpoint === "edits") {
+    const images = obj.images;
+    const first = Array.isArray(images) ? images[0] : undefined;
+    if (typeof obj.image === "string") imageUrl = obj.image;
+    else if (typeof obj.image_url === "string") imageUrl = obj.image_url;
+    else if (first && typeof first === "object" && first !== null) {
+      const rec = first as Record<string, unknown>;
+      if (typeof rec.image_url === "string") imageUrl = rec.image_url;
+      else if (typeof rec.url === "string") imageUrl = rec.url;
+    }
+    if (!imageUrl?.trim()) {
+      return formatErrorResponse(400, "invalid_request_error", "image edits require an image URL");
+    }
+    imageUrl = imageUrl.trim();
+  }
+  const timeoutMs = config.images?.timeoutMs ?? IMAGES_UPSTREAM_TIMEOUT_MS;
+  const linkedSignal = signalWithTimeout(timeoutMs, signal);
+  try {
+    let token: string | undefined;
+    try {
+      token = await abortableRace(resolveXaiImageAuthToken(found.provider), linkedSignal.signal);
+    } catch {
+      if (signal?.aborted) {
+        return formatErrorResponse(499, "client_closed_request", `image ${endpoint} request canceled by client`);
+      }
+      if (linkedSignal.signal.aborted) {
+        return formatErrorResponse(504, "upstream_error", `xAI image ${endpoint} timed out during authentication`);
+      }
+      return xaiImageAuthMissing();
+    }
+    if (!token) return xaiImageAuthMissing();
+    logCtx.provider = "xai";
+    logCtx.model = bridgeModel;
+    const result = await callXaiImages(
+      {
+        prompt,
+        model: bridgeModel,
+        n,
+        size,
+        quality,
+        aspectRatio,
+        imageUrl,
+      },
+      { baseUrl: "https://api.x.ai/v1", token },
+      linkedSignal.signal,
+      timeoutMs,
+    );
+    const data: Array<{ b64_json: string }> = [];
+    let spentDecoded = 0;
+    let spentEncoded = 0;
+    for (const img of result.images) {
+      if (typeof img.b64_json === "string" && img.b64_json) {
+        const encodedBytes = img.b64_json.length;
+        if (encodedBytes > MAX_ENCODED_BYTES_PER_IMAGE) {
+          return formatErrorResponse(502, "upstream_error", "xAI image payload exceeds per-image size cap");
+        }
+        try {
+          decodeValidatedImageBase64(img.b64_json);
+        } catch {
+          return formatErrorResponse(502, "upstream_error", "xAI image payload failed base64/magic validation");
+        }
+        const decodedBytes = decodedBytesFromBase64(img.b64_json);
+        if (wouldExceedRelayBudget(spentDecoded, spentEncoded, decodedBytes, encodedBytes)) {
+          return xaiImageOutputTooLarge();
+        }
+        data.push({ b64_json: img.b64_json });
+        spentDecoded += decodedBytes;
+        spentEncoded += encodedBytes;
+        continue;
+      }
+      if (typeof img.url !== "string" || !img.url) continue;
+      const remaining = remainingRelayDecodedBytes(spentDecoded, spentEncoded);
+      if (remaining <= 0) return xaiImageOutputTooLarge();
+      let fetched: Response;
+      try {
+        fetched = await fetchPublicHttpsImage(img.url, {
+          signal: linkedSignal.signal,
+          pinnedDownload: xaiResultPinnedDownload,
+          maxBytes: remaining,
+        });
+      } catch (err) {
+        if (signal?.aborted || linkedSignal.signal.aborted) throw err;
+        return xaiImageDownloadFailed();
+      }
+      const observed = await readImageResponseBytes(fetched, {
+        maxBytes: remaining,
+        signal: linkedSignal.signal,
+      });
+      if (observed.oversized) return xaiImageOutputTooLarge();
+      if (observed.bytes.byteLength === 0) continue;
+      if (!sniffImageExtension(observed.bytes)) return xaiImageDownloadFailed();
+      const decodedBytes = observed.bytes.byteLength;
+      const b64 = Buffer.from(observed.bytes).toString("base64");
+      if (wouldExceedRelayBudget(spentDecoded, spentEncoded, decodedBytes, b64.length)) {
+        return xaiImageOutputTooLarge();
+      }
+      data.push({ b64_json: b64 });
+      spentDecoded += decodedBytes;
+      spentEncoded += b64.length;
+    }
+    if (data.length === 0) {
+      return formatErrorResponse(502, "upstream_error", "xAI image generation returned no usable images");
+    }
+    return new Response(JSON.stringify({ created: Math.floor(Date.now() / 1000), data }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  } catch (err) {
+    if (signal?.aborted) {
+      return formatErrorResponse(499, "client_closed_request", `image ${endpoint} request canceled by client`);
+    }
+    if (linkedSignal.signal.aborted || (err instanceof Error && err.name === "TimeoutError")) {
+      return formatErrorResponse(504, "upstream_error", `xAI image ${endpoint} timed out`);
+    }
+    const status = typeof err === "object" && err && "status" in err && typeof (err as { status: unknown }).status === "number"
+      ? (err as { status: number }).status
+      : 502;
+    const message = err instanceof Error ? err.message : String(err);
+    const safeMessage = sanitizeUpstreamErrorText(message).replace(
+      /https?:\/\/[^\s"'<>]+/gi,
+      "[upstream-url]",
+    );
+    return formatErrorResponse(
+      status >= 400 && status < 600 ? status : 502,
+      "upstream_error",
+      `xAI image ${endpoint} failed: ${safeMessage}`,
+    );
+  } finally {
+    linkedSignal.cleanup();
+  }
+}
+
 export async function handleImages(
   req: Request,
   config: OcxConfig,
   endpoint: ImagesEndpoint,
   logCtx: RequestLogContext,
   turnAdmissionLease?: AdmissionLease,
+  admission?: DataPlaneAdmission,
 ): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await readJsonRequestBody(req, undefined, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
+  } catch (err) {
+    return decodeRequestErrorResponse(err, "images");
+  }
+  const model = (body as { model?: unknown } | null)?.model;
+  if (typeof model === "string" && model) logCtx.model = model;
+
   const candidates = selectImagesProvider(config);
+  // Explicit images.provider owns the route, including its validation errors.
+  // Do not divert that selection to the xAI Imagine relay.
+  if (config.images?.provider === undefined) {
+    const xaiRelay = await tryXaiImageRelay(body, config, logCtx, req.signal, endpoint, admission);
+    if (xaiRelay) return xaiRelay;
+  }
   if (candidates.error) {
     return formatErrorResponse(400, "invalid_request_error", candidates.error);
   }
@@ -348,19 +672,11 @@ export async function handleImages(
       }
     }
   }
-  let body: unknown;
-  try {
-    body = await readJsonRequestBody(req);
-  } catch (err) {
-    return decodeRequestErrorResponse(err, "images");
-  }
-  const model = (body as { model?: unknown } | null)?.model;
-  if (typeof model === "string" && model) logCtx.model = model;
 
   const canUseOpenAiForward = !skipOpenAiForwardForAdmissionBearer && candidates.forwardCandidates.length > 0;
 
   if (!canUseOpenAiForward && !candidates.keyed) {
-    const ccaResponse = await tryCcaImageGeneration(body, config, logCtx, req.signal, endpoint);
+    const ccaResponse = await tryCcaImageGeneration(body, config, logCtx, req.signal, endpoint, admission);
     if (ccaResponse) return ccaResponse;
     // 400, not 5xx: codex retries every 5xx up to 5 total attempts, and this is a permanent
     // configuration state that must surface on the first attempt.
@@ -395,6 +711,8 @@ export async function handleImages(
         const safeAccountLabel = formatCodexProviderForLog("openai", err.accountId, config);
         console.error(`[images] Pool account ${safeAccountLabel} token failed; reauthentication required`);
         forwardAuthError = formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication");
+      } else if (err instanceof CodexModelAvailabilityError) {
+        forwardAuthError = codexModelAvailabilityErrorResponse(err);
       } else if (err instanceof CodexPoolAuthenticationError) {
         forwardAuthError = formatErrorResponse(401, "authentication_error", err.message);
       } else {
@@ -405,7 +723,20 @@ export async function handleImages(
 
   const headers: Record<string, string> = { "content-type": "application/json" };
   let url: string;
+  // Both relay branches copy the body upstream, so the destination is the
+  // provider chosen in that branch and the model the caller named. Each branch
+  // is checked as it is entered, before it resolves a credential or commits a
+  // key rotation, so a refused request spends nothing.
+  const relaySelector = requestedImageSelector(body);
   if (forward) {
+    const denial = admissionScopeDenial(config, admission, relaySelector, {
+      providerName: forward.providerName,
+      modelId: relaySelector,
+    });
+    if (denial) {
+      forward.releaseProbeLease?.();
+      return denial;
+    }
     const { provider } = forward;
     if (provider.headers) Object.assign(headers, provider.headers);
     for (const [name, value] of forward.headers) headers[name] = value;
@@ -414,13 +745,44 @@ export async function handleImages(
   } else if (forwardAuthError) {
     // Before surfacing the OpenAI auth failure, try CCA — the user may have a
     // valid Google Antigravity login even though their OpenAI pool is broken.
-    const ccaResponse = await tryCcaImageGeneration(body, config, logCtx, req.signal, endpoint);
+    const ccaResponse = await tryCcaImageGeneration(body, config, logCtx, req.signal, endpoint, admission);
     if (ccaResponse) return ccaResponse;
     // No CCA either: a configured OpenAI pool mode owns its authentication failure.
     // Do not hide a broken/expired pool behind separately billed API-key image generation.
     return forwardAuthError;
   } else if (candidates.keyed) {
-    const { provider, apiKey, providerName } = candidates.keyed;
+    const { providerName } = candidates.keyed;
+    const denial = admissionScopeDenial(config, admission, relaySelector, {
+      providerName,
+      modelId: relaySelector,
+    });
+    if (denial) return denial;
+    // The keyed image path builds its own URL and Authorization header and never enters
+    // handleResponses, so the pre-dispatch key pick happens here.
+    //
+    // Two things about the placement. It stays INSIDE this branch because higher up it would
+    // also run for requests ChatGPT forward goes on to serve, spending a rotation on a path
+    // that never used the key. And the header is rebuilt from the returned route rather than
+    // from candidates.keyed.apiKey, which is a snapshot resolved earlier: reusing it would
+    // send the OLD key while the picker had already persisted the new one.
+    //
+    // Transport variant: this branch reads `provider.baseUrl` and `provider.headers` to build
+    // the URL and the request, and it comes back with the credential already resolved.
+    const warmKeyProvider = selectProactiveApiKeyTransport(config, providerName, candidates.keyed.provider);
+    const provider = warmKeyProvider ?? candidates.keyed.provider;
+    // No fall back to the earlier snapshot once a pick has happened. The picker COMMITS its
+    // choice before returning, so if the chosen reference will not resolve -- revoked keychain
+    // entry, unset env var -- sending the previous key would authenticate a non-idempotent
+    // POST with a credential the config no longer considers active, and the previous key is
+    // the one that was cooling. Fail loudly instead.
+    if (warmKeyProvider && !warmKeyProvider.apiKey?.trim()) {
+      return formatErrorResponse(
+        500,
+        "configuration_error",
+        `image generation selected an API key for "${providerName}" that cannot be resolved`,
+      );
+    }
+    const apiKey = warmKeyProvider?.apiKey ?? candidates.keyed.apiKey;
     if (provider.headers) Object.assign(headers, provider.headers);
     headers["authorization"] = `Bearer ${apiKey}`;
     logCtx.provider = providerName;
@@ -428,7 +790,7 @@ export async function handleImages(
     url = `${provider.baseUrl.replace(/\/v1\/?$/, "")}/v1/images/${endpoint}`;
   } else {
     // No usable OpenAI credential — try CCA before giving up.
-    const ccaResponse = await tryCcaImageGeneration(body, config, logCtx, req.signal, endpoint);
+    const ccaResponse = await tryCcaImageGeneration(body, config, logCtx, req.signal, endpoint, admission);
     if (ccaResponse) return ccaResponse;
     return formatErrorResponse(
       401,
@@ -440,34 +802,53 @@ export async function handleImages(
   const timeoutMs = config.images?.timeoutMs ?? IMAGES_UPSTREAM_TIMEOUT_MS;
   const linkedSignal = signalWithTimeout(timeoutMs, req.signal);
   const sidecarExit = sidecarEnter("images");
+  let upstreamResponse: Response | undefined;
   try {
     // Images POSTs create paid, non-idempotent work. One fetch only: no reset retry without a
     // source-proven idempotency contract.
-    const upstreamResponse = await fetch(url, {
+    upstreamResponse = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
       signal: linkedSignal.signal,
+      // Do not follow a cross-origin 3xx while carrying Codex credentials. Bun strips
+      // `Authorization` across origins but forwards nonstandard headers, so
+      // `chatgpt-account-id`, `session_id`, and `x-codex-turn-metadata` would reach the
+      // redirect target. Verified with a two-server probe. The Responses path and native
+      // compact already set this; the credential-bearing sidecars did not.
+      redirect: "manual",
     });
-    // Buffer rather than stream: the payload is one JSON document (base64 image, typically a few
-    // MB), and buffering keeps the timeout window covering the whole exchange. Cap the size to
-    // prevent an oversized response from exhausting process memory.
-    const payload = await upstreamResponse.arrayBuffer();
-    if (payload.byteLength > IMAGES_RESPONSE_MAX_BYTES) {
-      return formatErrorResponse(502, "upstream_error", `image ${endpoint} response too large (${payload.byteLength} bytes)`);
+    const observed = await readImageResponseBytes(upstreamResponse, {
+      maxBytes: IMAGES_RESPONSE_MAX_BYTES,
+      signal: linkedSignal.signal,
+    });
+    if (observed.oversized) {
+      forward?.recordOutcome?.(upstreamResponse.status);
+      return formatErrorResponse(
+        502,
+        "upstream_error",
+        `image ${endpoint} response too large (exceeded ${IMAGES_RESPONSE_MAX_BYTES} bytes)`,
+      );
     }
-    forward?.recordOutcome?.(upstreamResponse.status);
     const relayHeaders: Record<string, string> = {};
     const contentType = upstreamResponse.headers.get("content-type");
     if (contentType) relayHeaders["content-type"] = contentType;
-    return new Response(payload, { status: upstreamResponse.status, headers: relayHeaders });
+    // Fetch represents 204/205/304 responses with a null body. Preserve that
+    // invariant: constructing those statuses with even an empty Uint8Array throws.
+    const relayBody = upstreamResponse.body === null ? null : observed.bytes;
+    const relayResponse = new Response(relayBody, {
+      status: upstreamResponse.status,
+      headers: relayHeaders,
+    });
+    forward?.recordOutcome?.(upstreamResponse.status);
+    return relayResponse;
   } catch (err) {
     // Client cancel first: it aborts the linked signal too, and must not be logged as an
     // upstream failure (499 maps to client_closed_request in the request log).
     if (req.signal.aborted) {
       return formatErrorResponse(499, "client_closed_request", `image ${endpoint} request canceled by client`);
     }
-    if (err instanceof Error && err.name === "TimeoutError") {
+    if (linkedSignal.signal.aborted || (err instanceof Error && err.name === "TimeoutError")) {
       forward?.recordOutcome?.("timeout");
       // codex retries 5xx up to 4 more times; a retried 504 is acceptable for a transient hang.
       return formatErrorResponse(504, "upstream_error", `image ${endpoint} upstream timed out`);
@@ -481,5 +862,9 @@ export async function handleImages(
   } finally {
     sidecarExit();
     linkedSignal.cleanup();
+    // If cancellation won before readImageResponseBytes attached its reader, the
+    // response still owns an upstream body/socket. Consumed or locked bodies are
+    // already owned by the reader and need no second cancellation.
+    cancelUnlockedResponseBody(upstreamResponse);
   }
 }

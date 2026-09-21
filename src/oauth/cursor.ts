@@ -52,8 +52,8 @@ function decodeCursorJwtPayload(token: string): CursorJwtPayload | undefined {
 /** Build OAuthCredentials from Cursor tokens, extracting stable identity from JWT `sub` for multiauth. */
 export function credentialsFromCursorTokens(accessToken: string, refreshToken: string): OAuthCredentials {
   const payload = decodeCursorJwtPayload(accessToken) ?? decodeCursorJwtPayload(refreshToken);
-  const accountId = typeof payload?.sub === "string" && payload.sub.length > 0 ? payload.sub : undefined;
-  const email = typeof payload?.email === "string" && payload.email.length > 0 ? payload.email.toLowerCase() : undefined;
+  const accountId = cursorJwtIdentity(payload?.sub);
+  const email = cursorJwtEmail(payload?.email);
   return {
     access: accessToken,
     refresh: refreshToken,
@@ -63,10 +63,24 @@ export function credentialsFromCursorTokens(accessToken: string, refreshToken: s
   };
 }
 
+/** Coerce JWT `sub` (string or safe integer) into a stable multiauth account id. */
+function cursorJwtIdentity(value: unknown): string | undefined {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  return undefined;
+}
+
+function cursorJwtEmail(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return value.toLowerCase();
+}
+
 /** Generate PKCE params + the cursor.com deep-link login URL (challenge only — never the verifier). */
-export async function generateCursorAuthParams(): Promise<CursorAuthParams> {
+export async function generateCursorAuthParams(_opts?: { forceLogin?: boolean }): Promise<CursorAuthParams> {
   const { verifier, challenge } = await generatePKCE();
   const uuid = crypto.randomUUID();
+  // Cursor's deep-control page has no documented account-picker query; only the stable
+  // PKCE params are sent. forceLogin is honored only in loginCursor instructions.
   const params = new URLSearchParams({ challenge, uuid, mode: "login", redirectTarget: "cli" });
   return { verifier, challenge, uuid, loginUrl: `${CURSOR_LOGIN_URL}?${params.toString()}` };
 }
@@ -85,6 +99,19 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true },
     );
   });
+}
+
+/** Terminal poll statuses (T07, senpi PR #905): the login is denied/expired — retrying cannot succeed. */
+const POLL_TERMINAL_STATUSES = new Set([400, 401, 403, 410]);
+
+export class CursorAuthTerminalError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`Cursor login rejected by the auth server (HTTP ${status}); start a new login`);
+    this.name = "CursorAuthTerminalError";
+    this.status = status;
+  }
 }
 
 /**
@@ -121,9 +148,17 @@ export async function pollCursorAuth(
         return { accessToken: data.accessToken, refreshToken: data.refreshToken };
       }
 
+      // T07: a terminal auth status means the login attempt itself is dead (denied,
+      // expired, revoked). Fail on the FIRST such response instead of burning the
+      // 3-strike retry budget and masking the reason behind a generic error.
+      if (POLL_TERMINAL_STATUSES.has(response.status)) {
+        throw new CursorAuthTerminalError(response.status);
+      }
+
       throw new Error(`Cursor auth poll failed: ${response.status}`);
     } catch (err) {
       if (signal?.aborted) throw err instanceof Error ? err : new Error("Cursor login cancelled");
+      if (err instanceof CursorAuthTerminalError) throw err;
       consecutiveErrors++;
       if (consecutiveErrors >= 3) {
         throw new Error("Too many consecutive errors during Cursor auth polling");
@@ -139,9 +174,15 @@ export async function pollCursorAuth(
 export async function loginCursor(
   ctrl: OAuthController,
   pollBaseDelayMs: number = POLL_BASE_DELAY_MS,
+  opts?: { forceLogin?: boolean },
 ): Promise<OAuthCredentials> {
-  const { verifier, uuid, loginUrl } = await generateCursorAuthParams();
-  ctrl.onAuth?.({ url: loginUrl, instructions: "Approve the Cursor login in your browser, then return here." });
+  const { verifier, uuid, loginUrl } = await generateCursorAuthParams({ forceLogin: opts?.forceLogin === true });
+  ctrl.onAuth?.({
+    url: loginUrl,
+    instructions: opts?.forceLogin
+      ? "Log out of Cursor in the browser (or use a private window), sign in as the account you want to add, then approve and return here."
+      : "Approve the Cursor login in your browser, then return here.",
+  });
   ctrl.onProgress?.("Waiting for Cursor login approval…");
   const { accessToken, refreshToken } = await pollCursorAuth(uuid, verifier, ctrl.signal, pollBaseDelayMs);
   return credentialsFromCursorTokens(accessToken, refreshToken);
