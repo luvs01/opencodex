@@ -1193,18 +1193,34 @@ jobs:
 
       - name: Build unsigned desktop app
         working-directory: desktop
-        # Updater artifacts stay disabled here: with the pubkey configured in
-        # tauri.conf.json they require TAURI_SIGNING_PRIVATE_KEY, which only
-        # exists as a release-workflow secret.
+        # `createUpdaterArtifacts` is on and the updater public key is committed, so a plain
+        # `tauri build` stops with "A public key has been found, but no private key" unless
+        # TAURI_SIGNING_PRIVATE_KEY is set. This job proves the appex and the app bundle build
+        # and that the widget is embedded; it does not ship an update, and a verification
+        # build has no business holding the release key. Updater artifacts are therefore off
+        # here and the signing path stays in release.yml, which already reads the secret and
+        # refuses to publish a manifest when it is absent.
         run: bunx tauri build --ci --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Verify WidgetKit appex and desktop app
         run: |
           app=desktop/src-tauri/target/release/bundle/macos/OpenCodex.app
-          test -x "$app/Contents/MacOS/OpenCodex"
+          # Tauri renames the main binary only when `mainBinaryName` is set, and this config
+          # does not set it, so the bundled executable keeps the Cargo bin name rather than
+          # the product name. Read the name the bundle itself declares instead of restating
+          # it here, so this check follows the config instead of drifting from it.
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          test -n "$executable"
+          test -x "$app/Contents/MacOS/$executable"
           test -x "$app/Contents/PlugIns/OpenCodexWidget.appex/Contents/MacOS/OpenCodexWidget"
           test -x "$app/Contents/MacOS/ocx"
           codesign -dv "$app/Contents/PlugIns/OpenCodexWidget.appex"
+          # The widget is only offered in the gallery when its bundle is actually linked in, and
+          # nothing else here would notice its absence: the appex builds, signs and registers
+          # exactly the same way with the WidgetBundle dropped by the linker.
+          nm -a "$app/Contents/PlugIns/OpenCodexWidget.appex/Contents/MacOS/OpenCodexWidget" \
+            | grep -q "OpenCodexWidget0abC6BundleV" \
+            || { echo "::error::the widget bundle is not linked into the extension"; exit 1; }
 
   desktop-shell:
     name: desktop shell
