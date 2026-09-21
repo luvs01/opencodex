@@ -117,6 +117,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
     let stderrBytes = 0;
     let settled = false;
     let childClosed = false;
+    let childExitedAt: number | undefined;
     let receivedResult: SyntheticPatchV1 | undefined;
     let killReason: FabricTaskError | undefined;
     let reapTimer: ReturnType<typeof setTimeout> | undefined;
@@ -172,7 +173,10 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       try {
         const message = parseProducerProtocolLine(line);
         if (message.type === "activity" || message.type === "result") {
-          const at = budgetNow();
+          // Bytes drained after `exit` are judged at the exit timestamp: the
+          // process met its budgets when it died, so the drain must not
+          // condemn data it wrote while still inside them.
+          const at = childExitedAt ?? budgetNow();
           const expired = expiredDeadline(at);
           if (expired) {
             settleTimeout(expired);
@@ -181,7 +185,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
           if (message.type === "activity") {
             lastActivityAt = request.now ? at : now();
             inactivityDeadline = at + request.inactivityTimeoutMs;
-            armInactivity();
+            if (childExitedAt === undefined) armInactivity();
             return;
           }
         }
@@ -264,7 +268,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
       settleTimeout(new FabricTaskError(error.message, "harness_failure", "harness"));
     });
 
-    const decide = (code: number | null, signal: NodeJS.Signals | null) => {
+    const decide = (code: number | null, signal: NodeJS.Signals | null, reaped = false) => {
       if (settled) return;
       if (killReason) {
         finish(() => reject(killReason!));
@@ -289,6 +293,18 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         )));
         return;
       }
+      if (reaped) {
+        // `close` never followed `exit`: something outlived the producer still
+        // holding its pipes. The process tree escaped supervision, so the
+        // result cannot be trusted and scratch cannot be cleaned under a live
+        // descendant — report the escape instead of accepting it.
+        finish(() => reject(new FabricTaskError(
+          "isolated producer left a descendant holding its stdio",
+          "sandbox_violation",
+          "environment",
+        )));
+        return;
+      }
       if (receivedResult) {
         finish(() => resolve({ patch: receivedResult!, lastActivityAt }));
         return;
@@ -298,6 +314,16 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
 
     child.on("exit", (code, signal) => {
       if (childClosed || settled) return;
+      // `exit` ends the budget window even while `close` is still pending on
+      // stdio: an already-met deadline still applies, and no producer code can
+      // breach one after this point, so both budget timers are disarmed now.
+      childExitedAt = budgetNow();
+      if (!killReason) {
+        const expired = expiredDeadline(childExitedAt);
+        if (expired) killReason = expired;
+      }
+      clearTimeout(totalTimer);
+      clearTimeout(inactivityTimer);
       // The direct child is dead, but `close` also waits for its stdio to end.
       // Bound the drain so a descendant holding an inherited pipe cannot keep
       // the run pending, then settle from the recorded exit status.
@@ -310,7 +336,7 @@ export async function runIsolatedFabricProducer(request: IsolateRequest): Promis
         childClosed = true;
         try { child.stdout?.destroy(); } catch { /* already closed */ }
         try { child.stderr?.destroy(); } catch { /* already closed */ }
-        decide(code, signal);
+        decide(code, signal, true);
       }, EXIT_DRAIN_MS);
     });
 

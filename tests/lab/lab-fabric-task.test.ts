@@ -875,7 +875,7 @@ export async function execute() {
     expect(result.outcome.failure?.code).toBe("harness_failure");
   }, 20_000);
 
-  test("producer result resolves when a descendant still holds the pipes", async () => {
+  test("producer result is rejected when a descendant holds the pipes", async () => {
     const home = tempHome();
     process.env.OPENCODEX_HOME = home;
     const result = await runFabricSyntheticPatchTaskForRoute({
@@ -884,7 +884,10 @@ export async function execute() {
       patchExecutor: fabricOrphanedPipePatchExecutor(home),
       configDir: home,
     });
-    expect(result.outcome.outcome).toBe("pass");
+    // `close` never follows `exit` while a descendant holds the pipes — the
+    // process tree escaped supervision, so the result cannot be trusted.
+    expect(result.outcome.outcome).not.toBe("pass");
+    expect(result.outcome.failure?.code).toBe("sandbox_violation");
   }, 20_000);
 
   test("activity resets inactivity deadline within total budget", async () => {

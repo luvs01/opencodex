@@ -407,7 +407,7 @@ describe("isolated fabric producer deadline admission", () => {
     });
   });
 
-  test("a held-open pipe cannot keep a clean exit pending", async () => {
+  test("a held-open pipe turns a clean exit into a sandbox violation", async () => {
     await withProducer(async (h) => {
       h.at(1_099);
       h.result();
@@ -415,9 +415,49 @@ describe("isolated fabric producer deadline admission", () => {
       await h.pending();
       expect(h.timers).toHaveLength(3);
       h.timers[2]!.callback();
-      await h.success();
+      await h.rejection("sandbox_violation", "environment", "isolated producer left a descendant holding its stdio");
       expect(h.child.stdout.destroyed).toBe(true);
       expect(h.child.stderr.destroyed).toBe(true);
+    });
+  });
+
+  test("exit disarms the budget timers while close is pending", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result();
+      h.child.exit(0);
+      // The process met its budgets when it died; a deadline must not latch
+      // while the run waits on a descendant-held pipe to drain.
+      expect(h.timers[0]!.cleared).toBe(true);
+      expect(h.timers[1]!.cleared).toBe(true);
+      await h.pending();
+      h.child.close();
+      await h.success();
+    });
+  });
+
+  test("a buffered result is judged at the exit timestamp, not the close time", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result(false);
+      h.child.exit(0);
+      // Clock runs past both deadlines before close admits the drained bytes.
+      h.at(1_251);
+      h.child.close();
+      await h.success();
+    });
+  });
+
+  test("an exit past the deadline is still condemned at the drain", async () => {
+    await withProducer(async (h) => {
+      h.at(1_099);
+      h.result();
+      h.at(1_251);
+      h.child.exit(0);
+      await h.pending();
+      expect(h.child.signals).toEqual([]);
+      h.timers[2]!.callback();
+      await h.rejection("inactivity_timeout");
     });
   });
 

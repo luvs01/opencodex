@@ -131,14 +131,17 @@ its protocol stream: a parsed `result` line is stored, never settled, so an
 executor cannot end its supervision early and keep mutating its scratch tree.
 Protocol `error` lines, stream failures, and expired budgets latch a kill reason,
 SIGKILL the child, and settle only at the run's decision point — so scratch
-cleanup can never race a live producer. A stored result is accepted only when the
-child exited cleanly (`code 0`, no signal); a nonzero or signaled exit is a
-harness failure, and an already-latched failure always wins settlement. Process
-termination is tracked on `exit` separately from `close`, because `close` also
-waits for the child's stdio: a bounded drain (`EXIT_DRAIN_MS`) lets in-flight
-protocol data arrive, then the parent drops its stream ends and decides from the
-recorded exit status, so a descendant still holding an inherited pipe cannot keep
-a run pending.
+cleanup can never race a live producer. `exit` is the authoritative end of the
+budget window: an already-met deadline still applies, otherwise both budget
+timers are disarmed, and protocol bytes drained afterwards are judged at the
+exit timestamp. A stored result is accepted only on a clean `code 0` exit
+observed at `close`; a nonzero or signaled exit is a harness failure, and a
+latched failure always wins settlement. `close` also waits for the child's
+stdio, so after `exit` a bounded drain (`EXIT_DRAIN_MS`) lets in-flight protocol
+data arrive; if `close` never follows, the run is rejected as a sandbox
+violation — a held-open pipe proves a descendant escaped supervision, so its
+result cannot be trusted and its scratch cannot be cleaned under a live
+process.
 
 ## Scope guard
 
