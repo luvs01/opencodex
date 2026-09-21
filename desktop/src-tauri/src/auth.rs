@@ -1,5 +1,15 @@
 use std::path::PathBuf;
 
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeIdentity {
+    pub pid: u32,
+    pub port: u16,
+    pub attestation_secret: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Auth {
     home: PathBuf,
@@ -23,6 +33,15 @@ impl Auth {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
         })
+    }
+
+    pub fn runtime_identity(&self) -> Option<RuntimeIdentity> {
+        let value = std::fs::read(self.home.join("runtime-port.json")).ok()?;
+        let identity: RuntimeIdentity = serde_json::from_slice(&value).ok()?;
+        if identity.pid == 0 || identity.attestation_secret.len() != 43 {
+            return None;
+        }
+        Some(identity)
     }
 
     pub fn user_agent() -> &'static str {
