@@ -925,8 +925,7 @@ Do not rewrite an active paginated rollout or thread row to migrate those conver
 
 ## Experimental native mid-turn steering
 
-For a compatible model on the canonical ChatGPT forward route or an explicitly configured
-[OpenAI API WebSocket route](#steering-continuation-settings-and-public-api), and a client
+For a compatible model on the canonical ChatGPT forward route, and a client
 that sends `response.steer`, enable both options in `~/.opencodex/config.json` and restart
 OpenCodex before starting a fresh turn:
 
@@ -951,7 +950,7 @@ Do not rerun tools or resend accepted steering text. Model, account, tool declar
 may change in an explicit saved-result continuation as described below. Other changes
 require an explicitly stopped or finished turn and normal new dispatch. Multiple independent conversations use independent connections.
 
-HTTP fallback, noncanonical gateways, translated models, sidecars, Combo attempts and plaintext V2
+HTTP fallback, noncanonical gateways, public API-key routes, translated models, sidecars, Combo attempts and plaintext V2
 restoration do not support this option. It does not add steering capability to a model or
 a client that lacks it. Unsupported routes return a protocol error rather than silently
 ignoring input. Disconnected or timed-out delivery may be unknown: never automatically

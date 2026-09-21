@@ -297,9 +297,9 @@ Provider-scoped approval reviewer settings are projected by the [catalog owner](
 ## Experimental native mid-turn steering
 
 `codexNativeSteering: true` is an independent, default-off opt-in for the client-facing
-Responses WebSocket endpoint. It requires `websockets: true`, a canonical ChatGPT forward
-route or explicitly opted-in canonical OpenAI API route, an eligible Bun runtime, and a
-supporting model/execution mode. HTTP fallback and translated/sidecar/Combo paths do not gain steering. Plaintext V2
+Responses WebSocket endpoint. It requires `websockets: true`, the canonical ChatGPT forward
+route, an eligible Bun runtime, and a supporting model/execution mode. HTTP fallback and
+translated/sidecar/Combo paths do not gain steering. Plaintext V2
 restoration is excluded because it is not a transparent native event stream.
 
 `src/server/responses/native-steering.ts` owns one downstream turn and one private physical
