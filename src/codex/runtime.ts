@@ -109,10 +109,9 @@ export interface ResolveCodexRuntimeDeps {
  * How a `codex-runtime.json` record got onto disk.
  *
  * "pinned" is an intentional operator selection (doctor --fix). "discovered" is
- * automatic resolve-and-persist. Absent is the pre-field shape and is treated
- * as discovered, not pinned: every such file was written by
- * resolveAndPersistCodexRuntime, so reading it as a pin would leave issue 4204
- * unfixed on exactly the installs that have it.
+ * automatic resolve-and-persist. Absent is the pre-field shape and is
+ * ambiguous — both paths wrote it — so it is read conservatively as a possible
+ * operator pin rather than surrendered to the next automatic resolution.
  */
 export type CodexRuntimePinOrigin = "pinned" | "discovered";
 
@@ -951,7 +950,17 @@ export function resolveAndPersistCodexRuntime(
   const selectionUnchanged = selectionMatches && persistedRuntime.origin !== undefined;
   if (result.runtime.command && result.runtime.source !== "fallback" && !selectionUnchanged) {
     try {
-      persistCodexRuntime(result.runtime, deps, selectionMatches ? "pinned" : "discovered");
+      // Provenance follows the command, not the observed metadata. The binary
+      // at a pinned path can be upgraded in place (a version mismatch), and a
+      // persisted command is re-probed as the `configured` candidate whatever
+      // source the record stored, so neither mismatch demotes a pin. While the
+      // persisted command keeps the seat, pinned and ambiguous origin-less
+      // records stay pinned; only a different selected command, or a record
+      // already marked discovered, writes "discovered".
+      const retainedPin = persistedRuntime !== null
+        && persistedRuntime.command === result.runtime.command
+        && persistedCodexRuntimeIsPinned(persistedRuntime);
+      persistCodexRuntime(result.runtime, deps, retainedPin ? "pinned" : "discovered");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const persistError = redactUserPath(redactSecretString(message)).slice(0, 200);

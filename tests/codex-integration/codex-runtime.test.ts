@@ -1338,11 +1338,12 @@ describe("unpinned discovered runtime handover (issue 4204)", () => {
     command: string,
     selectedVersion: string,
     origin?: "pinned" | "discovered",
+    source: string = "configured",
   ): void {
     const payload: Record<string, unknown> = {
       version: 1,
       command,
-      source: "configured",
+      source,
       selectedVersion,
       updatedAt: "2026-01-01T00:00:00.000Z",
     };
@@ -1377,6 +1378,107 @@ describe("unpinned discovered runtime handover (issue 4204)", () => {
     expect(result.newerAvailable?.version).toBe("0.153.4");
     expect(result.replacedConfigured).toBeUndefined();
     expect(loadPersistedCodexRuntime({ configDir })?.origin).toBe("pinned");
+  });
+
+  test("an in-place binary upgrade keeps an explicit pin pinned", () => {
+    // The file at a pinned path can be replaced by a newer build without the
+    // path changing. The version mismatch must not demote the record to
+    // discovered, or a later resolve could hand the pin to a newer candidate.
+    const configDir = tempConfigDir();
+    writeLegacyPersisted(configDir, "C:\\old\\codex.exe", "0.135.0", "pinned");
+    const execFileSync: RuntimeExecFile = (file) => {
+      const text = String(file);
+      if (text.includes("old")) return "codex-cli 0.154.0";
+      if (text.includes("new")) return "codex-cli 0.155.0";
+      return "codex-cli 0.120.0";
+    };
+    const deps = {
+      configDir,
+      env: { PATH: "C:\\new" },
+      platform: "win32" as const,
+      existsSync: () => true,
+      execFileSync,
+    };
+    const result = resolveAndPersistCodexRuntime(deps);
+    expect(result.runtime.command).toBe("C:\\old\\codex.exe");
+    expect(result.runtime.version).toBe("0.154.0");
+    const persisted = loadPersistedCodexRuntime({ configDir });
+    expect(persisted?.selectedVersion).toBe("0.154.0");
+    expect(persisted?.origin).toBe("pinned");
+
+    // The surviving pin must still refuse handover on the next resolution.
+    const next = resolveCodexRuntime(deps);
+    expect(next.runtime.command).toBe("C:\\old\\codex.exe");
+    expect(next.supersededDiscovered).toBeUndefined();
+  });
+
+  test("an in-place binary upgrade backfills an origin-less record as pinned", () => {
+    const configDir = tempConfigDir();
+    writeLegacyPersisted(configDir, "C:\\old\\codex.exe", "0.135.0");
+    const execFileSync: RuntimeExecFile = (file) => {
+      const text = String(file);
+      if (text.includes("old")) return "codex-cli 0.154.0";
+      if (text.includes("new")) return "codex-cli 0.155.0";
+      return "codex-cli 0.120.0";
+    };
+    const deps = {
+      configDir,
+      env: { PATH: "C:\\new" },
+      platform: "win32" as const,
+      existsSync: () => true,
+      execFileSync,
+    };
+    const result = resolveAndPersistCodexRuntime(deps);
+    expect(result.runtime.command).toBe("C:\\old\\codex.exe");
+    const persisted = loadPersistedCodexRuntime({ configDir });
+    expect(persisted?.selectedVersion).toBe("0.154.0");
+    expect(persisted?.origin).toBe("pinned");
+
+    const next = resolveCodexRuntime(deps);
+    expect(next.runtime.command).toBe("C:\\old\\codex.exe");
+    expect(next.supersededDiscovered).toBeUndefined();
+  });
+
+  test("an origin-less record stored under a discovery source stays pinned", () => {
+    // Pre-provenance files store the source the original resolve observed.
+    // The persisted command is re-probed as the `configured` candidate, so the
+    // stored source normalizes on the next write — that mismatch must not
+    // demote the ambiguous record either.
+    const configDir = tempConfigDir();
+    writeLegacyPersisted(configDir, "C:\\old\\codex.exe", "0.135.0", undefined, "path");
+    const result = resolveAndPersistCodexRuntime({
+      configDir,
+      env: { PATH: "C:\\new" },
+      platform: "win32",
+      existsSync: () => true,
+      execFileSync: (file) =>
+        String(file).includes("old") ? "codex-cli 0.135.0" : "codex-cli 0.153.4",
+    });
+    expect(result.runtime.command).toBe("C:\\old\\codex.exe");
+    const persisted = loadPersistedCodexRuntime({ configDir });
+    expect(persisted?.origin).toBe("pinned");
+    expect(persisted?.source).toBe("configured");
+  });
+
+  test("an in-place binary upgrade keeps a discovered record discovered", () => {
+    const configDir = tempConfigDir();
+    writeLegacyPersisted(configDir, "C:\\old\\codex.exe", "0.135.0", "discovered");
+    const result = resolveAndPersistCodexRuntime({
+      configDir,
+      env: { PATH: "C:\\new" },
+      platform: "win32",
+      existsSync: () => true,
+      execFileSync: (file) => {
+        const text = String(file);
+        if (text.includes("old")) return "codex-cli 0.154.0";
+        if (text.includes("new")) return "codex-cli 0.153.4";
+        return "codex-cli 0.120.0";
+      },
+    });
+    expect(result.runtime.command).toBe("C:\\old\\codex.exe");
+    const persisted = loadPersistedCodexRuntime({ configDir });
+    expect(persisted?.selectedVersion).toBe("0.154.0");
+    expect(persisted?.origin).toBe("discovered");
   });
 
   test("origin pinned still resolves to 0.135.0 and reports no handover", () => {
