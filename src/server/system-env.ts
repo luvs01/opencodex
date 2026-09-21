@@ -263,7 +263,7 @@ export async function injectSystemEnv(
     if (injectedKeys.includes("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL")) {
       unsetLaunchctlEnv("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
       injectedKeys.splice(injectedKeys.indexOf("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"), 1);
-      writeTracking(port, injectedKeys);
+      writeTracking(port, injectedKeys, tracked);
     }
     inject("ANTHROPIC_BASE_URL", destination.origin);
     inject("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
