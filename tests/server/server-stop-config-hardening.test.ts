@@ -95,6 +95,11 @@ test("server.stop(true) waits for the config-dir ACL flight the startup loadConf
 
 test("server.stop(true) resolves promptly when no flight is in progress", async () => {
   const server = startServer(0);
+  // startServer launches the native-main startup convergence (and on Windows a
+  // config-dir icacls child) asynchronously; settle both before timing so the
+  // "no flight in progress" premise holds rather than racing that startup work.
+  await nativeStartup.waitForNativeMainStartupGate();
+  await flushConfigDirHardeningForTests();
   const t0 = Date.now();
   await server.stop(true);
   expect(Date.now() - t0).toBeLessThan(2_000);
