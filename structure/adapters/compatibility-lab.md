@@ -68,8 +68,9 @@ host-shaped, so `ETIMEDOUT request after 30 seconds` is untouched.
 
 **Weak** markers (`upstream`, `connect to`) read as English at least as often as
 they name a host, so they redact only a candidate that is already host-shaped
-and is not a plain dotted namespace. `upstream provider.metric.p95 exceeded` and
-`Unable to connect to your account` both survive.
+and is not a plain dotted namespace or the conventional `*.metric.p<digits>`
+form. `upstream provider.metric.p95 exceeded` and
+`Unable to connect to your account` both survive; `upstream db.prod1` does not.
 
 ### Known limits
 
@@ -84,7 +85,7 @@ Recorded rather than implied, so a reader knows what is not covered:
 | Cisco dotted MAC (`0123.4567.89ab`), ideographic-dot IDN | not redacted — unusual notations |
 | Escaped-quote mail local part | partially redacted; the address is broken but a fragment of the local part can remain |
 | Percent-encoding nested more than six deep | not decoded further |
-| Fully alphabetic dotted namespace (`provider.timeout`, `provider.request.duration`) | **over-redacted to `[host]`** — indistinguishable from a real hostname. A namespace whose last label carries a digit (`provider.metric.p95`) survives |
+| Fully alphabetic dotted namespace (`provider.timeout`, `provider.request.duration`) | **over-redacted to `[host]`** — indistinguishable from a real hostname. A digit-suffixed namespace survives bare (`release.v2`); after a weak marker only the conventional `*.metric.p<digits>` form does (`provider.metric.p95`) — `upstream db.prod1` and `upstream api.v2` redact |
 
 The marker behaviors and the redacted categories are asserted in both
 directions — positive cases for what must be removed, negative cases for the
