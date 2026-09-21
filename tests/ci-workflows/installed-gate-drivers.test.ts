@@ -458,6 +458,7 @@ describe("installed-artifact gate workflow", () => {
   const jobs = workflow.jobs ?? {};
   type Job = NonNullable<typeof jobs>[string] & {
     environment?: string;
+    needs?: string | string[];
     steps?: Array<{ name?: string; uses?: string; run?: string; if?: string; with?: Record<string, unknown> }>;
   };
 
@@ -474,7 +475,7 @@ describe("installed-artifact gate workflow", () => {
   });
 
   test("every platform job targets a self-hosted gate runner with a bounded timeout", () => {
-    const gateJobs = Object.entries(jobs).filter(([name]) => name !== "report");
+    const gateJobs = Object.entries(jobs).filter(([name]) => name !== "validate" && name !== "report");
     expect(gateJobs.map(([name]) => name)).toEqual(["macos", "windows", "linux"]);
     for (const [, job] of gateJobs) {
       const runsOn = Array.isArray(job["runs-on"]) ? job["runs-on"] : [job["runs-on"]];
@@ -486,7 +487,8 @@ describe("installed-artifact gate workflow", () => {
   });
 
   test("the gate report is uploaded even when the gate failed", () => {
-    for (const [name, job] of Object.entries(jobs)) {
+    for (const name of ["macos", "windows", "linux"] as const) {
+      const job = jobs[name]!;
       const uploads = (job.steps ?? []).filter(step => step.uses?.startsWith("actions/upload-artifact@"));
       expect(uploads.length, `${name} must upload its report`).toBe(1);
       expect(uploads[0]?.if).toContain("always()");
@@ -512,11 +514,47 @@ describe("installed-artifact gate workflow", () => {
 
   test("GUI automation inputs are hook names, never command text", () => {
     const inputNames = [...text.matchAll(/client_payload\[['"]([^'"]+)['"]\]/g)].map(match => match[1]);
-    expect(inputNames).toContain("consent-hook");
-    expect(inputNames).toContain("tray-quit-hook");
-    expect(inputNames).toContain("elevate-accept-hook");
+    // client_payload is free-form JSON, so the dispatch contract is exactly this key
+    // set: a dropped required key or an incidental extra reference both break it.
+    expect(new Set(inputNames)).toEqual(new Set([
+      "version",
+      "from-version",
+      "consent-hook",
+      "tray-click-hook",
+      "tray-quit-hook",
+      "tray-check-hook",
+      "tray-install-hook",
+      "elevate-accept-hook",
+    ]));
     for (const name of inputNames) {
       expect(name).not.toMatch(/command$/);
+    }
+  });
+
+  test("dispatch payloads are validated on a hosted runner before a gate job is scheduled", () => {
+    // repository_dispatch carries a free-form client_payload: required versions and
+    // hook names must pass a shape check before a privileged runner is requested.
+    const validate = jobs.validate as Job | undefined;
+    expect(validate, "a validate job must precede the privileged gate jobs").toBeDefined();
+    const runsOn = Array.isArray(validate?.["runs-on"]) ? validate?.["runs-on"] : [validate?.["runs-on"]];
+    expect(runsOn).not.toContain("self-hosted");
+    expect(validate?.environment, "validate runs before the gated environment is requested").toBeUndefined();
+    const runScript = (validate?.steps ?? []).map(step => step.run ?? "").join("\n");
+    for (const key of [
+      "version",
+      "from-version",
+      "consent-hook",
+      "tray-click-hook",
+      "tray-quit-hook",
+      "tray-check-hook",
+      "tray-install-hook",
+      "elevate-accept-hook",
+    ]) {
+      expect(runScript, `validate must check client_payload.${key}`).toContain(key);
+    }
+    for (const name of ["macos", "windows", "linux"] as const) {
+      const needs = (jobs[name] as Job | undefined)?.needs;
+      expect(needs, `${name} must wait on payload validation`).toBe("validate");
     }
   });
 
@@ -529,9 +567,10 @@ describe("installed-artifact gate workflow", () => {
   test("every gate job sits behind a required-review environment and checks out protected dev", () => {
     // The runners install software and hold sudo; the workflow must never execute a
     // dispatcher-selected ref on them.
-    for (const [name, job] of Object.entries(jobs) as Array<[string, Job]>) {
-      expect(job.environment, `${name} must declare the gated environment`).toBe("opencodex-desktop-gate");
-      const checkout = (job.steps ?? []).find(step => step.uses?.startsWith("actions/checkout@"));
+    for (const name of ["macos", "windows", "linux"] as const) {
+      const job = jobs[name] as Job | undefined;
+      expect(job?.environment, `${name} must declare the gated environment`).toBe("opencodex-desktop-gate");
+      const checkout = (job?.steps ?? []).find(step => step.uses?.startsWith("actions/checkout@"));
       expect(checkout?.with?.ref, `${name} must check out the protected integration branch`).toBe("dev");
     }
   });

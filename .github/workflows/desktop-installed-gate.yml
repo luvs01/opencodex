@@ -21,7 +21,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    # repository_dispatch carries a free-form client_payload — nothing upstream
+    # enforces required fields, so shape-check it on a hosted runner before a
+    # privileged self-hosted machine is even scheduled or a maintainer approval is
+    # requested. The patterns mirror parseGateArguments (strict semver, plain hook
+    # file names) so a malformed event fails here instead of on the gate runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ github.event.client_payload['version'] }}
+      FROM_VERSION: ${{ github.event.client_payload['from-version'] }}
+      CONSENT_HOOK: ${{ github.event.client_payload['consent-hook'] }}
+      TRAY_CLICK_HOOK: ${{ github.event.client_payload['tray-click-hook'] }}
+      TRAY_QUIT_HOOK: ${{ github.event.client_payload['tray-quit-hook'] }}
+      TRAY_CHECK_HOOK: ${{ github.event.client_payload['tray-check-hook'] }}
+      TRAY_INSTALL_HOOK: ${{ github.event.client_payload['tray-install-hook'] }}
+      ELEVATE_ACCEPT_HOOK: ${{ github.event.client_payload['elevate-accept-hook'] }}
+    steps:
+      - name: Validate the dispatch payload
+        run: |
+          set -euo pipefail
+          semver='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          hook_name='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          for pair in "version:$VERSION" "from-version:$FROM_VERSION"; do
+            name="${pair%%:*}"; value="${pair#*:}"
+            if ! [[ "$value" =~ $semver ]]; then
+              echo "client_payload.$name must be strict semver (x.y.z[-suffix]), got '$value'" >&2
+              exit 1
+            fi
+          done
+          for pair in "consent-hook:$CONSENT_HOOK" "tray-click-hook:$TRAY_CLICK_HOOK" "tray-quit-hook:$TRAY_QUIT_HOOK" "tray-check-hook:$TRAY_CHECK_HOOK" "tray-install-hook:$TRAY_INSTALL_HOOK" "elevate-accept-hook:$ELEVATE_ACCEPT_HOOK"; do
+            name="${pair%%:*}"; value="${pair#*:}"
+            if [ -n "$value" ] && ! [[ "$value" =~ $hook_name ]]; then
+              echo "client_payload.$name must be a plain hook file name, got '$value'" >&2
+              exit 1
+            fi
+          done
+
   macos:
+    needs: validate
     runs-on: [self-hosted, opencodex-gate-macos]
     timeout-minutes: 60
     # Required-review environment: no run reaches the GUI runner without a maintainer
@@ -91,6 +130,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: validate
     runs-on: [self-hosted, opencodex-gate-windows]
     timeout-minutes: 60
     environment: opencodex-desktop-gate
@@ -157,6 +197,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    needs: validate
     runs-on: [self-hosted, opencodex-gate-linux]
     timeout-minutes: 60
     environment: opencodex-desktop-gate
