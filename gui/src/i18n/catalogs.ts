@@ -1,11 +1,13 @@
 import { en, type TKey } from "./en";
 import { de } from "./de";
+import { fr } from "./fr";
 import { ko } from "./ko";
 import { zh } from "./zh";
 import { zhTW } from "./zh-TW";
 import { ru } from "./ru";
 import { ja } from "./ja";
 import { tr } from "./tr";
+import { vi } from "./vi";
 import { LAB_CATALOG_OVERRIDES, type LabLocale } from "./lab-translations";
 
 /** React-free locale catalog registry for formatters and other shared helpers. */
@@ -23,12 +25,14 @@ function withLabTranslations(locale: Locale, catalog: Record<TKey, string>): Rec
 export const DICTS: Record<Locale, Record<TKey, string>> = {
   en: withLabTranslations("en", en),
   de: withLabTranslations("de", de),
+  fr: withLabTranslations("fr", fr),
   ko: withLabTranslations("ko", ko),
   zh: withLabTranslations("zh", zh),
   "zh-TW": withLabTranslations("zh-TW", zhTW),
   ru: withLabTranslations("ru", ru),
   ja: withLabTranslations("ja", ja),
   tr: withLabTranslations("tr", tr),
+  vi: withLabTranslations("vi", vi),
 };
 
 /** Native language names shown by the language picker, kept inside i18n rather than UI metadata. */

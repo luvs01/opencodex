@@ -1,7 +1,10 @@
-import { useI18n, useT } from "../i18n/shared";
+import { useState } from "react";
+import { useT } from "../i18n/shared";
+import { useCopyFeedback } from "./use-copy-feedback";
 import { IconAlert, IconPause, IconPlay, IconX } from "../icons";
 import { displayAccountId } from "../lib/privacy";
 import AccountPriorityControl, { AccountPriorityBadge } from "./AccountPriorityControl";
+import { DEFAULT_ACCOUNT_PRIORITY, normalizeAccountPriority } from "../account-priority";
 import type { CodexAccountEntry } from "./codex-account-pool-types";
 import type { CodexAccountModeState } from "../codex-multi-state";
 import QuotaBars from "./QuotaBars";
@@ -15,7 +18,6 @@ import {
   oauthHealthShowsDoctor,
   oauthHealthShowsReauth,
 } from "../oauth-health-display";
-import { formatCostUsd, formatTokenCount } from "../provider-workspace/usage";
 
 export function CodexAccountPoolCards({
   pool,
@@ -66,15 +68,20 @@ export function CodexAccountPoolCards({
   doctorCopyOutcomeFor?: (accountId: string) => "copied" | "unavailable" | null;
 }) {
   const t = useT();
-  const { locale } = useI18n();
   const isNext = (account: CodexAccountEntry) => !account.paused && activeId === account.id;
+  const idCopy = useCopyFeedback<string>();
+  // Which cards have their ⋯ disclosure open; the priority select renders inside it unless
+  // the account already carries a non-default priority (then it stays inline).
+  const [moreOpen, setMoreOpen] = useState<ReadonlySet<string>>(new Set());
 
   return (
     <>
       {pool.map(a => {
         const healthStatus = a.health?.status;
+        const planExcluded = a.selectionExcludedReason === "plan_excluded";
         const showReauth = Boolean(a.needsReauth) || oauthHealthShowsReauth(healthStatus);
         const inCooldown = oauthHealthIsCooldown(healthStatus);
+        const validationPending = a.health?.reason === "validation_pending";
         const healthLabel = formatOAuthHealthLabel(t, a.health);
         const healthSummary = formatOAuthHealthSummary(t, "codex", a.id, a.health);
         return (
@@ -84,6 +91,11 @@ export function CodexAccountPoolCards({
             <strong>{a.alias ?? a.email}</strong>
             <span className="card-badges">
               {a.plan && <span className="badge badge-green">{a.plan}</span>}
+              {planExcluded && (
+                <span className="badge badge-muted" title={t("codexAuth.planExcludedHint", { plan: a.selectionExcludedPlan ?? a.plan ?? "" })}>
+                  {t("codexAuth.planExcluded")}
+                </span>
+              )}
               {a.paused && (
                 <span className="badge badge-muted" title={t("codexAuth.pausedHint")}>
                   {t("codexAuth.paused")}
@@ -96,13 +108,13 @@ export function CodexAccountPoolCards({
                 <span className={oauthHealthBadgeClass(healthStatus)}>{healthLabel}</span>
               )}
               {showReauth && !healthLabel && <span className="badge badge-amber">{t("codexAuth.needsReauth")}</span>}
-              {isNext(a) && !showReauth && !inCooldown && (
+              {isNext(a) && !planExcluded && !showReauth && !inCooldown && !validationPending && (
                 <span className="badge badge-primary">
                   {t(accountModeState === "direct" ? "codexAuth.poolPrepared" : "codexAuth.nextSession")}
                 </span>
               )}
             </span>
-            {!a.paused && !isNext(a) && !showReauth && !inCooldown && (
+            {!a.paused && !planExcluded && (!isNext(a) || pinnedId !== a.id) && !showReauth && !inCooldown && !validationPending && (
               <button type="button" className="btn btn-ghost btn-sm codex-account-switch" onClick={() => onSwitch(a)}>
                 {switchActionLabel}
               </button>
@@ -132,57 +144,73 @@ export function CodexAccountPoolCards({
                 saving={pauseUpdatingId === a.id}
               />
             </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onEditAlias(a)}>
-              {t("prov.editAlias")}
-            </button>
-            <button
-              type="button"
-              className="btn-icon btn-icon-danger card-right"
-              aria-label={`${t("common.remove")} — ${a.email}`}
-              title={`${t("common.remove")} — ${a.email}`}
-              onClick={e => { e.stopPropagation(); void onRemove(a.id); }}
+            {/*
+              Rarely used actions fold into a labelled disclosure (aria-expanded from the
+              native details; controls revealed inline, DOM tab order — not a menu role).
+              Switch/pause/reauth stay inline: those are the daily decisions.
+            */}
+            <details
+              className="codex-account-more card-right"
+              open={moreOpen.has(a.id)}
+              onToggle={e => {
+                const open = (e.currentTarget as HTMLDetailsElement).open;
+                setMoreOpen(prev => { const next = new Set(prev); if (open) next.add(a.id); else next.delete(a.id); return next; });
+              }}
             >
-              <IconX width={14} />
-            </button>
+              <summary className="btn btn-ghost btn-sm" aria-label={`${t("codexAuth.moreActions")} — ${a.email}`} title={t("codexAuth.moreActions")}>⋯</summary>
+              <div className="codex-account-more-body">
+                <span className="mono text-caption muted">{t("prov.accountId")}: {displayAccountId(a.id)}</span>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => idCopy.copy(a.id, a.id)}>
+                  {idCopy.outcomeFor(a.id) === "copied" ? t("startup.copied") : t("codexAuth.copyId")}
+                </button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onEditAlias(a)}>
+                  {t("prov.editAlias")}
+                </button>
+                <button
+                  type="button"
+                  className="btn-icon btn-icon-danger"
+                  aria-label={`${t("common.remove")} — ${a.email}`}
+                  title={`${t("common.remove")} — ${a.email}`}
+                  onClick={e => { e.stopPropagation(); void onRemove(a.id); }}
+                >
+                  <IconX width={14} />
+                </button>
+              </div>
+            </details>
           </div>
-          <div className="card-sub">{a.email}{a.plan ? ` · ${a.plan}` : ""} · {t("prov.accountId")}: {displayAccountId(a.id)}</div>
-          {a.logLabel && (
-            <div className="card-sub faint">{t("codexAuth.logLabel")}: <code>{a.logLabel}</code></div>
-          )}
-          {a.usage30d && (
-            <div className="card-sub faint" title={t("logs.metric.estimatedCostTitle")}>
-              {t("usage.card.totalTokens")}: {formatTokenCount(a.usage30d.totalTokens, locale)} · {t("pws.estimatedCost")}: {formatCostUsd(a.usage30d.estimatedCostUsd, locale)} · {t("usage.coverage.measured")}: {Math.round(a.usage30d.usageCoverageRatio * 100)}%
-            </div>
-          )}
+          <div className="codex-account-identity">
+            <div className="codex-account-identity-copy">{a.email}{a.plan ? ` · ${a.plan}` : ""}</div>
+            {(normalizeAccountPriority(a.priority) !== DEFAULT_ACCOUNT_PRIORITY || moreOpen.has(a.id)) && (
+            <AccountPriorityControl
+              value={a.priority}
+              selectId={`codex-account-priority-${a.id}`}
+              // Every row, not just the one being written: the controller serializes order
+              // writes behind one mutation ref, so a second row's pick would come back "busy"
+              // and be dropped with no toast. Same global lock the pause button uses.
+              // A pending switch counts too — it writes the same pin this clears, so the
+              // controller refuses to overlap them, and that refusal is equally silent.
+              disabled={priorityUpdatingId !== null || switchingId !== null}
+              onChange={(priority) => onPriorityChange(a, priority)}
+            />
+            )}
+          </div>
           {healthSummary && (
             <div className="card-sub faint">{healthSummary}</div>
           )}
           {inCooldown && (
             <div className="card-sub faint">{t("pws.healthCooldownHint")}</div>
           )}
-          {a.id === pinnedId && !a.paused && <div className="card-sub faint">{t("codexAuth.pinnedHint")}</div>}
-          <AccountPriorityControl
-            value={a.priority}
-            selectId={`codex-account-priority-${a.id}`}
-            // Every row, not just the one being written: the controller serializes order
-            // writes behind one mutation ref, so a second row's pick would come back "busy"
-            // and be dropped with no toast. Same global lock the pause button uses.
-            // A pending switch counts too — it writes the same pin this clears, so the
-            // controller refuses to overlap them, and that refusal is equally silent.
-            disabled={priorityUpdatingId !== null || switchingId !== null}
-            onChange={(priority) => onPriorityChange(a, priority)}
-          />
           {showReauth
             ? <div className="card-sub faint">{t("codexAuth.tokenExpired")}</div>
-            : !inCooldown && (
-              <QuotaBars
-                quota={a.quota}
-                plan={a.plan}
-                threshold={threshold}
-                t={t}
-                pending={a.quota == null}
-              />
-            )}
+            : !inCooldown && <>
+                <QuotaBars
+                  quota={a.quota}
+                  plan={a.plan}
+                  threshold={threshold}
+                  t={t}
+                  pending={a.quota == null}
+                />
+              </>}
         </div>
         );
       })}
