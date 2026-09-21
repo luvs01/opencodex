@@ -177,7 +177,7 @@ function clamp(s: string, max: number): string {
 }
 
 function boundedError(error: string): string {
-  return clamp(error.replace(/[\u0000-\u001f\u007f]/g, " ").trim(), DESC_MAX_CHARS);
+  return clamp(error.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").trim(), DESC_MAX_CHARS);
 }
 
 
