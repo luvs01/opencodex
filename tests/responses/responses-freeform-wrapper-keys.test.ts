@@ -111,16 +111,42 @@ describe("freeform wrapper keys the literal matcher could not see", () => {
     expect(emissions(program, "exec").length).toBeGreaterThan(1);
   });
 
-  test("does not repeatedly parse trailing whitespace after an object closes", () => {
+  test("does not reparse a closed object on trailing whitespace deltas", () => {
     const parse = spyOn(JSON, "parse");
     try {
       const body = "{}" + " ".repeat(MAX_FREEFORM_WRAPPER_SCAN_CHARS + 1);
-      expect(published(body, "exec")).toBe("{}");
-      // The closing brace resolves the object once. Every later prefix is legal JSON, but none
-      // can change that decision, so provider-controlled whitespace must not reparse it.
-      expect(parse).toHaveBeenCalledTimes(2);
+      // Inside the bound every whitespace prefix publishes byte-exact; past it the scan holds
+      // and completion stays authoritative, exactly like every other budget-exhausted buffer.
+      expect(published(body, "exec")).toBe(body.slice(0, MAX_FREEFORM_WRAPPER_SCAN_CHARS));
+      // Nothing reparses the accumulated buffer at all anymore: a closed object resolves from
+      // the scan's own member table, and `{}` carries no member names to decode. Provider-
+      // controlled whitespace deltas therefore cannot turn into repeated parse work.
+      expect(parse).not.toHaveBeenCalled();
     } finally {
       parse.mockRestore();
+    }
+  });
+
+  test("a closed object's trailing whitespace streams byte-exact", () => {
+    // The review gap in the first fix: once the object closed, later whitespace prefixes held
+    // forever, so the concatenated deltas lost the whitespace the completed item keeps. Every
+    // raw-object spelling must publish all of its bytes, fragmented or in one chunk.
+    for (const body of ["{} ", '{"a":1}   ', '{"code":"a","script":"b"}\t\n', '{ "x" : [ 1 , 2 ] } ']) {
+      expect({ body, completed: unwrapFreeformToolInput(body, "exec") })
+        .toEqual({ body, completed: body });
+      expect({ body, streamed: published(body, "exec") }).toEqual({ body, streamed: body });
+      expect({ body, whole: progressiveFreeformInput(body, "exec") })
+        .toEqual({ body, whole: body });
+      expect({ body, retractions: stream(body, "exec").retractions })
+        .toEqual({ body, retractions: [] });
+    }
+
+    // A closed fallback wrapper publishes its value once; the trailing whitespace is wrapper
+    // syntax rather than input bytes, so it is correctly absent whichever way it arrives.
+    for (const body of ['{"code":"cmd"}', '{"code":"cmd"}  ', '{"code":"cmd"}\n']) {
+      expect({ body, completed: unwrapFreeformToolInput(body, "exec") })
+        .toEqual({ body, completed: "cmd" });
+      expect({ body, streamed: published(body, "exec") }).toEqual({ body, streamed: "cmd" });
     }
   });
 
