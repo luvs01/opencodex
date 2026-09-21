@@ -625,7 +625,10 @@ jobs:
             (
               last_size=-1
               silent_for=0
-              while sleep 15; do
+              # A suite that finishes kills this subshell mid-`sleep`; the orphaned
+              # sleep would keep the step's output pipes open for its remaining run,
+              # so its descriptors are detached up front.
+              while sleep 15 </dev/null >/dev/null 2>&1; do
                 size="$(wc -c < "$suite_log" 2>/dev/null || echo 0)"
                 if [ "$size" -le "$last_size" ]; then
                   silent_for=$((silent_for + 15))
@@ -639,7 +642,7 @@ jobs:
                   # tee's read ends only when every descendant that inherited the
                   # merged stream is dead; a lingering grandchild must not hang the
                   # leg a second time, so give EOF a moment, then reap tee itself.
-                  sleep 5
+                  sleep 5 </dev/null >/dev/null 2>&1
                   pkill -KILL -f "tee $suite_log" 2>/dev/null || true
                   exit 0
                 fi
