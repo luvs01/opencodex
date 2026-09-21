@@ -4,6 +4,7 @@ import { getConfigDir } from "../../config/paths";
 import { CLAUDE_INTERCEPT_HOSTS, startConnectProxy, type ConnectProxyHandle } from "./connect-proxy";
 import { startClaudeInterceptListener } from "./listener";
 import { claudeInterceptCaCertPath, ensureLocalInterceptCa, issueLocalInterceptLeaf } from "./local-ca";
+import { ensureClaudeInterceptProxyToken } from "./proxy-auth";
 
 /**
  * Lifecycle for the Claude intercept pair (CONNECT proxy + TLS listener).
@@ -68,6 +69,7 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   if (options.requestedPort === 0 && !explicitPort) return null;
   const configDir = options.configDir ?? getConfigDir();
   const ca = ensureLocalInterceptCa(configDir);
+  const authToken = ensureClaudeInterceptProxyToken(configDir);
   const leaf = issueLocalInterceptLeaf(ca, CLAUDE_INTERCEPT_HOSTS);
   const listener = startClaudeInterceptListener<T>({
     leaf,
@@ -79,6 +81,7 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   try {
     proxy = await startConnectProxy(claudeInterceptProxyPort(options.config, options.publicPort), {
       interceptPort: listener.port!,
+      authToken,
     });
   } catch (error) {
     await listener.stop(true);

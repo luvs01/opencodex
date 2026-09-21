@@ -20,6 +20,7 @@ import { getConfigDir } from "../config/paths";
 import type { OcxConfig } from "../types";
 import { claudeInterceptCaCertPath, ensureLocalInterceptCa } from "./intercept/local-ca";
 import { claudeInterceptEnabled, claudeInterceptProxyPort } from "./intercept/runtime";
+import { ensureClaudeInterceptProxyToken } from "./intercept/proxy-auth";
 import {
   applyClaudeInterceptSettings,
   buildClaudeInterceptEnv,
@@ -104,7 +105,8 @@ export function desktopFirstPartyTarget(
 ): DesktopFirstPartyTarget {
   const proxyPort = claudeInterceptProxyPort(config, config.port ?? 10100);
   const caCertPath = claudeInterceptCaCertPath(opencodexConfigDir);
-  return { proxyPort, caCertPath, env: buildClaudeInterceptEnv(proxyPort, caCertPath) };
+  const authToken = ensureClaudeInterceptProxyToken(opencodexConfigDir);
+  return { proxyPort, caCertPath, env: buildClaudeInterceptEnv(proxyPort, caCertPath, authToken) };
 }
 
 export interface DesktopFirstPartyInspection {
