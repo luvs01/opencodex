@@ -122,6 +122,9 @@ export async function prepareAdapterExchange(
     | "genericFailovers"
     | "applyFailoverSnapshot"
     | "noteRoutedAttemptSend"
+    | "selectionIsCurrent"
+    | "adapterBindings"
+    | "refreshDispatchAdapter"
   >,
   responseEffects: Pick<ResponsesEffects, "cancelResponseCompletion" | "notifyResponseComplete" | "refreshRequestToolAliases">,
   sendBudgetState: Pick<
@@ -148,6 +151,9 @@ export async function prepareAdapterExchange(
     anthropicSessionKey,
     commitResolvedOAuthSelection,
     applyFailoverSnapshot,
+    selectionIsCurrent,
+    adapterBindings,
+    refreshDispatchAdapter,
   } = transportState;
   const {
     parsed,
@@ -194,6 +200,21 @@ export async function prepareAdapterExchange(
   // sendCount stays 0), and crucially no empty-completion guard, which treats an outputless
   // terminal as a failed turn and re-invokes the identical request. Routing this through the
   // ordinary event path would therefore reinstate the loop it exists to end.
+  // A bound termination scope resolves its serving credential lazily, so it must read the same
+  // selection the upcoming send would use. Selection is mutable while a request waits: run the
+  // dispatch binding's revalidation before evaluating a local terminal, or a stale-credential hit
+  // suppresses work the send path would have moved onto the newly selected credential.
+  if (
+    transportState.activeAdapter.localTerminal
+    && !selectionIsCurrent(adapterBindings.get(transportState.activeAdapter))
+  ) {
+    try {
+      await refreshDispatchAdapter(parsed);
+      bindRouteReasoningReplayScope({ parsed, providerName: route.providerName, provider: route.provider,
+        adapterName: transportState.activeAdapter.name,
+        oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot });
+    } catch { /* the send path surfaces a failed refresh; a scope miss only skips suppression */ }
+  }
   const localTerminal = transportState.activeAdapter.localTerminal?.(parsed);
   if (localTerminal) {
     logCtx.localTerminalReason = localTerminal.reason;

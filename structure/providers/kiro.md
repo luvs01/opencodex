@@ -102,11 +102,14 @@ A delivered `final_answer` may close a Kiro turn only for the exact request that
 `src/responses/turn-termination.ts` keeps a process-wide map of delivered-answer fingerprints
 keyed by a bound scope rather than by the parsed request's fields. The scope is bound in
 `src/server/responses/request-transport.ts` after the final adapter is resolved, and only when
-that adapter is `kiro`: the digest covers the conversation lane (`sessionLaneIdFromRequest`, or
-the normalized Cursor conversation id when no lane headers exist), the admission identity, the
+that adapter is `kiro`: the digest covers the conversation lane (`sessionSpecificLaneIdFromRequest`,
+or the normalized Cursor conversation id when no lane headers exist), the admission identity, the
 routed provider and model, and the serving credential. The composite is hashed before binding, so
 no caller, account, key or route identifier is retained, and a request with no conversation
-identity binds no scope at all.
+identity binds no scope at all. The lane must name a child: a request carrying only
+`x-codex-parent-thread-id` gets the coalescing group as its lane, which every sibling under that
+parent shares, so a parent-only request binds no scope rather than collapsing the group into one
+conversation.
 
 Conversation, admission, and route are captured eagerly — they belong to the admitted request —
 but the serving credential resolves lazily at check/record time. Kiro key-pool and OAuth failover
@@ -116,6 +119,12 @@ served instead of the one that failed. For key-authenticated routes the credenti
 non-secret `apiKeyAccountLogLabel` of the active `_apiKeyAttempt` (or a fresh capture of the
 current selection); an OAuth snapshot account id wins when one is bound, and the Codex auth
 context is the last resort — different keys therefore never share a scope.
+
+Because the credential resolves lazily, the check must read the same selection the upcoming send
+would use, and selection is mutable while a request waits. `prepareAdapterExchange` therefore
+runs the dispatch binding's staleness check (`selectionIsCurrent`, `refreshDispatchAdapter`) before
+evaluating `localTerminal`, so a record a since-replaced credential made cannot suppress work the
+send path would have moved onto the live one.
 
 A bare log-conversation digest is too wide here: it deliberately coalesces a parent's parallel
 subagents, and a scope that coarse would let one child's delivered answer suppress a sibling's

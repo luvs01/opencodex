@@ -77,12 +77,22 @@ export function sessionIdHeaderFromRequest(headers: Headers): string | null {
  * pair separates siblings while still keeping one conversation's overlapping turns together.
  */
 export function sessionLaneIdFromRequest(headers: Headers): string | undefined {
+  return sessionSpecificLaneIdFromRequest(headers)
+    ?? normalizeLogConversationId(headers.get("x-codex-parent-thread-id"));
+}
+
+/**
+ * The lane's child-specific half only: the thread or session a request actually owns, still
+ * qualified by its parent when both exist. A bare parent is a coalescing group, never an exact
+ * conversation, so callers that need one child's identity — the Kiro termination scope — must
+ * take this and refuse parent-only requests rather than collapse siblings into a shared key.
+ */
+export function sessionSpecificLaneIdFromRequest(headers: Headers): string | undefined {
+  const specific = normalizeLogConversationId(headers.get("thread-id"))
+    ?? normalizeLogConversationId(sessionIdHeaderFromRequest(headers));
+  if (!specific) return undefined;
   const parent = normalizeLogConversationId(headers.get("x-codex-parent-thread-id"));
-  const thread = normalizeLogConversationId(headers.get("thread-id"));
-  const session = normalizeLogConversationId(sessionIdHeaderFromRequest(headers));
-  const specific = thread ?? session;
-  if (parent && specific) return `${parent}\u0000${specific}`;
-  return specific ?? parent;
+  return parent ? `${parent}\u0000${specific}` : specific;
 }
 
 function firstSanitizedConversationId(

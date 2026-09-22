@@ -50,7 +50,7 @@ import { recordAnthropicAccountQuotaFromHeaders, hasPassiveAccountQuota } from "
 import { checkOutboundBodySize, describeOutboundBodyRefusal } from "./outbound-body-guard";
 import { formatErrorResponse } from "../../bridge";
 import { bindRouteReasoningReplayScope } from "./core-replay";
-import { sessionIdHeaderFromRequest, sessionLaneIdFromRequest, normalizeLogConversationId } from "../request-log-conversation";
+import { sessionIdHeaderFromRequest, sessionLaneIdFromRequest, sessionSpecificLaneIdFromRequest, normalizeLogConversationId } from "../request-log-conversation";
 import { bindTurnTerminationScope } from "../../responses/turn-termination";
 import { codexLogAccountId } from "./core-codex-account";
 import { redactSecretString } from "../../lib/redact";
@@ -672,7 +672,10 @@ export async function prepareResponsesTransport(
     // failed would replay or suppress under the wrong identity, and `route.provider` is the field
     // every rotation site rewrites, so reading it late tracks the credential that actually served.
     // Hash the composite before binding so no caller, account, key, or route identifier is retained.
-    const exactConversation = sessionLaneIdFromRequest(req.headers)
+    // A parent-only lane is a coalescing group, not a child: two siblings that send only
+    // `x-codex-parent-thread-id` would share one scope and suppress each other, the exact leak
+    // this guard exists to close. Only a thread/session id or the Cursor conversation counts.
+    const exactConversation = sessionSpecificLaneIdFromRequest(req.headers)
       ?? normalizeLogConversationId(parsed._cursorConversationId);
     const admissionIdentity = options.admission?.kind === "configured"
       ? `configured:${options.admission.keyId}`
@@ -851,6 +854,7 @@ export async function prepareResponsesTransport(
     applyFailoverSnapshot,
     selectionIsCurrent,
     resolveSelectionAdapter,
+    refreshDispatchAdapter,
     refreshRunTurnAdapter,
     oauthDispatch,
     noteRoutedAttemptSend,

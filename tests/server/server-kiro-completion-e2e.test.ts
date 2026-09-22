@@ -486,6 +486,56 @@ describe("Kiro completion through public server endpoints", () => {
     }
   });
 
+  // Sibling isolation above still let a bare parent id stand in for the lane: a request sending
+  // only `x-codex-parent-thread-id` got the shared parent digest as its scope, so every sibling
+  // in the group collapsed into one conversation and suppressed each other.
+  test("a parent-only lane is not an exact conversation scope", async () => {
+    const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
+    const upstream = scriptedKiroUpstream([
+      completionFrames(deliveredAnswer, "completion-a"),
+      completionFrames("Parent-only sibling work completed.", "completion-b"),
+    ]);
+    saveConfig(kiroConfig(upstream.server.url.toString()));
+    const proxy = startServer(0);
+    // No session/thread id at all: the shared parent header is the only identity either request
+    // carries, which is exactly what a coalescing group sends for every child under it.
+    const headers = {
+      "content-type": "application/json",
+      "x-codex-parent-thread-id": "shared-parent",
+    };
+    try {
+      const first = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model: "kiro-test/gpt-5.6-sol", stream: false, input: "first task" }),
+      });
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(upstream.requests).toHaveLength(1);
+
+      const sibling = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "kiro-test/gpt-5.6-sol",
+          stream: false,
+          input: [
+            { type: "message", role: "user", content: [{ type: "input_text", text: "different task" }] },
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: deliveredAnswer }] },
+          ],
+        }),
+      });
+      expect(sibling.status).toBe(200);
+      await sibling.text();
+      // The parent is a group, not a conversation. Accepted as the scope, the first request's
+      // record would suppress this sibling and leave upstream at one request.
+      expect(upstream.requests).toHaveLength(2);
+    } finally {
+      await proxy.stop(true);
+      upstream.server.stop(true);
+    }
+  });
+
   test("a new user request after a proxy-recorded final answer is not suppressed", async () => {
     const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
     const upstream = scriptedKiroUpstream([
