@@ -6,12 +6,24 @@ description: Run the opencodex proxy locally against a scratch home and exercise
 # Testing the opencodex management API locally
 
 ## Start a scratch instance
-- `OPENCODEX_HOME` relocates ALL opencodex state (config.json, admin-api-token, lab
-  automation state, SQLite projections). Always set it to a scratch dir so a test run
-  never touches the real `~/.opencodex`.
-- Minimal scratch `config.json`: `{"port":<testport>,"hostname":"127.0.0.1","codexAutoStart":false}`
-  — loopback bind avoids the server-auth assert, and `codexAutoStart:false` skips client-
-  config writes (harmless anyway when no Codex CLI is installed).
+- `OPENCODEX_HOME` relocates OpenCodex-owned state ONLY (config.json, admin-api-token,
+  lab automation state, SQLite projections). Client homes are NOT relocated: startup
+  syncs can still write to the real `~/.codex`, `~/.grok`, `~/.claude`, and Claude
+  Desktop dirs. Point these at scratch too: `CODEX_HOME`, `GROK_HOME`,
+  `CLAUDE_CONFIG_DIR`, `OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR`.
+- `codexAutoStart:false` does NOT gate startup client syncs: `shouldSyncCodexOnStart`
+  reads `clientIntegrations.codex` (absent = ON), `shouldSyncGrokOnStart` reads
+  `clientIntegrations.grok`, and the Claude roster write (`ocx-*.md` into
+  `~/.claude/agents/`) is gated by `claudeCode.enabled`/`claudeCode.injectAgents`.
+  Observed: a run with only OPENCODEX_HOME + codexAutoStart:false still injected five
+  `ocx-*.md` files into the real `~/.claude/agents/`.
+- Safe scratch `config.json`:
+  `{"port":<testport>,"hostname":"127.0.0.1","codexAutoStart":false,
+   "clientIntegrations":{"codex":false,"grok":false,"claude-desktop":false},
+   "claudeCode":{"injectAgents":false}}`
+  — loopback bind avoids the server-auth assert. Use the env vars AND the config
+  disables together; either alone leaves a write path open (e.g. a disabled
+  integration still prunes its owned files under the real home).
 - Management auth: set `OPENCODEX_ADMIN_AUTH_TOKEN` (any non-empty string works for the env
   source). If unset, the server mints `admin-api-token` in OPENCODEX_HOME on first start.
 - Start foreground: `bun run src/cli/index.ts start --port <testport>`
