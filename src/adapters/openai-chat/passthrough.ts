@@ -1,6 +1,7 @@
 import { openAIChatTransport, stripBracketedModelSuffix } from "./wire";
 import type { AdapterRequest } from "../base";
 import { frameAgentRouterMessages } from "../agentrouter";
+import { applyExplicitChatDeveloperRole } from "./developer-role";
 import { openRouterProviderPayload, resolveOpenRouterRouting } from "../../providers/openrouter-routing";
 import { resolveVercelGatewayRouting, vercelGatewayProviderPayload } from "../../providers/vercel-gateway-routing";
 import { fastPolicyForModel } from "../../providers/service-tier";
@@ -10,6 +11,7 @@ import { isDebugEnabled } from "../../lib/debug-settings";
 import { modelRecordValue } from "../../reasoning-effort";
 import { modelInList, type OcxProviderConfig } from "../../types";
 import { chatParallelToolCallsWireValue } from "./parallel-tool-calls";
+import { applyExplicitChatReasoningWirePolicy } from "./reasoning-wire";
 
 const CHAT_PASSTHROUGH_FIELDS = [
   "audio",
@@ -55,16 +57,37 @@ export function buildOpenAIChatPassthroughRequest(
 
   const body: Record<string, unknown> = {
     model: provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId,
-    messages: frameAgentRouterMessages(provider.baseUrl, rawBody.messages),
+    // The caller's messages are forwarded as they arrived, with one exception: an operator who
+    // recorded that this destination rejects the `developer` role gets that role converted in
+    // place. Verbatim was not neutral there — it sent the role anyway and the turn failed
+    // upstream with a 400 before the model saw it. An unrecorded destination is still verbatim,
+    // and the conversion changes the role of those messages and nothing else, so the position
+    // of every message and every other field survive unchanged.
+    messages: applyExplicitChatDeveloperRole(
+      frameAgentRouterMessages(provider.baseUrl, rawBody.messages),
+      provider,
+    ),
     stream,
   };
   for (const field of CHAT_PASSTHROUGH_FIELDS) {
     if (rawBody[field] !== undefined) body[field] = rawBody[field];
   }
   const rawEfforts = modelRecordValue(provider.modelReasoningEfforts, modelId) ?? provider.reasoningEfforts;
-  if (modelInList(provider.noReasoningModels, modelId) || rawEfforts?.length === 0) {
+  const reasoningDisabled = modelInList(provider.noReasoningModels, modelId) || rawEfforts?.length === 0;
+  if (reasoningDisabled) {
     delete body.reasoning_effort;
   }
+  const hasTools = Array.isArray(rawBody.tools) && rawBody.tools.length > 0;
+  const requestedEffort = typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined;
+  applyExplicitChatReasoningWirePolicy({
+    provider,
+    modelId,
+    hasTools,
+    requestedEffort,
+    wireEffort: requestedEffort,
+    reasoningDisabled,
+    body,
+  });
 
   const openRouterRouting = resolveOpenRouterRouting(provider, modelId);
   if (openRouterRouting) body.provider = openRouterProviderPayload(openRouterRouting);
@@ -108,7 +131,7 @@ export function buildOpenAIChatPassthroughRequest(
   if (provider.promptCacheKey && rawBody.prompt_cache_key !== undefined) {
     body.prompt_cache_key = rawBody.prompt_cache_key;
   }
-  if (Array.isArray(rawBody.tools) && rawBody.tools.length > 0) {
+  if (hasTools) {
     // Same three provider states as the translated path, and the same defect in the unset one:
     // a caller's explicit false was dropped here too (#5211). The native route reads the bit off
     // the raw request rather than the parsed options, since nothing projects this body.

@@ -28,9 +28,10 @@ const chatProvider: OcxProviderConfig = {
   adapter: "openai-chat",
   baseUrl: "https://gateway.example.internal/v1",
   apiKey: "k",
-  // The wire role folds to `system` unless a destination is recorded as accepting
-  // `developer`; the document test asserts the role a turn keeps, so it declares the
-  // destination rather than asserting the default.
+  // The case below asserts that a document survives on a `developer` turn, so it needs the
+  // role to reach the wire. That role folds to `system` unless a destination records that it
+  // accepts it, so the destination records it here; the document contract is what is under
+  // test, not the role decision.
   foldDeveloperRoleToSystem: false,
 };
 const anthropicProvider = {
