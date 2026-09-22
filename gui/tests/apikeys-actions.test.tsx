@@ -27,6 +27,7 @@ const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_AC
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 let active: Root | null = null;
+let rerender: (props: Partial<ApiKeysWorkspaceProps>) => Promise<void> = async () => {};
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map(key => [key, Reflect.get(globalThis, key)])) as typeof previousGlobals;
@@ -44,6 +45,7 @@ afterEach(async () => {
   if (active) {
     const root = active;
     active = null;
+    rerender = async () => {};
     await act(async () => { root.unmount(); });
   }
   testWindow.close();
@@ -105,6 +107,13 @@ async function mount(props: Partial<ApiKeysWorkspaceProps>): Promise<HTMLDivElem
   const { createRoot } = await import("react-dom/client");
   const root = createRoot(container);
   active = root;
+  // Same root, new props: how a parent's state update (the rotationSecret
+  // landing after a start, say) actually reaches the mounted workspace.
+  rerender = async next => {
+    await act(async () => {
+      root.render(<LanguageProvider><ApiKeysWorkspace {...value} {...next} /></LanguageProvider>);
+    });
+  };
   await act(async () => { root.render(<LanguageProvider><ApiKeysWorkspace {...value} /></LanguageProvider>); });
   return container;
 }
@@ -305,6 +314,68 @@ test("an idle key offers rotation only when its start handler is wired", async (
 
   expect(container.textContent).not.toContain("Key rotation");
   expect(container.textContent).not.toContain("Start rotation");
+});
+
+test("a start-only integration keeps the issued secret on screen", async () => {
+  const calls: string[] = [];
+  const container = await mount({
+    onRotationStart: async id => { calls.push(`start:${id}`); return true; },
+  });
+  await openKey(container);
+  await act(async () => { button(container, "Start rotation").click(); await Promise.resolve(); });
+  expect(calls).toEqual(["start:k1"]);
+
+  // The hub's answer carries the one-time secret. Without finish handlers the
+  // pending-state guard alone would hide the section — stranding the only copy.
+  await rerender({
+    rotationSecret: { id: "k1", key: "ocx_data_shown_once", rotationId: "rotation-1" },
+  });
+  expect(container.textContent).toContain("Key rotation");
+  expect(container.textContent).toContain("ocx_data_shown_once");
+  expect(container.textContent).not.toContain("Commit rotation");
+  expect(container.textContent).not.toContain("Abort rotation");
+});
+
+test("the secret's own controls are wired separately from the lifecycle actions", async () => {
+  const pendingKey = {
+    id: "k1",
+    name: "alpha",
+    prefix: "ocx_data_aaaaaaaa...",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    pendingRotation: {
+      id: "rotation-1",
+      createdAt: "2026-08-28T00:00:00.000Z",
+      expiresAt: "2026-08-28T00:10:00.000Z",
+    },
+    usage: { requests7d: 0, totalRequests: 0 },
+  };
+  const rotationSecret = { id: "k1", key: "ocx_data_shown_once", rotationId: "rotation-1" };
+
+  // A finish handler keeps the section up, but Copy and Close still check
+  // their own callbacks — an unwired reveal box is read-only.
+  const container = await mount({
+    keys: [pendingKey],
+    rotationSecret,
+    onRotationCommit: async () => true,
+  });
+  await openKey(container);
+  const reveal = container.querySelector<HTMLElement>(".api-key-reveal")!;
+  expect(reveal.textContent).toContain("ocx_data_shown_once");
+  expect([...reveal.querySelectorAll("button")]).toHaveLength(0);
+
+  await act(async () => { active?.unmount(); active = null; });
+
+  const wired = await mount({
+    keys: [pendingKey],
+    rotationSecret,
+    onRotationCommit: async () => true,
+    onCopyRotationSecret: () => {},
+    onDismissRotationSecret: () => {},
+  });
+  await openKey(wired);
+  const wiredReveal = wired.querySelector<HTMLElement>(".api-key-reveal")!;
+  const labels = [...wiredReveal.querySelectorAll("button")].map(b => b.textContent?.trim());
+  expect(labels).toEqual(["Copy", "Close"]);
 });
 
 test("a pending key renders only the rotation actions that have handlers", async () => {
