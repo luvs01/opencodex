@@ -12,6 +12,7 @@ import * as statusFacade from "../../src/cli/status";
 import * as statusProbes from "../../src/cli/status-probes";
 import { packageVersion } from "../../src/cli/help";
 import { getDefaultConfig } from "../../src/config";
+import { isProcessAlive } from "../../src/lib/process-control";
 import { findDeadPid } from "../helpers/dead-pid";
 import { COLD_SPAWN_WARMUP_HOOK_BUDGET_MS, warmColdSpawn } from "../helpers/cold-spawn-warmup";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -1061,7 +1062,7 @@ describe("status reports stale process records end to end", () => {
     await new Promise<void>(resolve => { occupied.listen(0, "127.0.0.1", () => resolve()); });
     const occupiedPort = (occupied.address() as AddressInfo).port;
     try {
-      const pid = findDeadPid();
+      let pid = findDeadPid();
       writeFileSync(join(home, "config.json"), JSON.stringify({ port: occupiedPort, codexAutoStart: false }), "utf8");
       writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
 
@@ -1069,14 +1070,24 @@ describe("status reports stale process records end to end", () => {
       // hands back a port it has already released. Confirm refusal immediately before and
       // immediately after the probe, and re-allocate when something took it in between, so
       // a stolen port retries instead of failing an assertion it never exercised.
+      //
+      // The seeded dead pid carries the same hazard: `findDeadPid` proves it free once,
+      // and a pid reclaimed later makes the probe correctly judge the records as owned by
+      // a live process on every remaining attempt — the same misreading as a stolen port.
+      // Re-verify liveness around the probe and re-seed the records when it is taken.
       let parsed: { proxy?: { staleProcessState?: unknown } } | undefined;
       for (let attempt = 0; attempt < 5 && parsed === undefined; attempt++) {
+        if (isProcessAlive(pid)) {
+          pid = findDeadPid();
+          writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
+        }
         const recordedPort = await allocateFreePort();
         if (recordedPort === occupiedPort) continue;
         if (!await refusesConnection(recordedPort)) continue;
         writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: recordedPort, hostname: "127.0.0.1" }), "utf8");
         const observed = JSON.parse(runStatusJson(home).stdout) as { proxy?: { staleProcessState?: unknown } };
         if (!await refusesConnection(recordedPort)) continue;
+        if (isProcessAlive(pid)) continue;
         // The TCP check can refuse while the HTTP /healthz probe aborts at 800ms
         // without an ECONNREFUSED code. That leaves staleProcessState false even
         // though the recorded port is still empty; retry instead of treating a
