@@ -281,12 +281,13 @@ function modelAcceptsImageInputWithCache(
   }
   const fromRow = advertisesImageInput(candidate.inputModalities);
   if (fromRow !== undefined) return fromRow;
-  // A preset name is not transport identity. Some fixed key presets intentionally preserve a
-  // same-named custom destination, so vendor metadata is authoritative only while the configured
-  // adapter and endpoint still belong to the registry row that owns that name — where "owns"
-  // includes canonical metadata aliases like `gemini` or `anthropic-key`, resolved to the entry
-  // that declares them. Otherwise the capability is unknown and request dispatch must preserve
-  // the custom destination's image boundary.
+  // A preset name is not transport identity. Routing binds a name to a registry transport by
+  // exact id only, so vendor metadata is authoritative only while the configured adapter and
+  // endpoint still belong to the registry row that owns that name — where "owns" includes
+  // canonical metadata aliases like `gemini` or `anthropic-key`, resolved to the entry that
+  // declares them and then matched on the configured transport itself rather than the owner's
+  // pinning rule. Otherwise the capability is unknown and request dispatch must preserve the
+  // custom destination's image boundary.
   if (provider !== undefined && !providerMatchesRegistryTransportOrAlias(candidate.provider, provider)) return undefined;
   return metadataImageInput(candidate.provider, candidate.id);
 }

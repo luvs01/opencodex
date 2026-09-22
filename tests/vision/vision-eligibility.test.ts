@@ -227,10 +227,12 @@ describe("vision eligibility core", () => {
     expect(modelAcceptsImageInput(folded, { provider: "Gemini", id: candidate.id })).toBe(false);
   });
 
-  test("11f. an alias-named custom destination follows the owning entry's pinning", () => {
-    // `google` is a name-pinned (non-preserved) preset, so a `gemini` row pointed at a custom
-    // gateway answers with the same verdict the canonical `google` name returns — the alias
-    // inherits its owner's transport rule rather than failing open or closed on its own.
+  test("11f. an alias-named custom destination is not bound by the owning entry's pinning", () => {
+    // `google` is a name-pinned preset: routing discards a custom baseUrl saved under that
+    // exact id, so the vendor verdict applies regardless. `gemini` only ALIASES the google
+    // bundle — routing preserves its configured destination, so at a custom gateway the
+    // capability is unknown and the image boundary is preserved, while the pinned `google`
+    // row keeps the text-only verdict.
     const provider = {
       adapter: "google",
       authMode: "key",
@@ -239,9 +241,51 @@ describe("vision eligibility core", () => {
     const config = configWithProviders({ gemini: provider, google: provider });
     const id = "gemini-live-2.5-flash-preview-native-audio";
 
-    expect(modelAcceptsImageInput(config, { provider: "gemini", id }))
-      .toBe(modelAcceptsImageInput(config, { provider: "google", id }));
-    expect(modelAcceptsImageInput(config, { provider: "gemini", id })).toBe(false);
+    expect(modelAcceptsImageInput(config, { provider: "google", id })).toBe(false);
+    expect(modelAcceptsImageInput(config, { provider: "gemini", id })).toBeUndefined();
+    expect(isVisionEligibleModel(config, { provider: "gemini", id })).toBe(true);
+    expect(requiresVisionPreprocessing(config, provider, id, "gemini")).toBe(false);
+  });
+
+  test("11g. an alias-named row on a different wire or auth mode is not the owner's transport", () => {
+    // A custom `gemini` fronting an OpenAI-shaped gateway keeps its own transport end to end:
+    // the google bundle cannot strip or redirect its images even though the name resolves.
+    const openaiShaped = {
+      adapter: "openai-chat",
+      authMode: "key",
+      baseUrl: "https://operator.example/v1",
+    } as const;
+    const config = configWithProviders({ gemini: openaiShaped });
+    const id = "gemini-live-2.5-flash-preview-native-audio";
+
+    expect(modelAcceptsImageInput(config, { provider: "gemini", id })).toBeUndefined();
+    expect(requiresVisionPreprocessing(config, openaiShaped, id, "gemini")).toBe(false);
+
+    // Same name and endpoint as 11e but forward auth: not the key-auth google transport, so
+    // the verdict cannot speak for this destination either.
+    const forwardAuth = {
+      adapter: "google",
+      authMode: "forward",
+      baseUrl: "https://generativelanguage.googleapis.com",
+    } as const;
+    const forwarded = configWithProviders({ gemini: forwardAuth });
+    expect(modelAcceptsImageInput(forwarded, { provider: "gemini", id })).toBeUndefined();
+    expect(requiresVisionPreprocessing(forwarded, forwardAuth, id, "gemini")).toBe(false);
+  });
+
+  test("11h. a case-varied name is bound by the same transport rule as an alias", () => {
+    // Routing is case-sensitive, so `Gemini` is custom too: at a custom endpoint it keeps its
+    // image boundary (mirroring 11f), and only the canonical endpoint keeps the verdict (11e).
+    const custom = {
+      adapter: "google",
+      authMode: "key",
+      baseUrl: "https://operator-gateway.example/google",
+    } as const;
+    const config = configWithProviders({ Gemini: custom });
+    const id = "gemini-live-2.5-flash-preview-native-audio";
+
+    expect(modelAcceptsImageInput(config, { provider: "Gemini", id })).toBeUndefined();
+    expect(requiresVisionPreprocessing(config, custom, id, "Gemini")).toBe(false);
   });
 
   test("12. only the selected Anthropic OAuth provider contributes Anthropic options", () => {
