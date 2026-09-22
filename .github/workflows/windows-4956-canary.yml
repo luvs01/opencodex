@@ -1,0 +1,29 @@
+name: Windows 4956 fixture canary
+on:
+  push:
+    branches: [diag/windows-4956-canary]
+permissions:
+  contents: read
+concurrency:
+  group: windows-4956-canary-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows-fixtures:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact fixture fix
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
+        with:
+          persist-credentials: false
+          ref: 5f9d1046a804e863cc0835340dc6e1781c0bf186
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Verify exact runtime and revision
+        run: |
+          git rev-parse HEAD
+          bun --version
+      - name: Windows fixture regressions
+        run: bun test --isolate --timeout 60000 ./tests/cli/cli-connect-readiness.test.ts ./tests/codex-integration/codex-reset-credit-auto-redeem.test.ts
