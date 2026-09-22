@@ -176,6 +176,20 @@ describe("both updaters consult the shared rule", () => {
     expect(bunPath).toContain("if (postInstallPlan.mayRestoreService) {");
   });
 
+  test("the Bun updater fences and delegates its final stop authorization", () => {
+    const leaseAt = bunPath.indexOf("const replacementLease = acquireOwnershipMutationLease");
+    const lockedReadAt = bunPath.indexOf("const lockedOwnership = await resolvedRuntimeOwnership()", leaseAt);
+    const stopAt = bunPath.indexOf('selfLaunchArgv(["stop"])', lockedReadAt);
+    const releaseAt = bunPath.indexOf("replacementLease.release()", stopAt);
+    expect(leaseAt).toBeGreaterThan(-1);
+    expect(lockedReadAt).toBeGreaterThan(leaseAt);
+    expect(stopAt).toBeGreaterThan(lockedReadAt);
+    expect(releaseAt).toBeGreaterThan(stopAt);
+    expect(bunPath.slice(lockedReadAt, stopAt)).toContain("lockedOwnership.subjectToken !== initialOwnership.subjectToken");
+    expect(bunPath.slice(lockedReadAt, stopAt)).toContain("ownershipMutationLeaseChildEnvironment");
+    expect(bunPath.slice(stopAt, releaseAt)).toContain("env: stopEnvironment");
+  });
+
   test("the npm launcher gates its stop, its refresh and its failure recovery", () => {
     expect(launcher).toContain("from \"../src/update/runtime-ownership.mjs\"");
     expect(launcher).toContain("if (stopNeeded && !runtimePlan.mayStopRuntime)");

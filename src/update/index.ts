@@ -11,7 +11,10 @@ import { readPid, readRuntimePort } from "../config/process-state";
 import { pendingTeardownOutstanding } from "../config/pending-teardown";
 import type { ServiceOwnership } from "../service/state";
 import { planUpdateRuntimeHandling } from "./runtime-ownership.mjs";
-import { acquireOwnershipMutationLease } from "../service/ownership-mutation-lease.mjs";
+import {
+  acquireOwnershipMutationLease,
+  ownershipMutationLeaseChildEnvironment,
+} from "../service/ownership-mutation-lease.mjs";
 import { npmInvocation } from "./npm-invocation.mjs";
 import { pnpmInvocation, pnpmInvocationForPath, resolvePnpmCommands } from "./pnpm-invocation.mjs";
 import { detectInstallFromPath } from "./install-detection.mjs";
@@ -421,7 +424,7 @@ export async function runUpdate(): Promise<void> {
   // What this update may do to the runtime. A desktop takeover vetoes both the stop and the
   // service refresh below; see `planUpdateRuntimeHandling` for why each half is wrong.
   const initialOwnership = await resolvedRuntimeOwnership();
-  const runtimePlan = planUpdateRuntimeHandling({
+  let runtimePlan = planUpdateRuntimeHandling({
     ...initialOwnership,
     serviceInstalled: serviceWasInstalled,
   });
@@ -466,6 +469,36 @@ export async function runUpdate(): Promise<void> {
     ...(runtimeTrusted && livePid ? { oldPid: livePid } : {}),
   };
 
+  const { serviceStatePaths } = await import("../service");
+  const replacementLease = acquireOwnershipMutationLease(serviceStatePaths());
+  const lockedOwnership = await resolvedRuntimeOwnership();
+  const lockedPlan = planUpdateRuntimeHandling({
+    ...lockedOwnership,
+    serviceInstalled: serviceWasInstalled,
+  });
+  if (lockedOwnership.subjectToken !== initialOwnership.subjectToken || !lockedPlan.mayReplacePackage) {
+    replacementLease.release();
+    console.error(lockedPlan.notice
+      ?? "⚠️  Update stopped because runtime ownership changed before stop authorization; rerun from the beginning.");
+    process.exit(1);
+  }
+  runtimePlan = lockedPlan;
+  const stopEnvironment = ownershipMutationLeaseChildEnvironment(process.env, replacementLease.token);
+  let replacementRefusal: string | null = null;
+  let stopAttempted = false;
+  const installStdio = updateChildStdio();
+  let postUpdateLauncher = installer === "pnpm" && owner
+    ? join(owner.packagePath, "bin", "ocx.mjs")
+    : join(packageRoot(), "bin", "ocx.mjs");
+  let postUpdateLauncherUsable = true;
+  let r: {
+    status: number | null;
+    signal?: NodeJS.Signals | null;
+    stdout?: string | Buffer | null;
+    stderr?: string | Buffer | null;
+  } | null = null;
+  try {
+
   // Never replace package files under a live proxy: the running server dynamic-imports
   // modules after startup, so an in-place update leaves it executing mixed old/new code.
   // Gate on the service and the runtime-port record too, not just the pid file — a
@@ -476,7 +509,6 @@ export async function runUpdate(): Promise<void> {
   // shared client config still points at a proxy that is gone; installing over that
   // silently skips the recovery the receipt was written to trigger (#3008).
   // Full `ocx stop` semantics (drain, service stop, restore).
-  let stopAttempted = false;
   if (runtimePlan.mayStopRuntime && (serviceWasInstalled || readPid() || readRuntimePort() || pendingTeardownOutstanding())) {
     stopAttempted = true;
     console.log("⏹  Stopping the running proxy before updating...");
@@ -485,6 +517,7 @@ export async function runUpdate(): Promise<void> {
       stdio: stopStdio,
       encoding: stopStdio === "pipe" ? "utf8" : undefined,
       windowsHide: true,
+      env: stopEnvironment,
     });
     if (stopStdio === "pipe") logSpawnOutput("", stop);
     // One decision, shared with the package launcher (#3008). The two lanes disagreeing about
@@ -517,6 +550,7 @@ export async function runUpdate(): Promise<void> {
           ? `⚠️  Could not confirm the proxy on ${capturedListen.hostname}:${capturedListen.port} is stopped; aborting the update. Run 'ocx stop' and retry.`
           : "⚠️  Could not stop the running proxy; aborting the update. Run 'ocx stop' and retry.");
       }
+      replacementLease.release();
       process.exit(1);
     }
     if (historyOnlyStop || historyRestoreIncomplete()) {
@@ -538,24 +572,8 @@ export async function runUpdate(): Promise<void> {
     }
   }
 
-  const installStdio = updateChildStdio();
-  let postUpdateLauncher = installer === "pnpm" && owner
-    ? join(owner.packagePath, "bin", "ocx.mjs")
-    : join(packageRoot(), "bin", "ocx.mjs");
-  let postUpdateLauncherUsable = true;
-  let r: {
-    status: number | null;
-    signal?: NodeJS.Signals | null;
-    stdout?: string | Buffer | null;
-    stderr?: string | Buffer | null;
-  } | null = null;
-  const { serviceStatePaths } = await import("../service");
-  const replacementLease = acquireOwnershipMutationLease(serviceStatePaths());
-  let replacementRefusal: string | null = null;
-  try {
-  // Ownership can change while registry and stop work is in flight. Unknown at this exact
-  // boundary blocks replacement; a confirmed desktop claim still permits updating the idle
-  // npm installation while leaving the bundled sidecar alone.
+  // Re-read even though cooperating ownership changes are fenced by the lease: an unreadable
+  // or externally replaced record still blocks replacement at the final package boundary.
   const replacementOwnership = await resolvedRuntimeOwnership();
   const replacementPlan = planUpdateRuntimeHandling({
     ...replacementOwnership,
