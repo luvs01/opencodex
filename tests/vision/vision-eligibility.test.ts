@@ -288,6 +288,55 @@ describe("vision eligibility core", () => {
     expect(requiresVisionPreprocessing(config, custom, id, "Gemini")).toBe(false);
   });
 
+  test("11i. an override preset keeps vendor verdicts only at declared endpoints", () => {
+    // `moonshot` sets allowBaseUrlOverride + baseUrlChoices, so routing honors a configured
+    // URL — including the "custom" choice. The generated moonshot bundle can therefore only
+    // speak while the configured endpoint is a declared one (the preset default or a listed
+    // choice); an arbitrary gateway falls back to unknown.
+    const customGateway = {
+      adapter: "openai-chat",
+      authMode: "key",
+      baseUrl: "https://gateway.example/v1",
+    } as const;
+    const config = configWithProviders({ moonshot: customGateway });
+    const candidate = { provider: "moonshot", id: "kimi-k2.5" };
+
+    expect(modelAcceptsImageInput(config, candidate)).toBeUndefined();
+    expect(requiresVisionPreprocessing(config, customGateway, candidate.id, candidate.provider)).toBe(false);
+
+    const declaredChina = {
+      adapter: "openai-chat",
+      authMode: "key",
+      baseUrl: "https://api.moonshot.cn/v1",
+    } as const;
+    const china = configWithProviders({ moonshot: declaredChina });
+    expect(modelAcceptsImageInput(china, candidate)).toBe(true);
+    expect(requiresVisionPreprocessing(china, declaredChina, candidate.id, candidate.provider)).toBe(false);
+
+    const canonical = configWithProviders({ moonshot: {
+      adapter: "openai-chat",
+      authMode: "key",
+      baseUrl: "https://api.moonshot.ai/v1",
+    } as const });
+    expect(modelAcceptsImageInput(canonical, candidate)).toBe(true);
+  });
+
+  test("11j. a case-varied name on a declared former endpoint keeps the verdict", () => {
+    // `zai` declares its pre-move Chat endpoint through destinationAliases: a saved `ZAI`
+    // row — case-varied, so routing serves it as custom — still points at a vendor-owned
+    // destination, so the generated text-only verdict for glm-5.3 applies.
+    const provider = {
+      adapter: "openai-chat",
+      authMode: "key",
+      baseUrl: "https://api.z.ai/api/coding/paas/v4",
+    } as const;
+    const config = configWithProviders({ ZAI: provider });
+    const candidate = { provider: "ZAI", id: "glm-5.3" };
+
+    expect(modelAcceptsImageInput(config, candidate)).toBe(false);
+    expect(requiresVisionPreprocessing(config, provider, candidate.id, candidate.provider)).toBe(true);
+  });
+
   test("12. only the selected Anthropic OAuth provider contributes Anthropic options", () => {
     const config = configWithProviders({
       anthropic: {

@@ -153,7 +153,10 @@ function advertisesImageInput(modalities: readonly string[] | undefined): boolea
 
 /** Vendor-table modalities for a routed row, or undefined when the table has no opinion. */
 function metadataImageInput(provider: string, modelId: string): boolean | undefined {
-  const resolved = resolveMetadataProvider(provider) ?? provider;
+  // Bundle keys are lowercase, so a case-varied configured name (e.g. `ZAI`) folds the same
+  // way resolveMetadataProvider folds its aliases; the transport guard above decides whether
+  // that bundle is allowed to speak for the destination at all.
+  const resolved = resolveMetadataProvider(provider) ?? provider.toLowerCase();
   const meta = getModelMetadataCaseInsensitive(resolved, modelId);
   return advertisesImageInput(meta?.input);
 }
@@ -285,9 +288,12 @@ function modelAcceptsImageInputWithCache(
   // exact id only, so vendor metadata is authoritative only while the configured adapter and
   // endpoint still belong to the registry row that owns that name — where "owns" includes
   // canonical metadata aliases like `gemini` or `anthropic-key`, resolved to the entry that
-  // declares them and then matched on the configured transport itself rather than the owner's
-  // pinning rule. Otherwise the capability is unknown and request dispatch must preserve the
-  // custom destination's image boundary.
+  // declares them, and where "belong" means the configured adapter/auth/endpoint literally
+  // equals a declared destination (the fixed transport, a `baseUrlChoices` endpoint, or a
+  // `destinationAliases` former endpoint) rather than reusing the owner's pinning rule. An
+  // `allowBaseUrlOverride` or `preserveCustomDestination` exact id is bound the same way,
+  // because routing honors its configured URL. Otherwise the capability is unknown and
+  // request dispatch must preserve the custom destination's image boundary.
   if (provider !== undefined && !providerMatchesRegistryTransportOrAlias(candidate.provider, provider)) return undefined;
   return metadataImageInput(candidate.provider, candidate.id);
 }
