@@ -1,0 +1,31 @@
+name: Astra model refusal regression
+on:
+  push:
+    branches: [diag/astra-refusal-canary]
+permissions:
+  contents: read
+concurrency:
+  group: astra-refusal-canary-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  refusal-recovery:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - name: Checkout exact recovery fix
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          ref: 6443712af4fc7440728555d78340297c5109d2ba
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Verify revision
+        run: git rev-parse HEAD
+      - name: Account and transport regression files
+        run: bun test --isolate --timeout 60000 ./tests/codex-integration/codex-account-selection-preferences.test.ts ./tests/codex-integration/codex-model-denial-evidence.test.ts ./tests/responses/ws-upstream.test.ts ./tests/server/server-auth.test.ts
