@@ -24,6 +24,13 @@ description: Run the opencodex proxy locally against a scratch home and exercise
   — loopback bind avoids the server-auth assert. Use the env vars AND the config
   disables together; either alone leaves a write path open (e.g. a disabled
   integration still prunes its owned files under the real home).
+- Residual writes the recipe does NOT cover (macOS only, opencodex-owned artifacts
+  only): startup always runs `refreshOwnedRaycastCatalog` (rewrites an existing
+  opencodex-owned Raycast provider entry under the OS home — no env override) and
+  `reconcileShellHook` (removes the opencodex-marked block from `~/.zshrc` when the
+  system env is inactive — `CLAUDE_CONFIG_DIR` does not redirect it). Harmless on a
+  box with neither installed; for hermetic isolation on macOS run under a disposable
+  OS user/home instead.
 - Management auth: set `OPENCODEX_ADMIN_AUTH_TOKEN` (any non-empty string works for the env
   source). If unset, the server mints `admin-api-token` in OPENCODEX_HOME on first start.
 - Start foreground: `bun run src/cli/index.ts start --port <testport>`
