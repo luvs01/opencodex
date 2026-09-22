@@ -23,8 +23,7 @@
         "fail-fast": false,
         "matrix": {
           "shard": [
-            1,
-            2
+            1
           ]
         }
       },
@@ -35,7 +34,7 @@
           "with": {
             "persist-credentials": false,
             "fetch-tags": true,
-            "ref": "abdccbe59d68ca5dd5632a04d6440a6cb6a443a3"
+            "ref": "cb41ba3b4c60798dec1110edf394844b9c49b74e"
           }
         },
         {
