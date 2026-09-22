@@ -204,6 +204,7 @@ export async function prepareAdapterExchange(
   // selection the upcoming send would use. Selection is mutable while a request waits: run the
   // dispatch binding's revalidation before evaluating a local terminal, or a stale-credential hit
   // suppresses work the send path would have moved onto the newly selected credential.
+  let selectionCurrent = true;
   if (
     transportState.activeAdapter.localTerminal
     && !selectionIsCurrent(adapterBindings.get(transportState.activeAdapter))
@@ -213,9 +214,14 @@ export async function prepareAdapterExchange(
       bindRouteReasoningReplayScope({ parsed, providerName: route.providerName, provider: route.provider,
         adapterName: transportState.activeAdapter.name,
         oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot });
-    } catch { /* the send path surfaces a failed refresh; a scope miss only skips suppression */ }
+    } catch {
+      // A failed refresh leaves the route stale; a scope evaluated under it could still hit a
+      // record the replaced credential made and return success where the credential error
+      // belongs. The send path re-validates and surfaces that error on its own terms.
+      selectionCurrent = false;
+    }
   }
-  const localTerminal = transportState.activeAdapter.localTerminal?.(parsed);
+  const localTerminal = selectionCurrent ? transportState.activeAdapter.localTerminal?.(parsed) : undefined;
   if (localTerminal) {
     logCtx.localTerminalReason = localTerminal.reason;
     // Mark the physical attempt too, not just the parent row. `finishRequestAttempt` finalizes the

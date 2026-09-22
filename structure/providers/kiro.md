@@ -115,16 +115,19 @@ Conversation, admission, and route are captured eagerly — they belong to the a
 but the serving credential resolves lazily at check/record time. Kiro key-pool and OAuth failover
 can swap the physical transport after the bind, and every rotation site rewrites
 `route.provider`, so a deferred resolver lands the record under the credential that actually
-served instead of the one that failed. For key-authenticated routes the credential element is the
-non-secret `apiKeyAccountLogLabel` of the active `_apiKeyAttempt` (or a fresh capture of the
-current selection); an OAuth snapshot account id wins when one is bound, and the Codex auth
+served instead of the one that failed. For key-authenticated routes the credential element is
+`credentialIdentity` — the digest of the resolved wire credential, not the configured
+`env:`/`keychain:` reference, so a rotation behind a stable expression terminates the old
+identity's scope; an OAuth snapshot account id wins when one is bound, and the Codex auth
 context is the last resort — different keys therefore never share a scope.
 
 Because the credential resolves lazily, the check must read the same selection the upcoming send
 would use, and selection is mutable while a request waits. `prepareAdapterExchange` therefore
 runs the dispatch binding's staleness check (`selectionIsCurrent`, `refreshDispatchAdapter`) before
 evaluating `localTerminal`, so a record a since-replaced credential made cannot suppress work the
-send path would have moved onto the live one.
+send path would have moved onto the live one. A failed refresh leaves the route stale, so the
+terminal is skipped entirely and the ordinary send path surfaces the credential error instead
+of a stale-credential hit masquerading as success.
 
 A bare log-conversation digest is too wide here: it deliberately coalesces a parent's parallel
 subagents, and a scope that coarse would let one child's delivered answer suppress a sibling's

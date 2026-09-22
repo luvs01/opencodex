@@ -20,8 +20,8 @@ describe("adapter dispatch local-terminal selection revalidation", () => {
   const FRESH_SCOPE = "b".repeat(32);
   const BUILD_SENTINEL = "reached-build-request";
 
-  const staleProvider = { authMode: "key", apiKey: "kiro-key-a" } as unknown as OcxProviderConfig;
-  const freshProvider = { authMode: "key", apiKey: "kiro-key-b" } as unknown as OcxProviderConfig;
+  const staleProvider = { authMode: "key", apiKey: "kiro-key-a", baseUrl: "https://example.test" } as unknown as OcxProviderConfig;
+  const freshProvider = { authMode: "key", apiKey: "kiro-key-b", baseUrl: "https://example.test" } as unknown as OcxProviderConfig;
 
   const messages = [
     { role: "user", content: [{ type: "text", text: "question" }] },
@@ -151,6 +151,24 @@ describe("adapter dispatch local-terminal selection revalidation", () => {
     expect(exchange.calls.refresh).toBe(1);
     const json = await response.json() as { output?: unknown[] };
     expect(json.output ?? []).toHaveLength(0);
+  });
+
+  test("a failed refresh skips the terminal check entirely", async () => {
+    // The record was made under the stale credential and would still match under it: evaluating
+    // the terminal after a failed refresh is what turns the credential error into a fake success.
+    seedRecord(STALE_SCOPE);
+    const route = { providerName: "kiro-test", modelId: "gpt-5.6-sol", provider: staleProvider };
+    const parsed = makeParsed();
+    bindTurnTerminationScope(parsed, () => (route.provider === staleProvider ? STALE_SCOPE : FRESH_SCOPE));
+    const exchange = makeExchange({
+      parsed, route, current: false,
+      onRefresh: () => { throw new Error("credential unavailable"); },
+    });
+
+    const response = await exchange.run();
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain(BUILD_SENTINEL);
+    expect(exchange.calls.refresh).toBe(1);
   });
 
   test("a current binding is not re-resolved before the terminal check", async () => {

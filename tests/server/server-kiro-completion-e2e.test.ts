@@ -763,6 +763,76 @@ describe("Kiro completion through public server endpoints", () => {
       upstream.server.stop(true);
     }
   });
+
+  test("a delivered final answer does not follow an env-backed key through rotation", async () => {
+    // The configured apiKey is an env reference: the attempt's reference stays constant across a
+    // rotation while the wire credential changes. Identity must follow the resolved value, or the
+    // rotated key inherits the exhausted key's suppression record.
+    const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
+    const upstream = scriptedKiroUpstream([
+      completionFrames(deliveredAnswer, "completion-a"),
+      completionFrames("This replay is a different credential's work.", "completion-b"),
+    ]);
+    const config = kiroConfig(upstream.server.url.toString());
+    config.providers["kiro-test"].apiKey = "$OCX_KIRO_E2E_ROTATED_KEY";
+    saveConfig(config);
+    const previousEnv = process.env.OCX_KIRO_E2E_ROTATED_KEY;
+    process.env.OCX_KIRO_E2E_ROTATED_KEY = "kiro-key-a";
+    const proxy = startServer(0);
+    const tools = [{ type: "function", name: "bash", description: "Run a command", parameters: { type: "object" } }];
+    const replayBody = JSON.stringify({
+      model: "kiro-test/gpt-5.6-sol",
+      stream: false,
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "what is code mode" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: deliveredAnswer }] },
+      ],
+      tools,
+    });
+    try {
+      const first = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-env-rotation-thread" },
+        body: JSON.stringify({
+          model: "kiro-test/gpt-5.6-sol",
+          stream: false,
+          input: "what is code mode",
+          tools,
+        }),
+      });
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(upstream.requests).toHaveLength(1);
+
+      // Control: replaying under the SAME resolved key still suppresses.
+      const sameKeyReplay = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-env-rotation-thread" },
+        body: replayBody,
+      });
+      expect(sameKeyReplay.status).toBe(200);
+      expect((await sameKeyReplay.json() as { output?: unknown[] }).output ?? []).toHaveLength(0);
+      expect(upstream.requests).toHaveLength(1);
+
+      // Rotate the credential behind the stable env reference. The record belongs to key-a's
+      // serving identity, so under the resolved-credential scope this is new work and must send —
+      // a reference-keyed label would suppress it, which is the leak the review flagged.
+      process.env.OCX_KIRO_E2E_ROTATED_KEY = "kiro-key-b";
+      const rotatedReplay = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-env-rotation-thread" },
+        body: replayBody,
+      });
+      expect(rotatedReplay.status).toBe(200);
+      await rotatedReplay.text();
+      expect(upstream.requests).toHaveLength(2);
+    } finally {
+      if (previousEnv === undefined) delete process.env.OCX_KIRO_E2E_ROTATED_KEY;
+      else process.env.OCX_KIRO_E2E_ROTATED_KEY = previousEnv;
+      await proxy.stop(true);
+      upstream.server.stop(true);
+    }
+  });
 });
 
 // The behavioural tests above prove nothing was SENT. This one proves the request log says so.

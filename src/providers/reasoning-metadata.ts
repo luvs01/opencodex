@@ -175,7 +175,7 @@ function modelLadderValue(
  * so both sides still bind learned refusals to the same wire credential, and a rotation behind
  * a stable reference starts clean instead of inheriting the previous credential's refusals.
  */
-function credentialIdentity(provider: OcxProviderConfig): string | undefined {
+export function credentialIdentity(provider: OcxProviderConfig): string | undefined {
   const resolved = provider._apiKeyAttempt?.reference !== undefined
     ? provider.apiKey
     : resolveProviderApiKey(provider.apiKey);

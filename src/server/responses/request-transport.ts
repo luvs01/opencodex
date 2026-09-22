@@ -34,8 +34,7 @@ import {
   noteGenericPoolSelection,
 } from "../../oauth/generic-account-failover";
 import { stampOAuthAccountLabel, usesApiKeyAccount } from "../../providers/label";
-import { apiKeyAccountLogLabel } from "../../codex/account-label";
-import { captureProviderApiKeySelection } from "../../providers/api-key-selection-capture";
+import { credentialIdentity } from "../../providers/reasoning-metadata";
 import { resolveProviderTransport } from "../../providers/xai-transport";
 import { resolveCopilotApiBaseUrl } from "../../oauth/github-copilot";
 import {
@@ -683,13 +682,12 @@ export async function prepareResponsesTransport(
     bindTurnTerminationScope(parsed, exactConversation
       ? () => {
         const provider = route.provider;
+        // credentialIdentity hashes the resolved wire credential, not the configured
+        // reference: an env:keychain-backed key can rotate behind a stable expression,
+        // and the scope must follow what was actually sent, never the retained secret.
         const servingAccount = replayOAuthCredentialSnapshot?.accountId
-          ?? (usesApiKeyAccount(provider)
-            ? apiKeyAccountLogLabel(
-              route.providerName,
-              provider._apiKeyAttempt ?? captureProviderApiKeySelection(provider),
-            )
-            : codexLogAccountId(admissionState.authCtx));
+          ?? (usesApiKeyAccount(provider) ? credentialIdentity(provider) : undefined)
+          ?? codexLogAccountId(admissionState.authCtx);
         return normalizeLogConversationId(JSON.stringify([
           exactConversation,
           admissionIdentity,
