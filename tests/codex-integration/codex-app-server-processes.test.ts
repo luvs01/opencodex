@@ -716,13 +716,13 @@ describe("Codex app-server process matching (#476)", () => {
         listSnapshots: () => snapshots,
         readStartMs: pid => pid === 7 ? 1_000 : 3_000,
         catalogMtimeMs: () => 2_000,
+        modelsCacheMtimeMs: () => 4_000,
       },
     });
     expect(result.warned).toBe(true);
-    expect(result.processes.map(process => process.pid)).toEqual([7]);
+    expect(result.processes.map(process => process.pid)).toEqual([7, 8]);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("PID: 7");
-    expect(errors[0]).not.toContain("8");
+    expect(errors[0]).toContain("PIDs: 7, 8");
   });
 
   test("afterCatalogWriteHandleAppServers stays quiet for fresh and unknown observations", () => {

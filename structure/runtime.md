@@ -65,7 +65,7 @@ Catalog-derived reasoning-level diagnostics are escaped only at the human-output
 `ocx system codex-restart` requests a full Codex desktop-app restart and app-server restarts through the management endpoint. `src/cli/capabilities.ts` names that scope in its summary and `--yes` description; `src/cli/system-command.ts` explains the desktop interruption when confirmation is missing and sends no restart request. Human output says the restart was requested, while `--json` preserves the complete server result, including skipped or refused desktop outcomes.
 
 After a CLI catalog/cache write, advisory restart guidance compares each running Codex app-server's
-start time with the written catalog mtime. It reports only processes proven stale; a fresh or
+start time with the newest catalog or models-cache mtime. It reports only processes proven stale; a fresh or
 unreadable observation does not claim that another restart is required. Explicit
 `--restart-codex` and `--restart-app-server-only` retain their operator-consent semantics and act on
 verified matching processes regardless of the advisory freshness result.

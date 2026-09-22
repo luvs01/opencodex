@@ -14,7 +14,7 @@ import {
   resolveTrustedWindowsPowerShellExe,
   resolveTrustedWindowsTaskkillExe,
 } from "../lib/windows-elevation";
-import { readCodexCatalogPath } from "./catalog/parsing";
+import { activeCodexModelsCachePath, readCodexCatalogPath } from "./catalog/parsing";
 
 export const STALE_CODEX_APP_SERVER_HINT =
   "If Codex still shows an older model list, run `ocx sync --restart-codex`: it restarts the long-lived app-server "
@@ -141,6 +141,7 @@ export interface CodexAppServerProcessIo {
   /** Async batch start-time seam used by the request-path Windows collector. */
   readStartMsBatchAsync?: (pids: readonly number[]) => Promise<Map<number, number | null>>;
   catalogMtimeMs?: () => number | null;
+  modelsCacheMtimeMs?: () => number | null;
 }
 
 function execFileTextAsync(
@@ -754,6 +755,10 @@ function defaultCatalogMtimeMs(): number | null {
   }
 }
 
+function defaultModelsCacheMtimeMs(): number | null {
+  try { return statSync(activeCodexModelsCachePath()).mtimeMs; } catch { return null; }
+}
+
 function codexAppServerProcessesFromSnapshots(
   snapshots: readonly ProcessSnapshot[],
 ): CodexAppServerProcess[] {
@@ -1254,12 +1259,19 @@ export function afterCatalogWriteHandleAppServers(
     const observed = computeCodexAppServerCatalogStatus(options.io ?? {});
     const starts = new Map(observed.status.processes.map(process => [process.pid, process.startedAtMs]));
     const catalogMtimeMs = observed.status.catalogMtimeMs;
+    // Injected catalog clocks are self-contained test/probe observations. Production
+    // also includes cache-only writes, whose mtime can be newer than the catalog.
+    const cacheMtimeMs = options.io?.modelsCacheMtimeMs
+      ? options.io.modelsCacheMtimeMs()
+      : options.io?.catalogMtimeMs ? null : defaultModelsCacheMtimeMs();
+    const writeMtimeMs = catalogMtimeMs === null ? cacheMtimeMs
+      : cacheMtimeMs === null ? catalogMtimeMs : Math.max(catalogMtimeMs, cacheMtimeMs);
     const processes = observed.processes.filter(process => !excluded.has(process.pid));
-    const staleProcesses = catalogMtimeMs === null
+    const staleProcesses = writeMtimeMs === null
       ? []
       : processes.filter(process => {
         const startedAtMs = starts.get(process.pid);
-        return startedAtMs !== null && startedAtMs !== undefined && startedAtMs <= catalogMtimeMs;
+        return startedAtMs !== null && startedAtMs !== undefined && startedAtMs <= writeMtimeMs;
       });
     if (staleProcesses.length === 0) return { processes, warned: false, hint };
     options.log?.error(formatStaleCodexAppServerWarning(staleProcesses));
