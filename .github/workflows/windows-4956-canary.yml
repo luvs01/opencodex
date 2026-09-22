@@ -25,5 +25,5 @@ jobs:
         run: |
           git rev-parse HEAD
           bun --version
-      - name: Windows fixture regressions
-        run: bun test --isolate --timeout 60000 ./tests/cli/cli-connect-readiness.test.ts ./tests/codex-integration/codex-reset-credit-auto-redeem.test.ts
+      - name: Previously reported listener cancellation
+        run: bun test --isolate --timeout 15000 ./tests/server/server-management-auth.test.ts -t "canceling an incomplete context body releases the actual listener turn"
