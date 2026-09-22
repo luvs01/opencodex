@@ -291,8 +291,10 @@ function modelAcceptsImageInputWithCache(
   // declares them, and where "belong" means the configured adapter/auth/endpoint literally
   // equals a declared destination (the fixed transport, a `baseUrlChoices` endpoint, or a
   // `destinationAliases` former endpoint) rather than reusing the owner's pinning rule. An
-  // `allowBaseUrlOverride` or `preserveCustomDestination` exact id is bound the same way,
-  // because routing honors its configured URL. Otherwise the capability is unknown and
+  // `allowBaseUrlOverride` exact id is bound to the same declared set but only on the
+  // endpoint, because routing canonicalizes its adapter and auth and preserves just the
+  // configured URL; a `preserveCustomDestination` row is compared literally, because
+  // routing serves the stored row unchanged. Otherwise the capability is unknown and
   // request dispatch must preserve the custom destination's image boundary.
   if (provider !== undefined && !providerMatchesRegistryTransportOrAlias(candidate.provider, provider)) return undefined;
   return metadataImageInput(candidate.provider, candidate.id);

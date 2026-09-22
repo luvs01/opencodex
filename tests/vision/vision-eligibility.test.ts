@@ -337,6 +337,22 @@ describe("vision eligibility core", () => {
     expect(requiresVisionPreprocessing(config, provider, candidate.id, candidate.provider)).toBe(true);
   });
 
+  test("11k. a canonical override preset missing authMode keeps the verdict", () => {
+    // Routing canonicalizes an exact override id to the entry's adapter and derived auth —
+    // only the configured URL reaches the wire — so a legacy `google-antigravity` row that
+    // predates authMode still lands on the declared Google transport, and the generated
+    // text-only verdict for gemini-live-2.5-flash-preview-native-audio applies.
+    const provider = {
+      adapter: "google",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+    } as const;
+    const config = configWithProviders({ "google-antigravity": provider });
+    const candidate = { provider: "google-antigravity", id: "gemini-live-2.5-flash-preview-native-audio" };
+
+    expect(modelAcceptsImageInput(config, candidate)).toBe(false);
+    expect(requiresVisionPreprocessing(config, provider, candidate.id, candidate.provider)).toBe(true);
+  });
+
   test("12. only the selected Anthropic OAuth provider contributes Anthropic options", () => {
     const config = configWithProviders({
       anthropic: {
