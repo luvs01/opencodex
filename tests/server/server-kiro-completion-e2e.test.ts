@@ -89,16 +89,17 @@ function kiroConfig(baseUrl: string): OcxConfig {
   } as OcxConfig;
 }
 
-function scriptedKiroUpstream(attempts: Uint8Array[][]) {
+function scriptedKiroUpstream(attempts: Array<Uint8Array[] | { status: number; body?: string }>) {
   const requests: Array<Record<string, any>> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       requests.push(await req.json() as Record<string, any>);
-      const frames = attempts.shift();
-      if (!frames) return new Response("unexpected extra Kiro attempt", { status: 500 });
-      return new Response(streamOf(frames), {
+      const attempt = attempts.shift();
+      if (!attempt) return new Response("unexpected extra Kiro attempt", { status: 500 });
+      if (!Array.isArray(attempt)) return new Response(attempt.body ?? "", { status: attempt.status });
+      return new Response(streamOf(attempt), {
         headers: { "content-type": "application/vnd.amazon.eventstream" },
       });
     },
@@ -616,6 +617,97 @@ describe("Kiro completion through public server endpoints", () => {
 
       expect(response.status).toBe(200);
       expect(upstream.requests).toHaveLength(1);
+    } finally {
+      await proxy.stop(true);
+      upstream.server.stop(true);
+    }
+  });
+
+  // The scope must name the credential that SERVED, not the credential selected when the request
+  // was bound. Key-pool failover commits a new key mid-request; a record keyed to the failed key
+  // (or to no key at all, as it was for key-authenticated routes) lets one key's delivered answer
+  // suppress a replay that a different key must answer for itself.
+  test("a recorded final answer follows the serving credential through key failover", async () => {
+    const deliveredAnswer = "Code mode runs JavaScript that calls tools.";
+    const upstream = scriptedKiroUpstream([
+      completionFrames(deliveredAnswer, "completion-a"),
+      { status: 429, body: JSON.stringify({ message: "quota exceeded" }) },
+      completionFrames("A rotated key answered this one.", "completion-b"),
+      completionFrames("This replay is a different credential's work.", "completion-c"),
+    ]);
+    const config = kiroConfig(upstream.server.url.toString());
+    config.providers["kiro-test"].apiKey = "kiro-key-a";
+    config.providers["kiro-test"].apiKeyPool = [
+      { id: "key-a", key: "kiro-key-a" },
+      { id: "key-b", key: "kiro-key-b" },
+    ];
+    saveConfig(config);
+    const proxy = startServer(0);
+    const tools = [{ type: "function", name: "bash", description: "Run a command", parameters: { type: "object" } }];
+    const replayBody = JSON.stringify({
+      model: "kiro-test/gpt-5.6-sol",
+      stream: false,
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "what is code mode" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: deliveredAnswer }] },
+      ],
+      tools,
+    });
+    try {
+      const first = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-key-boundary-thread" },
+        body: JSON.stringify({
+          model: "kiro-test/gpt-5.6-sol",
+          stream: false,
+          input: "what is code mode",
+          tools,
+        }),
+      });
+      expect(first.status).toBe(200);
+      await first.text();
+      expect(upstream.requests).toHaveLength(1);
+
+      // Control: replaying under the SAME committed key still suppresses — the record is only
+      // meaningful if same-credential replays keep short-circuiting.
+      const sameKeyReplay = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-key-boundary-thread" },
+        body: replayBody,
+      });
+      expect(sameKeyReplay.status).toBe(200);
+      expect((await sameKeyReplay.json() as { output?: unknown[] }).output ?? []).toHaveLength(0);
+      expect(upstream.requests).toHaveLength(1);
+
+      // Exhaust key-a on an unrelated conversation so the committed key rotates to key-b. The
+      // insufficient-quota body is what skips Kiro's transient-throttle probe and reaches the
+      // pool rotation -- a bare 429 would just retry key-a inside fetchKiroWithRetry.
+      const rotated = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-key-boundary-other-thread" },
+        body: JSON.stringify({
+          model: "kiro-test/gpt-5.6-sol",
+          stream: false,
+          input: "unrelated task",
+          tools,
+        }),
+      });
+      expect(rotated.status).toBe(200);
+      await rotated.text();
+      expect(upstream.requests).toHaveLength(3);
+
+      // The original conversation replays again, now routed onto key-b. Its delivered answer was
+      // recorded under key-a, so this is a different serving identity's work and must send. Under
+      // the old scope (serving account always null for key routes, or pinned at bind time) this
+      // turn was suppressed — exactly the cross-credential leak the review flagged.
+      const rotatedKeyReplay = await originalFetch(new URL("/v1/responses", proxy.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", session_id: "kiro-key-boundary-thread" },
+        body: replayBody,
+      });
+      expect(rotatedKeyReplay.status).toBe(200);
+      await rotatedKeyReplay.text();
+      expect(upstream.requests).toHaveLength(4);
     } finally {
       await proxy.stop(true);
       upstream.server.stop(true);

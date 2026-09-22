@@ -9,7 +9,7 @@ interface DeliveredFinalAnswerRecord {
   createdAt: number;
 }
 
-const scopesByRequest = new WeakMap<OcxParsedRequest, string>();
+const scopesByRequest = new WeakMap<OcxParsedRequest, string | (() => string | undefined)>();
 const deliveredFinalAnswers = new Map<string, DeliveredFinalAnswerRecord>();
 
 function pruneDeliveredFinalAnswers(at = Date.now()): void {
@@ -58,16 +58,32 @@ function deliveredFinalAnswerText(response: unknown): string | undefined {
 }
 
 /** Bind the normalized per-conversation digest without adding proxy-private fields to the wire body. */
-export function bindTurnTerminationScope(parsed: OcxParsedRequest, scope: string | undefined): void {
-  // Only the normalized log-conversation digest may key this process-wide map. Refusing any raw
-  // fallback prevents a future caller from retaining a client header or account identifier here.
+export function bindTurnTerminationScope(
+  parsed: OcxParsedRequest,
+  scope: string | (() => string | undefined) | undefined,
+): void {
+  // Only the normalized log-conversation digest may key this process-wide map. A bound string must
+  // already BE that digest; a resolver is deferred to read time so a credential rotation after this
+  // bind lands the record under the identity that actually served the answer. Both paths enforce the
+  // digest shape -- refusing any raw value prevents a future caller from retaining a client header
+  // or account identifier here.
+  if (typeof scope === "function") {
+    scopesByRequest.set(parsed, scope);
+    return;
+  }
   if (!scope || !/^[0-9a-f]{32}$/.test(scope)) return;
   scopesByRequest.set(parsed, scope);
 }
 
+function recordedScope(parsed: OcxParsedRequest): string | undefined {
+  const bound = scopesByRequest.get(parsed);
+  const scope = typeof bound === "function" ? bound() : bound;
+  return typeof scope === "string" && /^[0-9a-f]{32}$/.test(scope) ? scope : undefined;
+}
+
 /** Remember only a final-answer message the proxy actually emitted for this exact conversation. */
 export function rememberDeliveredFinalAnswer(parsed: OcxParsedRequest, response: unknown): void {
-  const scope = scopesByRequest.get(parsed);
+  const scope = recordedScope(parsed);
   if (!scope) return;
   const text = deliveredFinalAnswerText(response);
   if (!text) return;
@@ -88,7 +104,7 @@ export function hasRecordedTrailingDeliveredFinalAnswer(
   parsed: OcxParsedRequest,
   messages: readonly OcxMessage[],
 ): boolean {
-  const scope = scopesByRequest.get(parsed);
+  const scope = recordedScope(parsed);
   if (!scope) return false;
   pruneDeliveredFinalAnswers();
   const record = deliveredFinalAnswers.get(scope);

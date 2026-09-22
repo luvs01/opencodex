@@ -34,6 +34,8 @@ import {
   noteGenericPoolSelection,
 } from "../../oauth/generic-account-failover";
 import { stampOAuthAccountLabel, usesApiKeyAccount } from "../../providers/label";
+import { apiKeyAccountLogLabel } from "../../codex/account-label";
+import { captureProviderApiKeySelection } from "../../providers/api-key-selection-capture";
 import { resolveProviderTransport } from "../../providers/xai-transport";
 import { resolveCopilotApiBaseUrl } from "../../oauth/github-copilot";
 import {
@@ -664,21 +666,35 @@ export async function prepareResponsesTransport(
   if (adapter.name === "kiro") {
     // A log conversation deliberately coalesces a parent's parallel subagents, but a delivered
     // final answer may suppress work only for the exact child and serving identity that emitted it.
-    // Hash the composite before binding so no caller, account, or route identifier is retained.
+    // Conversation and admission are bound to the admitted request and captured eagerly; the serving
+    // credential is resolved lazily at check/record time instead. Kiro key-pool and OAuth failover
+    // can swap the physical transport after this bind -- a record pinned to the credential that
+    // failed would replay or suppress under the wrong identity, and `route.provider` is the field
+    // every rotation site rewrites, so reading it late tracks the credential that actually served.
+    // Hash the composite before binding so no caller, account, key, or route identifier is retained.
     const exactConversation = sessionLaneIdFromRequest(req.headers)
       ?? normalizeLogConversationId(parsed._cursorConversationId);
     const admissionIdentity = options.admission?.kind === "configured"
       ? `configured:${options.admission.keyId}`
       : options.admission?.kind;
-    const servingAccount = replayOAuthCredentialSnapshot?.accountId ?? codexLogAccountId(admissionState.authCtx);
     bindTurnTerminationScope(parsed, exactConversation
-      ? normalizeLogConversationId(JSON.stringify([
-        exactConversation,
-        admissionIdentity,
-        route.providerName,
-        route.modelId,
-        servingAccount,
-      ]))
+      ? () => {
+        const provider = route.provider;
+        const servingAccount = replayOAuthCredentialSnapshot?.accountId
+          ?? (usesApiKeyAccount(provider)
+            ? apiKeyAccountLogLabel(
+              route.providerName,
+              provider._apiKeyAttempt ?? captureProviderApiKeySelection(provider),
+            )
+            : codexLogAccountId(admissionState.authCtx));
+        return normalizeLogConversationId(JSON.stringify([
+          exactConversation,
+          admissionIdentity,
+          route.providerName,
+          route.modelId,
+          servingAccount,
+        ]));
+      }
       : undefined);
   }
   bindRouteReasoningReplayScope({

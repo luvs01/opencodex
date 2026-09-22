@@ -104,9 +104,18 @@ keyed by a bound scope rather than by the parsed request's fields. The scope is 
 `src/server/responses/request-transport.ts` after the final adapter is resolved, and only when
 that adapter is `kiro`: the digest covers the conversation lane (`sessionLaneIdFromRequest`, or
 the normalized Cursor conversation id when no lane headers exist), the admission identity, the
-routed provider and model, and the serving account. The composite is hashed before binding, so
-no caller, account or route identifier is retained, and a request with no conversation identity
-binds no scope at all.
+routed provider and model, and the serving credential. The composite is hashed before binding, so
+no caller, account, key or route identifier is retained, and a request with no conversation
+identity binds no scope at all.
+
+Conversation, admission, and route are captured eagerly — they belong to the admitted request —
+but the serving credential resolves lazily at check/record time. Kiro key-pool and OAuth failover
+can swap the physical transport after the bind, and every rotation site rewrites
+`route.provider`, so a deferred resolver lands the record under the credential that actually
+served instead of the one that failed. For key-authenticated routes the credential element is the
+non-secret `apiKeyAccountLogLabel` of the active `_apiKeyAttempt` (or a fresh capture of the
+current selection); an OAuth snapshot account id wins when one is bound, and the Codex auth
+context is the last resort — different keys therefore never share a scope.
 
 A bare log-conversation digest is too wide here: it deliberately coalesces a parent's parallel
 subagents, and a scope that coarse would let one child's delivered answer suppress a sibling's
