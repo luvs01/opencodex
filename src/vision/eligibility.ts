@@ -26,7 +26,7 @@ import { getModelMetadataCaseInsensitive, resolveMetadataProvider } from "../gen
 import { nativeInputModalities } from "../codex/catalog/metadata";
 import { SUPPORTED_NATIVE_OPENAI_SLUGS } from "../codex/catalog/native-models";
 import { enrichProviderFromRegistry } from "../providers/derive";
-import { providerMatchesRegistryTransportOrAlias } from "../providers/registry";
+import { providerMatchesRegistryTransportOrAlias } from "../providers/registry-transport";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers-destination";
 
 /**
