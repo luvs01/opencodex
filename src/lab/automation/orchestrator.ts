@@ -406,6 +406,13 @@ export async function runLabAutomationTick(configDir?: string): Promise<void> {
 
 export function startLabAutomationScheduler(configDir?: string): void {
   const key = configKey(configDir);
+  // Same late-request race as enqueueManualLabRun: a policy PUT or CLI enable can resume
+  // after the shutdown sweep already ran. Starting here would reset the latch and leave a
+  // live interval dispatching Lab work outside the completed sweep.
+  if (didRunOptionalShutdownHooks()) {
+    requestLabAutomationShutdown();
+    return;
+  }
   const currentOwner = dispatchDepsByConfigDir.get(key)?.token;
   const existing = schedulerTimers.get(key);
   if (existing) {
@@ -421,6 +428,14 @@ export function startLabAutomationScheduler(configDir?: string): void {
     requestLabAutomationShutdown();
     stopLabAutomationScheduler(configDir);
   });
+  // The sweep may have run in the gap between the entry check and this registration; it
+  // snapshots the registry once, so a hook that landed afterwards is orphaned. Keep the
+  // latch set and never start the timer — the registration stays live so a repeat sweep
+  // still tears this scheduler down.
+  if (didRunOptionalShutdownHooks()) {
+    requestLabAutomationShutdown();
+    return;
+  }
   shutdownRequested = false;
   const { policy, routes } = loadLabAutomationConfig(configDir);
   const now = Date.now();

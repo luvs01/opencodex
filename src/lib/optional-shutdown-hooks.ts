@@ -33,6 +33,11 @@ let hooksRan = false;
  * Registration after a sweep is NOT retro-applied: the hook waits for the next
  * `runOptionalShutdownHooks`, which a draining process never reaches. Callers whose work
  * must not outlive the sweep should gate on `didRunOptionalShutdownHooks`.
+ *
+ * The `hooksRan` latch is process-lifetime: every production caller runs the sweep inside
+ * `drainAndShutdown`, whose callers then exit or hand off to a newly spawned process —
+ * there is no in-process restart after a sweep. `resetOptionalShutdownHooksForTests`
+ * models that fresh process; it is the only way a post-sweep subsystem may start again.
  */
 export function registerOptionalShutdownHook(key: string, hook: ShutdownHook): () => void {
   hooks.set(key, hook);
