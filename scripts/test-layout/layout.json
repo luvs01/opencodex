@@ -204,6 +204,7 @@
     "acl-error-classification.test.ts": "lib",
     "active-registry-admission.test.ts": "codex-integration",
     "adapter-buffered-tool-conformance.test.ts": "adapters",
+    "adapter-dispatch-local-terminal.test.ts": "responses",
     "adapter-error-inline.test.ts": "adapters",
     "adapter-event-oauth-failover.test.ts": "oauth",
     "adapter-inner-send-budget-wiring.test.ts": "adapters",
