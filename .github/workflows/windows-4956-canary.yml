@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout exact fixture fix
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
           ref: 5f9d1046a804e863cc0835340dc6e1781c0bf186
