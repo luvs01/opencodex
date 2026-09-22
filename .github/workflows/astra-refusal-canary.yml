@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
-          ref: 9f5df4ec2f314a340787a6eccd44a729529b6c2e
+          ref: 2149c4b2a921c152226e0cdca6865cd9cdad8a1a
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
       - name: Install dependencies
