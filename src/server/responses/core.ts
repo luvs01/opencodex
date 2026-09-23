@@ -1,4 +1,5 @@
 import { capturePoolQuotaWriter } from "../../codex/account-store";
+import { teeForInspection } from "../inspection-stream";
 import { CODEX_POOL_REFRESH_INCOMPLETE_LOG_REASON } from "../../codex/pool-refresh-backoff";
 import type { Server } from "bun";
 import { recordContextSessionOwner } from "../../codex/context-owner";
@@ -7084,7 +7085,7 @@ async function handleResponsesInner(
           })),
         );
       }
-      const [nativeBody, inspectBody] = passthroughSseBody.tee();
+      const [nativeBody, inspectBody] = teeForInspection(passthroughSseBody);
       const turnAc = new AbortController();
       const clientGone = new AbortController();
       linkAbortSignal(upstream, turnAc.signal);

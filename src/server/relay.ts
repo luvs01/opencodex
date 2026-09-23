@@ -26,6 +26,7 @@ import {
   MAX_CLIENT_SSE_FRAME_BYTES,
 } from "./sse-frame-buffer";
 import { replaceSseDataPayload } from "./sse-payload-rewrite";
+import { inspectNonStreamBody } from "./inspection-stream";
 
 const nativePassthroughSseResponses = new WeakSet<Response>();
 const eagerRelaySseResponses = new WeakSet<Response>();
@@ -718,26 +719,19 @@ export function responseWithDeferredRequestLog(
   }
   if (!response.body || !contentType.includes("text/event-stream")) {
     if (response.body && (contentType.includes("application/json") || response.status >= 400)) {
-      const finalizeJsonLog = async () => {
-        const text = await response.text();
-        // Non-JSON error bodies: inspect/log only a bounded prefix (the stored
-        // upstreamError is 500 chars anyway); the FULL text is still forwarded to the
-        // client below, unchanged. JSON bodies keep full inspection (usage parsing).
-        const isJson = contentType.includes("application/json");
-        inspectResponseLogJson(logCtx, isJson ? text : text.slice(0, 8192));
-        addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
-        return text;
-      };
-      const body = new ReadableStream<Uint8Array>({
-        async start(controller) {
-          try {
-            controller.enqueue(new TextEncoder().encode(await finalizeJsonLog()));
-            controller.close();
-          } catch (err) {
-            addFinalRequestLog(requestId, start, logCtx, 502, { closeReason: "non_stream" }, addLog);
-            try { controller.error(err); } catch { /* already torn down */ }
+      const isJson = contentType.includes("application/json");
+      const body = inspectNonStreamBody(response.body, isJson, (kind, text) => {
+        if (text !== undefined) inspectResponseLogJson(logCtx, text);
+        else {
+          logCtx.activeTierMetadata?.markResponseUnparseable();
+          if (isUsageDebugEnabled()) {
+            logCtx.usageDebugBodyKind = "json";
+            logCtx.usageDebugBodySample = "[JSON inspection omitted: body incomplete or inspection limit exceeded]";
           }
-        },
+        }
+        addFinalRequestLog(requestId, start, logCtx,
+          kind === "cancel" ? 499 : kind === "error" ? 502 : response.status,
+          { closeReason: kind === "cancel" ? "client_cancel" : "non_stream" }, addLog);
       });
       return new Response(body, {
         status: response.status,
