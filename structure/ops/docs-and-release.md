@@ -333,6 +333,13 @@ The release must fail before `npm publish` if npm, the Git tag, or the GitHub Re
 requested version. This prevents partial releases where npm is published but GitHub Release creation
 fails afterward.
 
+After npm acknowledges publication, the registry smoke retries within one bounded replication
+window until both `@<version>` exists and the requested dist-tag resolves to that exact version.
+Temporary failure to observe the version remains a recorded pending verification and never retries
+`npm publish`. If the immutable version becomes visible but the tag remains stale or unreadable for
+the whole window, the release job fails before creating Git metadata so an operator must repair the
+tag explicitly; it never silently treats stable and preview channels as interchangeable.
+
 Two ordering checks run before publication. The version on `origin/dev` must strictly outrank the
 release target, proving the pre-move has landed. After a fresh tag fetch, the release target must also
 outrank the global release-tag set. The only equality exception is a dry run whose existing tag points

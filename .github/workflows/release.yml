@@ -773,6 +773,7 @@ jobs:
         if: ${{ inputs.dry-run != true && steps.publication.outputs.published == 'true' }}
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+          NPM_DIST_TAG: ${{ inputs.tag }}
           PUBLISHED: ${{ steps.publication.outputs.published }}
         run: |
           set -euo pipefail
@@ -781,21 +782,34 @@ jobs:
             exit 1
           }
           pkg_name="$(node -p "require('./package.json').name")"
+          version_seen=false
           for attempt in $(seq 1 6); do
             if VERSION=$(timeout --kill-after=2s 10s npm view "${pkg_name}@${RELEASE_VERSION}" version --fetch-retries=0 --fetch-timeout=8000 2>/dev/null); then
               if [ "$VERSION" != "$RELEASE_VERSION" ]; then
                 echo "::error::Registry returned an unexpected version; refusing to create a release"
                 exit 1
               fi
-              echo "registry version=$VERSION"
-              echo "verification=verified" >> "$GITHUB_OUTPUT"
-              echo "Registry verified ${pkg_name}@${RELEASE_VERSION}." >> "$GITHUB_STEP_SUMMARY"
-              timeout --kill-after=2s 10s npm dist-tag ls "$pkg_name" --fetch-retries=0 --fetch-timeout=8000 || echo "::warning::Could not read npm dist-tags; exact version was verified"
-              exit 0
+              version_seen=true
+              if TAG_VERSION=$(timeout --kill-after=2s 10s npm view "${pkg_name}@${NPM_DIST_TAG}" version --fetch-retries=0 --fetch-timeout=8000 2>/dev/null); then
+                if [ "$TAG_VERSION" = "$RELEASE_VERSION" ]; then
+                  echo "registry version=$VERSION dist-tag[$NPM_DIST_TAG]=$TAG_VERSION"
+                  echo "verification=verified" >> "$GITHUB_OUTPUT"
+                  echo "Registry verified ${pkg_name}@${RELEASE_VERSION} and dist-tag ${NPM_DIST_TAG}." >> "$GITHUB_STEP_SUMMARY"
+                  exit 0
+                fi
+                echo "::notice::Registry dist-tag ${NPM_DIST_TAG} still resolves to ${TAG_VERSION} (attempt $attempt/6)"
+              else
+                echo "::notice::Registry dist-tag ${NPM_DIST_TAG} is not readable yet (attempt $attempt/6)"
+              fi
+            else
+              echo "::notice::Registry version lookup not confirmed (attempt $attempt/6)"
             fi
-            echo "::notice::Registry lookup not confirmed (attempt $attempt/6)"
             if [ "$attempt" -lt 6 ]; then sleep 5; fi
           done
+          if [ "$version_seen" = "true" ]; then
+            echo "::error::${pkg_name}@${RELEASE_VERSION} exists, but dist-tag ${NPM_DIST_TAG} did not resolve to it after the bounded replication window"
+            exit 1
+          fi
           echo "verification=pending" >> "$GITHUB_OUTPUT"
           echo "::warning::npm publish succeeded, but registry verification remains pending; continuing GitHub release creation without republishing"
           echo "Publication acknowledged for ${pkg_name}@${RELEASE_VERSION}; registry verification pending after bounded reads. Inspect the registry before announcing availability. Do not republish this version." >> "$GITHUB_STEP_SUMMARY"

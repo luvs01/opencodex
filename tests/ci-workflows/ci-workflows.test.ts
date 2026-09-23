@@ -5521,6 +5521,10 @@ test("release recovery requires same-run publication and preserves successful-st
   expect(publish.id).toBe("publication");
   expect(smoke.id).toBe("registry-smoke");
   expect(smoke.env?.PUBLISHED).toBe("${{ steps.publication.outputs.published }}");
+  expect(smoke.env?.NPM_DIST_TAG).toBe("${{ inputs.tag }}");
+  expect(smoke.run).toContain('npm view "${pkg_name}@${NPM_DIST_TAG}" version');
+  expect(smoke.run).toContain('if [ "$TAG_VERSION" = "$RELEASE_VERSION" ]');
+  expect(smoke.run).toContain('dist-tag ${NPM_DIST_TAG} did not resolve to it');
   for (const step of [smoke, release]) {
     expect(step.if).toBe("${{ inputs.dry-run != true && steps.publication.outputs.published == 'true' }}");
   }
@@ -5535,16 +5539,18 @@ test.skipIf(process.platform === "win32")("release shell recovers only unverifie
   const publish = steps.find(step => step.name === "Publish (or dry-run)")!.run!;
   const smoke = steps.find(step => step.name === "Post-publish registry smoke")!.run!;
   const scenarios = [
-    { mode: "match", dry: false, status: 0, receipt: true, verification: "verified", reads: 1 },
-    { mode: "delayed", dry: false, status: 0, receipt: true, verification: "verified", reads: 3 },
-    { mode: "unavailable", dry: false, status: 0, receipt: true, verification: "pending", reads: 6 },
-    { mode: "timeout", dry: false, status: 0, receipt: true, verification: "pending", reads: 6 },
-    { mode: "wrong", dry: false, status: 1, receipt: true, verification: "", reads: 1 },
-    { mode: "empty", dry: false, status: 1, receipt: true, verification: "", reads: 1 },
-    { mode: "dist-failure", dry: false, status: 0, receipt: true, verification: "verified", reads: 1 },
-    { mode: "publish-failure", dry: false, status: 23, receipt: false, verification: "", reads: 0 },
-    { mode: "match", dry: true, status: 0, receipt: false, verification: "", reads: 0 },
-    { mode: "missing-receipt", dry: false, status: 1, receipt: false, verification: "", reads: 0 },
+    { mode: "match", dry: false, status: 0, receipt: true, verification: "verified", versionReads: 1, tagReads: 1 },
+    { mode: "delayed", dry: false, status: 0, receipt: true, verification: "verified", versionReads: 3, tagReads: 1 },
+    { mode: "tag-delayed", dry: false, status: 0, receipt: true, verification: "verified", versionReads: 3, tagReads: 3 },
+    { mode: "tag-stale", dry: false, status: 1, receipt: true, verification: "", versionReads: 6, tagReads: 6 },
+    { mode: "tag-unavailable", dry: false, status: 1, receipt: true, verification: "", versionReads: 6, tagReads: 6 },
+    { mode: "unavailable", dry: false, status: 0, receipt: true, verification: "pending", versionReads: 6, tagReads: 0 },
+    { mode: "timeout", dry: false, status: 0, receipt: true, verification: "pending", versionReads: 6, tagReads: 0 },
+    { mode: "wrong", dry: false, status: 1, receipt: true, verification: "", versionReads: 1, tagReads: 0 },
+    { mode: "empty", dry: false, status: 1, receipt: true, verification: "", versionReads: 1, tagReads: 0 },
+    { mode: "publish-failure", dry: false, status: 23, receipt: false, verification: "", versionReads: 0, tagReads: 0 },
+    { mode: "match", dry: true, status: 0, receipt: false, verification: "", versionReads: 0, tagReads: 0 },
+    { mode: "missing-receipt", dry: false, status: 1, receipt: false, verification: "", versionReads: 0, tagReads: 0 },
   ];
   for (const scenario of scenarios) {
     const dir = mkdtempSync(join(tmpdir(), "ocx-publication-"));
@@ -5559,8 +5565,19 @@ test.skipIf(process.platform === "win32")("release shell recovers only unverifie
         case "$1" in
           publish) [ "$SCENARIO" != "publish-failure" ] || return 23 ;;
           view)
-            count=$(cat "$COUNTER" 2>/dev/null || echo 0)
-            count=$((count + 1)); echo "$count" > "$COUNTER"
+            if [[ "$2" == *"@$NPM_DIST_TAG" ]]; then
+              count=$(cat "$TAG_COUNTER" 2>/dev/null || echo 0)
+              count=$((count + 1)); echo "$count" > "$TAG_COUNTER"
+              case "$SCENARIO" in
+                tag-delayed) [ "$count" -ge 3 ] || { echo 9.8.6; return 0; } ;;
+                tag-stale) echo 9.8.6; return 0 ;;
+                tag-unavailable) return 1 ;;
+              esac
+              echo "$RELEASE_VERSION"
+              return 0
+            fi
+            count=$(cat "$VERSION_COUNTER" 2>/dev/null || echo 0)
+            count=$((count + 1)); echo "$count" > "$VERSION_COUNTER"
             case "$SCENARIO" in
               unavailable) return 1 ;;
               timeout) return 124 ;;
@@ -5569,7 +5586,6 @@ test.skipIf(process.platform === "win32")("release shell recovers only unverifie
               empty) return 0 ;;
             esac
             echo "$RELEASE_VERSION" ;;
-          dist-tag) [ "$SCENARIO" != "dist-failure" ] || return 1 ;;
         esac
       }
       timeout() {
@@ -5585,7 +5601,8 @@ test.skipIf(process.platform === "win32")("release shell recovers only unverifie
       const child = Bun.spawn(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], {
         env: { ...process.env, SCENARIO: scenario.mode, DRY_RUN: String(scenario.dry),
           NPM_DIST_TAG: "latest", RELEASE_VERSION: "9.8.7", GITHUB_OUTPUT: output,
-          GITHUB_STEP_SUMMARY: summary, CALLS: calls, COUNTER: join(dir, "counter") },
+          GITHUB_STEP_SUMMARY: summary, CALLS: calls,
+          VERSION_COUNTER: join(dir, "version-counter"), TAG_COUNTER: join(dir, "tag-counter") },
         stdin: "ignore", stdout: "pipe", stderr: "pipe",
       });
       const [status, stdout, stderr] = await Promise.all([
@@ -5597,12 +5614,10 @@ test.skipIf(process.platform === "win32")("release shell recovers only unverifie
       expect(receipt.includes("published=true")).toBe(scenario.receipt);
       expect(receipt.includes("verification=")).toBe(scenario.verification !== "");
       if (scenario.verification) expect(receipt).toContain(`verification=${scenario.verification}`);
-      const reads = log.filter(line => line.startsWith("view "));
-      expect(reads).toHaveLength(scenario.reads);
-      for (const read of reads) expect(read).toBe("view @fixture/renamed@9.8.7 version --fetch-retries=0 --fetch-timeout=8000");
-      const tags = log.filter(line => line.startsWith("dist-tag "));
-      expect(tags).toEqual(scenario.verification === "verified"
-        ? ["dist-tag ls @fixture/renamed --fetch-retries=0 --fetch-timeout=8000"] : []);
+      const versionReads = log.filter(line => line === "view @fixture/renamed@9.8.7 version --fetch-retries=0 --fetch-timeout=8000");
+      const tagReads = log.filter(line => line === "view @fixture/renamed@latest version --fetch-retries=0 --fetch-timeout=8000");
+      expect(versionReads).toHaveLength(scenario.versionReads);
+      expect(tagReads).toHaveLength(scenario.tagReads);
       expect(log.filter(line => line.startsWith("publish "))).toHaveLength(scenario.dry || scenario.mode === "missing-receipt" ? 0 : 1);
       if (scenario.verification === "pending") {
         expect(stdout).toContain("::warning::npm publish succeeded");
