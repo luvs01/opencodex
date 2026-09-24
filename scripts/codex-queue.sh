@@ -99,7 +99,7 @@ supports_queue() {
 # Prefer app bundles over a stale PATH CLI; cover both standalone package layouts.
 # Explicit selection is authoritative and never silently falls back to another CLI.
 resolve_codex() {
-  local candidate
+  local candidate directory remaining_path
   if [ -n "$CODEX_EXE" ]; then
     case "$CODEX_EXE" in /*) ;; *) CODEX_EXE="$PWD/$CODEX_EXE" ;; esac
     supports_queue "$CODEX_EXE" || fail "selected CLI does not support queue --thread/--message; check --codex/CODEX_EXE"
@@ -116,11 +116,16 @@ resolve_codex() {
     "$HOME/.codex/bin/codex" "$HOME/.codex/bin"/*/codex; do
     if supports_queue "$candidate"; then printf '%s\n' "$candidate"; return; fi
   done
-  candidate=$(type -P codex || true)
-  if [ -n "$candidate" ] && supports_queue "$candidate"; then
-    printf '%s\n' "$candidate"
-    return
-  fi
+  # Inspect every PATH directory, not just the first (possibly obsolete) CLI.
+  # Split only on colon: spaces/newlines are data; empty entries mean cwd.
+  remaining_path="${PATH:-}"
+  while :; do
+    directory="${remaining_path%%:*}"
+    case "$directory" in /*) candidate="$directory/codex" ;; *) candidate="$PWD/${directory:+$directory/}codex" ;; esac
+    if supports_queue "$candidate"; then printf '%s\n' "$candidate"; return; fi
+    [[ "$remaining_path" == *:* ]] || break
+    remaining_path="${remaining_path#*:}"
+  done
   fail "no queue-capable Codex CLI found; install/update Codex or specify --codex /path/to/codex"
 }
 

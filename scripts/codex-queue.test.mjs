@@ -338,6 +338,17 @@ for (const shell of shells) {
         assert.equal(result.status, 0, result.output); assert.equal(realpathSync.native(probes(f).at(-1)), realpathSync.native(bundled));
         assert.deepEqual(records(f), []);
       });
+      it('finds a queue-capable later PATH candidate after an obsolete CLI', { skip: existsSync('/Applications/Codex.app/Contents/Resources/codex') }, () => {
+        const f = fixture();
+        const old = makeStub(join(f.root, 'old path/codex'));
+        writeFileSync(old, stubJs.replace("path.basename(process.argv[1]).startsWith('old')", 'true'));
+        const working = makeStub(join(f.root, 'working path/codex'));
+        const result = run(f, { pin: false, thread: threadA, dryRun: true,
+          env: { PATH: dirname(old) + ':' + dirname(working) + ':' + f.env.PATH } });
+        assert.equal(result.status, 0, result.output);
+        assert.deepEqual(probes(f).map(p => realpathSync.native(p)), [old, working].map(p => realpathSync.native(p)));
+        assert.deepEqual(records(f), []);
+      });
       it('finds the standalone bin layout (discovery only)', { skip: existsSync('/Applications/Codex.app/Contents/Resources/codex') }, () => {
         const f = fixture(); const standalone = makeStub(join(f.store, 'packages/standalone/current/bin/codex'));
         const result = run(f, { pin: false, thread: threadA, dryRun: true });
