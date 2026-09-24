@@ -63,11 +63,22 @@ test("an open serialized block charges only its appended bytes", () => {
 });
 
 test("malformed whitespace-heavy serialized calls are scanned without event-loop delay", () => {
+  // Measured in CPU time rather than elapsed wall time: `performance.now()` counts OS
+  // descheduling, VM pauses and GC, so a loaded CI runner can blow any wall-clock budget
+  // while the code under test did nothing wrong. The bound stays a tripwire far above the
+  // scan's real cost — only a return to super-linear work can cross it.
   const content = "<tool_call><function=exec>" + " ".repeat(80_000);
-  const buffer = new SerializedToolCallContentBuffer(createTestTranslatorBudget());
-  expect(buffer.ingest(content)).toBe("");
+  const structured = [{ names: new Set(["exec"]), argumentsText: '{"input":"ok"}' }];
+  const build = () => {
+    const buffer = new SerializedToolCallContentBuffer(createTestTranslatorBudget());
+    expect(buffer.ingest(content)).toBe("");
+    return buffer;
+  };
+  build().flush(structured); // Warm up so first-call JIT and allocation land outside the measurement.
 
-  const started = performance.now();
-  expect(buffer.flush([{ names: new Set(["exec"]), argumentsText: '{"input":"ok"}' }])).toBe(content);
-  expect(performance.now() - started).toBeLessThan(500);
+  const buffer = build();
+  const before = process.cpuUsage();
+  expect(buffer.flush(structured)).toBe(content);
+  const spent = process.cpuUsage(before);
+  expect((spent.user + spent.system) / 1000).toBeLessThan(500);
 });
