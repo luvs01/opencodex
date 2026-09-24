@@ -34,26 +34,54 @@ export interface StructuredToolCallReference {
 
 /** Finds complete bare blocks outside literal Markdown; ambiguous outer blocks stop the scan. */
 function callsIn(text: string, context: TextContext = { fence: null, lineStart: true }): SerializedToolCall[] {
-  const pattern = /<tool_call>\s*<function=([^>\r\n]+)>([\s\S]*?)(?:<\/parameter>)?\s*<\/function>\s*<\/tool_call>/y;
   const calls: SerializedToolCall[] = [];
   let offset = 0;
   while (offset < text.length) {
     const split = splitAtPossibleSerializedToolCall(text.slice(offset), context, true);
     offset += split.emit.length;
     if (!split.hasOpenTag) break;
-    pattern.lastIndex = offset;
-    const match = pattern.exec(text);
-    if (!match) break; // An incomplete/ambiguous outer block cannot authorize an inner call.
-    calls.push({
-      name: match[1]!.trim(),
-      body: match[2]!,
-      start: match.index,
-      end: match.index + match[0].length,
-    });
-    offset = pattern.lastIndex;
+    const call = callAt(text, offset);
+    if (!call) break; // An incomplete/ambiguous outer block cannot authorize an inner call.
+    calls.push(call);
+    offset = call.end;
     context = { fence: null, lineStart: false };
   }
   return calls;
+}
+
+/** Parses one candidate with monotonic delimiter scans, including malformed whitespace-heavy input. */
+function callAt(text: string, start: number): SerializedToolCall | undefined {
+  let cursor = start + OPEN_TAG.length;
+  while (cursor < text.length && /\s/.test(text[cursor]!)) cursor += 1;
+  if (!text.startsWith(FUNCTION_TAG, cursor)) return undefined;
+  const nameStart = cursor + FUNCTION_TAG.length;
+  const nameEnd = text.indexOf(">", nameStart);
+  if (nameEnd < 0 || /[\r\n]/.test(text.slice(nameStart, nameEnd))) return undefined;
+
+  const bodyStart = nameEnd + 1;
+  cursor = bodyStart;
+  while (cursor < text.length) {
+    const functionEnd = text.indexOf("</function>", cursor);
+    if (functionEnd < 0) return undefined;
+    let toolEnd = functionEnd + "</function>".length;
+    while (toolEnd < text.length && /\s/.test(text[toolEnd]!)) toolEnd += 1;
+    if (text.startsWith(CLOSE_TAG, toolEnd)) {
+      let bodyEnd = functionEnd;
+      while (bodyEnd > bodyStart && /\s/.test(text[bodyEnd - 1]!)) bodyEnd -= 1;
+      const parameterEnd = "</parameter>";
+      if (text.slice(bodyStart, bodyEnd).endsWith(parameterEnd)) bodyEnd -= parameterEnd.length;
+      else bodyEnd = functionEnd;
+      return {
+        name: text.slice(nameStart, nameEnd).trim(),
+        body: text.slice(bodyStart, bodyEnd),
+        start,
+        end: toolEnd + CLOSE_TAG.length,
+      };
+    }
+    // No delimiter can begin within the whitespace already scanned.
+    cursor = toolEnd;
+  }
+  return undefined;
 }
 
 /** Splits safe visible text from a possible control block while carrying Markdown context across chunks. */

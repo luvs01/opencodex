@@ -61,3 +61,13 @@ test("an open serialized block charges only its appended bytes", () => {
   expect(buffer.flush([])).toBe(open + body);
   expect(budget.snapshot()).toMatchObject({ currentBytes: 0, overflows: 0 });
 });
+
+test("malformed whitespace-heavy serialized calls are scanned without event-loop delay", () => {
+  const content = "<tool_call><function=exec>" + " ".repeat(80_000);
+  const buffer = new SerializedToolCallContentBuffer(createTestTranslatorBudget());
+  expect(buffer.ingest(content)).toBe("");
+
+  const started = performance.now();
+  expect(buffer.flush([{ names: new Set(["exec"]), argumentsText: '{"input":"ok"}' }])).toBe(content);
+  expect(performance.now() - started).toBeLessThan(500);
+});
