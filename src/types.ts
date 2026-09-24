@@ -28,6 +28,7 @@ export {
   OPENAI_PROVIDER_TIER_VERSION,
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   captureWireAdapterHardPins,
+  captureWireAdapterHardPinPrefixes,
   isWirePinnedModel,
   pinnedWireAdapter,
 } from "./types/wire";
@@ -76,6 +77,7 @@ export type {
   OcxConfig,
   OcxAccountPoolRotationStrategy,
   OcxAccountPoolQuotaWindow,
+  OcxComboCooldownWaitPolicy,
   OcxComboStrategy,
   OcxComboDefaultEffort,
   OcxComboDefaultEffortMode,
@@ -106,6 +108,7 @@ export type {
   ResponsesItemIdRepairConfig,
   RateLimitRetryPolicy,
   TransientRetryPolicy,
+  ResetReplayPolicy,
   ProviderWebSearchBridgeBackend,
   ProviderWebSearchBridgeConfig,
   ProviderCostOverlay,

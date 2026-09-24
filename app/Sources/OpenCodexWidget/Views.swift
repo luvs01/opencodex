@@ -2,7 +2,6 @@ import SwiftUI
 import WidgetKit
 import MenuBarCore
 
-@available(macOS 14, *)
 struct OpenCodexWidgetView: View {
     let entry: SnapshotEntry
     @Environment(\.widgetFamily) private var family
@@ -91,7 +90,7 @@ struct OpenCodexWidgetView: View {
                 quotaView(snapshot)
             } else if let chart = snapshot.chart {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Last \(windowLabel(chart))").font(.caption).foregroundStyle(.secondary)
+                    Text("Last \(windowLabel(chart))\(chart.incomplete == true ? " · partial" : "")").font(.caption).foregroundStyle(.secondary)
                     chartView(chart, flexible: false).widgetAccentable()
                 }
             } else {
@@ -117,7 +116,7 @@ struct OpenCodexWidgetView: View {
                 }
             }
             if let chart = snapshot.chart {
-                Text("Last \(windowLabel(chart)) · \(chart.series.count) models")
+                Text("Last \(windowLabel(chart)) · \(chart.series.count) models\(chart.incomplete == true ? " · partial" : "")")
                     .font(.caption).foregroundStyle(.secondary)
                 chartView(chart, flexible: true)
                     .frame(maxHeight: .infinity)
@@ -301,14 +300,13 @@ struct OpenCodexWidgetView: View {
     }
 }
 
-@available(macOS 14, *)
+@main
 struct OpenCodexWidgetBundle: WidgetBundle {
     var body: some Widget {
         OpenCodexWidget()
     }
 }
 
-@available(macOS 14, *)
 struct OpenCodexWidget: Widget {
     let kind = "OpenCodexWidget"
 

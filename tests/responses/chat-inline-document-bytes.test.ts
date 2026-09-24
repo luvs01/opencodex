@@ -4,7 +4,7 @@ import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { chatCompletionsToResponsesBody, ChatCompletionsRequestError } from "../../src/chat/inbound";
 import { anthropicToResponsesBody } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
-import { inlineDocumentDataUrl, inlineDocumentMarker } from "../../src/responses/inline-document";
+import { inlineDocumentDataUrl, inlineDocumentMarker, inlineDocumentFromDataUrl, isInlineDocumentDataUrl } from "../../src/responses/inline-document";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 
 /**
@@ -28,9 +28,10 @@ const chatProvider: OcxProviderConfig = {
   adapter: "openai-chat",
   baseUrl: "https://gateway.example.internal/v1",
   apiKey: "k",
-  // The wire role folds to `system` unless a destination is recorded as accepting
-  // `developer`; the document test asserts the role a turn keeps, so it declares the
-  // destination rather than asserting the default.
+  // The case below asserts that a document survives on a `developer` turn, so it needs the
+  // role to reach the wire. That role folds to `system` unless a destination records that it
+  // accepts it, so the destination records it here; the document contract is what is under
+  // test, not the role decision.
   foldDeveloperRoleToSystem: false,
 };
 const anthropicProvider = {
@@ -69,6 +70,24 @@ function parsedContent(body: Record<string, unknown>): unknown {
 }
 
 describe("inline document bytes survive the inbound parse", () => {
+  test.each(["A", "A=", "AA=", "AAA=="])("malformed base64 quantum %s is refused before translation", (payload) => {
+    const url = `data:application/pdf;base64,${payload}`;
+    expect(isInlineDocumentDataUrl(url)).toBe(false);
+    expect(inlineDocumentFromDataUrl(url, "doc.pdf")).toBeUndefined();
+    expect(() => chatCompletionsToResponsesBody(chatRequest({
+      type: "file", file: { filename: "doc.pdf", file_data: url },
+    }))).toThrow(ChatCompletionsRequestError);
+  });
+
+  test.each(["AA", "AAA", "AA==", "AAA=", "AAAA"])("valid padded or unpadded bytes %s survive unchanged", (payload) => {
+    const url = `data:application/pdf;base64,${payload}`;
+    expect(isInlineDocumentDataUrl(url)).toBe(true);
+    const content = parsedContent(chatCompletionsToResponsesBody(chatRequest({
+      type: "file", file: { filename: "doc.pdf", file_data: url },
+    })));
+    expect(content).toEqual([expect.objectContaining({ type: "document", data: payload })]);
+  });
+
   test("a Chat file part becomes a document carrying its bytes", () => {
     const content = parsedContent(chatCompletionsToResponsesBody(chatRequest({
       type: "file",

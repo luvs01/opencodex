@@ -104,7 +104,7 @@ export function describeCodexDesktopSwitches(
  * instead — a settings GET and a switch-free PUT then agree with an attempted apply.
  */
 export async function observedCodexDesktopSwitchApply(): Promise<CodexDesktopSwitchApply> {
-  // Same lazy boundary as applyCodexDesktopSwitches: the ownership predicate lives in the
+  // Same lazy boundary as applyCodexConfigInjection: the ownership predicate lives in the
   // injection graph, which the settings read path must not pull in at module scope.
   const { currentExternalCodexModelProvider } = await import("./inject/config-toml");
   let provider: string | null;
@@ -129,7 +129,15 @@ export async function observedCodexDesktopSwitchApply(): Promise<CodexDesktopSwi
   };
 }
 
-export async function applyCodexDesktopSwitches(
+/**
+ * Re-run the Codex config injection so a setting that lives in `~/.codex/config.toml` follows the
+ * stored config NOW rather than at the next `ocx sync`.
+ *
+ * Shared by the Desktop switches (`codexDesktopAuthless`, `codexClientCompaction`) and the
+ * web-search sidecar's Codex-side key. Both write through the same artifact transaction, so the
+ * failure vocabulary — and the "run 'ocx sync' to retry" advice that reads it — has to be one thing.
+ */
+export async function applyCodexConfigInjection(
   config: OcxConfig,
 ): Promise<CodexDesktopSwitchApply> {
   if (!shouldSyncCodexOnStart(config)) {

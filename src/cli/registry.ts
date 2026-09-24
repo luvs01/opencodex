@@ -29,18 +29,32 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "--socks5-off          Clear a saved SOCKS5 outbound proxy from config.proxy.",
     ],
   },
-  { name: "stop", usage: "ocx stop", summary: "Stop the proxy and restore native Codex config." },
+  {
+    name: "stop",
+    usage: "ocx stop [--json]",
+    summary: "Stop the proxy and restore native Codex config.",
+    details: [
+      "--json keeps the stop path unchanged and prints one structured summary document on stdout; human output moves to stderr.",
+      "Exit codes are identical with and without --json: 0, 1, 79 (history cleanup incomplete), 80 (teardown deferred).",
+    ],
+  },
   {
     name: "restore",
     aliases: ["eject"],
     usage: "ocx restore [back]",
     summary: "Restore native Codex config without stopping the proxy; `restore back` re-points codex at the running proxy.",
+    details: [
+      "--remove-codex-provider-table  Also remove [model_providers.opencodex] when a paginated home made restore keep it. Conversations tagged opencodex stop opening.",
+    ],
   },
   {
     name: "eject",
     aliases: [],
     usage: "ocx eject [back]",
     summary: "Restore native Codex config without stopping the proxy; `eject back` re-points codex at the running proxy.",
+    details: [
+      "--remove-codex-provider-table  Also remove [model_providers.opencodex] when a paginated home made restore keep it. Conversations tagged opencodex stop opening.",
+    ],
   },
   {
     name: "recover-history",
@@ -69,7 +83,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "service",
-    usage: "ocx service [install|repair|restart|start|stop|status|uninstall|remove]",
+    usage: "ocx service [install|repair|restart|start|stop|status|uninstall|remove|claim]",
     summary: "Run as a background service.",
     details: [
       "With no subcommand, installs when absent or repairs an existing service.",
@@ -437,6 +451,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "  ocx claude desktop [apply]                         Save and apply the four-family profile",
       "  ocx claude desktop show [--json]                   Show routes, families, and defaults",
       "  ocx claude desktop status [--json]                 Show applied state, drift, and health",
+      "  ocx claude desktop bind <picker-id> <route>        First-party: serve a Code tab picker model with a route",
+      "  ocx claude desktop unbind <picker-id>              Remove a first-party binding",
       "  ocx claude desktop move <route> <family> [--default]",
       "  ocx claude desktop default <family> <route|none>",
       "  ocx claude desktop export <path|->                 Export versioned JSON (`-` = stdout)",
@@ -491,6 +507,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     details: [
       "Alias of ocx integration client <sub> --client zcode.",
       "enable writes the managed provider.opencodex block into ~/.zcode/v2/config.json; disable removes only that block.",
+      "ZCode 3.14 moved its providers to ~/.zcode/v2/provider_config.json; where that file exists, enable is refused because the write cannot reach the client.",
       "ZCode reads its config at startup — restart ZCode after enable/disable.",
       "Select OpenCodex Proxy/<provider>/<model> from ZCode's model picker.",
     ],
@@ -540,6 +557,19 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "--timeout requires --wait and accepts a positive integer (1..300).",
       "--json emits {ready, status, pid, port}; status is one of ready|pending|failed|unreachable.",
       "Invalid or unknown arguments exit 64. Not-ready, pending, failed, timeout, and unreachable exit 1.",
+    ],
+  },
+  {
+    name: "resolve",
+    usage: "ocx resolve [--json]",
+    summary: "Emit the resolved config home, effective port, and identity-checked proxy liveness as one JSON document.",
+    details: [
+      "Machine surface for embedding shells: it replaces a second home/port/liveness implementation beside the CLI.",
+      "The port is the live listener's port when an opencodex proxy answers, otherwise the configured port (default 10100).",
+      "Liveness is three-valued: live, absent-proven (every recorded and configured endpoint definitively dead), or unknown — unknown exits 1 and never reads as absent.",
+      "--json emits one versioned document (schema ocx-resolve/1); the default prints two human lines.",
+      "Exit 0 carries a trustworthy verdict; exit 1 means the CLI could not resolve (invalid config or undecidable liveness) and callers must refuse to guess.",
+      "Any unknown argument exits 64 before preflight side effects.",
     ],
   },
   {

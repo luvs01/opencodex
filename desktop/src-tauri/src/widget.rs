@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod macos {
+    use crate::companion_query::{timeline_query, timeline_rows};
     use crate::{
         proxy::{ProxyClient, ProxyError},
         tray,
@@ -44,6 +45,12 @@ mod macos {
         bucket_seconds: i64,
         style: String,
         series: Vec<Series>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        incomplete: bool,
+    }
+
+    fn is_false(value: &bool) -> bool {
+        !value
     }
 
     #[derive(Debug, Serialize, serde::Deserialize, Clone, PartialEq)]
@@ -68,6 +75,8 @@ mod macos {
         Unauthorized,
         Http,
         Decode,
+        /// The port answered, but as something other than the runtime this shell is bound to.
+        Foreign,
     }
 
     fn state_for_error(
@@ -85,6 +94,18 @@ mod macos {
                 "Needs API key",
                 Some("This proxy requires an API key.".into()),
             ),
+            // A runtime this app did not start is a different event from a fault, so it does not
+            // borrow the vocabulary of one. "degraded" would claim the proxy is misbehaving and
+            // "unreachable" would claim nothing is there; a user who started the runtime from npm
+            // or the CLI themselves would read either as a defect in a setup that is working.
+            // The widget has no red for this: `tone` in `app/Sources/OpenCodexWidget/Views.swift`
+            // maps a state it does not know to the neutral secondary colour, which is the right
+            // signal for "serving, just not ours".
+            ErrorKind::Foreign => (
+                "foreign",
+                "External runtime",
+                Some("This port is served by a runtime this app did not start.".into()),
+            ),
             ErrorKind::Http | ErrorKind::Decode => ("degraded", "Degraded", detail),
         }
     }
@@ -95,6 +116,7 @@ mod macos {
             ProxyError::Unauthorized => (ErrorKind::Unauthorized, None),
             ProxyError::Http(status) => (ErrorKind::Http, Some(format!("HTTP {status}"))),
             ProxyError::Decode(error) => (ErrorKind::Decode, Some(error.to_string())),
+            ProxyError::Foreign => (ErrorKind::Foreign, None),
         }
     }
 
@@ -103,7 +125,7 @@ mod macos {
     }
 
     fn integer(value: Option<&Value>) -> Option<i64> {
-        value.and_then(Value::as_i64)
+        value.and_then(crate::companion_usage::integer)
     }
 
     fn reset_at(value: Option<&Value>) -> Option<f64> {
@@ -115,12 +137,18 @@ mod macos {
         })
     }
 
-    fn quotas(value: &Value) -> Vec<Quota> {
+    fn quotas(value: &Value, settings: &Value) -> Vec<Quota> {
         let Some(reports) = value.get("reports").and_then(Value::as_array) else {
             return Vec::new();
         };
         let mut rows = Vec::new();
         for report in reports {
+            if crate::companion_usage::hidden(
+                settings.get("settings").unwrap_or(settings),
+                crate::companion_usage::text(report, "provider"),
+            ) {
+                continue;
+            }
             let provider_label = report
                 .get("label")
                 .or_else(|| report.get("provider"))
@@ -177,10 +205,9 @@ mod macos {
             .and_then(Value::as_str)
             .unwrap_or("line")
             .to_owned();
-        let series = value
-            .get("series")
-            .and_then(Value::as_array)?
-            .iter()
+        let (rows, incomplete) = timeline_rows(value, settings)?;
+        let series = rows
+            .into_iter()
             .take(6)
             .filter_map(|item| {
                 Some(Series {
@@ -199,44 +226,8 @@ mod macos {
             bucket_seconds,
             style,
             series,
+            incomplete,
         })
-    }
-
-    fn timeline_query(settings: &Value) -> String {
-        let settings = settings.get("settings").unwrap_or(settings);
-        let get = |key: &str, fallback: &str| {
-            settings
-                .get(key)
-                .and_then(Value::as_str)
-                .unwrap_or(fallback)
-                .to_owned()
-        };
-        let hours = settings
-            .get("chartHours")
-            .and_then(Value::as_i64)
-            .unwrap_or(24);
-        let bucket_minutes = settings
-            .get("bucketMinutes")
-            .and_then(Value::as_i64)
-            .unwrap_or(60);
-        let metric = get("tokenMetric", "total");
-        let aggregation = get("aggregation", "sum");
-        let grouping = get("chartGrouping", "model");
-        let mut query = format!(
-            "hours={hours}&bucketMinutes={bucket_minutes}&metric={metric}&aggregation={aggregation}&grouping={grouping}"
-        );
-        if let Some(models) = settings.get("models").and_then(Value::as_array) {
-            let models = models
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(",");
-            if !models.is_empty() {
-                query.push_str("&models=");
-                query.push_str(&models);
-            }
-        }
-        query
     }
 
     fn snapshot_path() -> PathBuf {
@@ -304,7 +295,7 @@ mod macos {
             (!parts.is_empty()).then(|| parts.join(" · "))
         };
         let today_snapshot = today
-            .and_then(|value| value.get("summary").or(Some(value)))
+            .and_then(|value| crate::companion_usage::filtered_summary(value, settings))
             .map(|summary| Today {
                 requests: integer(summary.get("requests")),
                 total_tokens: integer(summary.get("totalTokens")),
@@ -321,7 +312,7 @@ mod macos {
             endpoint_display: format!("{}:{}", endpoint.host, endpoint.port),
             menu_title,
             today: today_snapshot,
-            quotas: quotas(quotas_value),
+            quotas: quotas(quotas_value, settings),
             chart,
             last_updated: timeline_value.map(|_| now_seconds()),
             generated_at: now_seconds(),
@@ -423,6 +414,7 @@ mod macos {
                         id: "openai/gpt".into(),
                         points: vec![1.0, 2.0],
                     }],
+                    incomplete: false,
                 }),
                 last_updated: Some(2.0),
                 generated_at: 3.0,
@@ -434,7 +426,7 @@ mod macos {
         }
 
         #[test]
-        fn error_state_mapping_covers_four_kinds() {
+        fn error_state_mapping_covers_every_kind() {
             assert_eq!(
                 state_for_error(ErrorKind::Unreachable, None).0,
                 "unreachable"
@@ -451,6 +443,19 @@ mod macos {
                 state_for_error(ErrorKind::Decode, Some("bad".into())).0,
                 "degraded"
             );
+            assert_eq!(state_for_error(ErrorKind::Foreign, None).0, "foreign");
+        }
+
+        #[test]
+        fn a_foreign_runtime_is_not_reported_as_a_failure() {
+            // The mapping is the whole point of the variant. Folding it into either neighbour
+            // tells a user whose own CLI or npm runtime holds the port that something is broken,
+            // and the widget is the one surface where that claim is read without any context.
+            assert_eq!(proxy_error(&ProxyError::Foreign).0, ErrorKind::Foreign);
+            let (state, title, detail) = state_for_error(ErrorKind::Foreign, None);
+            assert_eq!(state, "foreign");
+            assert_eq!(title, "External runtime");
+            assert!(detail.unwrap().contains("did not start"));
         }
 
         #[test]

@@ -11,6 +11,7 @@ import {
   providerWebSearchBridgeConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
+  retryOnResetPolicyConfigError,
   sanitizeModelCostsForDisplay,
 } from "../config";
 import {
@@ -723,6 +724,10 @@ export function providerManagementConfigError(
     delete canonicalCandidate.modelCosts;
     // requestPacing is a user-owned transport overlay, not part of the canonical seed.
     delete canonicalCandidate.requestPacing;
+    // retryOnReset is the same kind of overlay: it tunes how this provider's own Responses
+    // sends recover, not what the canonical forward seed is. Validated below
+    // (retryOnResetPolicyConfigError).
+    delete canonicalCandidate.retryOnReset;
     // Context windows are the same kind of user-owned overlay as requestPacing: the operator
     // narrowing what their own native rows advertise. They can only ever LOWER the measured
     // window (see nativeOpenAiContextWindow), so admitting them cannot widen what the proxy
@@ -739,6 +744,12 @@ export function providerManagementConfigError(
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
+    // Canonical ChatGPT keeps WebSocket as the default, but an operator may
+    // select the existing HTTP/SSE path without changing its auth or endpoint.
+    if (raw.upstreamWebsocket !== undefined) {
+      if (raw.upstreamWebsocket !== false) return "provider openai upstreamWebsocket must be false or omitted";
+      delete canonicalCandidate.upstreamWebsocket;
+    }
     const canonical = seed && (options?.allowOperatorOverlays
       ? matchesCanonicalProviderSeed(canonicalCandidate, seed)
       : sameCanonicalProviderSeed(canonicalCandidate, seed));
@@ -768,6 +779,10 @@ export function providerManagementConfigError(
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
     // it before it reaches the management API response.
     return `provider ${JSON.stringify(redactSecretString(name))} ${retryOn429Error}`;
+  }
+  const retryOnResetError = retryOnResetPolicyConfigError(raw.retryOnReset);
+  if (retryOnResetError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${retryOnResetError}`;
   }
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
@@ -809,6 +824,8 @@ export function providerManagementConfigError(
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
   const suppressSyntheticMaxError = booleanRecordConfigError(raw.modelSuppressSyntheticMax, "modelSuppressSyntheticMax");
   if (suppressSyntheticMaxError) return `provider ${name} ${suppressSyntheticMaxError}`;
+  const verbositySupportError = booleanRecordConfigError(raw.modelSupportsVerbosity, "modelSupportsVerbosity");
+  if (verbositySupportError) return `provider ${name} ${verbositySupportError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
     raw.modelReasoningSummaryDelivery,
     raw.modelSupportsReasoningSummaries,
@@ -939,6 +956,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   mcpMaxResultBytes: "editor",
   modelAdapters: "editor",
   fastWire: "editor",
+  fastEnabled: "editor",
   baseUrl: "editor",
   responsesPath: "editor",
   chatCompletionsPath: "editor",
@@ -1031,6 +1049,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   noReasoningModels: "editor",
   noTemperatureModels: "editor",
   noTopPModels: "editor",
+  noStopModels: "editor",
   noPenaltyModels: "editor",
   noStructuredOutputModels: "editor",
   noJsonSchemaModels: "editor",
@@ -1049,7 +1068,9 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   showThinkingSummary: "editor",
   retryOn429: "editor",
   transientRetryOn5xx: "editor",
+  retryOnReset: "editor",
   reasoningSplitModels: "editor",
+  inlineThinkTagModels: "editor",
   reasoningDetailsModels: "editor",
   thinkingToggleModels: "editor",
   thinkingBudgetModels: "editor",

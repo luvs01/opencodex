@@ -5,6 +5,7 @@ import {
   clientConnectionSchema,
   CODEX_ACCOUNT_PIN_PATTERN,
   codexAccountPrioritiesSchema,
+  salvageCodexAccountAutoSwitchThresholds,
   codexPoolSchema,
   codexQuotaAutoRefreshSchema,
   credentialGroupsSchema,
@@ -46,6 +47,7 @@ import {
   MAIN_CODEX_ACCOUNT_NAMESPACE_TARGET,
 } from "../../codex/account-namespace-match";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "../../codex/upstream-host-health";
+import { MIN_USAGE_LEDGER_MAX_BYTES } from "../../usage/retention-contract";
 import { COMBO_NAMESPACE, comboConfigIssues } from "../../combos/types";
 import { routingProfileIssues } from "../../routing/profile";
 import { POLICY_NAMESPACE } from "../../routing/profile-namespace";
@@ -58,6 +60,7 @@ import { OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { modelAutoCompactTokenLimitsConfigError } from "../../providers/auto-compact-budget";
 import { hasFastWireCapabilityConflict } from "../../providers/fastwire";
 import { parseDesktopProfile } from "../../claude/desktop-profile";
+import { isInterceptBindingId, isInterceptBindingRoute } from "../../claude/intercept/model-bindings";
 import { DEFAULT_APP_OWNED_MEMORY_BUDGET_BYTES, MAX_APP_OWNED_MEMORY_BUDGET_MB, MIN_APP_OWNED_MEMORY_BUDGET_MB } from "../../lib/app-owned-memory";
 
 export const configSchema = z.object({
@@ -82,6 +85,14 @@ export const configSchema = z.object({
   managementUsageMaxReadBytes: z.number().int().positive().default(64 * 1024 * 1024).describe(
     "Deprecated compatibility limit for bounded legacy usage readers; GET /api/usage always aggregates the complete ledger",
   ),
+  // Opt-in ledger ceiling. A hand edit below the floor, or a non-safe integer, disables only
+  // this limit rather than failing the config: refusing to start because history retention was
+  // mistyped would be a worse outcome than not trimming history.
+  usageLedgerMaxBytes: z.number().int()
+    .min(MIN_USAGE_LEDGER_MAX_BYTES)
+    .max(Number.MAX_SAFE_INTEGER)
+    .optional()
+    .catch(undefined),
   // Invalid hand edits disable only this opt-in circuit. Live writes remain strict.
   upstreamHostCircuitThreshold: z.number().int()
     .min(0)
@@ -138,7 +149,9 @@ export const configSchema = z.object({
   // Ultra Fast is opt-in for the same reason and degrades the same way: a malformed hand
   // edit turns the tier off rather than rejecting the config that carries it.
   ultraFastTier: z.boolean().optional().catch(false),
-  codexMainAccountHardLock: z.boolean().optional().catch(false),
+  // Default-on policy (#5694): absence and malformed hand edits both mean "on", and only an
+  // explicit `false` written by the settings PUT opts out.
+  codexMainAccountHardLock: z.boolean().optional().catch(undefined),
   // Future versions remain opaque through passthrough-compatible whole-config saves.
   // Only version 1 grants deletion authority in the rebase path.
   configRebaseProvenance: z.unknown().optional(),
@@ -208,6 +221,10 @@ export const configSchema = z.object({
   // typo cannot trip the backup-and-defaults repair path and wipe providers or
   // pool accounts. Warning emitted in loadConfig.
   codexAccountPriorities: codexAccountPrioritiesSchema.optional().catch(undefined),
+  // A bad hand-edited entry must not retire valid overrides on the next unrelated save.
+  codexAccountAutoSwitchThresholds: z.unknown().optional().transform(salvageCodexAccountAutoSwitchThresholds),
+  // An invalid optional preference must not discard providers or credential rows.
+  codexAccountPriorityFailback: z.boolean().optional().catch(false),
   activeCodexAccountPinned: z.string().regex(CODEX_ACCOUNT_PIN_PATTERN).optional().catch(undefined),
   // A malformed hand edit must degrade to false without discarding providers, accounts,
   // or the exact selector map. Live writes remain strict.
@@ -270,12 +287,28 @@ export const configSchema = z.object({
       if (!intercept || typeof intercept !== "object" || Array.isArray(intercept)) {
         ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept"], message: "intercept must be an object" });
       } else {
-        const { enabled, port } = intercept as { enabled?: unknown; port?: unknown };
+        const { enabled, port, picker, modelMap } = intercept as { enabled?: unknown; port?: unknown; picker?: unknown; modelMap?: unknown };
         if (enabled !== undefined && typeof enabled !== "boolean") {
           ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "enabled"], message: "intercept.enabled must be a boolean" });
         }
+        if (picker !== undefined && typeof picker !== "boolean") {
+          ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "picker"], message: "intercept.picker must be a boolean" });
+        }
         if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)) {
           ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "port"], message: "intercept.port must be an integer between 1 and 65535" });
+        }
+        if (modelMap !== undefined) {
+          if (!modelMap || typeof modelMap !== "object" || Array.isArray(modelMap)) {
+            ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "modelMap"], message: "intercept.modelMap must be an object of picker id to route" });
+          } else {
+            for (const [id, route] of Object.entries(modelMap as Record<string, unknown>)) {
+              if (!isInterceptBindingId(id)) {
+                ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "modelMap", id], message: "intercept.modelMap keys must be claude- picker model ids" });
+              } else if (!isInterceptBindingRoute(route)) {
+                ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "modelMap", id], message: "intercept.modelMap values must be non-empty routes without whitespace" });
+              }
+            }
+          }
         }
       }
     }

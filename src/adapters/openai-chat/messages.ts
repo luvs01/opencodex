@@ -1,5 +1,6 @@
 import { isNativeOpenAIChatTarget, stripBracketedModelSuffix } from "./wire";
 import { reasoningDetailSegmentForWire } from "./response-events";
+import { translatedChatDeveloperWireRole } from "./developer-role";
 import { isVolcengineArkPaygChatTarget } from "./tool-schema";
 import { contentPartsToText } from "../image";
 import { EMPTY_TOOL_OUTPUT_ANNOTATION, isWhitespaceOnlyTextPartArray } from "../empty-tool-output-annotation";
@@ -114,19 +115,10 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
   };
 
   const nativeOpenAI = isNativeOpenAIChatTarget(provider);
-  // `developer` is part of the Chat Completions role set, but not every OpenAI-compatible
-  // gateway accepts it: one that does not answers `400 role 'developer' is not allowed` and the
-  // turn never starts. #5213 removed a hostname test that decided the role, which was right —
-  // a gateway proxying OpenAI accepts the role and the hostname cannot say so. Defaulting to
-  // forwarding instead was wrong in the other direction: it assumed every destination accepts a
-  // role until an operator marks it, so a gateway that rejects it broke on the next request and
-  // no test in this repository could see it, because what breaks lives outside the repository.
-  //
-  // The key is tri-state and the unset state is the safe one. Absent means nobody has recorded
-  // what this destination accepts, so the role folds to `system`; `true` means it is known to
-  // reject the role; `false` means it is known to accept it and the role is forwarded. Either
-  // way the message keeps the slot it arrived in — only the role changes, never the position.
-  const developerWireRole = provider.foldDeveloperRoleToSystem === false ? "developer" : "system";
+  // Which role a developer message carries, and why the unrecorded state folds, is stated once
+  // in ./developer-role.ts and read from there by the native passthrough as well. Either way the
+  // message keeps the slot it arrived in — only the role changes, never the position.
+  const developerWireRole = translatedChatDeveloperWireRole(provider);
   // A developer message keeps the slot it arrived in. Hoisting its text into the leading
   // system block moved a mid-conversation instruction ahead of every turn it was written to
   // follow, and the caller saw an ordinary answer either way (#5213). The Claude inbound mints
@@ -232,7 +224,7 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
         let reasoningContent = thinkingParts.map(p => p.thinking).join("");
         if (
           reasoningContent.length === 0
-          && toolCalls.length > 0
+          && (toolCalls.length > 0 || thinkingParts.length > 0)
           && modelInList(provider.preserveReasoningContentModels, parsed.modelId)
         ) {
           const cached = toolCalls
@@ -243,11 +235,11 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
           if (cached.length > 0) {
             reasoningContent = [...new Set(cached)].join("\n");
           } else if (modelInList(provider.requiresReasoningPlaceholderModels ?? provider.preserveReasoningContentModels, parsed.modelId)) {
-            // Fallback (extends #950, closes #1193): the replay cache is
+            // Fallback (extends #950 and #1193; fixes #5421): the replay cache is
             // bounded (64 entries / 256 KiB / 1 h TTL) and always misses on
-            // long sessions, and some tool rounds carry no recorded reasoning
-            // at all. DeepSeek thinking mode rejects ANY tool_call assistant
-            // message missing reasoning_content with HTTP 400, so inject a
+            // long sessions, and some thinking/tool rounds carry no recorded
+            // reasoning at all. DeepSeek thinking mode rejects replay without
+            // reasoning_content with HTTP 400, so inject a
             // minimal placeholder rather than emit a bare continuation the
             // upstream will reject. Scoped to requiresReasoningPlaceholderModels
             // (defaulting to the preserve list): preserve-listed providers with

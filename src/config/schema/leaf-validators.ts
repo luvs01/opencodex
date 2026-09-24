@@ -14,6 +14,7 @@ import {
 } from "../provider-validation";
 import { isValidCodexAccountNamespaceTarget } from "../../codex/account-namespace-match";
 import { isCodexAccountPriorityKey } from "../../codex/account-priority";
+import { isCodexAccountAutoSwitchThresholdKey, parseCodexAutoSwitchThreshold } from "../../codex/account-auto-switch";
 import { parseAccountPriority } from "../../codex/pool-rotation";
 import { credentialGroupIssues } from "../../routing/identity-domains";
 import { providerDestinationConfigError } from "../../lib/destination-policy";
@@ -79,6 +80,17 @@ export const retryOn429PolicySchema = z.object({
 const transientRetryOn5xxPolicySchema = z.object({
   enabled: z.boolean().optional(),
   attempts: z.number().int().min(1).max(10).optional(),
+}).strict();
+
+/**
+ * `retryOnReset` accepts only these keys. `replacements` counts DUPLICATE inferences the
+ * operator is willing to risk for one logical request, so the ceiling is two rather than a
+ * send budget: this is the one send the proxy otherwise refuses outright, and a third of them
+ * says the connection, not the retry policy, is the problem.
+ */
+export const retryOnResetPolicySchema = z.object({
+  enabled: z.boolean().optional(),
+  replacements: z.number().int().min(1).max(2).optional(),
 }).strict();
 
 const requestPacingRuleSchema = z.object({
@@ -280,6 +292,7 @@ export const providerConfigSchema = z.object({
   annotateEmptyToolOutputs: z.boolean().optional(),
   foldDeveloperRoleToSystem: z.boolean().optional(),
   fastWire: fastWireSchema.nullable().optional(),
+  fastEnabled: z.boolean().optional(),
   supportsServiceTier: z.boolean().optional(),
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
   modelSuppressSyntheticMax: z.record(z.string().min(1), z.boolean()).optional(),
@@ -299,9 +312,11 @@ export const providerConfigSchema = z.object({
   upstreamHttpVersion: z.enum(UPSTREAM_HTTP_VERSION_VALUES)
     .nullish()
     .transform(value => value ?? undefined),
-  // Opt-in upstream Responses WebSocket for OpenAI-compatible providers (e.g.
-  // aggregators whose WebSocket ingress is measurably faster than SSE). The
-  // canonical ChatGPT backend WS selection is independent of this flag.
+  // Opt-in upstream Responses WebSocket for OpenAI-compatible providers, honored only
+  // for the first-party api.openai.com/v1 upstream; other custom endpoints stay on
+  // bounded HTTP/SSE. On the canonical ChatGPT `openai` provider the same field selects
+  // the transport: omitted keeps the upstream WebSocket on eligible turns, explicit
+  // `false` sends streaming turns over HTTP/SSE, and provider management rejects `true`.
   upstreamWebsocket: z.boolean().optional(),
   directGeminiWireRenames: z.boolean().optional(),
   googleToolSchemaPolicy: z.enum(["compatible", "reject-lossy"]).optional(),
@@ -331,6 +346,10 @@ export const providerConfigSchema = z.object({
     .optional(),
   retryOn429: retryOn429PolicySchema.optional(),
   transientRetryOn5xx: transientRetryOn5xxPolicySchema.optional(),
+  // Degrades to "absent" like `webSearchBridge`: a malformed hand edit of an opt-in feature
+  // that is off by default must not send the operator through invalid-config recovery. The
+  // management write boundary still rejects it loudly (`retryOnResetPolicyConfigError`).
+  retryOnReset: retryOnResetPolicySchema.optional().catch(undefined),
   codexAccountMode: z.enum(["pool", "direct"]).optional(),
   // Validated rather than passed through: this schema ends in `.passthrough()`, so an
   // undeclared key survives verbatim. A misspelled `codexToolMode` therefore used to be
@@ -475,7 +494,7 @@ export function modelPreferHostedToolsConfigError(
     ? (provider.modelAdapters as Record<string, unknown>)[modelId]
     : undefined;
   const resolveEffectiveWire = (modelId: string, currentWire: unknown): unknown => {
-    const pinned = pinnedWireAdapter(providerName, modelId);
+    const pinned = pinnedWireAdapter(providerName, modelId, provider);
     if (pinned) return pinned;
     const requestedWire = requestedWireFor(modelId);
     if (typeof requestedWire === "string" && MODEL_ADAPTER_OVERRIDE_ALLOWED.has(requestedWire)) {
@@ -617,6 +636,54 @@ const codexQuotaAutoRefreshEntrySchema = z.object({
 }).strict();
 const CODEX_QUOTA_AUTO_REFRESH_KEY_ERROR =
   "quota auto-refresh keys must be a Codex pool-account id or the main Codex account and cannot be reserved JavaScript object keys";
+
+const CODEX_ACCOUNT_AUTO_SWITCH_THRESHOLDS_RECORD_ERROR =
+  "codexAccountAutoSwitchThresholds must be a plain object mapping Codex account ids to usage thresholds";
+const CODEX_ACCOUNT_AUTO_SWITCH_THRESHOLD_KEY_ERROR =
+  "usage-threshold keys must be a Codex pool-account id or the main Codex account and cannot be reserved JavaScript object keys";
+const CODEX_ACCOUNT_AUTO_SWITCH_THRESHOLD_VALUE_ERROR =
+  "account usage threshold must be an integer between 0 and 100";
+
+export const codexAccountAutoSwitchThresholdsSchema = z.custom<Record<string, unknown>>(
+  (value): value is Record<string, unknown> => !!value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null),
+  { error: CODEX_ACCOUNT_AUTO_SWITCH_THRESHOLDS_RECORD_ERROR },
+).superRefine((thresholds, ctx) => {
+  for (const [accountId, threshold] of Object.entries(thresholds)) {
+    if (!isCodexAccountAutoSwitchThresholdKey(accountId)) {
+      ctx.addIssue({
+        code: "custom",
+        path: [accountId],
+        message: CODEX_ACCOUNT_AUTO_SWITCH_THRESHOLD_KEY_ERROR,
+      });
+    }
+    if (parseCodexAutoSwitchThreshold(threshold) === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: [accountId],
+        message: CODEX_ACCOUNT_AUTO_SWITCH_THRESHOLD_VALUE_ERROR,
+      });
+    }
+  }
+}).pipe(z.record(z.string(), z.number().int()));
+
+/** Load only: retain valid overrides from a hand-edited map; writes use the strict schema above. */
+export function salvageCodexAccountAutoSwitchThresholds(value: unknown): Record<string, number> | undefined {
+  const parsed = codexAccountAutoSwitchThresholdsSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return undefined;
+  const valid: Record<string, number> = Object.create(null);
+  for (const [accountId, threshold] of Object.entries(value)) {
+    const parsedThreshold = parseCodexAutoSwitchThreshold(threshold);
+    if (isCodexAccountAutoSwitchThresholdKey(accountId) && parsedThreshold !== null) {
+      valid[accountId] = parsedThreshold;
+    }
+  }
+  return Object.keys(valid).length ? valid : undefined;
+}
 
 export const codexQuotaAutoRefreshSchema = z.custom<Record<string, unknown>>(
   (value): value is Record<string, unknown> => !!value
