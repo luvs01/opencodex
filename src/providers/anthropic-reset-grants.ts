@@ -15,6 +15,7 @@
  * and no upstream body, token, or organization id leaves through an error message.
  */
 import { CLAUDE_CLI_USER_AGENT } from "./claude-cli-identity";
+import { QUOTA_JSON_READ_FAILURE, readQuotaJson } from "./quota-wire";
 
 export const ANTHROPIC_API_ORIGIN = "https://api.anthropic.com";
 export const ANTHROPIC_RESET_GRANT_PROGRAM = "cedar_ember";
@@ -242,11 +243,9 @@ async function getAccountJson(path: string, options: AnthropicAccountRequestOpti
   }
   if (response.status === 401 || response.status === 403) throw new AnthropicResetGrantError("auth");
   if (!response.ok) throw new AnthropicResetGrantError("upstream");
-  try {
-    return await response.json();
-  } catch {
-    throw new AnthropicResetGrantError("malformed");
-  }
+  const body = await readQuotaJson(response, READ_TIMEOUT_MS);
+  if (body === QUOTA_JSON_READ_FAILURE) throw new AnthropicResetGrantError("malformed");
+  return body;
 }
 
 /** Reads the reset-grant block for the account that owns `accessToken`. */
@@ -311,12 +310,8 @@ export async function claimAnthropicResetGrant(options: AnthropicResetClaimOptio
   if (response.status === 429) return { code: "rate_limited", resetsLeft: null, cleared: [] };
   if (response.status === 401 || response.status === 403) return { code: "auth_error", resetsLeft: null, cleared: [] };
   if (!response.ok) throw new AnthropicResetGrantUnknownOutcome();
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new AnthropicResetGrantUnknownOutcome();
-  }
+  const body = await readQuotaJson(response, ANTHROPIC_RESET_GRANT_REDEEM_TIMEOUT_MS);
+  if (body === QUOTA_JSON_READ_FAILURE) throw new AnthropicResetGrantUnknownOutcome();
   if (!isRecord(body) || typeof body.result !== "string"
     || !(ANTHROPIC_RESET_RESULTS as readonly string[]).includes(body.result)) {
     throw new AnthropicResetGrantUnknownOutcome();

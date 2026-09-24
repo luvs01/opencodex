@@ -22,6 +22,7 @@ import {
   settleAnthropicResetOperation,
 } from "../../../src/providers/anthropic-reset-grant-ledger";
 import { CLAUDE_CLI_USER_AGENT } from "../../../src/providers/claude-cli-identity";
+import { QUOTA_RESPONSE_MAX_BYTES } from "../../../src/providers/quota-wire";
 
 // Every upstream call in this file goes to an injected fake. No test may reach
 // api.anthropic.com: a real claim spends the user's one-time reset.
@@ -164,6 +165,16 @@ describe("reset-grant wire", () => {
     await expect(fetchAnthropicOrganizationUuid({ accessToken: "t", fetchFn: bad.fn })).rejects.toMatchObject({ code: "malformed" });
   });
 
+  test("status and profile reads reject bodies whose declared size exceeds the shared limit", async () => {
+    const oversized = () => new Response("{}", {
+      headers: { "content-length": String(QUOTA_RESPONSE_MAX_BYTES + 1) },
+    });
+    await expect(fetchAnthropicResetGrantStatus({ accessToken: "t", fetchFn: fakeFetch(oversized).fn }))
+      .rejects.toMatchObject({ code: "malformed" });
+    await expect(fetchAnthropicOrganizationUuid({ accessToken: "t", fetchFn: fakeFetch(oversized).fn }))
+      .rejects.toMatchObject({ code: "malformed" });
+  });
+
   test("a claim posts the Claude Code body to the organization path", async () => {
     const fake = fakeFetch(() => json({ result: "reset", resets_left: 0, cleared: ["five_hour", "seven_day", "mystery"] }));
     const answer = await claimAnthropicResetGrant({
@@ -193,6 +204,19 @@ describe("reset-grant wire", () => {
     ]) {
       await expect(claimAnthropicResetGrant({ ...base, fetchFn: fakeFetch(respond).fn })).rejects.toBeInstanceOf(AnthropicResetGrantUnknownOutcome);
     }
+  });
+
+  test("a claim rejects a streamed body that exceeds the shared limit", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(QUOTA_RESPONSE_MAX_BYTES + 1));
+        controller.close();
+      },
+    });
+    const fetchFn = fakeFetch(() => new Response(stream, { status: 200 })).fn;
+    await expect(claimAnthropicResetGrant({
+      accessToken: "t", organizationUuid: ORG, grantId: "g-1", requestId: "r-1", fetchFn,
+    })).rejects.toBeInstanceOf(AnthropicResetGrantUnknownOutcome);
   });
 
   test("malformed identifiers are refused before anything is sent", async () => {
