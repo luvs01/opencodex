@@ -31,7 +31,17 @@ stay writable).
 ```bash
 ocx agent sidecar web --list
 ocx agent sidecar web --model gpt-5.6-luna
+ocx agent sidecar web --enabled off
 ```
+
+`--enabled off` is the same switch as the Dashboard's Off row: OpenCodex stops running the
+sidecar and the Codex integration writes `web_search = "disabled"` into `~/.codex/config.toml`,
+which is what lets an MCP search server be the only search path. `--enabled on` removes that
+marker-owned line again. When the save actually moves the switch, the command reports the
+Codex-side write it triggered (`codexWebSearch` in `--json`, a trailing `Codex config:` line
+otherwise) and points at `ocx sync` when it could not happen; a save that leaves the switch
+where it was has nothing to report and prints no `Codex config:` line. The flag works for
+`vision` too.
 
 ### `ocx effort [status|set|clear]`
 
@@ -331,7 +341,7 @@ No key is ever serialized. Configs carry either a documented environment referen
 non-secret loopback placeholder. A loopback proxy (`127.0.0.1`, the default) requires no
 admission key at all. Set a referenced variable only when the client schema supports it and
 the proxy binds beyond loopback; see
-[Remote access](/reference/configuration/#remote-access) for how admission keys are issued. Keys for
+[Remote access](/reference/configuration/server/#remote-access) for how admission keys are issued. Keys for
 the upstream providers themselves are a separate thing entirely, configured per
 [Providers](/guides/providers/).
 The generated gjc integration uses a non-secret loopback placeholder and needs no environment variable. It remains loopback-only; it does not configure remote admission credentials.
@@ -396,6 +406,10 @@ An observed identity or digest describes those files during this observation. It
 
 Inspect and safely modify validated OpenCodex configuration. `show` and `get` mask secrets. Import
 validates before writing and requires `--yes`.
+
+Display and mutation output strip credentials from proxy URLs while retaining the host and port.
+`direct` and credential-free proxy values stay readable. `export` preserves credentials so the
+backup can restore the configuration; store exported files as secrets.
 
 ### Usage from a connected client
 
