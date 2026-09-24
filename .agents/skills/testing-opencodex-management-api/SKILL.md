@@ -24,13 +24,14 @@ description: Run the opencodex proxy locally against a scratch home and exercise
   — loopback bind avoids the server-auth assert. Use the env vars AND the config
   disables together; either alone leaves a write path open (e.g. a disabled
   integration still prunes its owned files under the real home).
-- Residual writes the recipe does NOT cover (macOS only, opencodex-owned artifacts
-  only): startup always runs `refreshOwnedRaycastCatalog` (rewrites an existing
-  opencodex-owned Raycast provider entry under the OS home — no env override) and
-  `reconcileShellHook` (removes the opencodex-marked block from `~/.zshrc` when the
-  system env is inactive — `CLAUDE_CONFIG_DIR` does not redirect it). Harmless on a
-  box with neither installed; for hermetic isolation on macOS run under a disposable
-  OS user/home instead.
+- Residual writes the recipe does NOT cover (opencodex-owned artifacts only):
+  startup always runs `refreshOwnedRaycastCatalog` (rewrites an existing
+  opencodex-owned Raycast provider entry under the OS home — `~/.config/raycast/ai`
+  on macOS AND Windows, no env override) and `reconcileShellHook` (removes the
+  opencodex-marked block from `~/.zshrc` when the system env is inactive —
+  `CLAUDE_CONFIG_DIR` does not redirect it; only relevant where a zshrc exists).
+  Harmless on a box with neither installed; for hermetic isolation run under a
+  disposable OS user/home instead.
 - Management auth: set `OPENCODEX_ADMIN_AUTH_TOKEN` (any non-empty string works for the env
   source). If unset, the server mints `admin-api-token` in OPENCODEX_HOME on first start.
 - Start foreground: `bun run src/cli/index.ts start --port <testport>`
@@ -41,10 +42,13 @@ description: Run the opencodex proxy locally against a scratch home and exercise
 - Header: `x-opencodex-api-key: <token>` (or `Authorization: Bearer <token>`). No token →
   `401 {"error":"opencodex admin token required"}`. Origin header NOT required for curl.
 - Useful routes: `GET/PUT /api/lab/automation` (status has `schedulerRunning` — live
-  interval presence, not just policy), `POST /api/lab/automation/run` (SYNCHRONOUS — the
-  200 response IS the terminal run record), `GET /api/lab/automation/runs`.
+  interval presence, not just policy), `POST /api/lab/automation/run` (SYNCHRONOUS —
+  returns `{run, trigger}`; `run` is the post-dispatch record, normally terminal but
+  can still be `queued`/`cancelled` when dispatch could not run it),
+  `GET /api/lab/automation/runs`.
 - PUT policy body: `{"policy":{"enabled":true,"layers":{"protocolConformance":true}}}`;
-  merges with disk policy atomically.
+  merged policy+routes publish in one atomic rename, but the read-merge is not under
+  the save lock — concurrent PUTs can lose one update.
 - Manual run body: `{"evidenceLayer":"protocol_conformance","scenarioId":"responses-core.protocol.request-shape"}`
   — protocol_conformance runs need NO provider (in-process fixture harness; upstream is
   deliberately dead). live_route_compatibility needs providerName+modelId in config.
