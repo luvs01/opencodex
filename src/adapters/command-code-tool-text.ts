@@ -28,6 +28,8 @@ import { validatesRestoredValue } from "./command-code-restored-schema";
 export const TOOL_CALL_MARKER = "<tool_call>";
 /** A held block larger than this is released as text rather than buffered further. */
 export const MAX_HELD_TOOL_TEXT_BYTES = 64 * 1024;
+/** Maximum unterminated text blocks and tool inputs retained from one upstream stream. */
+export const MAX_TRACKED_MIMO_STATES = 256;
 
 export interface CommandCodeDeclaredTool {
   freeform: boolean;
@@ -260,6 +262,7 @@ export class CommandCodeToolTextFilter {
   private head = 0;
   private queuedBytes = 0;
   private queueOperations = 0;
+  private restorationDisabled = false;
 
   constructor(
     private readonly budget: TranslatorBudget,
@@ -269,10 +272,15 @@ export class CommandCodeToolTextFilter {
   /** Counts queue item visits and appends for the bounded-work regression. */
   queueOperationsForTest(): number { return this.queueOperations; }
   openBlockCountForTest(): number { return this.blocks.size; }
+  trackedStateCountForTest(): number { return this.blocks.size + this.openInputs.size; }
 
   toolInputStart(id: unknown, name: unknown): AdapterEvent[] {
     const events = this.breakOpenBlocks();
-    if (typeof id === "string" && typeof name === "string") this.openInputs.set(id, name);
+    if (this.restorationDisabled || typeof id !== "string" || typeof name !== "string") return events;
+    if (!this.openInputs.has(id) && this.trackedStateCountForTest() >= MAX_TRACKED_MIMO_STATES) {
+      return [...events, ...this.disableRestoration()];
+    }
+    this.openInputs.set(id, name);
     return events;
   }
 
@@ -294,15 +302,20 @@ export class CommandCodeToolTextFilter {
   }
 
   textStart(id: unknown): AdapterEvent[] {
+    if (this.restorationDisabled) return [];
     const key = typeof id === "string" ? id : DEFAULT_TEXT_ID;
     const events = this.blocks.has(key) ? this.textEnd(key) : [];
     events.push(...this.breakOpenBlocks(key));
+    if (this.trackedStateCountForTest() >= MAX_TRACKED_MIMO_STATES) {
+      return [...events, ...this.disableRestoration()];
+    }
     const block: TextBlock = { id: key, markupParts: [], probe: "", bytes: 0, state: "probing", ended: false, interrupted: false, candidates: new Set(this.openInputs.keys()) };
     this.blocks.set(key, block);
     return events;
   }
 
   textDelta(id: unknown, text: string): AdapterEvent[] {
+    if (this.restorationDisabled) return text ? [{ type: "text_delta", text }] : [];
     const key = typeof id === "string" ? id : DEFAULT_TEXT_ID;
     const boundaryEvents = this.breakOpenBlocks(key);
     let block = this.blocks.get(key);
@@ -453,6 +466,7 @@ export class CommandCodeToolTextFilter {
     this.queuedBytes = 0;
     this.blocks.clear();
     this.activeProbes.clear();
+    this.openInputs.clear();
     for (const item of pending) {
       this.queueOperations++;
       if (item.kind === "finish") break;
@@ -585,5 +599,14 @@ export class CommandCodeToolTextFilter {
       item.block.markupParts = [];
     }
     return this.drain();
+  }
+
+  private disableRestoration(): AdapterEvent[] {
+    this.restorationDisabled = true;
+    const events = this.flushPendingAsText();
+    this.blocks.clear();
+    this.activeProbes.clear();
+    this.openInputs.clear();
+    return events;
   }
 }

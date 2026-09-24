@@ -6,6 +6,7 @@ import { createCommandCodeAdapter } from "../../src/adapters/command-code";
 import {
   CommandCodeToolTextFilter,
   MAX_HELD_TOOL_TEXT_BYTES,
+  MAX_TRACKED_MIMO_STATES,
   markupMatchesInput,
   parseToolCallMarkup,
   salvagedArguments,
@@ -344,14 +345,18 @@ describe("Command Code MiMo tool-call text", () => {
     expect(spacedBudget.snapshot().currentBytes).toBe(0);
   });
 
-  test("many empty text starts do not scan open blocks", () => {
+  test("bounds unterminated MiMo state and falls back to text passthrough", () => {
     const budget = createTestTranslatorBudget();
     const filter = new CommandCodeToolTextFilter(budget, undefined);
-    const count = 20_000;
-    for (let index = 0; index < count; index++) expect(filter.textStart(`empty-${index}`)).toEqual([]);
-    expect(filter.openBlockCountForTest()).toBe(count);
+    for (let index = 0; index < MAX_TRACKED_MIMO_STATES / 2; index++) {
+      expect(filter.toolInputStart(`call-${index}`, "exec")).toEqual([]);
+      expect(filter.textStart(`empty-${index}`)).toEqual([]);
+    }
+    expect(filter.trackedStateCountForTest()).toBe(MAX_TRACKED_MIMO_STATES);
+    expect(filter.textStart("overflow")).toEqual([]);
+    expect(filter.trackedStateCountForTest()).toBe(0);
+    expect(filter.textDelta("overflow", "ordinary text")).toEqual([{ type: "text_delta", text: "ordinary text" }]);
     expect(filter.boundary()).toEqual([]);
-    expect(filter.queueOperationsForTest()).toBeLessThan(count * 2);
     expect(filter.finish()).toEqual({ events: [], salvaged: false });
     expect(filter.openBlockCountForTest()).toBe(0);
     expect(budget.snapshot().currentBytes).toBe(0);
