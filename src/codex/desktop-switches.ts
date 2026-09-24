@@ -129,6 +129,14 @@ export async function observedCodexDesktopSwitchApply(): Promise<CodexDesktopSwi
   };
 }
 
+// The apply gates skip the injector entirely, so they run the same ownership read the
+// observed path does — a disabled integration or an absent runtime must not make a
+// switch PUT report local state the external provider still controls.
+async function externalOwnershipApply(): Promise<CodexDesktopSwitchApply | null> {
+  const ownership = await observedCodexDesktopSwitchApply();
+  return !ownership.applied && ownership.reason === "external_provider" ? ownership : null;
+}
+
 /**
  * Re-run the Codex config injection so a setting that lives in `~/.codex/config.toml` follows the
  * stored config NOW rather than at the next `ocx sync`.
@@ -141,13 +149,15 @@ export async function applyCodexConfigInjection(
   config: OcxConfig,
 ): Promise<CodexDesktopSwitchApply> {
   if (!shouldSyncCodexOnStart(config)) {
-    return { applied: false, reason: "integration_disabled", retryable: false };
+    return (await externalOwnershipApply())
+      ?? { applied: false, reason: "integration_disabled", retryable: false };
   }
 
   const { readRuntimePort } = await import("../config/process-state");
   const runtime = readRuntimePort(process.pid);
   if (!runtime) {
-    return { applied: false, reason: "proxy_not_running", retryable: true };
+    return (await externalOwnershipApply())
+      ?? { applied: false, reason: "proxy_not_running", retryable: true };
   }
 
   try {
