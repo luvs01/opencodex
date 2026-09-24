@@ -47,6 +47,7 @@ import {
   DEEPSEEK_V4_LEGACY_MODELS,
   DEEPSEEK_GATEWAY_THINKING_MODELS,
   DEEPSEEK_VISION_PREVIEW_MODEL,
+  COMMAND_CODE_MIMO_CONTEXT_WINDOWS,
   COMMAND_CODE_MODEL_INPUT_MODALITIES,
   OPENCODE_FREE_DEEPSEEK_MODELS,
   OPENCODE_ZEN_TEXT_ONLY_MODELS,
@@ -170,6 +171,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     // (merges into v4-flash later).
     modelContextWindows: {
       [`deepseek/${DEEPSEEK_VISION_PREVIEW_MODEL}`]: 1_048_576,
+      ...COMMAND_CODE_MIMO_CONTEXT_WINDOWS,
     },
     modelInputModalities: COMMAND_CODE_MODEL_INPUT_MODALITIES,
     modelDiscovery: {
@@ -822,15 +824,30 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     // glm-5.3 carry live end-to-end evidence there (custom tools, reasoning replay, streaming,
     // multi-turn continuation).
     //
-    // That is deliberately NOT expressed as a modelWireDefaults pin. Pinning would move every
-    // existing Codex user of those models onto a different upstream with no config change, and
-    // one delta is unresolved: preserveReasoningContentModels below is read by the CHAT adapter,
-    // while the Responses serializer reads preserveResponsesReasoningContent, which this entry
-    // does not set. On the Responses wire those models would replay with blanked reasoning
-    // content -- less state than they carry today. Z.AI and DeepSeek set both flags together for
-    // exactly this reason. Until that flag is justified against this gateway, Responses stays a
-    // documented per-model modelAdapters opt-in;
-    // tests/providers/alibaba-token-plan-responses-optin.test.ts holds both halves.
+    // That evidence is now expressed as a modelWireDefaults pin scoped to Responses inbound
+    // only: Codex clients ride the native wire with zero translation hops, while chat and
+    // anthropic inbound keep the provider-wide chat wire and its measured prefix-cache
+    // behavior. The pin was held back until the one open delta was closed with its own live
+    // evidence: the Responses serializer replays reasoning content through the separate
+    // preserveResponsesReasoningContent flag, which the Chat-side preserveReasoningContentModels
+    // list does not cover. Measured 260922 on this gateway (#5188): a two-turn replay that
+    // round-trips a reasoning item WITH its plaintext content array is accepted (HTTP 200) and
+    // the model continues from it, so the flag is set beside the pins — the same pairing Z.AI
+    // and DeepSeek use. qwen3.7-plus is the one pinned model in thinkingBudgetModels, and its
+    // full low/medium/high/xhigh/max effort ladder is accepted as reasoning.effort strings on
+    // this wire (measured same day), so the Responses path does not need the numeric
+    // thinking_budget translation the Chat wire applies. The rest of the family stays a
+    // documented per-model modelAdapters opt-in; modelAdapters always wins over the pin in
+    // both directions.
+    // tests/providers/alibaba-token-plan-responses-optin.test.ts holds the opt-in half and the
+    // flag guard; tests/providers/alibaba-token-plan-wire-defaults.test.ts holds the pins.
+    // The intl sibling stays unpinned until the same four-axis verification runs against its
+    // gateway (its /responses route is registered, #5097).
+    modelWireDefaults: {
+      "qwen3.8-flash": { wire: "openai-responses", inbound: ["responses"] },
+      "qwen3.7-plus": { wire: "openai-responses", inbound: ["responses"] },
+      "glm-5.3": { wire: "openai-responses", inbound: ["responses"] },
+    },
     note: "Token Plan Personal Edition · China (Beijing)",
     modelInputModalities: ALIBABA_TOKEN_PLAN_INPUT_MODALITIES,
     modelContextWindows: ALIBABA_TOKEN_PLAN_CONTEXT_WINDOWS,
@@ -860,6 +877,10 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     directReasoningEffortModels: QWEN38_FAMILY,
     thinkingBudgetModels: ALIBABA_TOKEN_PLAN_QWEN_MODELS.filter(id => !QWEN38_FAMILY.includes(id)),
     preserveReasoningContentModels: ALIBABA_TOKEN_PLAN_PRESERVE_REASONING,
+    // Responses replay uses this provider-level flag, not the Chat-path model list above;
+    // measured live on this gateway (see the pin comment). The model list still covers a
+    // caller who opts back into Chat.
+    preserveResponsesReasoningContent: true,
     noVisionModels: ALIBABA_TOKEN_PLAN_NO_VISION,
     // The gateway accepts prompt_cache_key on every Token Plan chat model (probed 260902).
     promptCacheKey: true,
@@ -1139,7 +1160,11 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     // narrower table that silently falls behind whenever the keyed one is updated.
     noJsonSchemaModels: [...DEEPSEEK_GATEWAY_THINKING_MODELS, ...OPENCODE_FREE_DEEPSEEK_MODELS],
   },
-  { id: "xiaomi", label: "Xiaomi MiMo", baseUrl: "https://api.xiaomimimo.com/anthropic", adapter: "anthropic", authKind: "key", dashboardUrl: "https://xiaomimimo.com", defaultModel: "mimo-v2.5-pro" },
+  // Xiaomi retires mimo-v2.5 and mimo-v2.5-pro on 2026-10-21 with no redirect
+  // (https://mimo.mi.com/docs/en-US/updates/deprecate), so the first-party presets default to V2.6.
+  // Saved defaults are not rewritten; V2.5 stays listed until it stops answering.
+  // Both first-party presets read the xiaomi metadata bundle for window, output, modalities and price.
+  { id: "xiaomi", label: "Xiaomi MiMo", baseUrl: "https://api.xiaomimimo.com/anthropic", adapter: "anthropic", authKind: "key", dashboardUrl: "https://xiaomimimo.com", defaultModel: "mimo-v2.6-pro", models: ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.6-pro-ultraspeed", "mimo-v2.5-pro", "mimo-v2.5"], jawcodeBundle: "xiaomi" },
   // Xiaomi's public OpenAI-compatible endpoint is a distinct transport from both the Anthropic
   // preset above and the paid token-plan host below. Keep a separate fixed-destination contract
   // so existing custom providers are never retargeted while the official route receives the
@@ -1151,8 +1176,9 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     adapter: "openai-chat",
     authKind: "key",
     dashboardUrl: "https://platform.xiaomimimo.com/console/balance",
-    defaultModel: "mimo-v2.5",
-    models: ["mimo-v2.5"],
+    defaultModel: "mimo-v2.6-flash",
+    models: ["mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed", "mimo-v2.5"],
+    jawcodeBundle: "xiaomi",
     reasoningEfforts: ["low", "medium", "high"],
     reasoningEffortMap: { xhigh: "high", max: "high", ultra: "high" },
     preserveCustomDestination: true,
@@ -1192,8 +1218,23 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     adapter: "openai-chat",
     authKind: "key",
     dashboardUrl: "https://xiaomimimo.com",
-    defaultModel: "mimo-v2.5-pro",
-    models: ["mimo-v2.5-pro", "mimo-v2.5"],
+    // Token-plan roster per Xiaomi's token-plan model list (V2.6 Pro and Flash). Model-level facts
+    // come from Xiaomi's model pages (mimo.mi.com/models/en-US/<id>, fetched 2026-09-24): 1M context,
+    // 128K max output; V2.6 Pro/Flash and V2.5 take text/image/video/audio, V2.5 Pro text only. The
+    // catalog vocabulary has no video or audio, so only text/image are claimed. The token plan speaks
+    // the same API format as pay-as-you-go, so these are model facts rather than plan facts. No
+    // jawcodeBundle: pricing and entitlement stay unclaimed, and usage estimates still come from the
+    // model-level vendor price fallback, exactly as they did for V2.5.
+    defaultModel: "mimo-v2.6-pro",
+    models: ["mimo-v2.6-pro", "mimo-v2.6-flash", "mimo-v2.5-pro", "mimo-v2.5"],
+    modelContextWindows: { "mimo-v2.6-pro": 1_048_576, "mimo-v2.6-flash": 1_048_576, "mimo-v2.5-pro": 1_048_576, "mimo-v2.5": 1_048_576 },
+    modelMaxOutputTokens: { "mimo-v2.6-pro": 131_072, "mimo-v2.6-flash": 131_072, "mimo-v2.5-pro": 131_072, "mimo-v2.5": 131_072 },
+    modelInputModalities: {
+      "mimo-v2.6-pro": ["text", "image"],
+      "mimo-v2.6-flash": ["text", "image"],
+      "mimo-v2.5": ["text", "image"],
+      "mimo-v2.5-pro": ["text"],
+    },
     // The gateway validates the ladder strictly and rejects anything above `high`.
     reasoningEfforts: ["low", "medium", "high"],
     reasoningEffortMap: { xhigh: "high", max: "high", ultra: "high" },
@@ -1249,7 +1290,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     featured: false,
     dashboardUrl: "https://github.com/settings/copilot",
     liveModels: true,
-    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"],
+    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-luna"],
     defaultModel: "gpt-4o",
     // Copilot fronts a mixed-wire catalog: these models reject /chat/completions for
     // real Codex-agent traffic (function tools + reasoning), so every inbound wire
@@ -1266,6 +1307,9 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
       "gpt-5.6-sol": "openai-responses",
       "gpt-5.6-terra": "openai-responses",
       "gpt-6-astra": "openai-responses",
+      // 260923 preemptive: GPT-6 Sol/Luna ride Responses like every GPT-5.6/6 row above.
+      "gpt-6-sol": "openai-responses",
+      "gpt-6-luna": "openai-responses",
       "grok-4.5": "openai-responses",
       "grok-4.6": "openai-responses",
       "mai-code-1.1-flash": "openai-responses",
@@ -1321,9 +1365,10 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     // private console endpoint — the approach closed in #687 and left in draft in #2244.
     // baseUrl is the canonical region identity: the adapter fails closed if it is overridden, so a
     // global key is never sent to the CN environment (that is the separate `codebuddy-cn` entry).
-    // v1 runs tools-disabled so Codex keeps tool ownership; this provider is text/reasoning only
-    // until the control-protocol tool bridge lands (see docs). Free/trial/promotional/subscription
-    // credits draw from the same official API-key pool. Requires the CLI: `npm i -g @tencent-ai/codebuddy-code`.
+    // The CLI always runs tools-disabled; a capture-only MCP bridge advertises the request's
+    // Codex tool catalog, so approval, sandboxing, and execution stay with the client.
+    // Free/trial/promotional/subscription credits draw from the same official API-key pool.
+    // Requires the CLI: `npm i -g @tencent-ai/codebuddy-code`.
     // GOVERNANCE: whether routing this vendor automation surface behind a proxy for a third-party
     // agent satisfies CodeBuddy's AUP is an open question flagged for maintainer security review.
     id: "codebuddy",
@@ -1343,7 +1388,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     reasoningEfforts: CODEBUDDY_REASONING_EFFORTS,
     modelReasoningEfforts: CODEBUDDY_GLOBAL_MODEL_REASONING_EFFORTS,
     modelDefaultReasoningEfforts: CODEBUDDY_GLOBAL_MODEL_DEFAULT_REASONING_EFFORTS,
-    note: "Official CodeBuddy Code CLI (Tencent Cloud), global/public environment. Uses the documented CODEBUDDY_API_KEY + headless CLI surface; never reads desktop sessions or private console endpoints. Region-isolated from codebuddy-cn. v1 disables CLI tools (--tools \"\") so Codex retains tool ownership: text/reasoning only for now. Requires `npm i -g @tencent-ai/codebuddy-code`. AUP/routing authorization flagged for maintainer security review.",
+    note: "Official CodeBuddy Code CLI (Tencent Cloud), global/public environment. Uses the documented CODEBUDDY_API_KEY + headless CLI surface; never reads desktop sessions or private console endpoints. Region-isolated from codebuddy-cn. The CLI always runs tools-disabled (--tools \"\"); a capture-only MCP bridge surfaces the request's Codex tool catalog as capturable calls, with approval and execution kept by the client. Requires `npm i -g @tencent-ai/codebuddy-code`. AUP/routing authorization flagged for maintainer security review.",
   },
   {
     // Official CodeBuddy Code CLI provider, CHINA / `internal` environment. Identical adapter and
@@ -1368,7 +1413,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     modelReasoningEfforts: CODEBUDDY_CN_MODEL_REASONING_EFFORTS,
     modelDefaultReasoningEfforts: CODEBUDDY_CN_MODEL_DEFAULT_REASONING_EFFORTS,
     noVisionModels: CODEBUDDY_CN_NO_VISION_MODELS,
-    note: "Official CodeBuddy Code CLI (Tencent Cloud), China/internal environment. Uses the documented CODEBUDDY_API_KEY + headless CLI surface; never reads desktop sessions or private console endpoints. Region-isolated from codebuddy (Global); credentials are never exchanged across regions. v1 disables CLI tools (--tools \"\"): text/reasoning only for now. Requires `npm i -g @tencent-ai/codebuddy-code`. AUP/routing authorization flagged for maintainer security review.",
+    note: "Official CodeBuddy Code CLI (Tencent Cloud), China/internal environment. Uses the documented CODEBUDDY_API_KEY + headless CLI surface; never reads desktop sessions or private console endpoints. Region-isolated from codebuddy (Global); credentials are never exchanged across regions. The CLI always runs tools-disabled (--tools \"\"); a capture-only MCP bridge surfaces the request's Codex tool catalog as capturable calls, with approval and execution kept by the client. Requires `npm i -g @tencent-ai/codebuddy-code`. AUP/routing authorization flagged for maintainer security review.",
   },
   {
     id: "stepfun",

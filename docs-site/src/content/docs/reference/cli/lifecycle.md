@@ -334,6 +334,8 @@ and this session ends with the app.
 Invalidate Codex's local model picker cache so it is rebuilt from the active opencodex catalog. The
 same stale-`app-server` warning and optional restart flags as `ocx sync` apply.
 
+If the derived cache already has identical bytes, the command succeeds without rewriting it or restarting Codex. With `--json`, this is reported as `ok: true`, `wrote: false`, `skipped: true`, and `skippedReason: "unchanged"`; an invalid catalog or failed cache write still exits nonzero.
+
 ### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex] [--restart-app-server-only]`
 
 Install a complete catalog served by another OpenCodex instance's `/v1/catalog` endpoint, then
@@ -700,6 +702,8 @@ package registry or install an update.
 
 ### `ocx update [--tag latest|preview]`
 
+When OpenCodex is installed through mise, this command exits unsuccessfully before stopping the proxy or changing package files and shows `mise upgrade <tool>`, using the verified local mise alias. Update checks remain available and report the installation as externally managed. An unreadable or inconsistent mise ownership record fails closed without guessing a tool name, and `--tag preview` never changes mise's configured selection.
+
 Self-update opencodex from npm. Stable installs use `@latest`; preview installs stay on `@preview`
 unless you pass `--tag latest|preview`. It detects a source checkout and tells you to
 `git pull && bun install` instead, and is a no-op if you are already on the newest version for that
@@ -709,6 +713,9 @@ Unix-only check. A failure aborts while the tray and proxy are still running. A 
 then stopped before files are replaced; an installed service is rebuilt and started automatically,
 while a foreground installation prints `ocx start` as the next step. Dashboard update records
 redact profile/cache paths and UID/GID values before they are persisted.
+If the install step fails, the previous version stays installed and its service is restarted; the
+terminal output names the next step, and [Update Failed on Windows](/troubleshooting/update-failed/)
+covers finishing the update and the folders a failed attempt can leave behind.
 
 ```bash
 ocx update
