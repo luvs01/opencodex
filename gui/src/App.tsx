@@ -12,6 +12,7 @@ import Integrations from "./pages/Integrations";
 import Startup from "./pages/Startup";
 import RemoteWorkspace from "./pages/RemoteWorkspace";
 import ErrorBoundary from "./components/ErrorBoundary";
+import QuotaSummaryBar from "./components/quota-summary-bar/QuotaSummaryBar";
 import { SidebarGithubRow } from "./components/sidebar-github-row";
 import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconCodex, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
 import { useI18n, useT, LOCALES, localeDisplayName, type Locale, type TKey } from "./i18n/shared";
@@ -464,6 +465,11 @@ export default function App() {
       </aside>
 
       <main className="main" inert={navOpen}>
+        {targetsSettled && page !== "startup" && (!targets.connected || sharedSessionReady) && (
+          <ErrorBoundary key={sharedBase} pageName={t("quotaSummary.aria")} title={t("errorBoundary.title")} message={t("errorBoundary.message")} detailsLabel={t("errorBoundary.details")} reloadLabel={t("errorBoundary.reload")}>
+            <QuotaSummaryBar apiBase={sharedBase} />
+          </ErrorBoundary>
+        )}
         {/*
           Combos is full-bleed, unlike every other surface, and it is reachable only as
           a Models tab. `.main-inner` is App's element, so App is the only place that

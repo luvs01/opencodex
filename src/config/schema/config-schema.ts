@@ -149,7 +149,9 @@ export const configSchema = z.object({
   // Ultra Fast is opt-in for the same reason and degrades the same way: a malformed hand
   // edit turns the tier off rather than rejecting the config that carries it.
   ultraFastTier: z.boolean().optional().catch(false),
-  codexMainAccountHardLock: z.boolean().optional().catch(false),
+  // Default-on policy (#5694): absence and malformed hand edits both mean "on", and only an
+  // explicit `false` written by the settings PUT opts out.
+  codexMainAccountHardLock: z.boolean().optional().catch(undefined),
   // Future versions remain opaque through passthrough-compatible whole-config saves.
   // Only version 1 grants deletion authority in the rebase path.
   configRebaseProvenance: z.unknown().optional(),
@@ -285,9 +287,12 @@ export const configSchema = z.object({
       if (!intercept || typeof intercept !== "object" || Array.isArray(intercept)) {
         ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept"], message: "intercept must be an object" });
       } else {
-        const { enabled, port, modelMap } = intercept as { enabled?: unknown; port?: unknown; modelMap?: unknown };
+        const { enabled, port, picker, modelMap } = intercept as { enabled?: unknown; port?: unknown; picker?: unknown; modelMap?: unknown };
         if (enabled !== undefined && typeof enabled !== "boolean") {
           ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "enabled"], message: "intercept.enabled must be a boolean" });
+        }
+        if (picker !== undefined && typeof picker !== "boolean") {
+          ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "picker"], message: "intercept.picker must be a boolean" });
         }
         if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)) {
           ctx.addIssue({ code: "custom", path: ["claudeCode", "intercept", "port"], message: "intercept.port must be an integer between 1 and 65535" });

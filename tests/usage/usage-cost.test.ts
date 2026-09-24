@@ -192,15 +192,14 @@ describe("resolveMatchedPrice", () => {
       jawcodeProvider: "anthropic",
       status: "verified-derived",
     });
-    // Cursor publishes the same standard list rate; non-Fast variants collapse onto one row.
-    for (const spelling of ["claude-opus-5-5", "claude-opus-5-5-thinking-high"]) {
-      expect(resolveMatchedPrice("cursor", spelling), spelling).toMatchObject({
-        cost4: COST4,
-        source: "expected",
-        status: "verified",
-      });
-    }
-    expect(resolveMatchedPrice("cursor", "claude-opus-5-5-thinking-high-fast")).toMatchObject({
+    // Cursor publishes the standard row and a separate Fast row; the old thinking IDs were
+    // removed when the live Cursor roster proved Opus 5.5 uses flat effort IDs.
+    expect(resolveMatchedPrice("cursor", "claude-opus-5-5")).toMatchObject({
+      cost4: COST4,
+      source: "expected",
+      status: "verified",
+    });
+    expect(resolveMatchedPrice("cursor", "claude-opus-5-5-high-fast")).toMatchObject({
       cost4: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 },
       source: "expected",
       status: "verified",
