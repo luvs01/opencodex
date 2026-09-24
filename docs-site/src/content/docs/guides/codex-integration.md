@@ -337,7 +337,9 @@ On WSL, if `CODEX_HOME` is unset and the Linux `~/.codex` directory is absent or
 (`config.toml`, `auth.json`, `sessions`, `history.jsonl`), opencodex also
 checks for a single Windows Codex Desktop home at `/mnt/c/Users/*/.codex/config.toml`. When exactly
 one candidate exists, it uses that directory so WSL app-server mode and Windows Codex Desktop share
-the same config and auth files. Set `CODEX_HOME` explicitly to override this detection. When Windows Codex Desktop runs its app-server inside WSL, it ships the Linux Codex binary under that home as `bin/wsl/<hash>/codex`; opencodex finds it there when the service PATH has no `codex`, after any explicitly configured runtime and PATH.
+the same config and auth files. Set `CODEX_HOME` explicitly to override this detection. opencodex does
+not automatically execute binaries stored inside this shared home. If the WSL service PATH has no
+`codex`, set `CODEX_CLI_PATH` to the trusted app-server runtime you want it to use.
 
 If the Codex home exists but Codex has not written `config.toml` yet (for example a fresh Desktop install
 that was never signed in to OpenAI), opencodex creates an empty `config.toml` there and continues. If

@@ -38,7 +38,9 @@ or is a directory holding no Codex state (none of `config.toml`, `auth.json`, `s
 `history.jsonl`; `defaultCodexHome` in `src/codex/home.ts`). A fresh local home Codex is already using
 stays the home before `config.toml` exists (issue 5441), a bare directory does not move an existing
 user off a Windows home they were running against, and a stat failure other than absence keeps the
-local home rather than switching to a different one. Codex runtime discovery (src/codex/runtime.ts) also reads this home on Linux: after an explicit runtime, PATH, and the ordinary install locations, it enumerates the direct children of <effective CODEX_HOME>/bin/wsl/<version-hash>/codex newest first, probes each through the isolated --version seam, and re-enumerates on every resolve so a Desktop update that replaces the hash directory is picked up (issue 5635). An explicitly
+local home rather than switching to a different one. Codex runtime discovery (`src/codex/runtime.ts`)
+does not execute binaries found inside this shared home; an app-server runtime that is not on PATH
+must be selected explicitly with `CODEX_CLI_PATH`. An explicitly
 set path that is unreadable or not a directory is an error, not a fallback: silently using a
 different home than the operator named would write provider state where nobody is looking for it. A fresh install can have that directory but no `config.toml` yet; applying the integration then creates an empty `config.toml` there (never overwriting an existing file) and continues, while a missing home directory is refused with instructions to start Codex once or set `CODEX_HOME` (issue 5422).
 The managed files are:
