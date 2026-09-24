@@ -9,16 +9,18 @@ usage() {
 Usage: codex-queue.sh (--thread <id-or-exact-name> | --latest) [options] [<message>]
   --message <text>  Explicit message (also accepts text beginning with a dash)
   --codex <path>    Pin a trusted native CLI; otherwise discover a queue-capable CLI
-  --dry-run        Show the executable and target without queueing (message optional)
+  --dry-run        Check selection/help without queueing; private values stay hidden
+  --show-target    Reveal selection in a local terminal; requires --dry-run
   --               End options; the next argument is the entire message
   --help           Show this help
 CODEX_HOME is honored. --latest is global filesystem activity, NOT the active UI chat;
-prefer --latest --dry-run, verify the target, then send with --thread <id>.
+use --latest --dry-run --show-target in a private terminal, then send with --thread <id>.
+On-demand only: no enable/disable state, quota polling, auto-send, or routing changes.
 USAGE
 }
 
 fail() { printf '%s\n' "$1" >&2; exit 2; }
-THREAD=""; LATEST=0; MESSAGE=""; MESSAGE_SET=0; DRY_RUN=0
+THREAD=""; LATEST=0; MESSAGE=""; MESSAGE_SET=0; DRY_RUN=0; SHOW_TARGET=0
 CODEX_EXE="${CODEX_EXE:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -41,6 +43,7 @@ while [ "$#" -gt 0 ]; do
       shift ;;
     --latest) LATEST=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --show-target) SHOW_TARGET=1; shift ;;
     --help|-h) usage; exit 0 ;;
     --)
       shift
@@ -55,6 +58,10 @@ done
 [ -n "$THREAD" ] || [ "$LATEST" -eq 1 ] || fail "choose --thread <id-or-exact-name> or explicitly opt in with --latest"
 [ -z "$THREAD" ] || [ "$LATEST" -eq 0 ] || fail "--thread and --latest are mutually exclusive"
 [ "$DRY_RUN" -eq 1 ] || [ -n "$MESSAGE" ] || fail "a nonempty message is required"
+if [ "$SHOW_TARGET" -eq 1 ]; then
+  [ "$DRY_RUN" -eq 1 ] || fail "--show-target requires --dry-run"
+  [ -t 1 ] && [ -t 2 ] || fail "--show-target requires a local terminal, not redirected output"
+fi
 CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME is required}/.codex}"
 
 # Read every NUL-delimited path before selecting: no ls batches, SIGPIPE, or
@@ -64,9 +71,9 @@ resolve_latest_thread() (
   local uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
   local pattern="^rollout-.+-($uuid)(_$uuid)?\\.jsonl$"
   [ -d "$sessions" ] || fail "no sessions directory under the effective CODEX_HOME"
-  paths=$(mktemp) || fail "could not create temporary session listing"
+  paths=$(mktemp 2>/dev/null) || fail "could not create temporary session listing"
   trap 'rm -f -- "$paths"' EXIT
-  find "$sessions" -type f -name 'rollout-*.jsonl' -print0 > "$paths" || fail "session scan failed; refusing a partial selection"
+  find "$sessions" -type f -name 'rollout-*.jsonl' -print0 > "$paths" 2>/dev/null || fail "session scan failed; refusing a partial selection"
   while IFS= read -r -d '' candidate; do
     name="${candidate##*/}"
     [[ "$name" =~ $pattern ]] || continue
@@ -123,7 +130,14 @@ if [ "$LATEST" -eq 1 ]; then
 fi
 CODEX_EXE=$(resolve_codex)
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf 'Codex: %s\nThread: %s\nDry run only; no message was queued.\n' "$CODEX_EXE" "$THREAD"
+  if [ "$SHOW_TARGET" -eq 1 ]; then
+    # Explicit local display, never the default diagnostic/captured output.
+    # Escape controls so an exact session name cannot inject terminal commands.
+    printf 'Codex: %q\nThread: %q\n' "$CODEX_EXE" "$THREAD"
+  else
+    printf '%s\n' 'Codex: queue-capable CLI (path hidden)' 'Thread: selected (value hidden)'
+  fi
+  printf '%s\n' 'Dry run only; no message was queued. Daemon/provider health is not checked.'
   exit 0
 fi
 # Equals-form flags keep dash-prefixed names/text as values. No eval, no retry:
