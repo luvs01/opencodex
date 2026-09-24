@@ -107,7 +107,19 @@ export async function observedCodexDesktopSwitchApply(): Promise<CodexDesktopSwi
   // Same lazy boundary as applyCodexDesktopSwitches: the ownership predicate lives in the
   // injection graph, which the settings read path must not pull in at module scope.
   const { currentExternalCodexModelProvider } = await import("./inject/config-toml");
-  const provider = currentExternalCodexModelProvider();
+  let provider: string | null;
+  try {
+    provider = currentExternalCodexModelProvider();
+  } catch (error) {
+    // A present-but-unreadable config.toml (permissions, deletion racing existsSync)
+    // must not take down the whole settings report — ownership is simply undetermined.
+    return {
+      applied: false,
+      reason: "not_requested",
+      retryable: true,
+      detail: `config.toml ownership could not be determined: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   if (!provider) return { applied: false, reason: "not_requested", retryable: false };
   return {
     applied: false,
