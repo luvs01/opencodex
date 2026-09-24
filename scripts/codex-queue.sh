@@ -1,96 +1,131 @@
 #!/bin/bash
-# Send a message to an existing Codex thread via the native codex queue
-# command, bypassing the desktop composer's client-side usage gate.
-#
-# Uses only the app's own app-server daemon and thread store. No proxy, no
-# certificate, no app modification. Without --thread, the newest rollout
-# under ~/.codex/sessions is used.
-#
-# Usage:
-#   ./codex-queue.sh "continue with the next step"
-#   ./codex-queue.sh --thread 019f644b-a10a-73c2-8c3f-f3c7713a2928 "status?"
+# Queue one text message using Codex's native CLI. No auth/config/app changes.
+# A target is required: --thread is preferred; --latest is an explicit heuristic.
+# Run with --help for usage. Requires Bash 3.2+ and standard POSIX utilities.
 set -euo pipefail
 
-THREAD=""
-MESSAGE=""
+usage() {
+  cat <<'USAGE'
+Usage: codex-queue.sh (--thread <id-or-exact-name> | --latest) [options] [<message>]
+  --message <text>  Explicit message (also accepts text beginning with a dash)
+  --codex <path>    Pin a trusted native CLI; otherwise discover a queue-capable CLI
+  --dry-run        Show the executable and target without queueing (message optional)
+  --               End options; the next argument is the entire message
+  --help           Show this help
+CODEX_HOME is honored. --latest is global filesystem activity, NOT the active UI chat;
+prefer --latest --dry-run, verify the target, then send with --thread <id>.
+USAGE
+}
 
-while [ $# -gt 0 ]; do
+fail() { printf '%s\n' "$1" >&2; exit 2; }
+THREAD=""; LATEST=0; MESSAGE=""; MESSAGE_SET=0; DRY_RUN=0
+CODEX_EXE="${CODEX_EXE:-}"
+while [ "$#" -gt 0 ]; do
   case "$1" in
-    --thread)
-      THREAD="${2:?--thread requires a value}"
-      shift 2
-      ;;
-    --thread=*)
-      THREAD="${1#--thread=}"
+    --thread|--message|--codex)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a nonempty value"
+      case "$1" in
+        --thread) [ -z "$THREAD" ] || fail "--thread was supplied twice"; THREAD="$2" ;;
+        --message) [ "$MESSAGE_SET" -eq 0 ] || fail "message was supplied twice"; MESSAGE="$2"; MESSAGE_SET=1 ;;
+        --codex) CODEX_EXE="$2" ;;
+      esac
+      shift 2 ;;
+    --thread=*|--message=*|--codex=*)
+      value="${1#*=}"
+      [ -n "$value" ] || fail "option requires a nonempty value"
+      case "$1" in
+        --thread=*) [ -z "$THREAD" ] || fail "--thread was supplied twice"; THREAD="$value" ;;
+        --message=*) [ "$MESSAGE_SET" -eq 0 ] || fail "message was supplied twice"; MESSAGE="$value"; MESSAGE_SET=1 ;;
+        --codex=*) CODEX_EXE="$value" ;;
+      esac
+      shift ;;
+    --latest) LATEST=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --)
       shift
-      ;;
-    --message)
-      MESSAGE="${2:?--message requires a value}"
-      shift 2
-      ;;
-    --message=*)
-      MESSAGE="${1#--message=}"
-      shift
-      ;;
-    -*)
-      echo "unknown option: $1" >&2
-      exit 2
-      ;;
+      [ "$#" -eq 1 ] && [ "$MESSAGE_SET" -eq 0 ] || fail "supply exactly one message after --"
+      MESSAGE="$1"; MESSAGE_SET=1; shift ;;
+    -*) fail "unknown option (use --message or -- before a dash-prefixed message)" ;;
     *)
-      if [ -z "$MESSAGE" ]; then
-        MESSAGE="$1"
-      else
-        echo "unexpected extra argument: $1" >&2
-        exit 2
-      fi
-      shift
-      ;;
+      [ "$MESSAGE_SET" -eq 0 ] || fail "message was supplied twice"
+      MESSAGE="$1"; MESSAGE_SET=1; shift ;;
   esac
 done
+[ -n "$THREAD" ] || [ "$LATEST" -eq 1 ] || fail "choose --thread <id-or-exact-name> or explicitly opt in with --latest"
+[ -z "$THREAD" ] || [ "$LATEST" -eq 0 ] || fail "--thread and --latest are mutually exclusive"
+[ "$DRY_RUN" -eq 1 ] || [ -n "$MESSAGE" ] || fail "a nonempty message is required"
+CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME is required}/.codex}"
 
-if [ -z "$MESSAGE" ]; then
-  echo "usage: codex-queue.sh [--thread <id>] <message>" >&2
-  exit 2
-fi
+# Read every NUL-delimited path before selecting: no ls batches, SIGPIPE, or
+# partial result on a failed scan. Do not follow symlinked session directories.
+resolve_latest_thread() (
+  local sessions="$CODEX_HOME_DIR/sessions" paths candidate latest="" latest_id="" name
+  local uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+  local pattern="^rollout-.+-($uuid)(_$uuid)?\\.jsonl$"
+  [ -d "$sessions" ] || fail "no sessions directory under the effective CODEX_HOME"
+  paths=$(mktemp) || fail "could not create temporary session listing"
+  trap 'rm -f -- "$paths"' EXIT
+  find "$sessions" -type f -name 'rollout-*.jsonl' -print0 > "$paths" || fail "session scan failed; refusing a partial selection"
+  while IFS= read -r -d '' candidate; do
+    name="${candidate##*/}"
+    [[ "$name" =~ $pattern ]] || continue
+    if [[ -z "$latest" || "$candidate" -nt "$latest" ]] ||
+       { [[ ! "$latest" -nt "$candidate" ]] && [[ "$candidate" > "$latest" ]]; }; then
+      latest="$candidate"
+      latest_id="${BASH_REMATCH[1]}"
+    fi
+  done < "$paths"
+  [ -n "$latest_id" ] || fail "no recognized rollout thread found; specify --thread explicitly"
+  printf '%s\n' "$latest_id"
+)
 
+# Probe help only: an older CLI can print top-level help with exit 0, so require
+# both queue-specific flags. This does not prove the running daemon is compatible.
+supports_queue() {
+  local help
+  [ -f "$1" ] && [ -x "$1" ] || return 1
+  help=$("$1" queue --help 2>/dev/null) || return 1
+  [[ "$help" == *--thread* && "$help" == *--message* ]]
+}
+
+# Prefer app bundles over a stale PATH CLI; cover both standalone package layouts.
+# Explicit selection is authoritative and never silently falls back to another CLI.
 resolve_codex() {
-  if command -v codex >/dev/null 2>&1; then
-    command -v codex
+  local candidate
+  if [ -n "$CODEX_EXE" ]; then
+    case "$CODEX_EXE" in /*) ;; *) CODEX_EXE="$PWD/$CODEX_EXE" ;; esac
+    supports_queue "$CODEX_EXE" || fail "selected CLI does not support queue --thread/--message; check --codex/CODEX_EXE"
+    printf '%s\n' "$CODEX_EXE"
     return
   fi
-  local candidate
   for candidate in \
-    "$HOME/.codex/bin/codex" \
-    "$HOME/.codex/bin"/*/codex \
     "$HOME/Applications/Codex.app/Contents/Resources/codex" \
-    "/Applications/Codex.app/Contents/Resources/codex"; do
-    if [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return
-    fi
+    "/Applications/Codex.app/Contents/Resources/codex" \
+    "$CODEX_HOME_DIR/packages/standalone/current/bin/codex" \
+    "$CODEX_HOME_DIR/packages/standalone/current/codex" \
+    "$HOME/.codex/packages/standalone/current/bin/codex" \
+    "$HOME/.codex/packages/standalone/current/codex" \
+    "$HOME/.codex/bin/codex" "$HOME/.codex/bin"/*/codex; do
+    if supports_queue "$candidate"; then printf '%s\n' "$candidate"; return; fi
   done
-  echo "codex not found on PATH or in the usual install locations" >&2
-  return 1
-}
-
-resolve_latest_thread() {
-  local sessions="$HOME/.codex/sessions"
-  local latest
-  latest=$(find "$sessions" -type f -name 'rollout-*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1)
-  if [ -z "$latest" ]; then
-    echo "no rollout sessions found under $sessions" >&2
-    return 1
+  candidate=$(type -P codex || true)
+  if [ -n "$candidate" ] && supports_queue "$candidate"; then
+    printf '%s\n' "$candidate"
+    return
   fi
-  basename "$latest" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1
+  fail "no queue-capable Codex CLI found; install/update Codex or specify --codex /path/to/codex"
 }
 
-if [ -z "$THREAD" ]; then
+if [ "$LATEST" -eq 1 ]; then
   THREAD=$(resolve_latest_thread)
+  printf '%s\n' 'Warning: --latest may select a different project or a subagent, not the foreground chat.' >&2
 fi
-if [ -z "$THREAD" ]; then
-  echo "could not resolve a thread id" >&2
-  exit 1
-fi
-
 CODEX_EXE=$(resolve_codex)
-exec "$CODEX_EXE" queue --thread "$THREAD" --message "$MESSAGE"
+if [ "$DRY_RUN" -eq 1 ]; then
+  printf 'Codex: %s\nThread: %s\nDry run only; no message was queued.\n' "$CODEX_EXE" "$THREAD"
+  exit 0
+fi
+# Equals-form flags keep dash-prefixed names/text as values. No eval, no retry:
+# a failure/timeout can be ambiguous, and a second invocation could duplicate work.
+exec "$CODEX_EXE" queue "--thread=$THREAD" "--message=$MESSAGE"
