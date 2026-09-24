@@ -15,7 +15,7 @@
  * is touched. Same shape and the same restraint as `model-rename-migration`,
  * for the case where the id was right and the number was not.
  */
-import { PROVIDER_REGISTRY } from "./registry";
+import { PROVIDER_REGISTRY, normalizedProviderEndpoint } from "./registry";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 
 export interface StaleContextWindow {
@@ -72,8 +72,8 @@ function providerStillMatchesRegistry(name: string, prov: OcxProviderConfig): bo
   const choices = entry.baseUrlChoices?.map(choice => choice.baseUrl) ?? [];
   const known = [entry.baseUrl, ...choices]
     .filter((url): url is string => typeof url === "string")
-    .map(url => url.replace(/\/+$/, ""));
-  return known.includes(prov.baseUrl.replace(/\/+$/, ""));
+    .map(normalizedProviderEndpoint);
+  return known.includes(normalizedProviderEndpoint(prov.baseUrl));
 }
 
 /** Pure projection. The caller decides whether to persist. */

@@ -71,6 +71,19 @@ describe("stale context window migration", () => {
     expect(projection.config.providers!["alibaba-token-plan"]!.modelContextWindows!["qwen3.8-max"]).toBe(1_000_000);
   });
 
+  test.each([
+    " HTTPS://TOKEN-PLAN.CN-BEIJING.MAAS.ALIYUNCS.COM/compatible-mode/v1",
+    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1//",
+  ])("repairs a row whose saved endpoint is URL-equivalent to the registry's: %s", baseUrl => {
+    // baseUrl is trimmed at parse time and URL schemes/hosts are case-insensitive,
+    // so these rows point at the registry destination as surely as the bare URL.
+    const config = alibabaConfig("alibaba-token-plan", 983_616);
+    config.providers!["alibaba-token-plan"]!.baseUrl = baseUrl;
+    const projection = projectStaleContextWindows(config);
+    expect(projection.changed).toBe(true);
+    expect(projection.config.providers!["alibaba-token-plan"]!.modelContextWindows!["qwen3.8-max"]).toBe(1_000_000);
+  });
+
   test("repairs an intl row pointed at a declared baseUrlChoices endpoint", () => {
     const config = alibabaConfig("alibaba-token-plan-intl", 983_616);
     config.providers!["alibaba-token-plan-intl"]!.baseUrl =
