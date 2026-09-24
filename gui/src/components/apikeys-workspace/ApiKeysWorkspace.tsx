@@ -416,9 +416,11 @@ export default function ApiKeysWorkspace({
                   ) : (
                     <>
                       <p className="muted">{t("api.rotation.description")}</p>
-                      <button type="button" className="btn btn-ghost btn-sm" disabled={rotationPending} onClick={() => { void runRotation("start"); }}>
-                        {rotationPending ? t("api.rotation.starting") : t("api.rotation.start")}
-                      </button>
+                      {onRotationStart && (
+                        <button type="button" className="btn btn-ghost btn-sm" disabled={rotationPending} onClick={() => { void runRotation("start"); }}>
+                          {rotationPending ? t("api.rotation.starting") : t("api.rotation.start")}
+                        </button>
+                      )}
                     </>
                   )}
                   {rotationFailed && <p className="awi-delete-error" role="alert">{t("api.rotation.failed")}</p>}
