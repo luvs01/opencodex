@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 
 const scripts = dirname(fileURLToPath(import.meta.url));
 const windows = process.platform === 'win32';
+// Native realpath canonicalizes Windows 8.3/long-path aliases in path assertions.
 const roots = [];
 after(() => roots.forEach(root => rmSync(root, { recursive: true, force: true })));
 const threadA = '00000000-0000-4000-8000-000000000001';
@@ -124,11 +125,12 @@ for (const shell of shells) {
       if (options.message !== undefined) flag('Message', options.message);
       if (options.extra) args.push(...options.extra);
       // Enter through PowerShell literals, not -File's external string binder.
-      // This isolates the helper's native argv handling, even for leading dashes.
+      // This isolates native argv handling. -Command otherwise maps a script's
+      // nonzero status to 1; explicitly exit with its LASTEXITCODE.
       const psLiteral = value => "'" + value.replaceAll("'", "''") + "'";
       const command = (options.location ? 'Set-Location -LiteralPath ' + psLiteral(options.location) + '; ' : '') + '& ' + args.map((arg, index) =>
         flagPositions.has(index)
-          ? arg : psLiteral(arg)).join(' ');
+          ? arg : psLiteral(arg)).join(' ') + '; exit $LASTEXITCODE';
       const launchArgs = ps
         ? ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')]
         : args;
@@ -220,7 +222,7 @@ for (const shell of shells) {
           }
           const record = records(f)[0];
           assert.equal(record.home, f.store); assert.equal(record.ocxHome, f.ocxHome);
-          assert.equal(realpathSync(record.cwd), realpathSync(f.root));
+          assert.equal(realpathSync.native(record.cwd), realpathSync.native(f.root));
           assert.deepEqual(record.args, ['queue', `--thread=${threadA}`, '--message=continue']);
           assert.equal(probes(f).length, 2); // Only help probes, no usage/login/sync command.
         });
@@ -233,7 +235,7 @@ for (const shell of shells) {
         const result = run(f, { latest: true, message: 'continue', location, env: { CODEX_HOME: relativeStore } });
         assert.equal(result.status, 0, result.output);
         assert.equal(records(f)[0].home, relativeStore);
-        assert.equal(realpathSync(records(f)[0].cwd), realpathSync(location));
+        assert.equal(realpathSync.native(records(f)[0].cwd), realpathSync.native(location));
         assert.equal(records(f)[0].args[1], `--thread=${threadA}`);
       });
     }
@@ -301,7 +303,7 @@ for (const shell of shells) {
         const f = fixture();
         const bundled = makeStub(join(f.env.LOCALAPPDATA, 'OpenAI/Codex/bin/build-a/codex.exe'));
         const result = run(f, { pin: false, thread: threadA, dryRun: true });
-        assert.equal(result.status, 0, result.output); assert.equal(probes(f).at(-1), bundled);
+        assert.equal(result.status, 0, result.output); assert.equal(realpathSync.native(probes(f).at(-1)), realpathSync.native(bundled));
         assert.deepEqual(records(f), []);
       });
     }
@@ -333,13 +335,13 @@ for (const shell of shells) {
         const bundled = makeStub(join(f.home, 'Applications/Codex.app/Contents/Resources/codex'));
         const old = makeStub(join(f.root, 'old-path/codex'));
         const result = run(f, { pin: false, thread: threadA, dryRun: true, env: { PATH: dirname(old) + ':' + f.env.PATH } });
-        assert.equal(result.status, 0, result.output); assert.equal(probes(f).at(-1), bundled);
+        assert.equal(result.status, 0, result.output); assert.equal(realpathSync.native(probes(f).at(-1)), realpathSync.native(bundled));
         assert.deepEqual(records(f), []);
       });
       it('finds the standalone bin layout (discovery only)', { skip: existsSync('/Applications/Codex.app/Contents/Resources/codex') }, () => {
         const f = fixture(); const standalone = makeStub(join(f.store, 'packages/standalone/current/bin/codex'));
         const result = run(f, { pin: false, thread: threadA, dryRun: true });
-        assert.equal(result.status, 0, result.output); assert.equal(probes(f).at(-1), standalone);
+        assert.equal(result.status, 0, result.output); assert.equal(realpathSync.native(probes(f).at(-1)), realpathSync.native(standalone));
         assert.deepEqual(records(f), []);
       });
     }

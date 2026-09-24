@@ -156,6 +156,13 @@ try {
     }
   }
   $codexHomeDir = if ([string]::IsNullOrEmpty($env:CODEX_HOME)) { Join-Path $HOME '.codex' } else { $env:CODEX_HOME }
+  # Anchor relative paths before filesystem cmdlets, including Windows PowerShell
+  # 5.1 literal paths after Set-Location. The native child's environment stays intact.
+  if (-not [IO.Path]::IsPathRooted($codexHomeDir)) {
+    $location = Get-Location
+    if ($location.Provider.Name -ne 'FileSystem') { Stop-QueueHelper 'Run this helper from a filesystem directory.' }
+    $codexHomeDir = [IO.Path]::GetFullPath((Join-Path $location.ProviderPath $codexHomeDir))
+  }
   if ($Latest) {
     $Thread = Resolve-LatestThread $codexHomeDir
     Write-Warning '-Latest may select a different project or a subagent, not the foreground chat.'
