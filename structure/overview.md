@@ -100,10 +100,12 @@ are defined in [bounded response ingestion](transports/inventory.md#bounded-resp
 - **INV-COMPANION-01** — Timeline model rows and available ids merge historical pool providers
   under their base provider, while account grouping keeps separate labels. A legacy
   account-qualified model filter selects the entire merged row; hiding a base provider removes
-  all its accounts, and hiding a raw provider removes that account's attributions.
+  all its accounts, and hiding a raw provider removes that account's attributions. Exact configured
+  provider names retain their namespace even when their suffix resembles a pool account.
   Enforced by `tests/usage/usage-timeline.test.ts`.
 - **INV-COMPANION-02** — Loaded and updated companion model selections normalize older
-  account-qualified ids to canonical timeline ids and deduplicate them.
+  account-qualified ids to canonical timeline ids and deduplicate them without rewriting an exact
+  configured provider namespace.
   Enforced by `tests/server/companion-settings.test.ts`.
 
 Each invariant carries a stable id. A bound invariant names one test, and that test names the id

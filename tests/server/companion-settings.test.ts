@@ -9,6 +9,7 @@ import {
   saveCompanionSettings,
 } from "../../src/companion/settings";
 import type { OcxConfig } from "../../src/types";
+import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
 
 const opened: string[] = [];
 mock.module("../../src/lib/open-url", () => ({
@@ -58,6 +59,18 @@ describe("companion settings", () => {
       const result = await call("PUT", { settings: { models: ["openai-main/gpt-5.6-luna", "openai/gpt-5.6-luna"] } });
       expect(result.body.settings.models).toEqual(["openai/gpt-5.6-luna"]);
     });
+  });
+
+  test("a configured suffix-shaped provider selection keeps its namespace", () => {
+    refreshUserCostOverlays({ providers: { "acme-pabcdef": {} } } as OcxConfig);
+    try {
+      const updated = applyCompanionSettingsPatch(DEFAULT_COMPANION_SETTINGS, {
+        models: ["acme-pabcdef/same-model"],
+      });
+      expect(updated).toMatchObject({ models: ["acme-pabcdef/same-model"] });
+    } finally {
+      refreshUserCostOverlays({ providers: {} } as OcxConfig);
+    }
   });
 
   test("nested native model identifiers survive settings writes", async () => {

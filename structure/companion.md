@@ -72,6 +72,7 @@ A partial settings PUT refuses unreadable or unsupported persisted content with 
 Timeline model rows and available ids merge historical pool providers under their base provider,
 while account grouping keeps separate labels. Legacy account-qualified model filters select the
 whole merged row; hiding a base provider removes all its accounts, and hiding a raw provider removes
-that account's attributions. Loaded and updated companion model selections normalize older
+that account's attributions. Exact configured provider names retain their namespace even when their
+suffix resembles a pool account. Loaded and updated companion model selections normalize older
 account-qualified ids to canonical timeline ids and deduplicate them. Coverage: `tests/usage/usage-timeline.test.ts`
 and `tests/server/companion-settings.test.ts`.

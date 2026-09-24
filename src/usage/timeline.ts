@@ -2,6 +2,7 @@ import { baseProviderLabel } from "../providers/label";
 import { cacheTokensFromUsage, usageAttributions } from "./summary";
 import type { PersistedUsageEntry } from "./log";
 import { usageDisplayTotalTokens } from "./totals";
+import { activeConfiguredProviders } from "./user-cost-overlays";
 
 export type TimelineMetric = "total" | "input" | "output" | "cached";
 export type TimelineAggregation = "sum" | "average" | "max";
@@ -59,13 +60,18 @@ export function isTimelineModelId(value: unknown): value is string {
 /**
  * Pool accounts log as `openai-p<hex6>` (and older rows as `openai-main`/`chatgpt`), so the raw
  * provider would draw one line per account for the same model. The usage summary already folds these
- * through `baseProviderLabel`; the timeline keys on the same label so both views agree.
+ * through `baseProviderLabel`; the timeline keys on the same label so both views agree. An exact
+ * configured provider wins first because account-shaped suffixes remain valid custom namespaces.
  */
-function timelineModelId(provider: string, model: string): string {
-  return `${baseProviderLabel(provider)}/${model}`;
+function timelineProvider(provider: string): string {
+  return activeConfiguredProviders().has(provider) ? provider : baseProviderLabel(provider);
 }
 
-/** A saved selection may still name a pool account (`openai-p6bc633/gpt-5`); it selects the merged row. */
+function timelineModelId(provider: string, model: string): string {
+  return `${timelineProvider(provider)}/${model}`;
+}
+
+/** A saved selection may still name a non-configured pool account; it selects the merged row. */
 export function normalizeTimelineModelId(id: string): string {
   const cut = id.indexOf("/");
   return timelineModelId(id.slice(0, cut), id.slice(cut + 1));
@@ -76,7 +82,7 @@ export function normalizeTimelineModelId(id: string): string {
  * accounts and Anthropic OAuth accounts (`formatAnthropicProviderForLog`) both log that way.
  */
 function poolAccountLabel(provider: string): string | undefined {
-  if (baseProviderLabel(provider) === provider) return undefined;
+  if (timelineProvider(provider) === provider) return undefined;
   return provider.match(/-(main|p[a-f0-9]{6})$/)?.[1];
 }
 
@@ -160,7 +166,7 @@ export function createTimelineAccumulator(query: TimelineQuery): { add(entry: Pe
     const bucket = Math.floor((entry.timestamp - startMs) / (bucketSeconds * 1000));
     if (bucket < 0 || bucket >= buckets) return;
     for (const attribution of usageAttributions(entry)) {
-      const provider = baseProviderLabel(attribution.provider);
+      const provider = timelineProvider(attribution.provider);
       if (hiddenProviders.has(attribution.provider) || hiddenProviders.has(provider)) continue;
       const modelId = timelineModelId(attribution.provider, attribution.model);
       availableModels.add(modelId);

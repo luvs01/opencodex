@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { PersistedUsageEntry } from "../../src/usage/log";
 import { createTimelineAccumulator, parseTimelineQuery } from "../../src/usage/timeline";
+import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
+import type { OcxConfig } from "../../src/types";
 
 const now = 1_700_000_000_000;
 function entry(overrides: Partial<PersistedUsageEntry> = {}): PersistedUsageEntry {
@@ -172,6 +174,23 @@ describe("usage timeline", () => {
       ["openai/gpt-6-astra · pc272f0", "pc272f0", 2],
       ["xai/grok-4.7 · unknown", "unknown", 1],
     ]);
+  });
+
+  test("suffix-shaped configured providers retain independent timeline identities", () => {
+    refreshUserCostOverlays({ providers: { acme: {}, "acme-pabcdef": {} } } as OcxConfig);
+    try {
+      const query = parseTimelineQuery(new URLSearchParams("hours=6&grouping=modelAccount&hiddenProvider=acme"), now);
+      if ("error" in query) throw new Error(query.error);
+      const acc = createTimelineAccumulator(query);
+      acc.add(entry({ provider: "acme", model: "same-model", totalTokens: 10 }));
+      acc.add(entry({ provider: "acme-pabcdef", model: "same-model", totalTokens: 20 }));
+      expect(acc.finish()).toMatchObject({
+        availableModels: ["acme-pabcdef/same-model"],
+        series: [{ id: "acme-pabcdef/same-model · unknown", provider: "acme-pabcdef", total: 20 }],
+      });
+    } finally {
+      refreshUserCostOverlays({ providers: {} } as OcxConfig);
+    }
   });
 
   test("counts missing measurements and folds excess series", () => {
