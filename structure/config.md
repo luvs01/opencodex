@@ -359,11 +359,8 @@ three separate facts per switch: the **stored** value in `config.json`, the **ef
 this bind and role will actually produce, and whether `config.toml` was **applied**, with the
 reason and retryability when it was not. `src/codex/desktop-switches.ts` owns that projection.
 When an external `model_provider` owns `config.toml`, injection preserves the file and reports the
-effective switch and authentication source as externally controlled rather than claiming a rewrite.
-A report that attempted no rewrite — the settings GET, or a PUT that changed no desktop switch —
-checks the same `currentExternalCodexModelProvider` ownership predicate through
-`observedCodexDesktopSwitchApply`, so read reports describe observed ownership instead of
-re-deriving it only from a completed apply.
+effective switch and authentication source as externally controlled. A report that attempted no
+rewrite checks the same `currentExternalCodexModelProvider` predicate via `observedCodexDesktopSwitchApply`.
 
 Effective values come from `isEffectiveCodexDesktopAuthless` and
 `isEffectiveCodexClientCompaction` in `src/codex/loopback-target.ts` rather than a second copy
