@@ -529,3 +529,6 @@ Anthropic Fast pricing applies a 2x list-price multiplier only when the response
 `tests/usage/usage-anthropic-fast-pricing.test.ts` pins that distinction. The request-metrics recovery
 label `anthropic-fast-downgrade` projects to `fast_downgrade`, separate from reasoning-effort
 `effort_downgrade`.
+
+Cursor Claude Opus 5.5 Fast model identifiers resolve to Cursor's separate 2x Fast rate; standard
+and thinking-only variants retain the standard tuple.

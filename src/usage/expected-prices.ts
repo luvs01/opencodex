@@ -115,6 +115,7 @@ const CLAUDE_OPUS_5 = CLAUDE_OPUS_46;
 // hits are 0.05x base input (0.20), a model-specific footnote on the pricing page, NOT the
 // 0.1x most families use. 1M context and 128K output at one flat rate (no long-context tier).
 const CLAUDE_OPUS_55: Cost4 = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 };
+const CLAUDE_OPUS_55_FAST: Cost4 = { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 };
 const ANTHROPIC_PRICING = "https://platform.claude.com/docs/en/about-claude/pricing (official; 5m cache-write tier)";
 const CLAUDE_OPUS_5_SOURCE = `anthropic official Claude Opus 5 ${ANTHROPIC_PRICING}`;
 const CLAUDE_OPUS_55_SOURCE = `anthropic official Claude Opus 5.5 ${ANTHROPIC_PRICING}; cache hit = 0.05x base input`;
@@ -229,8 +230,9 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   // cover account-label namespaces. Cursor publishes the same list rate on its own model page.
   { provider: "anthropic", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: CLAUDE_OPUS_55_SOURCE, verifiedAt: "2026-09-23", status: "verified" },
   { provider: "anthropic-apikey", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: CLAUDE_OPUS_55_SOURCE, verifiedAt: "2026-09-23", status: "verified" },
-  // Cursor canonicalizes every Opus 5.5 spelling (thinking/effort/fast suffixes) onto this row.
+  // Cursor canonicalizes standard and Fast spellings onto their respective rows.
   { provider: "cursor", modelId: "claude-opus-5-5", cost4: CLAUDE_OPUS_55, source: CURSOR_OPUS_55_PRICING, verifiedAt: "2026-09-23", status: "verified" },
+  { provider: "cursor", modelId: "claude-opus-5-5-fast", cost4: CLAUDE_OPUS_55_FAST, source: CURSOR_OPUS_55_PRICING, verifiedAt: "2026-09-23", status: "verified" },
   // MiniMax M2.1 highspeed — published PAYG price (verified).
   { provider: "minimax", modelId: "MiniMax-M2.1-highspeed", cost4: MINIMAX_M21_HIGHSPEED, source: MINIMAX_PRICING, verifiedAt: "2026-07-20", status: "verified" },
   { provider: "minimax-cn", modelId: "MiniMax-M2.1-highspeed", cost4: MINIMAX_M21_HIGHSPEED, source: MINIMAX_PRICING, verifiedAt: "2026-07-20", status: "verified" },
@@ -481,11 +483,18 @@ export function findExpectedPriceOverlay(
   const match = exact.find(row => row.status === "verified")
     ?? exact.find(row => row.status === "verified-derived");
   if (match || provider !== "cursor") return match;
-  const canonicalBaseId = normalizeCursorClaudeId(modelId)?.canonicalBaseId;
-  if (!canonicalBaseId) return undefined;
-  const canonical = overlays.filter(row => row.provider === provider && row.modelId === canonicalBaseId);
-  return canonical.find(row => row.status === "verified")
-    ?? canonical.find(row => row.status === "verified-derived");
+  const normalized = normalizeCursorClaudeId(modelId);
+  if (!normalized) return undefined;
+  const canonicalIds = normalized.fast
+    ? [`${normalized.canonicalBaseId}-fast`, normalized.canonicalBaseId]
+    : [normalized.canonicalBaseId];
+  for (const canonicalId of canonicalIds) {
+    const canonical = overlays.filter(row => row.provider === provider && row.modelId === canonicalId);
+    const canonicalMatch = canonical.find(row => row.status === "verified")
+      ?? canonical.find(row => row.status === "verified-derived");
+    if (canonicalMatch) return canonicalMatch;
+  }
+  return undefined;
 }
 
 /** OpenAI Fast price multipliers retained as a compatibility export. */
