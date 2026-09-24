@@ -1035,6 +1035,28 @@ describe("warnIfStaleCodexAppServersAfterStartupWrite (#1046)", () => {
     expect(errors[0]).toContain("4242");
   });
 
+  /*
+   * A cache-only startup write leaves the catalog older than an app-server that
+   * started between the catalog write and the cache rewrite. Comparing against
+   * the catalog alone reports `fresh` for a process the cache write just made
+   * stale — the classifier must use the newest of the two write mtimes.
+   */
+  test("warns when a cache-only write postdates a process newer than the catalog", () => {
+    const { log, errors } = collectErrors();
+    const result = warnIfStaleCodexAppServersAfterStartupWrite({
+      log,
+      io: {
+        listSnapshots: () => [{ pid: 4242, commandLine: APP_SERVER_CMD }],
+        readStartMs: () => 2_000,
+        catalogMtimeMs: () => 1_000,
+        modelsCacheMtimeMs: () => 3_000,
+      },
+    });
+    expect(result.warned).toBe(true);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("4242");
+  });
+
   test("stays quiet for fresh, not_running, and unknown", () => {
     const fresh = collectErrors();
     expect(warnIfStaleCodexAppServersAfterStartupWrite({

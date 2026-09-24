@@ -759,6 +759,25 @@ function defaultModelsCacheMtimeMs(): number | null {
   try { return statSync(activeCodexModelsCachePath()).mtimeMs; } catch { return null; }
 }
 
+/**
+ * The write boundary for picker staleness is the NEWER of the catalog and the
+ * models cache: Codex's picker reads models_cache.json, so a cache-only rewrite
+ * leaves the catalog older than the app-servers it just made stale.
+ *
+ * Injected catalog clocks are self-contained test/probe observations, so the
+ * default cache stat runs only when no catalog clock was injected.
+ */
+function newestCatalogWriteMtimeMs(
+  io: CodexAppServerProcessIo,
+  catalogMtimeMs: number | null,
+): number | null {
+  const cacheMtimeMs = io.modelsCacheMtimeMs
+    ? io.modelsCacheMtimeMs()
+    : io.catalogMtimeMs ? null : defaultModelsCacheMtimeMs();
+  return catalogMtimeMs === null ? cacheMtimeMs
+    : cacheMtimeMs === null ? catalogMtimeMs : Math.max(catalogMtimeMs, cacheMtimeMs);
+}
+
 function codexAppServerProcessesFromSnapshots(
   snapshots: readonly ProcessSnapshot[],
 ): CodexAppServerProcess[] {
@@ -1259,13 +1278,7 @@ export function afterCatalogWriteHandleAppServers(
     const observed = computeCodexAppServerCatalogStatus(options.io ?? {});
     const starts = new Map(observed.status.processes.map(process => [process.pid, process.startedAtMs]));
     const catalogMtimeMs = observed.status.catalogMtimeMs;
-    // Injected catalog clocks are self-contained test/probe observations. Production
-    // also includes cache-only writes, whose mtime can be newer than the catalog.
-    const cacheMtimeMs = options.io?.modelsCacheMtimeMs
-      ? options.io.modelsCacheMtimeMs()
-      : options.io?.catalogMtimeMs ? null : defaultModelsCacheMtimeMs();
-    const writeMtimeMs = catalogMtimeMs === null ? cacheMtimeMs
-      : cacheMtimeMs === null ? catalogMtimeMs : Math.max(catalogMtimeMs, cacheMtimeMs);
+    const writeMtimeMs = newestCatalogWriteMtimeMs(options.io ?? {}, catalogMtimeMs);
     const processes = observed.processes.filter(process => !excluded.has(process.pid));
     const staleProcesses = writeMtimeMs === null
       ? []
@@ -1334,7 +1347,14 @@ export function warnIfStaleCodexAppServersAfterStartupWrite(
 ): { warned: boolean } {
   try {
     resetCodexAppServerCatalogStateCache();
-    const status = collectCodexAppServerCatalogState(options.io ?? {});
+    const io = options.io ?? {};
+    const status = collectCodexAppServerCatalogState({
+      ...io,
+      // The same write boundary afterCatalogWriteHandleAppServers applies: a
+      // cache-only startup rewrite leaves the catalog older than the app-servers
+      // it made stale, so the classifier compares against the newest of the two.
+      catalogMtimeMs: () => newestCatalogWriteMtimeMs(io, (io.catalogMtimeMs ?? defaultCatalogMtimeMs)()),
+    });
     if (status.state !== "stale") return { warned: false };
     options.log?.error(formatStaleCodexAppServerWarning(status.processes));
     return { warned: true };
