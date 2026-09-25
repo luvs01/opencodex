@@ -144,9 +144,19 @@ function Resolve-CodexExe([string]$Explicit, [string]$CodexHomeDir) {
     $candidates.Add((Join-Path $root 'packages\standalone\current\bin\codex.exe'))
     $candidates.Add((Join-Path $root 'packages\standalone\current\codex.exe'))
   }
-  foreach ($name in @('codex.exe', 'codex')) {
-    foreach ($command in @(Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue)) {
-      $candidates.Add($command.Source)
+  # Inspect PATH components before resolving them: Get-Command loses whether a
+  # candidate came from a relative entry. Local executables need explicit pinning.
+  foreach ($entry in ($env:PATH -split [IO.Path]::PathSeparator)) {
+    $directory = $entry
+    if ($directory.Length -ge 2 -and $directory.StartsWith('"') -and $directory.EndsWith('"')) {
+      $directory = $directory.Substring(1, $directory.Length - 2)
+    }
+    if ($env:OS -eq 'Windows_NT') {
+      # A drive-qualified root or UNC share is absolute; C:relative and \rooted are not.
+      if ($directory -notmatch '^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)') { continue }
+    } elseif (-not $directory.StartsWith('/')) { continue }
+    foreach ($name in @('codex.exe', 'codex')) {
+      $candidates.Add((Join-Path $directory $name))
     }
   }
   foreach ($candidate in $candidates) {

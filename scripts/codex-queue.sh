@@ -122,13 +122,16 @@ resolve_codex() {
     "$HOME/.codex/bin/codex" "$HOME/.codex/bin"/*/codex; do
     if supports_queue "$candidate"; then printf '%s\n' "$candidate"; return; fi
   done
-  # Inspect every PATH directory, not just the first (possibly obsolete) CLI.
-  # Split only on colon: spaces/newlines are data; empty entries mean cwd.
+  # Probe only absolute PATH directories, skipping empty/relative entries.
+  # Split only on colon: spaces/newlines stay data. Pin a local CLI explicitly.
   remaining_path="${PATH:-}"
   while :; do
     directory="${remaining_path%%:*}"
-    case "$directory" in /*) candidate="$directory/codex" ;; *) candidate="$PWD/${directory:+$directory/}codex" ;; esac
-    if supports_queue "$candidate"; then printf '%s\n' "$candidate"; return; fi
+    case "$directory" in
+      /*)
+        candidate="$directory/codex"
+        if supports_queue "$candidate"; then printf '%s\n' "$candidate"; return; fi ;;
+    esac
     [[ "$remaining_path" == *:* ]] || break
     remaining_path="${remaining_path#*:}"
   done

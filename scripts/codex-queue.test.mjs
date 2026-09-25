@@ -340,6 +340,30 @@ for (const shell of shells) {
       assert.equal(run(f, { exe: name, thread: threadA, message: 'continue' }).status, 0);
       assert.equal(records(f).length, 1);
     });
+    for (const entry of ['', '.', 'relative [bin]']) {
+      it(`does not probe a CLI from an empty/relative PATH entry (${JSON.stringify(entry)})`,
+        { skip: !windows && existsSync('/Applications/Codex.app/Contents/Resources/codex') }, () => {
+        for (const dryRun of [true, false]) {
+          const f = fixture(); const name = windows ? 'codex.exe' : 'codex';
+          makeStub(join(f.root, entry || '.', name));
+          const working = makeStub(join(f.root, 'absolute trusted bin', name));
+          const result = run(f, { pin: false, thread: threadA, message: 'continue', dryRun,
+            env: { PATH: [entry, dirname(working), f.env.PATH].join(windows ? ';' : ':') } });
+          assert.equal(result.status, 0, result.output);
+          assert.deepEqual(probes(f).map(p => realpathSync.native(p)), [realpathSync.native(working)]);
+          assert.equal(records(f).length, dryRun ? 0 : 1);
+          if (!dryRun) assert.equal(realpathSync.native(records(f)[0].exe), realpathSync.native(working));
+        }
+      });
+    }
+    it('allows an explicitly pinned current-directory Codex without automatic discovery', () => {
+      const f = fixture(); const name = windows ? 'codex.exe' : 'codex';
+      const pinned = makeStub(join(f.root, name));
+      const result = run(f, { exe: './' + name, thread: threadA, message: 'continue' });
+      assert.equal(result.status, 0, result.output);
+      assert.deepEqual(probes(f).map(p => realpathSync.native(p)), [realpathSync.native(pinned)]);
+      assert.equal(records(f).length, 1);
+    });
     if (windows) {
       it('rejects command shims before starting them', () => {
         const f = fixture(); const shim = join(f.root, 'codex.cmd');
