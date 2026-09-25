@@ -1,0 +1,147 @@
+name: PR 5790 scratch retention validation
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5790-correction-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 0fb3dcbf6aad2ec5b8ffa34e102d8d23d4ae4af7
+          persist-credentials: false
+      - name: Remove marker-based deletion authority and add preservation regressions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path); text = p.read_text()
+              assert text.count(old) == 1, (path, text.count(old))
+              p.write_text(text.replace(old, new))
+          p = Path('src/lab/fabric/scratch.ts'); text = p.read_text()
+          start = text.index('/** Marker left inside a scratch tree')
+          end = text.index('/** Require stats to describe a regular file', start)
+          text = text[:start] + '// Unconfirmed producer trees are retained for manual review. Neither a marker\n// inside producer-writable scratch nor its age grants later deletion authority.\n\n' + text[end:]
+          text = text.replace('  sweepDeferredScratch(configDir);\n', '')
+          for name in ['statSync', 'writeFileSync', 'Dirent']:
+              if text.count(name) == 1:
+                  text = text.replace('  ' + ('type ' if name == 'Dirent' else '') + name + ',\n', '')
+          p.write_text(text)
+          p = Path('src/lab/fabric/executor.ts'); text = p.read_text()
+          text = text.replace('  producerTerminationSignal,\n', '').replace('  markScratchForDeferredCleanup,\n', '')
+          text = text.replace('  // be removed under it, so cleanup is deferred instead of skipped forever.', '  // be removed under it; absence of a termination proof requires manual review.')
+          text = text.replace('  // Resolves when the last inherited stdio pipe closes — the durable signal\n  // that no descendant can still write inside the deferred scratch tree.\n  let deferredTermination: Promise<void> | undefined;\n', '')
+          text = text.replace('      deferredTermination = producerTerminationSignal(error);\n', '')
+          start = text.index('      if (producerTerminationUnconfirmed) {', text.index('  } finally {', text.index('producerTerminationUnconfirmed')))
+          end = text.index('      } else {\n        scratch.cleanup();', start)
+          text = text[:start] + '''      if (producerTerminationUnconfirmed) {
+                  // No writes into producer-controlled scratch after uncertain termination.
+                  // Age and later pipe closure cannot prove every descendant has exited.
+                  // Retain the tree, including across parent exit and later task creation.
+                  console.warn("[lab] Producer termination unconfirmed; scratch retained for manual review.");
+          '''.replace('          ', '', 1) + text[end:]
+          # Normalize only the newly emitted block's excessive indentation.
+          text = text.replace('                  //', '        //').replace('                  console.warn', '        console.warn')
+          p.write_text(text)
+          p = Path('src/lab/fabric/producer-isolate.ts'); text = p.read_text()
+          text = text.replace(' * once every still-open inherited stdio pipe reports its natural close, meaning\n * no descendant can still hold scratch open. Undefined when nothing monitorable\n * remained — callers must then rely on the deferred-cleanup sweep.', ' * once every monitored inherited stdio pipe reports its natural close. This is\n * observation only: closing a pipe does not prove a descendant exited and must\n * not authorize deletion. Undefined when nothing monitorable remained.')
+          text = text.replace('    // close — the only durable signal that no descendant can still write\n    // scratch. Undefined when no open pipe can be monitored.', '    // close. This is not a writer-termination proof or scratch deletion lease.\n    // Undefined when no open pipe can be monitored.')
+          text = text.replace('        // the direct child exited, so the caller must defer cleanup until the\n        // pipes actually close — same contract as an unconfirmed kill.', '        // the direct child exited, so the caller must retain scratch for manual\n        // review — pipe closure alone cannot prove a descendant terminated.')
+          p.write_text(text)
+          p = Path('tests/lab/lab-fabric-producer-deadline.test.ts'); text = p.read_text()
+          text = text.replace('import { existsSync, mkdtempSync, readFileSync, rmSync }', 'import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync }')
+          text = text.replace('import { sweepDeferredScratch }', 'import { createSyntheticScratch }')
+          old = 'test("trusted route defers scratch when exit arrives but close never does", async () => {'
+          assert text.count(old) == 1
+          text = text.replace(old, 'for (const marker of ["absent", "regular", "symlink", "directory"] as const) {\ntest.skipIf(process.platform === "win32" && marker === "symlink")(`unconfirmed producer retains scratch and preserves ${marker} marker paths`, async () => {')
+          start = text.index('for (const marker of ["absent"')
+          prefix, tail = text[:start], text[start:]
+          tail = tail.replace('  const child = new DeadlineChild();', '  const child = new DeadlineChild();\n  Object.assign(child.stdout, { unref() {} });\n  Object.assign(child.stderr, { unref() {} });', 1)
+          old = '    // The producer exits cleanly but a descendant keeps the inherited pipes'
+          insertion = '''    const markerPath = join(scratchRoot, ".ocx-deferred-cleanup");
+              const external = join(configDir, "outside.txt");
+              writeFileSync(external, "preserve outside bytes\\n");
+              if (marker === "regular") {
+                writeFileSync(markerPath, "producer-owned marker\\n");
+                utimesSync(markerPath, 0, 0);
+              } else if (marker === "symlink") {
+                symlinkSync(external, markerPath);
+              } else if (marker === "directory") {
+                mkdirSync(markerPath);
+              }
+
+          '''
+          insertion = '\n'.join(line[10:] if line.startswith('          ') else line for line in insertion.splitlines()) + '\n'
+          tail = tail.replace(old, insertion + old, 1)
+          old = '''    // Termination is unconfirmed: scratch must survive removal while a
+              // descendant could still write it, marked so a later run sweeps it even
+              // if this process exits first.
+              expect(existsSync(scratchRoot)).toBe(true);
+              expect(existsSync(join(scratchRoot, ".ocx-deferred-cleanup"))).toBe(true);
+
+              // The next task's sweep removes the marked tree once its marker ages out.
+              sweepDeferredScratch(configDir, 0);
+              expect(existsSync(scratchRoot)).toBe(false);'''
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())
+          assert tail.count(old) == 1
+          replacement = '''    expect(existsSync(scratchRoot)).toBe(true);
+              expect(readFileSync(external, "utf8")).toBe("preserve outside bytes\\n");
+              if (marker === "absent") expect(existsSync(markerPath)).toBe(false);
+              if (marker === "symlink") expect(lstatSync(markerPath).isSymbolicLink()).toBe(true);
+              if (marker === "regular") expect(readFileSync(markerPath, "utf8")).toBe("producer-owned marker\\n");
+              // A later task cannot use even an epoch-old marker as permission to delete.
+              const next = createSyntheticScratch(configDir);
+              next.cleanup();
+              expect(existsSync(scratchRoot)).toBe(true);
+              // Closing inherited pipes does not establish that the writer has exited.
+              child.close();
+              child.stdout.destroy(); child.stderr.destroy();
+              await drain();
+              expect(existsSync(scratchRoot)).toBe(true);
+              expect(readFileSync(join(scratchRoot, "src/value.txt"), "utf8")).toBe("before\\n");'''
+          replacement = '\n'.join(line[10:] if line.startswith('          ') else line for line in replacement.splitlines())
+          tail = tail.replace(old, replacement)
+          p.write_text(prefix + tail + '\n}\n')
+          replace('structure/adapters/compatibility-lab.md', 'cleanup contract of an unconfirmed kill: the executor marks the scratch tree\nwith `.ocx-deferred-cleanup` instead of removing it, removes it once every\ninherited pipe has closed, and the next task sweeps a marker older than the\nsweep age bound even if this process exits first.', 'cleanup contract of an unconfirmed kill: the executor retains scratch and emits a fixed\nmanual-review warning without writing into producer-controlled paths. Later task creation\nnever sweeps these trees. Marker age and inherited-pipe closure are not termination leases.\nAfter independently confirming all producer/descendant processes stopped, the operator may\nreview and remove the exact retained tree; parent exit does not grant automatic cleanup.')
+          PY
+      - name: Publish isolated candidate only
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/lab/fabric/executor.ts src/lab/fabric/scratch.ts src/lab/fabric/producer-isolate.ts tests/lab/lab-fabric-producer-deadline.test.ts structure/adapters/compatibility-lab.md
+          git commit -m 'fix(lab): retain unconfirmed scratch without marker writes or age sweeps'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5790-candidate-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/lab/lab-fabric-producer-deadline.test.ts tests/lab/lab-fabric-task.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: git diff --exit-code
