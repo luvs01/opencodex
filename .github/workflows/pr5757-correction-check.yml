@@ -1,0 +1,250 @@
+name: PR 5757 credential lifecycle validation
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5757-correction-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 9568a556f3c8198cd1ea767900196daf2b9b7b40
+          persist-credentials: false
+      - name: Apply exact lifecycle and regression corrections
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path); text = p.read_text()
+              assert text.count(old) == 1, (path, text.count(old))
+              p.write_text(text.replace(old, new))
+          replace('src/claude/intercept/connect-proxy.ts', '  authToken?: string;', '  authToken?: string | (() => string | null);')
+          replace('src/claude/intercept/connect-proxy.ts', '    if (options.authToken && !proxyAuthorized(requestHead, options.authToken)) {\n      respond(socket, 407, "Proxy Authentication Required");\n      return;\n    }', '    if (options.authToken !== undefined) {\n      let token: string | null = null;\n      try { token = typeof options.authToken === "function" ? options.authToken() : options.authToken; }\n      catch { /* unavailable credential must never fall back to an unauthenticated proxy */ }\n      if (!token || !proxyAuthorized(requestHead, token)) {\n        respond(socket, 407, "Proxy Authentication Required");\n        return;\n      }\n    }')
+          replace('src/claude/intercept/runtime.ts', 'import { ensureClaudeInterceptProxyToken }', 'import { ensureClaudeInterceptProxyToken, readClaudeInterceptProxyToken }')
+          replace('src/claude/intercept/runtime.ts', '      interceptPort: listener.port!,\n      authToken,', '      interceptPort: listener.port!,\n      // A real apply may recreate a missing token while this listener remains live.\n      // Read current validated authority per CONNECT; absent/invalid means deny, not mint.\n      authToken: () => readClaudeInterceptProxyToken(configDir),')
+          p = Path('tests/claude-integration/claude-intercept-proxy-auth.test.ts')
+          p.write_text(r'''import { afterEach, expect, test } from "bun:test";
+          import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+          import { connect, createServer } from "node:net";
+          import { tmpdir } from "node:os";
+          import { join } from "node:path";
+          import { claudeInterceptProxyTokenPath, ensureClaudeInterceptProxyToken, readClaudeInterceptProxyToken } from "../../src/claude/intercept/proxy-auth";
+          import { removeTreeWithRetry } from "../helpers/remove-tree";
+          
+          const roots: string[] = [];
+          function dir(): string {
+            const root = mkdtempSync(join(tmpdir(), "ocx-proxy-auth-"));
+            roots.push(root);
+            return root;
+          }
+          afterEach(() => { for (const root of roots.splice(0)) removeTreeWithRetry(root); });
+          
+          test("read returns null without creating anything on disk", () => {
+            const root = dir();
+            expect(readClaudeInterceptProxyToken(root)).toBeNull();
+            expect(existsSync(join(root, "claude-intercept"))).toBe(false);
+          });
+          test("ensure creates one bounded token and all callers reuse it", () => {
+            const root = dir();
+            const token = ensureClaudeInterceptProxyToken(root);
+            expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+            expect(readFileSync(claudeInterceptProxyTokenPath(root), "utf8")).toBe(`${token}\n`.replace("\\n", "\n"));
+            expect(ensureClaudeInterceptProxyToken(root)).toBe(token);
+            expect(readClaudeInterceptProxyToken(root)).toBe(token);
+            expect(readdirSync(join(root, "claude-intercept"))).toEqual(["proxy-token"]);
+          });
+          for (const ending of ["", "\n", "\r\n"]) {
+            test(`a valid committed credential with ending ${JSON.stringify(ending)} wins`, () => {
+              const root = dir();
+              ensureClaudeInterceptProxyToken(root);
+              writeFileSync(claudeInterceptProxyTokenPath(root), "A".repeat(43) + ending, { mode: 0o600 });
+              expect(ensureClaudeInterceptProxyToken(root)).toBe("A".repeat(43));
+            });
+          }
+          for (const [label, value] of [
+            ["empty", ""], ["short", "committed-token"], ["space", "A".repeat(43) + " "],
+            ["extra newline", "A".repeat(43) + "\n\n"], ["oversized", "A".repeat(65536)],
+            ["non-ascii", "가".repeat(43)],
+          ] as const) {
+            test(`invalid ${label} credentials are refused, never overwritten`, () => {
+              const root = dir();
+              ensureClaudeInterceptProxyToken(root);
+              const path = claudeInterceptProxyTokenPath(root);
+              writeFileSync(path, value);
+              expect(readClaudeInterceptProxyToken(root)).toBeNull();
+              expect(() => ensureClaudeInterceptProxyToken(root)).toThrow();
+              expect(readFileSync(path, "utf8")).toBe(value);
+              expect(readdirSync(join(root, "claude-intercept"))).toEqual(["proxy-token"]);
+            });
+          }
+          test("a directory at the credential path is not a credential", () => {
+            const root = dir();
+            mkdirSync(claudeInterceptProxyTokenPath(root), { recursive: true });
+            expect(readClaudeInterceptProxyToken(root)).toBeNull();
+            expect(() => ensureClaudeInterceptProxyToken(root)).toThrow();
+            expect(lstatSync(claudeInterceptProxyTokenPath(root)).isDirectory()).toBe(true);
+          });
+          test.skipIf(process.platform === "win32")("valid existing token permissions are repaired through its descriptor", () => {
+            const root = dir();
+            mkdirSync(join(root, "claude-intercept"), { recursive: true });
+            const path = claudeInterceptProxyTokenPath(root);
+            writeFileSync(path, "B".repeat(43) + "\n", { mode: 0o644 });
+            expect(readClaudeInterceptProxyToken(root)).toBeNull();
+            expect(ensureClaudeInterceptProxyToken(root)).toBe("B".repeat(43));
+            expect(statSync(path).mode & 0o077).toBe(0);
+          });
+          test.skipIf(process.platform === "win32")("a token symlink never reads or chmods its external target", () => {
+            const root = dir();
+            const external = join(root, "outside.txt");
+            writeFileSync(external, "C".repeat(43) + "\n", { mode: 0o644 });
+            const before = statSync(external).mode;
+            mkdirSync(join(root, "claude-intercept"), { mode: 0o700 });
+            const path = claudeInterceptProxyTokenPath(root);
+            symlinkSync(external, path);
+            expect(readClaudeInterceptProxyToken(root)).toBeNull();
+            expect(() => ensureClaudeInterceptProxyToken(root)).toThrow();
+            expect(lstatSync(path).isSymbolicLink()).toBe(true);
+            expect(readFileSync(external, "utf8")).toBe("C".repeat(43) + "\n");
+            expect(statSync(external).mode).toBe(before);
+          });
+          test("a linked credential directory never grants authority", () => {
+            const root = dir();
+            const external = join(root, "outside-dir");
+            mkdirSync(external);
+            writeFileSync(join(external, "proxy-token"), "D".repeat(43) + "\n");
+            symlinkSync(external, join(root, "claude-intercept"), process.platform === "win32" ? "junction" : "dir");
+            expect(readClaudeInterceptProxyToken(root)).toBeNull();
+            expect(() => ensureClaudeInterceptProxyToken(root)).toThrow();
+            expect(readFileSync(join(external, "proxy-token"), "utf8")).toBe("D".repeat(43) + "\n");
+          });
+          
+          async function unusedPort(): Promise<number> {
+            const server = createServer();
+            await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+            const address = server.address();
+            if (!address || typeof address === "string") throw new Error("no test port");
+            await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+            return address.port;
+          }
+          function connectStatus(port: number, token?: string): Promise<number> {
+            return new Promise((resolve, reject) => {
+              const socket = connect({ host: "127.0.0.1", port }, () => {
+                const auth = token ? `Proxy-Authorization: Basic ${Buffer.from(`opencodex:${token}`).toString("base64")}\r\n` : "";
+                socket.write(`CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n${auth}\r\n`);
+              });
+              socket.setTimeout(5000, () => socket.destroy(new Error("test CONNECT timed out")));
+              let head = "";
+              socket.on("data", chunk => {
+                head += chunk.toString("latin1");
+                if (head.includes("\r\n\r\n")) {
+                  const status = Number(head.split(" ")[1]);
+                  socket.destroy();
+                  resolve(status);
+                }
+              });
+              socket.on("error", reject);
+            });
+          }
+          test("a live intercept adopts an explicitly recreated token without restarting", async () => {
+            const root = dir();
+            const claudeHome = join(root, "claude");
+            mkdirSync(claudeHome);
+            const previous = process.env.CLAUDE_CONFIG_DIR;
+            process.env.CLAUDE_CONFIG_DIR = claudeHome;
+            const { startClaudeIntercept } = await import("../../src/claude/intercept/runtime");
+            const { applyDesktopFirstParty } = await import("../../src/claude/desktop-first-party");
+            const port = await unusedPort();
+            const config = { port: 10100, defaultProvider: "openai", providers: {},
+              claudeCode: { intercept: { enabled: true, port, picker: false } } };
+            let handle: Awaited<ReturnType<typeof startClaudeIntercept>>;
+            try {
+              handle = await startClaudeIntercept({ config, configDir: root, publicPort: 10100,
+                dispatch: async () => new Response("local fixture") });
+              expect(handle).not.toBeNull();
+              expect(applyDesktopFirstParty(config, { opencodexConfigDir: root, claudeConfigDir: claudeHome }).ok).toBe(true);
+              const old = readClaudeInterceptProxyToken(root)!;
+              expect(await connectStatus(port, old)).toBe(200);
+              unlinkSync(claudeInterceptProxyTokenPath(root));
+              expect(await connectStatus(port, old)).toBe(407);
+              expect(await connectStatus(port)).toBe(407);
+              expect(applyDesktopFirstParty(config, { opencodexConfigDir: root, claudeConfigDir: claudeHome }).ok).toBe(true);
+              const current = readClaudeInterceptProxyToken(root)!;
+              expect(current).not.toBe(old);
+              const settings = JSON.parse(readFileSync(join(claudeHome, "settings.json"), "utf8"));
+              expect(new URL(settings.env.HTTPS_PROXY).password).toBe(current);
+              expect(await connectStatus(port, current)).toBe(200);
+              expect(await connectStatus(port, old)).toBe(407);
+              expect(handle!.proxyPort).toBe(port);
+            } finally {
+              await handle?.stop();
+              if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+              else process.env.CLAUDE_CONFIG_DIR = previous;
+            }
+          }, 30000);
+          ''')
+          # Raw Python keeps TypeScript escape sequences; dedent only source indentation.
+          text = p.read_text()
+          text = '\n'.join(line[10:] if line.startswith('          ') else line for line in text.splitlines()) + '\n'
+          text = text.replace('`${token}\\n`.replace("\\\\n", "\\n")', '`${token}\\n`')
+          text = text.replace('let handle: Awaited<ReturnType<typeof startClaudeIntercept>>;', 'let handle: Awaited<ReturnType<typeof startClaudeIntercept>> = null;')
+          p.write_text(text)
+          p = Path('structure/clients/claude-desktop.md')
+          text = p.read_text()
+          anchor = '### First-party model bindings\n'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, '### Intercept credential lifetime\n\n`src/claude/intercept/proxy-auth.ts` reads a bounded base64url credential through a checked\nregular-file descriptor, rejects links and foreign POSIX owners, and never replaces invalid\nexisting entries. Creation hardens before no-replace publication. The authenticated listener\nreads this current authority for every CONNECT; absence or invalidity denies admission.\nAn explicit first-party apply can recreate a missing token and the live listener follows it\nwithout restart. Established tunnels are not revoked by this new-connection check.\n\n' + anchor)
+          p.write_text(text)
+          p = Path('docs-site/src/content/docs/guides/claude-code.md')
+          text = p.read_text()
+          anchor = 'Messages handler `ocx claude` uses.'
+          assert anchor in text
+          text += '\n### Intercept token recovery\n\nThe running authenticated proxy validates the current token for each new CONNECT request.\nAn explicit first-party apply recreates a missing token and refreshes the owned settings without\nrequiring a proxy restart; existing tunnels are not revoked. Invalid, linked, oversized or\nnon-token files are refused rather than overwritten. Inspect such an entry before removing only\nthe confirmed obsolete token file and applying first-party mode again; never delete its link target.\n'
+          p.write_text(text)
+          PY
+      - name: Publish isolated candidate only
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/claude/intercept/connect-proxy.ts src/claude/intercept/runtime.ts tests/claude-integration/claude-intercept-proxy-auth.test.ts structure/clients/claude-desktop.md docs-site/src/content/docs/guides/claude-code.md
+          git commit -m 'fix(claude): keep live CONNECT authority aligned with persisted token'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5757-candidate-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/claude-integration/claude-intercept-proxy-auth.test.ts tests/claude-integration/claude-intercept-proxy.test.ts tests/claude-integration/claude-intercept-settings.test.ts
+      - run: bun run typecheck
+      - if: runner.os == 'Linux'
+        run: bun run privacy:scan
+      - if: runner.os == 'Linux'
+        run: bun run structure:check
+      - run: git diff --exit-code
