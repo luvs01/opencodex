@@ -1,0 +1,76 @@
+name: PR 5776 recovery guidance review
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5776-guidance-review-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 3e9eef072c4c12fd9a6b32a6070bd232010949d1
+          persist-credentials: false
+      - name: Generalize error guidance without changing ownership behavior
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          old = "Restore read access to config.toml, then inspect 'ocx system settings --json'."
+          new = "Resolve the reported config.toml read error, then inspect 'ocx system settings --json'."
+          for name in ['src/cli/system-command.ts', 'src/cli/agent.ts']:
+              p = Path(name); text = p.read_text()
+              assert text.count(old) == 1
+              p.write_text(text.replace(old, new))
+          p = Path('tests/cli/cli-headless-parity.test.ts'); text = p.read_text()
+          old_assert = '      expect(output).toContain("ocx system settings --json");'
+          assert text.count(old_assert) == 1
+          text = text.replace(old_assert, old_assert + '\n      expect(output).toContain("Resolve the reported config.toml read error");')
+          start = text.index('describe("ownership recovery advice does not assume injection is enabled"')
+          pre, tail = text[:start], text[start:]
+          old_assert = '        expect(text).not.toContain("ocx sync");'
+          # Source indentation is normalized by the earlier candidate, not inferred here.
+          if old_assert not in tail:
+              old_assert = '                  expect(text).not.toContain("ocx sync");'
+          assert tail.count(old_assert) == 1
+          indent = old_assert[:len(old_assert) - len(old_assert.lstrip())]
+          tail = tail.replace(old_assert, old_assert + '\n' + indent + 'if (reason === "ownership_undetermined") expect(text).toContain("Resolve the reported config.toml read error");')
+          p.write_text(pre + tail)
+          PY
+      - name: Publish isolated candidate only
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/cli/system-command.ts src/cli/agent.ts tests/cli/cli-headless-parity.test.ts
+          git commit -m 'fix(cli): describe all ownership read errors in recovery guidance'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5776-final-review-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/cli/cli-headless-parity.test.ts --test-name-pattern 'ocx system settings|sidecar|ownership recovery'
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: git diff --exit-code
