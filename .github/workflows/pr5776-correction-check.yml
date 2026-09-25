@@ -1,0 +1,130 @@
+name: PR 5776 scoped correction validation
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5776-correction-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: bc718d94ac48327e8b2f41f1b67fb362ead0cb03
+          persist-credentials: false
+      - name: Apply exact source and regression corrections
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path); text = p.read_text()
+              assert text.count(old) == 1, (path, text.count(old))
+              p.write_text(text.replace(old, new))
+          replace('src/codex/desktop-switches.ts', '  } catch (error) {\n    return {\n      applied: false,\n      reason: "injection_refused",', '  } catch (error) {\n    // The injector may fail its ownership read after the initial apply gates passed.\n    const ownership = await observedOwnershipApply();\n    if (ownership) return ownership;\n    return {\n      applied: false,\n      reason: "injection_refused",')
+          old = '''    const retry = apply.reason === "external_provider"
+                ? ""
+                : " Run 'ocx sync' to apply the stored settings.";'''
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())
+          old = '    const retry = apply.reason === "external_provider"\n      ? ""\n      : " Run \'ocx sync\' to apply the stored settings.";'
+          new = '    const retry = apply.reason === "external_provider"\n      ? ""\n      : apply.reason === "ownership_undetermined"\n      ? " Restore read access to config.toml, then inspect \'ocx system settings --json\'."\n      : apply.reason === "integration_disabled"\n      ? " Enable Codex integration before applying the stored settings."\n      : " Run \'ocx sync\' to apply the stored settings.";'
+          for path in ['src/cli/system-command.ts', 'src/cli/agent.ts']:
+              replace(path, old, new)
+          replace('tests/cli/cli-headless-parity.test.ts', '      // Ownership may settle on a later read, so the retry advice stays.\n      expect(output).toContain("ocx sync");', '      // Observation can recover while integration stays disabled; sync cannot inject then.\n      expect(output).not.toContain("ocx sync");\n      expect(output).toContain("ocx system settings --json");')
+          p = Path('tests/cli/cli-headless-parity.test.ts')
+          p.write_text(p.read_text() + '''
+          describe("ownership recovery advice does not assume injection is enabled", () => {
+            for (const reason of ["ownership_undetermined", "integration_disabled"]) {
+              test(`sidecar ${reason} does not promise sync will apply settings`, async () => {
+                const { requests, deps } = fakeRuntime(() => ({
+                  ok: true, codexWebSearch: { applied: false, reason, retryable: true },
+                }));
+                const log = spyOn(console, "log").mockImplementation(() => {});
+                try {
+                  expect(await handleAgentCommand(["sidecar", "web", "--enabled", "on"], deps)).toBe(0);
+                  expect(requests).toHaveLength(1);
+                  const text = log.mock.calls.flat().join("\\n");
+                  expect(text).toContain("was not rewritten");
+                  expect(text).not.toContain("ocx sync");
+                  expect(text).toContain(reason === "ownership_undetermined"
+                    ? "ocx system settings --json" : "Enable Codex integration");
+                } finally { log.mockRestore(); }
+              });
+            }
+          });
+          ''')
+          p = Path('tests/config/settings-desktop-switch-apply.test.ts')
+          p.write_text(p.read_text() + '''
+          test("post-gate injector read failure retains undetermined ownership and null effective state", () => {
+            const root = mkdtempSync(join(tmpdir(), "ocx-settings-post-gate-"));
+            const codexHome = join(root, "codex");
+            mkdirSync(join(codexHome, "config.toml"), { recursive: true });
+            try {
+              const result = runIsolatedSettingsRequest({ root, codexHome,
+                routeConfig: { ...ISOLATED_PROVIDER_CONFIG, clientIntegrations: { codex: true } },
+                scriptBody: `
+                  const { writeRuntimePort } = await import("./src/config/process-state");
+                  writeRuntimePort({ pid: process.pid, port: config.port });
+                  const request = new Request("http://127.0.0.1:10100/api/settings", {
+                    method: "PUT", headers: { host: "127.0.0.1:10100", "content-type": "application/json" },
+                    body: JSON.stringify({ codexDesktopAuthless: true, codexClientCompaction: true }),
+                  });
+                  const response = await handleManagementAPI(request, new URL(request.url), config, {
+                    saveConfigPreservingClaudeCode: () => {},
+                    getCachedStartupHealth: async () => startupHealthFixture(),
+                    createManagementConvergeCodex: catalogConvergenceFactory(() => {}),
+                  });
+                `,
+              });
+              expect(result.status).toBe(200);
+              expect(result.body).toMatchObject({ codexDesktopSwitches: {
+                codexDesktopAuthless: { stored: true, effective: null },
+                codexClientCompaction: { stored: true, effective: null },
+                apply: { applied: false, reason: "ownership_undetermined", retryable: true },
+                authSource: { presentsCodexAccount: null },
+              } });
+            } finally { removeTreeWithRetry(root); }
+          }, 15000);
+          ''')
+          replace('docs-site/src/content/docs/guides/codex-integration.md', 'marks it retryable, so `ocx sync` or a later settings read reports the settled answer once the\nfile reads again.', 'marks it retryable, so a later `ocx system settings --json` read reports the settled answer once\nthe file is readable again. With Codex integration disabled, `ocx sync` is catalog-only and cannot apply it.')
+          replace('structure/config.md', 'control, and the apply gates keep that record instead of collapsing it to their own reason.', 'control; both apply gates and injector-error observation retain that record. Recovery advice requests\na later settings read, not sync, when ownership is unknown or integration is disabled.')
+          PY
+      - name: Publish isolated candidate only
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/codex/desktop-switches.ts src/cli/system-command.ts src/cli/agent.ts tests/config/settings-desktop-switch-apply.test.ts tests/cli/cli-headless-parity.test.ts docs-site/src/content/docs/guides/codex-integration.md structure/config.md
+          git commit -m 'fix(settings): retain unknown ownership after injection failures'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5776-candidate-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/config/settings-desktop-switch-apply.test.ts
+      - run: bun test tests/cli/cli-headless-parity.test.ts --test-name-pattern 'ocx system settings|sidecar|ownership recovery'
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: git diff --exit-code
