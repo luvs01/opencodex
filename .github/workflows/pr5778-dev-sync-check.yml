@@ -45,7 +45,9 @@ jobs:
               subprocess.run(['git', 'add', name], check=True)
           assert not subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).strip()
           subprocess.run(['git', 'diff', '--check'], check=True)
-          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          # Compare the resulting PR change to its incoming base. Do not rewrite
+          # unrelated whitespace already committed in the integration branch.
+          subprocess.run(['git', 'diff', '--cached', '--check', '88b9da8c51f75cffce030db13e2bc78a7b555d7f'], check=True)
           for path, expected in [
               ('src/combos/failover.ts', 'return true;'),
               ('src/combos/resolve.ts', 'onCooldownRecorded'),
