@@ -480,6 +480,7 @@ describe("headless GUI parity CLI", () => {
       // Claude reset grants: reading is an owed CLI verb (deferred-verb in the route
       // registry) and spending is dashboard-session-only by design.
       ["/api/anthropic/reset-grants", "(none — GUI reset-grant dialog; spend requires a dashboard session)"],
+      ["/api/protocols", "ocx api protocols/explain/policy"],
       ["/api/settings", "ocx system"],
       // Routing Intelligence (RI-04..RI-10): profiles + dry-run are mirrored by
       // `ocx route policy`. Analytics is GUI-first for now; the same request
@@ -492,6 +493,10 @@ describe("headless GUI parity CLI", () => {
       // the management route registry land. Naming the family here does not claim those
       // local and Hub status payloads are equivalent.
       ["/api/remote-workspace", "ocx remote-workspace"],
+      // Remote Link: status and revoke are `ocx link status|revoke`. Candidates, probe, host
+      // confirmation, and apply are the dashboard's guided pairing; the headless route is
+      // `ocx link port|issue` plus `ocx connect --link`, which the apply flow drives over SSH.
+      ["/api/link", "ocx link"],
       ["/api/shadow", "ocx models"],
       ["/api/sidecar", "ocx agent"],
       ["/api/startup", "ocx system"],
