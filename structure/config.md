@@ -468,13 +468,8 @@ and removes only normalized manifest entries. Manifest-owned directory links are
 traversing their targets. Unknown files remain in place and make the command report a partial
 uninstall with their exact paths.
 
-Per-catalog hashed backups are recorded only after a new backup is successfully written by
-`src/codex/catalog/parsing.ts` or published by `src/codex/internal/catalog-writer.ts`.
-Preserving an existing file does not register it, even if its deterministic name or bytes match.
-Previously recorded paths keep their ownership; unrecorded pre-ledger backups remain residuals.
-After stopping OpenCodex and completing any needed restore, review and archive those exact residual
-paths before manually removing only confirmed obsolete backups. Never infer ownership from a glob.
-The legacy fixed-name entries already present in ownership manifests are not migrated by this rule.
+Per-catalog hashed backups follow the [catalog ownership rules](catalog.md#shared-catalog):
+only new writes are registered; existing unrecorded files remain for manual review.
 
 The newly created OAuth downgrade copy is registered after copying, so owned uninstall
 includes it. Destructive OAuth mutations rewrite that copy without the removed provider through the
