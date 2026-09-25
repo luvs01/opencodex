@@ -4,6 +4,7 @@
 # Run with --help for usage. Requires Bash 3.2+ and standard POSIX utilities.
 set -euo pipefail
 
+# Print command usage without probing or submitting to Codex.
 usage() {
   cat <<'USAGE'
 Usage: codex-queue.sh (--thread <id-or-exact-name> | --latest) [options] [<message>]
@@ -19,6 +20,7 @@ On-demand only: no enable/disable state, quota polling, auto-send, or routing ch
 USAGE
 }
 
+# Print a validation error to stderr and exit with status 2.
 fail() { printf '%s\n' "$1" >&2; exit 2; }
 THREAD=""; LATEST=0; MESSAGE=""; MESSAGE_SET=0; DRY_RUN=0; SHOW_TARGET=0
 CODEX_EXE="${CODEX_EXE:-}"
@@ -66,6 +68,8 @@ CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME is required}/.codex}"
 
 # Read every NUL-delimited path before selecting: no ls batches, SIGPIPE, or
 # partial result on a failed scan. Do not follow symlinked session directories.
+# Print the first UUID from the newest recognized rollout in CODEX_HOME/sessions;
+# break modification-time ties by path, and fail if the scan cannot select one.
 resolve_latest_thread() (
   local sessions="$CODEX_HOME_DIR/sessions" paths candidate latest="" latest_id="" name
   local uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
@@ -89,6 +93,7 @@ resolve_latest_thread() (
 
 # Probe help only: an older CLI can print top-level help with exit 0, so require
 # both queue-specific flags. This does not prove the running daemon is compatible.
+# Return failure for missing executables or failed probes.
 supports_queue() {
   local help
   [ -f "$1" ] && [ -x "$1" ] || return 1
@@ -98,6 +103,7 @@ supports_queue() {
 
 # Prefer app bundles over a stale PATH CLI; cover both standalone package layouts.
 # Explicit selection is authoritative and never silently falls back to another CLI.
+# Print the selected executable path, or fail if no candidate supports queue.
 resolve_codex() {
   local candidate directory remaining_path
   if [ -n "$CODEX_EXE" ]; then

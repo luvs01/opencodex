@@ -26,6 +26,10 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+<#
+.SYNOPSIS
+  Throw a helper error marked for display by the outer handler.
+#>
 function Stop-QueueHelper([string]$Message) {
   # Only our fixed diagnostics are safe to print; native filesystem exceptions
   # can contain private directories, session names or the command line.
@@ -34,6 +38,12 @@ function Stop-QueueHelper([string]$Message) {
   throw $failure
 }
 
+<#
+.SYNOPSIS
+  Quote one literal argument for the native process launcher on Windows PowerShell 5.1.
+.DESCRIPTION
+  Returns a quoted string that preserves embedded quotes and trailing backslashes.
+#>
 function ConvertTo-NativeArgument([string]$Value) {
   # Windows CRT quoting for .NET Framework / Windows PowerShell 5.1:
   # double backslashes before a quote and before the closing quote.
@@ -42,6 +52,14 @@ function ConvertTo-NativeArgument([string]$Value) {
   return '"' + $escaped + '"'
 }
 
+<#
+.SYNOPSIS
+  Run the native Codex CLI from the shell's current filesystem location.
+.DESCRIPTION
+  In probe mode, capture help output and return its exit code and stdout; a probe
+  still running after 10 seconds is stopped and raises an error. Otherwise,
+  inherit output and return the CLI exit code. Process errors reach the caller.
+#>
 function Invoke-CodexNative([string]$Exe, [string[]]$Arguments, [switch]$Probe) {
   # Avoid cmd.exe and PowerShell's legacy native-argument serialization: quotes,
   # Unicode, newlines, trailing slashes and shell metacharacters must stay data.
@@ -81,6 +99,13 @@ function Invoke-CodexNative([string]$Exe, [string[]]$Arguments, [switch]$Probe) 
   }
 }
 
+<#
+.SYNOPSIS
+  Check whether a native CLI advertises queue --thread and --message.
+.DESCRIPTION
+  Returns false for a missing or unsupported executable, failed help output,
+  or a probe error. This check does not contact the running daemon.
+#>
 function Test-CodexQueue([string]$Path) {
   # A successful generic help response is not enough: check queue-specific flags.
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
@@ -92,6 +117,13 @@ function Test-CodexQueue([string]$Path) {
   } catch { return $false }
 }
 
+<#
+.SYNOPSIS
+  Return the full path of a queue-capable native Codex CLI.
+.DESCRIPTION
+  An explicit executable must pass the queue probe; otherwise search app bundles,
+  standalone installs, then PATH. Raise a safe error if none qualifies.
+#>
 function Resolve-CodexExe([string]$Explicit, [string]$CodexHomeDir) {
   # Pinning is authoritative: do not fall back after an invalid explicit choice.
   if (-not [string]::IsNullOrEmpty($Explicit)) {
@@ -123,6 +155,13 @@ function Resolve-CodexExe([string]$Explicit, [string]$CodexHomeDir) {
   Stop-QueueHelper 'No queue-capable native Codex CLI found. Install/update Codex or supply -CodexExe.'
 }
 
+<#
+.SYNOPSIS
+  Return the first UUID in the newest recognized rollout under CODEX_HOME/sessions.
+.DESCRIPTION
+  Modification time selects the file, with full path breaking ties. Missing,
+  unreadable, or unrecognized session stores raise an error.
+#>
 function Resolve-LatestThread([string]$CodexHomeDir) {
   # Scan only the effective store. Fail on incomplete reads instead of silently
   # selecting from another account/home. Deterministic filename order breaks ties.
