@@ -21,7 +21,7 @@
  * `isFailedEmptyExecWrapper` below for Computer Use, where a failed wrapper is separately marked
  * `isError`.
  */
-export const EMPTY_EXEC_OUTPUT_REGEX = /^(?:(?:Script completed|Command finished|Execution finished)[^\n]*\n+)?(?:Wall time[^\n]*\n+)?(?:Output:\s*)?(?:<empty>)?\s*$/;
+export const EMPTY_EXEC_OUTPUT_REGEX = /^(?:(?:Script completed|Command finished|Execution finished)[^\n]*\n+(?!\n))?(?:Wall time[^\n]*\n+(?!\n))?(?:Output:\s*)?(?:<empty>)?\s*$/;
 
 function skipFailedWrapperBlankSeparators(text: string, start: number): number {
   let index = start;
