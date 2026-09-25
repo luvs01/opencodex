@@ -1,0 +1,208 @@
+name: PR 5757 authentication review follow-up
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5757-final-review-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 21a6f6786e36674be72b7f44f67ed715a80501c0
+          persist-credentials: false
+      - name: Apply exact reviewed corrections without executing repository code
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+          def replace(path, old, new):
+              p = Path(path); text = p.read_text()
+              assert text.count(old) == 1, (path, text.count(old))
+              p.write_text(text.replace(old, new))
+          replace('src/claude/intercept/connect-proxy.ts',
+              'function respond(socket: Socket, status: number, reason: string): void {\n  if (socket.destroyed) return;\n  socket.end(`HTTP/1.1 ${status} ${reason}\\r\\nConnection: close\\r\\nContent-Length: 0\\r\\n\\r\\n`);\n}',
+              'function respond(socket: Socket, status: number, reason: string, headers: Readonly<Record<string, string>> = {}): void {\n  if (socket.destroyed) return;\n  const extra = Object.entries(headers).map(([name, value]) => `${name}: ${value}\\r\\n`).join("");\n  socket.end(`HTTP/1.1 ${status} ${reason}\\r\\n${extra}Connection: close\\r\\nContent-Length: 0\\r\\n\\r\\n`);\n}')
+          replace('src/claude/intercept/connect-proxy.ts',
+              '        respond(socket, 407, "Proxy Authentication Required");',
+              '        respond(socket, 407, "Proxy Authentication Required", { "Proxy-Authenticate": \'Basic realm="OpenCodex"\' });')
+          p = Path('src/claude/intercept/proxy-auth.ts'); text = p.read_text()
+          old = '''  } finally {
+              closeSync(fd);
+              try {
+                assertSameNode(temp, created);
+                unlinkSync(temp);
+                forgetEphemeralSecretPath(temp);
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                  throw new Error("Claude intercept credential temporary cleanup failed");
+                }
+                forgetEphemeralSecretPath(temp);
+              }
+            }
+          }'''
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())
+          new = '''  } finally {
+              // Cleanup cannot turn a committed credential into a failed apply or hide the
+              // original publication error. Do not retry close: its fd may already be reused.
+              let cleanupFailed = false;
+              try { closeSync(fd); } catch { cleanupFailed = true; }
+              let removed = false;
+              try {
+                assertSameNode(temp, created);
+                unlinkSync(temp);
+                removed = true;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === "ENOENT") removed = true;
+                else cleanupFailed = true;
+              }
+              if (removed) forgetEphemeralSecretPath(temp);
+              if (cleanupFailed) {
+                console.warn("[claude] Credential temporary cleanup incomplete; review retained temporary state.");
+              }
+            }
+          }'''
+          new = '\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          p = Path('tests/claude-integration/claude-intercept-proxy.test.ts')
+          text = p.read_text() + dedent('''
+          test("every authentication rejection includes a Basic proxy challenge before any dial", async () => {
+            for (const authToken of [AUTH_TOKEN, () => null, () => { throw new Error("unavailable"); }]) {
+              let dials = 0;
+              const proxy = await startConnectProxy(0, {
+                interceptPort: 1, authToken,
+                dialUpstream: () => { dials += 1; throw new Error("unexpected dial"); },
+              });
+              try {
+                for (const header of ["", "Proxy-Authorization: Basic invalid\\r\\n"]) {
+                  const response = await rawRequest(proxy.port,
+                    `CONNECT telemetry.example:443 HTTP/1.1\\r\\nHost: telemetry.example:443\\r\\n${header}\\r\\n`);
+                  expect(response).toMatch(/^HTTP\\/1\\.1 407 /);
+                  expect(response).toContain('\\r\\nProxy-Authenticate: Basic realm="OpenCodex"\\r\\n');
+                  expect(dials).toBe(0);
+                }
+              } finally { await proxy.close(); }
+            }
+          });
+          ''')
+          p.write_text(text)
+          p = Path('tests/claude-integration/claude-intercept-proxy-auth.test.ts')
+          text = p.read_text().replace('afterEach, expect, test }', 'afterEach, expect, spyOn, test }')
+          text = text.replace('import { connect, createServer }', 'import * as filesystem from "node:fs";\nimport { connect, createServer }')
+          text += dedent('''
+          test("published token stays usable when removal of its own temporary entry fails", () => {
+            const root = dir();
+            const original = filesystem.unlinkSync;
+            const warning = spyOn(console, "warn").mockImplementation(() => {});
+            const removal = spyOn(filesystem, "unlinkSync").mockImplementation(path => {
+              if (String(path).includes(".proxy-token.") && String(path).endsWith(".tmp")) {
+                throw Object.assign(new Error("private detail must not escape"), { code: "EACCES" });
+              }
+              return original(path);
+            });
+            try {
+              const token = ensureClaudeInterceptProxyToken(root);
+              expect(readClaudeInterceptProxyToken(root)).toBe(token);
+              expect(warning).toHaveBeenCalledTimes(1);
+              expect(warning.mock.calls.flat().join(" ")).not.toContain("private detail");
+              const temps = readdirSync(join(root, "claude-intercept")).filter(name => name.endsWith(".tmp"));
+              expect(temps).toHaveLength(1);
+            } finally { removal.mockRestore(); warning.mockRestore(); }
+          });
+          test("cleanup errors preserve the original credential creation error", () => {
+            const root = dir();
+            const originalWrite = filesystem.writeFileSync;
+            const originalUnlink = filesystem.unlinkSync;
+            const failure = new Error("expected creation failure");
+            const warning = spyOn(console, "warn").mockImplementation(() => {});
+            const write = spyOn(filesystem, "writeFileSync").mockImplementation((path, data, options) => {
+              if (typeof path === "number") throw failure;
+              return originalWrite(path, data, options);
+            });
+            const removal = spyOn(filesystem, "unlinkSync").mockImplementation(path => {
+              if (String(path).includes(".proxy-token.") && String(path).endsWith(".tmp")) {
+                throw Object.assign(new Error("secondary removal error"), { code: "EACCES" });
+              }
+              return originalUnlink(path);
+            });
+            try {
+              let caught: unknown;
+              try { ensureClaudeInterceptProxyToken(root); } catch (error) { caught = error; }
+              expect(caught).toBe(failure);
+              expect(readClaudeInterceptProxyToken(root)).toBeNull();
+              expect(warning).toHaveBeenCalledTimes(1);
+            } finally { removal.mockRestore(); write.mockRestore(); warning.mockRestore(); }
+          });
+          test("a temporary close error does not replace the published credential result", () => {
+            const root = dir();
+            const originalWrite = filesystem.writeFileSync;
+            const originalClose = filesystem.closeSync;
+            let tempFd = -1;
+            const warning = spyOn(console, "warn").mockImplementation(() => {});
+            const write = spyOn(filesystem, "writeFileSync").mockImplementation((path, data, options) => {
+              if (typeof path === "number") tempFd = path;
+              return originalWrite(path, data, options);
+            });
+            const close = spyOn(filesystem, "closeSync").mockImplementation(fd => {
+              originalClose(fd);
+              if (fd === tempFd) {
+                tempFd = -1;
+                throw new Error("injected post-close error");
+              }
+            });
+            try {
+              const token = ensureClaudeInterceptProxyToken(root);
+              expect(readClaudeInterceptProxyToken(root)).toBe(token);
+              expect(warning).toHaveBeenCalledTimes(1);
+              expect(readdirSync(join(root, "claude-intercept"))).toEqual(["proxy-token"]);
+            } finally { close.mockRestore(); write.mockRestore(); warning.mockRestore(); }
+          });
+          ''')
+          p.write_text(text)
+          replace('structure/clients/claude-desktop.md', 'without restart. Established tunnels are not revoked by this new-connection check.', 'without restart. Rejected CONNECT requests include a Basic proxy-authentication challenge.\nTemporary cleanup failures warn without replacing a committed result or an earlier error;\nretained temporary entries keep their ACL memo until absence is confirmed. Established tunnels\nare not revoked by this new-connection check.')
+          PY
+      - name: Publish isolated candidate only
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/claude/intercept/connect-proxy.ts src/claude/intercept/proxy-auth.ts tests/claude-integration/claude-intercept-proxy.test.ts tests/claude-integration/claude-intercept-proxy-auth.test.ts structure/clients/claude-desktop.md
+          git commit -m 'fix(claude): challenge proxy authentication and preserve publication outcomes'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5757-final-review-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/claude-integration/claude-intercept-proxy-auth.test.ts tests/claude-integration/claude-intercept-proxy.test.ts tests/claude-integration/claude-intercept-settings.test.ts
+      - run: bun run typecheck
+      - if: runner.os == 'Linux'
+        run: bun run privacy:scan
+      - if: runner.os == 'Linux'
+        run: bun run structure:check
+      - run: git diff --exit-code
