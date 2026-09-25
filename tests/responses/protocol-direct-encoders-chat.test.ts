@@ -386,4 +386,48 @@ describe("direct Chat encoder stream lifecycle", () => {
     expect(directFrames).toEqual(legacyFrames);
     expect(JSON.stringify(directFrames.at(-1))).toContain("upstream_stall_timeout");
   });
+
+  test("an idle Chat heartbeat stays off the relayed-event counter", async () => {
+    const ticks: (() => void)[] = [];
+    const timers = {
+      setInterval: (handler: () => void) => { ticks.push(handler); return ticks.length - 1; },
+      clearInterval: () => {},
+    };
+    async function* hang(): AsyncGenerator<AdapterEvent> {
+      yield { type: "text_delta", text: "waiting" };
+      await new Promise(() => {});
+    }
+    let relayedEvents = 0;
+    const stream = encodeChatCompletionSse(hang(), {
+      ...directOptions(),
+      heartbeatMs: 1_000,
+      stallTimeoutSec: 60,
+      timers,
+      hooks: { onRelayed: () => { relayedEvents++; } },
+    });
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let body = "";
+    // Carry one pending read across drains; a timed-out read is not abandoned but resumed next drain.
+    let pending: Promise<ReadableStreamReadResult<Uint8Array>> | undefined;
+    const drain = async () => {
+      while (true) {
+        const read = pending ?? reader.read();
+        pending = undefined;
+        const settled = await Promise.race([read, Bun.sleep(10).then(() => undefined)]);
+        if (settled === undefined) { pending = read; break; }
+        if (settled.done) return;
+        body += decoder.decode(settled.value);
+      }
+    };
+    await drain();
+    const baseline = relayedEvents;
+    // The first tick only clears the just-consumed upstream/wire activity flags; the heartbeats
+    // the watchdog emits afterwards are the keepalive comments under test.
+    for (let i = 0; i < 3; i++) for (const tick of ticks) tick();
+    await drain();
+    expect(body).toContain(": opencodex heartbeat");
+    expect(relayedEvents).toBe(baseline);
+    await reader.cancel();
+  });
 });
