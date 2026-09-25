@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, createServer } from "node:tls";
@@ -127,53 +127,13 @@ test("TLS rejects an IP-address leaf issued by the picker root", async () => {
   expect(await ipHandshake(ca.certPem, ipLeaf(ca))).toBe(false);
 });
 
-test("picker authority persists private key at 0600 and regenerates a corrupt key", () => {
+test("picker authority keeps its private key in process memory and removes a legacy key", () => {
   const dir = tempDir();
+  const stateDir = pickerStateDir(dir);
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "ca.key"), "legacy-exportable-key\n");
   const first = ensurePickerCa(dir);
   expect(ensurePickerCa(dir).fingerprint).toBe(first.fingerprint);
-  if (process.platform !== "win32") expect(statSync(join(pickerStateDir(dir), "ca.key")).mode & 0o777).toBe(0o600);
-  writeFileSync(join(pickerStateDir(dir), "ca.key"), "corrupt\n");
-  const repaired = ensurePickerCa(dir);
-  expect(repaired.fingerprint).not.toBe(first.fingerprint);
+  expect(existsSync(join(stateDir, "ca.key"))).toBe(false);
   expect(constraints(readFileSync(pickerCaCertPath(dir), "utf8"))?.dnsNames).toEqual([PICKER_HOST]);
-});
-
-test("a valid key-matching but unconstrained persisted CA is rotated", () => {
-  const dir = tempDir();
-  const first = ensurePickerCa(dir);
-  const unconstrained = createCertificateAuthority({ commonName: PICKER_CA_COMMON_NAME });
-  writeFileSync(pickerCaCertPath(dir), unconstrained.certPem);
-  writeFileSync(join(pickerStateDir(dir), "ca.key"), unconstrained.keyPem);
-  const repaired = ensurePickerCa(dir);
-  expect(repaired.fingerprint).not.toBe(first.fingerprint);
-  expect(repaired.fingerprint).not.toBe(pickerCaFingerprints(unconstrained.certPem).sha256);
-  expect(constraints(repaired.certPem)?.dnsNames).toEqual([PICKER_HOST]);
-});
-
-test("a claude.ai-constrained CA without the IP exclusion (the first format) is rotated", () => {
-  const dir = tempDir();
-  ensurePickerCa(dir);
-  const legacy = createCertificateAuthority({ commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST], excludeAllIpAddresses: false });
-  expect(constraints(legacy.certPem)?.excludedIps).toEqual([]);
-  writeFileSync(pickerCaCertPath(dir), legacy.certPem);
-  writeFileSync(join(pickerStateDir(dir), "ca.key"), legacy.keyPem);
-  const repaired = ensurePickerCa(dir);
-  expect(repaired.fingerprint).not.toBe(pickerCaFingerprints(legacy.certPem).sha256);
-  expect(constraints(repaired.certPem)?.excludedIps).toEqual(ALL_IPS);
-});
-
-test("a valid constrained CA with the wrong name or DNS scope is rotated", () => {
-  for (const options of [
-    { commonName: "other local CA", permittedDnsNames: [PICKER_HOST] },
-    { commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: ["example.com"] },
-  ]) {
-    const dir = tempDir();
-    ensurePickerCa(dir);
-    const other = createCertificateAuthority(options);
-    writeFileSync(pickerCaCertPath(dir), other.certPem);
-    writeFileSync(join(pickerStateDir(dir), "ca.key"), other.keyPem);
-    const repaired = ensurePickerCa(dir);
-    expect(repaired.fingerprint).not.toBe(pickerCaFingerprints(other.certPem).sha256);
-    expect(constraints(repaired.certPem)?.dnsNames).toEqual([PICKER_HOST]);
-  }
 });

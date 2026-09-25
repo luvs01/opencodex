@@ -133,15 +133,15 @@ because each terminator presents a certificate only its intended client trusts. 
 terminated by a `node:https` HTTP/1.1 relay (`picker-listener.ts`) only while the runtime's cached
 decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop intent on,
 `claudeCode.intercept.picker !== false`, no disarm latch, listener up, and the current picker CA
-trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`, under
-`<OPENCODEX_HOME>/claude-picker/`, 0600 key) carries critical name constraints permitting only
-`claude.ai` and excluding every IPv4 and IPv6 address, and is regenerated on reload when either is
-missing, which gives it a new fingerprint to trust. Trust is added without a policy string: Chromium
+trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`) carries critical
+name constraints permitting only `claude.ai` and excluding every IPv4 and IPv6 address. Its signing
+key exists only in the server process; only public certificates are written under
+`<OPENCODEX_HOME>/claude-picker/`. On restart the lifecycle releases the selected profile and removes
+the prior public root before creating a new process-scoped authority. Trust is added without a policy string: Chromium
 skips host-scoped trust settings, so `inspectPickerTrust` treats a current CA whose exported user
 trust settings carry `kSecTrustSettingsPolicyString` as untrusted and the trust step replaces it; an
-export it cannot read makes trust `unknown`, which never arms. A
-rotated-out picker certificate stays in the login keychain because `untrustPickerCa` removes only the
-current one; its key was overwritten, so it can no longer sign a leaf. The relay verifies the upstream
+export it cannot read makes trust `unknown`, which never arms. A rotated-out picker certificate is
+removed from the login keychain before its replacement is published. The relay verifies the upstream
 certificate, streams every body and upgrade unchanged, and rewrites only the bootstrap response's
 local Code picker surfaces, `ccd` (what the Desktop Code tab reads) and its `code` fallback, never the
 remote `ccr` (`picker-bootstrap.ts`), failing open to the original bytes; the model list

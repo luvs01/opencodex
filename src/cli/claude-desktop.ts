@@ -135,11 +135,14 @@ function persistPickerPreference(value: boolean): boolean {
 }
 
 function pickerTrustPaths(deps: ApplyProfileDeps, configDir = getConfigDir()): { caPath: string; leafPath: string; sha1: string } {
-  const ca = (deps.ensurePickerCaImpl ?? ensurePickerCa)(configDir);
+  const caPath = pickerCaCertPath(configDir);
+  const certPem = deps.ensurePickerCaImpl
+    ? deps.ensurePickerCaImpl(configDir).certPem
+    : readFileSync(caPath, "utf8");
   return {
-    caPath: pickerCaCertPath(configDir),
+    caPath,
     leafPath: pickerLeafCertPath(configDir),
-    sha1: pickerCaFingerprints(ca.certPem).sha1,
+    sha1: pickerCaFingerprints(certPem).sha1,
   };
 }
 

@@ -1,4 +1,5 @@
 import type { Server } from "bun";
+import { existsSync } from "node:fs";
 import type { OcxConfig } from "../../types";
 import { getConfigDir } from "../../config/paths";
 import type { DesktopPickerController } from "../desktop-picker";
@@ -8,6 +9,7 @@ import { claudeInterceptCaCertPath, ensureLocalInterceptCaForStartup, issueLocal
 import type { PickerRouteInput } from "./picker-models";
 import { createPickerRuntime, type CreatePickerRuntimeOptions, type PickerRuntime } from "./picker-runtime";
 import type { SecurityRunner } from "./picker-trust";
+import { pickerCaCertPath } from "./picker-ca";
 
 /**
  * Lifecycle for the Claude intercept pair (CONNECT proxy + TLS listener).
@@ -149,7 +151,23 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   let pickerProxyLive = false;
   try {
     if (options.loadPickerRoutes) {
-      picker = (options.createPicker ?? createPickerRuntime)({
+      // A picker authority is process-scoped. Before rotating it, release Desktop from the old
+      // proxy and remove the old public root from the login keychain. This also migrates releases
+      // that persisted an exportable ca.key: ensurePickerCa removes that key after this cleanup.
+      let pickerCleanupOk = true;
+      if (existsSync(pickerCaCertPath(configDir))) {
+        const { removeDesktopPickerArtifacts } = await import("../desktop-picker");
+        const cleanup = await removeDesktopPickerArtifacts({
+          configDir,
+          ...(options.pickerSecurity ? { security: options.pickerSecurity } : {}),
+          ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
+        });
+        if (!cleanup.ok) {
+          console.warn(`⚠ Claude Desktop picker authority rotation could not clean up: ${(cleanup.residual ?? []).join(", ")}`);
+          pickerCleanupOk = false;
+        }
+      }
+      if (pickerCleanupOk) picker = (options.createPicker ?? createPickerRuntime)({
         config: options.config,
         configDir,
         loadRoutes: options.loadPickerRoutes,
@@ -160,6 +178,7 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
         ...(options.pickerSecurity ? { security: options.pickerSecurity } : {}),
         ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
       });
+      if (!picker) throw new Error("picker authority rotation cleanup failed");
       const runtime = picker;
       const interceptPort = listener.port!;
       try {
