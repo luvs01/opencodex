@@ -401,6 +401,7 @@ export function startNativeMainStartupLifecycle(
     released = true;
     entry!.refs = Math.max(0, entry!.refs - 1);
     if (entry!.refs !== 0) return;
+    const releasedEpoch = entry!.epoch;
     entry!.epoch += 1;
     entry!.sweepStopping = true;
     if (entry!.sweepTimer) clearTimeout(entry!.sweepTimer);
@@ -413,11 +414,12 @@ export function startNativeMainStartupLifecycle(
     // the process exited, because a server whose config does not sync Codex installs a no-op
     // lifecycle that never touches the gate.
     //
-    // The gate state belonged only to this entry, so reset it to the process-initial state here,
-    // synchronously and before the first await: a NEW entry created for the same home afterwards
-    // re-arms its own gate and cannot be clobbered by this release. The epoch bump retires any
-    // in-flight `initializeNativeMainStartupGate`/convergence write from the released generation.
-    if (snapshot.homeId === homeId && !startupEntries.has(homeId)) {
+    // Reset only a snapshot published by this startup generation. A profile transaction can
+    // independently replace it with a same-home recovery fence, which must survive this release.
+    // Do this synchronously and before the first await: a NEW entry created for the same home
+    // afterwards re-arms its own gate and cannot be clobbered by this release. The epoch bump
+    // retires any in-flight convergence write from the released generation.
+    if (snapshot.homeId === homeId && epoch === releasedEpoch && !startupEntries.has(homeId)) {
       epoch += 1;
       snapshot = ready(null);
       settled = Promise.resolve(snapshot);

@@ -10,6 +10,7 @@ import type {
   NativeProfileRecoveryState,
 } from "../../src/codex/native-profile-store";
 import {
+  blockNativeMainRecovery,
   completeNativeMainRecovery,
   flushNativeMainStartupReleases,
   isNativeMainTrafficBlocked,
@@ -132,6 +133,25 @@ function startLifecycle(deps: NativeMainStartupGateDeps): NativeMainStartupLifec
 }
 
 describe("a released native-main startup entry cannot leave the process fenced", () => {
+  test("a release preserves a recovery fence published after startup", async () => {
+    const f = fabricatedHome("transaction-recovery-home");
+    const lifecycle = startLifecycle({ manager: f.manager, probeRecoveryState: () => "none", owner: OWNER });
+
+    expect(await within(lifecycle.settled, "startup convergence")).toEqual({
+      status: "ready",
+      homeId: f.homeId,
+    });
+    expect(blockNativeMainRecovery(f.homeId, "manual")).toBe(true);
+
+    await within(lifecycle.release(), "the lifecycle release");
+    expect(nativeMainStartupGateSnapshot()).toEqual({
+      status: "blocked",
+      homeId: f.homeId,
+      reason: "manual-recovery",
+    });
+    expect(isNativeMainTrafficBlocked()).toBe(true);
+  });
+
   test("a release during recovery resets the gate and ignores the convergence that follows", async () => {
     const f = fabricatedHome("release-during-recovery-home");
     const recovery = barrier();
@@ -342,4 +362,3 @@ describe("a released native-main startup entry cannot leave the process fenced",
     }
   });
 });
-
