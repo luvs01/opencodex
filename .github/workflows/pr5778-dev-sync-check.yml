@@ -1,0 +1,90 @@
+name: PR 5778 updated base validation
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5778-dev-sync-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 69ccf5d9f1531eebf087699d47d50be493939fc7
+          fetch-depth: 500
+          persist-credentials: false
+      - name: Merge exact integration state, resolving only known test-map additions
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags --depth=500 https://github.com/lidge-jun/opencodex 88b9da8c51f75cffce030db13e2bc78a7b555d7f
+          git merge --no-commit --no-ff 88b9da8c51f75cffce030db13e2bc78a7b555d7f || true
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          conflicts = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).splitlines()
+          allowed = {'scripts/test-layout/layout.json', 'tests/fixtures/test-layout-expected.json'}
+          print('CONFLICTS', conflicts)
+          if set(conflicts) - allowed:
+              subprocess.run(['git', 'diff', '--', *conflicts], check=False)
+              raise SystemExit('Unexpected conflict requires separate review; nothing will be published.')
+          for name in conflicts:
+              # Keep all current integration registrations and add only this PR's new test.
+              current = json.loads(subprocess.check_output(['git', 'show', ':3:' + name], text=True))
+              table = current['explicit'] if name.endswith('layout.json') else current
+              key = 'server-combo-cooldown-recording.test.ts'
+              assert key not in table or table[key] == 'server'
+              table[key] = 'server'
+              pathlib.Path(name).write_text(json.dumps(current, ensure_ascii=False, indent=2) + '\n')
+              subprocess.run(['git', 'add', name], check=True)
+          assert not subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).strip()
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          for path, expected in [
+              ('src/combos/failover.ts', 'return true;'),
+              ('src/combos/resolve.ts', 'onCooldownRecorded'),
+              ('src/server/responses/core-combo.ts', 'failedTargetCooldownRecorded'),
+          ]:
+              assert expected in pathlib.Path(path).read_text(), path
+          assert pathlib.Path('tests/server/server-combo-cooldown-recording.test.ts').is_file()
+          PY
+      - name: Publish only isolated integration candidate
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git commit -m 'Merge current dev into single-target cooldown fix without rewriting history'
+          git merge-base --is-ancestor 69ccf5d9f1531eebf087699d47d50be493939fc7 HEAD
+          git merge-base --is-ancestor 88b9da8c51f75cffce030db13e2bc78a7b555d7f HEAD
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5778-dev-sync-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - id: bun
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + require('./package.json').dependencies.bun + '\n')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ steps.bun.outputs.version }}
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/server/server-combo-cooldown-recording.test.ts
+      - run: bun test tests/server/server-combo-failover-e2e.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - run: git diff --exit-code
