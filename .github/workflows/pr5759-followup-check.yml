@@ -1,0 +1,256 @@
+name: PR 5759 isolated follow-up validation
+on:
+  push:
+    branches: [automation/pr5759-followup-20260925]
+    paths: [.github/workflows/pr5759-followup-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/automation/pr5759-followup-20260925'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      proposal: ${{ steps.proposal.outputs.sha }}
+    steps:
+      # This write-capable job runs only the fixed standard-library edits below.
+      # No package installation, build, repository test or generated script runs here.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Apply exact-head corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import re
+          import subprocess
+          import tomllib
+
+          base = '88f71e610dffb0c58c13d6a4dfa16e9eb8c49f99'
+          helper = '.github/workflows/pr5759-followup-check.yml'
+          changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
+          assert changed == [helper], changed
+          expected = {
+              'desktop/src-tauri/Cargo.lock': '980dc684340681a707af0ec546bf184dfee6973d',
+              'desktop/src-tauri/src/proxy.rs': '4bc0086326dfd8c5dbc67c9d54cf9242c302552b',
+              'desktop/src-tauri/src/auth.rs': '80d750c94c79f8d61b45b042d00d799e6eea4016',
+              'src/lib/local-management-capability.ts': 'de6f0d243a6a08f8784c6d51569c18db5fa8a1f3',
+              'structure/gui-and-management-api.md': '338b58e3e8115f186a57a2402434565e007d37f8',
+              'tests/server/local-management-capability.test.ts': '8fccc1dbd2bca4e5631faa196290364e9542fbbf',
+          }
+          for name, digest in expected.items():
+              data = Path(name).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == digest, (name, actual)
+
+          def replace_once(name, old, new):
+              p = Path(name)
+              text = p.read_text()
+              assert text.count(old) == 1, (name, old, text.count(old))
+              p.write_text(text.replace(old, new))
+
+          doc = 'structure/gui-and-management-api.md'
+          replace_once(doc, '`GET/PUT /api/oauth/accounts/pool`', '`GET/PUT/PATCH /api/oauth/accounts/pool`')
+          replace_once(doc, 'capability-aware server.\n', 'capability-aware server.\n\nThe desktop tray uses the same read-v1 contract for its fixed GET allowlist in\n`src/lib/local-management-capability.ts`, including `/api/oauth/accounts` and\n`/api/providers/keys`. Provider selectors and `quota=1` remain signed into the\nexact query; these grants authorize no account or API-key mutations.\n')
+
+          proxy = 'desktop/src-tauri/src/proxy.rs'
+          replace_once(proxy,
+              '            .apply(reqwest::Client::new().post("http://127.0.0.1:10100/api/update/desktop-snapshot"))',
+              '            .apply(\n                reqwest::Client::new().post("http://127.0.0.1:10100/api/update/desktop-snapshot"),\n            )')
+          replace_once(proxy,
+              '        assert_eq!(request.headers()["x-opencodex-desktop-snapshot-sha256"], digest);',
+              '        assert_eq!(\n            request.headers()["x-opencodex-desktop-snapshot-sha256"],\n            digest\n        );')
+
+          # The last caller was removed by 88f71e6. Refuse rather than remove a live API.
+          for p in Path('desktop/src-tauri/src').rglob('*.rs'):
+              if p.name != 'auth.rs':
+                  assert re.search(r'\.token\s*\(', p.read_text()) is None, str(p)
+          auth = 'desktop/src-tauri/src/auth.rs'
+          replace_once(auth, '    environment_token: Option<String>,\n', '')
+          replace_once(auth,
+              '        Self {\n            home,\n            environment_token: std::env::var("OPENCODEX_ADMIN_AUTH_TOKEN")\n                .ok()\n                .filter(|value| !value.is_empty()),\n        }',
+              '        Self { home }')
+          replace_once(auth,
+              '    pub fn token(&self) -> Option<String> {\n        self.environment_token.clone().or_else(|| {\n            std::fs::read_to_string(self.home.join("admin-api-token"))\n                .ok()\n                .map(|value| value.trim().to_owned())\n                .filter(|value| !value.is_empty())\n        })\n    }\n\n', '')
+
+          lock = 'desktop/src-tauri/Cargo.lock'
+          original_lock = tomllib.loads(Path(lock).read_text())
+          old_digest = 'name = "digest"\nversion = "0.10.7"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"\ndependencies = [\n "block-buffer",\n "crypto-common",\n]'
+          replace_once(lock, old_digest, old_digest.replace(' "crypto-common",\n]', ' "crypto-common",\n "subtle",\n]'))
+          repaired_lock = tomllib.loads(Path(lock).read_text())
+          assert len(original_lock['package']) == len(repaired_lock['package'])
+          for old, new in zip(original_lock['package'], repaired_lock['package']):
+              if old['name'] == 'digest' and old['version'] == '0.10.7':
+                  assert new == dict(old, dependencies=old['dependencies'] + ['subtle'])
+              else:
+                  assert old == new, old['name']
+
+          capability = 'src/lib/local-management-capability.ts'
+          replace_once(capability,
+              '  codexAuthActive: "/api/codex-auth/active",\n',
+              '  codexAuthActive: "/api/codex-auth/active",\n  oauthAccounts: "/api/oauth/accounts",\n  providerKeys: "/api/providers/keys",\n')
+          replace_once(capability,
+              '    || path === LOCAL_MANAGEMENT_READ_PATHS.codexAuthActive\n',
+              '    || path === LOCAL_MANAGEMENT_READ_PATHS.codexAuthActive\n    || path === LOCAL_MANAGEMENT_READ_PATHS.oauthAccounts\n    || path === LOCAL_MANAGEMENT_READ_PATHS.providerKeys\n')
+
+          tests = r'''
+          describe("native tray provider account read grants", () => {
+            const local = { attestationSecret: "D".repeat(43), pid: 5759, port: 10100 };
+            const state: ManagementAuthState = {
+              available: true, token: "tray-read-test-admin", source: "environment",
+              sessions: new Map(), pairingGrants: new Map(),
+            };
+            const cases = [
+              [LOCAL_MANAGEMENT_READ_PATHS.oauthAccounts,
+                "/api/oauth/accounts?provider=anthropic&quota=1",
+                "/api/oauth/accounts?provider=xai&quota=1"],
+              [LOCAL_MANAGEMENT_READ_PATHS.providerKeys,
+                "/api/providers/keys?name=example&quota=1",
+                "/api/providers/keys?name=other&quota=1"],
+            ] as const;
+
+            /** Mint precisely the request target emitted by native_tray_accounts::query. */
+            function signed(target: string): Request {
+              const nonce = randomBytes(32).toString("base64url");
+              const expiresAt = Date.now() + LOCAL_MANAGEMENT_CAPABILITY_TTL_MS;
+              const proof = createLocalManagementReadCapability(
+                local.attestationSecret, nonce, "GET", target, local.pid, local.port, expiresAt,
+              );
+              expect(proof).not.toBeNull();
+              return new Request(`http://127.0.0.1:${local.port}${target}`, {
+                headers: {
+                  [pidHeader]: String(local.pid), [nonceHeader]: nonce,
+                  [expiryHeader]: String(expiresAt), [proofHeader]: proof!,
+                },
+              });
+            }
+
+            for (const [pathname, target, other] of cases) {
+              test(`${pathname}: admits its real query once without an admin token`, () => {
+                const req = signed(target);
+                const replay = req.clone();
+                expect(req.headers.has("x-opencodex-api-key")).toBe(false);
+                expect(requireManagementAuth(req, state, undefined, local)).toBeNull();
+                expect(managementPrincipal(req, state, undefined, local)).toBe("local-read-capability");
+                expect(requireManagementAuth(replay, state, undefined, local)?.status).toBe(401);
+              });
+
+              test(`${pathname}: unused proof cannot change selector, route or method`, () => {
+                // Never admit the original first: rejection must prove binding, not merely replay.
+                for (const altered of [other, `${pathname}/extra`, "/api/config"]) {
+                  const original = signed(target);
+                  const req = new Request(`http://127.0.0.1:${local.port}${altered}`, {
+                    headers: original.headers,
+                  });
+                  expect(requireManagementAuth(req, state, undefined, local)?.status).toBe(401);
+                }
+                for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+                  const original = signed(target);
+                  const req = new Request(original.url, { method, headers: original.headers });
+                  expect(requireManagementAuth(req, state, undefined, local)?.status).toBe(401);
+                  expect(createLocalManagementReadCapability(
+                    local.attestationSecret, "A".repeat(43), method, target,
+                    local.pid, local.port, Date.now() + LOCAL_MANAGEMENT_CAPABILITY_TTL_MS,
+                  )).toBeNull();
+                }
+              });
+            }
+
+            test("every native account source is covered by the explicit read allowlist", () => {
+              const source = readFileSync(repoPath("desktop/src-tauri/src/native_tray_accounts.rs"), "utf8")
+                .split("#[cfg(test)]")[0]!;
+              const paths = new Set([...source.matchAll(/"(\/api\/[^"?]+)"/g)].map(match => match[1]!));
+              expect(paths.size).toBeGreaterThan(0);
+              for (const target of paths) {
+                expect(Object.values(LOCAL_MANAGEMENT_READ_PATHS) as string[]).toContain(target);
+              }
+            });
+
+            test("the desktop Auth no longer loads reusable admin credentials", () => {
+              const source = readFileSync(repoPath("desktop/src-tauri/src/auth.rs"), "utf8");
+              expect(source).not.toContain("OPENCODEX_ADMIN_AUTH_TOKEN");
+              expect(source).not.toContain("admin-api-token");
+              expect(source).not.toContain("pub fn token(");
+              expect(source).toContain("runtime-port.json");
+            });
+          });
+          '''
+          # De-indent only the trusted literal, never parse or execute repository text.
+          import textwrap
+          test_path = Path('tests/server/local-management-capability.test.ts')
+          with test_path.open('a') as output:
+              output.write(textwrap.dedent(tests))
+          Path(helper).unlink()
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed == set(expected) | {helper}, changed
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'add', '--', *expected, helper], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--stat'], check=True)
+          PY
+      - name: Publish proposal only on the isolated branch
+        id: proposal
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(desktop): complete tray grants and repair review gates'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/automation/pr5759-followup-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  bun:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.proposal }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Focused native Bun regression tests
+        run: bun test tests/server/local-management-capability.test.ts tests/server/server-management-auth.test.ts tests/server/sidebar-routes.test.ts tests/clients/desktop-runtime-identity.test.ts
+      - name: Typecheck
+        if: ${{ !cancelled() }}
+        run: bun run typecheck
+      - name: Privacy gate
+        if: ${{ !cancelled() }}
+        run: bun run privacy:scan
+      - name: Structure gate
+        if: ${{ !cancelled() }}
+        run: bun run structure:check
+  rust:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.proposal }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable installer
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Exact Rust formatting gate
+        run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
+      - name: Validate complete locked dependency resolution without compilation
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --manifest-path desktop/src-tauri/Cargo.toml --format-version 1 > "$RUNNER_TEMP/pr5759-cargo-metadata.json"
+          git diff --exit-code -- desktop/src-tauri/Cargo.lock
