@@ -1,0 +1,152 @@
+name: PR 5780 ownership recording order
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5780-recording-order-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 0b309a39ae884aab0b3d538a3733090c9fe327e8
+          persist-credentials: false
+      - name: Apply exact ownership corrections without running repository code
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path); text = p.read_text()
+              assert text.count(old) == 1, (path, text.count(old))
+              p.write_text(text.replace(old, new))
+          path = 'src/lib/config-ownership.ts'
+          p = Path(path); text = p.read_text()
+          start = text.index('export function recordOwnedConfigPath(')
+          boundary = text.index('  if (!ownership) return false;', start)
+          prefix = text[start:boundary]
+          validate = '  const rel = manifestRelativePath(configDir, candidatePath);\n  if (!rel) return false;\n'
+          assert validate in prefix
+          initializer = prefix.replace('export function recordOwnedConfigPath(configDir: string, candidatePath: string): boolean {', '/** Initialize only an empty or already-owned root; do not claim a candidate path. */\nexport function initializeConfigOwnership(configDir: string): boolean {').replace(validate, '')
+          initializer += '  return ownership !== null;\n}\n\n'
+          recorder = 'export function recordOwnedConfigPath(configDir: string, candidatePath: string): boolean {\n' + validate + '  if (!initializeConfigOwnership(configDir)) return false;\n  const cacheKey = ownershipCacheKey(configDir);\n  const ownership = ownershipCache.get(cacheKey);\n'
+          p.write_text(text[:start] + initializer + recorder + text[boundary:])
+          replace('src/codex/catalog/retained-sync.ts', 'import { loadConfig, websocketsEnabled }', 'import { getConfigDir, loadConfig, websocketsEnabled }')
+          replace('src/codex/catalog/retained-sync.ts', 'import { join } from "node:path";', 'import { join } from "node:path";\nimport { initializeConfigOwnership } from "../../lib/config-ownership";')
+          replace('src/codex/catalog/retained-sync.ts', '    if (pristine !== null) {\n      publishHashedCodexCatalogBackup', '    if (pristine !== null) {\n      // Initialize metadata while the root is empty; never pre-claim the hashed path.\n      initializeConfigOwnership(getConfigDir());\n      publishHashedCodexCatalogBackup')
+          replace('src/codex/internal/catalog-writer.ts', '  suppliedIo?: CatalogBackupWriteIO,\n): CatalogBackupPublication {', '  suppliedIo?: CatalogBackupWriteIO,\n  onPublished?: () => void,\n): CatalogBackupPublication {')
+          replace('src/codex/internal/catalog-writer.ts', '  removePublishedTemp(tempPath, io);\n  return "written";', '  try {\n    // Publication already succeeded; cleanup failure must not erase that ownership.\n    onPublished?.();\n  } finally {\n    removePublishedTemp(tempPath, io);\n  }\n  return "written";')
+          replace('src/codex/internal/catalog-writer.ts', '  const publication = publishCatalogBackup(prepared, io);\n  // Only a new publication proves creation; preserving an existing name proves no provenance.\n  // Existing ownership entries remain valid without re-adopting a preserved file.\n  if (!io && publication === "written") recordOwnedConfigPath(getConfigDir(), prepared.path);\n  return publication;', '  return publishCatalogBackup(prepared, io, io ? undefined : () => {\n    // Called only after a new no-replace publication, never for preserved winners.\n    recordOwnedConfigPath(getConfigDir(), prepared.path);\n  });')
+          p = Path('tests/codex-integration/codex-catalog-writer.test.ts'); text = p.read_text()
+          text = text.replace('beforeEach, expect, test }', 'beforeEach, expect, spyOn, test }')
+          text = text.replace('import { tmpdir }', 'import * as filesystem from "node:fs";\nimport { tmpdir }')
+          text = text.replace('  CONFIG_UNINSTALL_MANIFEST,', '  CONFIG_UNINSTALL_MANIFEST,\n  CONFIG_OWNER_FILE,\n  initializeConfigOwnership,')
+          text = text.replace('import type { AtomicWriteIO }', 'import { AtomicWriteResidualTempError } from "../../src/config";\nimport { syncCatalogModels } from "../../src/codex/catalog/retained-sync";\nimport { catalogBackupPathFor } from "../../src/codex/catalog/parsing";\nimport type { AtomicWriteIO }')
+          text += '''
+          test("metadata-only initialization never claims a hashed backup candidate", () => {
+            const name = "catalog-backup-0123456789abcdef.json";
+            expect(initializeConfigOwnership(openCodexHome)).toBe(true);
+            expect(existsSync(join(openCodexHome, CONFIG_OWNER_FILE))).toBe(true);
+            expect(manifestPaths(openCodexHome)).not.toContain(name);
+            expect(initializeConfigOwnership(openCodexHome)).toBe(true);
+            expect(manifestPaths(openCodexHome)).not.toContain(name);
+          });
+          test("metadata initialization refuses a pre-existing unowned backup", () => {
+            const path = join(openCodexHome, "catalog-backup-0123456789abcdef.json");
+            writeFileSync(path, "user-owned\\n");
+            expect(initializeConfigOwnership(openCodexHome)).toBe(false);
+            expect(existsSync(join(openCodexHome, CONFIG_OWNER_FILE))).toBe(false);
+            expect(removeOwnedConfigState(openCodexHome).status).toBe("refused");
+            expect(readFileSync(path, "utf8")).toBe("user-owned\\n");
+          });
+          test("retained catalog sync initializes an empty home before publishing its backup", async () => {
+            const path = join(codexHome, "custom-catalog.json");
+            const pristine = JSON.stringify({ models: [{ slug: "user-native", display_name: "User model" }] }) + "\\n";
+            writeFileSync(path, pristine);
+            writeFileSync(join(codexHome, "config.toml"), `model_catalog_json = ${JSON.stringify(path)}\\n`);
+            expect(readdirSync(openCodexHome)).toEqual([]);
+            const result = await syncCatalogModels({ port: 10100, defaultProvider: "openai", providers: {}, subagentModels: [] }, { allowWhenDesiredDisabled: true });
+            expect(result.refreshOutcome).toBe("committed");
+            const backup = catalogBackupPathFor(path);
+            expect(readFileSync(backup, "utf8")).toBe(pristine);
+            expect(manifestPaths(openCodexHome)).toContain(backup.split(/[\\\\/]/).pop()!);
+            expect(removeOwnedConfigState(openCodexHome).status).toBe("removed");
+            expect(existsSync(backup)).toBe(false);
+          }, 15000);
+          test("a published backup is recorded even when both temporary unlink attempts fail", () => {
+            expect(initializeConfigOwnership(openCodexHome)).toBe(true);
+            const name = "catalog-backup-0123456789abcdef.json";
+            const path = join(openCodexHome, name);
+            const realUnlink = filesystem.unlinkSync;
+            let attempts = 0;
+            let residual = "";
+            const mock = spyOn(filesystem, "unlinkSync").mockImplementation(candidate => {
+              if (String(candidate).startsWith(path + ".ocx.") && String(candidate).endsWith(".tmp")) {
+                attempts += 1;
+                residual = String(candidate);
+                throw Object.assign(new Error("injected sharing violation"), { code: "EACCES" });
+              }
+              return realUnlink(candidate);
+            });
+            try {
+              expect(() => withLivePermit(permit => publishHashedCodexCatalogBackup(permit, codexHome, { path, content: "pristine\\n" })))
+                .toThrow(AtomicWriteResidualTempError);
+              expect(attempts).toBe(2);
+              expect(readFileSync(path, "utf8")).toBe("pristine\\n");
+              expect(manifestPaths(openCodexHome)).toContain(name);
+              expect(existsSync(residual)).toBe(true);
+            } finally { mock.mockRestore(); }
+            // The failed cleanup is reported, not silently treated as a clean publication.
+            unlinkSync(residual);
+            expect(removeOwnedConfigState(openCodexHome).status).toBe("removed");
+            expect(existsSync(path)).toBe(false);
+          });
+          '''
+          p.write_text('\n'.join(line[10:] if line.startswith('          ') else line for line in text.splitlines()) + '\n')
+          replace('structure/catalog.md', 'Previously recorded paths keep their ownership; unrecorded pre-ledger backups remain residuals.', 'Retained sync initializes metadata in an empty root before publication, without claiming the hashed path.\nSuccessful publication records ownership before temporary-file cleanup; cleanup errors remain visible.\nPreviously recorded paths keep their ownership; unrecorded pre-ledger backups remain residuals.')
+          PY
+      - name: Publish only the isolated candidate
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/lib/config-ownership.ts src/codex/catalog/retained-sync.ts src/codex/internal/catalog-writer.ts tests/codex-integration/codex-catalog-writer.test.ts structure/catalog.md
+          git commit -m 'fix(uninstall): record created backups before temporary cleanup'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5780-recording-candidate-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/config/config-ownership-uninstall.test.ts tests/codex-integration/codex-catalog-writer.test.ts
+      - run: bun run typecheck
+      - if: runner.os == 'Linux'
+        run: bun run privacy:scan
+      - if: runner.os == 'Linux'
+        run: bun run structure:check
+      - run: git diff --exit-code
