@@ -1,0 +1,46 @@
+name: PR 5763 isolated validation
+
+on:
+  push:
+    branches: [automation/pr5763-validation-20260925]
+    paths: [.github/workflows/pr5763-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'luvs01/opencodex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      # Check out only the candidate: this helper is not part of the tested source tree.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: f1690aae69b1fd16a5ec27fbd351aaadd0e903e7
+          persist-credentials: false
+      - name: Resolve project Bun
+        id: bun-version
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + require('./package.json').dependencies.bun + '\n')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Native release contract tests
+        run: bun test tests/ci-workflows/release-pipeline-contract.test.ts
+      - name: Typecheck
+        if: runner.os == 'Linux'
+        run: bun run typecheck
+      - name: Privacy scan
+        if: runner.os == 'Linux'
+        run: bun run privacy:scan
+      - name: Structure check
+        if: runner.os == 'Linux'
+        run: bun run structure:check
+      - name: Verify the candidate stayed unchanged
+        run: git diff --exit-code
