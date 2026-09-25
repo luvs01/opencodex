@@ -91,6 +91,17 @@ These optimizations do not add request queues, retry policies, or RSS-based admi
 Translated audio/file admission follows the [final-adapter input contract](../adapters/registry.md#untranslated-input-media); native raw passthrough remains separate.
 Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
 
+`src/adapters/cursor.ts` bounds the armed output quarantine to an aggregate
+`CURSOR_OUTPUT_GUARD_MAX_HOLD_BYTES` (8 KiB) of serialized adapter events per turn.
+Retained size is projected from payload length plus fixed per-event overhead before
+any encoded copy exists, so a frame at the 16 MiB transport bound cannot force a
+same-size allocation merely to measure it. Text deltas are classified on each
+sniffer's bounded leading window before the cap check; an event that cannot fit
+settles both sniffers, releases the held events, and is emitted directly. This is a
+retained-quarantine bound, not a turn-length or peak-heap limit.
+`tests/providers/cursor/cursor-envelope-echo-retry.test.ts` covers oversized single
+deltas carrying each guarded pattern and an oversized reasoning frame.
+
 ## Response-log inspection
 
 `src/server/response-log-body.ts` forwards raw response chunks on downstream demand.
