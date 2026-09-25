@@ -5,6 +5,7 @@ import { parseRequest } from "../../src/responses/parser";
 import {
   CODE_MODE_HOST_CONTRACT_SENTENCE,
   CODE_MODE_HOST_FAILURE_GUIDANCE,
+  EMPTY_EXEC_OUTPUT_REGEX,
   annotateCodeModeHostFailure,
 } from "../../src/adapters/exec-tool-result-normalize";
 
@@ -109,6 +110,53 @@ describe("code-mode host failure annotation", () => {
     expect(CODE_MODE_HOST_CONTRACT_SENTENCE).toContain("write_stdin");
     // Never shows the decorated marker as a copyable literal (same rule as the nudge tests).
     expect(CODE_MODE_HOST_CONTRACT_SENTENCE).not.toContain("*** Begin Patch ***");
+  });
+});
+
+describe("EMPTY_EXEC_OUTPUT_REGEX", () => {
+  test.each([
+    "",
+    " ",
+    "<empty>",
+    "<empty>\n\n",
+    "Output:",
+    "Output:   ",
+    "Output:<empty>",
+    "Output: <empty>",
+    "Output:\n\n<empty>",
+    "Output: <empty> \n",
+    "Wall time\n",
+    "Wall time\n\nOutput:",
+    "Wall time\nOutput: <empty>",
+    "Script completed\n",
+    "Script completed\n\n\n",
+    "Script completed\n\t\n",
+    "Script completed\n\nWall time\n",
+    "Script completed\nWall time\nOutput:\n",
+    "Script completed\nWall time\nOutput:\n<empty>",
+    "Command finished\nWall time 0.1s\nOutput:\n<empty>\n\n\n",
+    "Execution finished\nOutput:\n",
+    "Script completed" + "\n".repeat(500),
+    "Output:" + " ".repeat(500),
+  ])("matches %p", (input) => {
+    expect(EMPTY_EXEC_OUTPUT_REGEX.test(input)).toBe(true);
+  });
+
+  test.each([
+    "x",
+    "Script failed\n",
+    "Output: x",
+    "Output: <empty> x",
+    "Output: <empty><empty>",
+    "<empty> Output:",
+    " <empty>",
+    "Output:\n\n<empty>\njunk",
+    "Script completed\n \nWall time\n",
+    "Script completed\nx",
+    "Output:" + " ".repeat(500) + "x",
+    "<empty>" + " ".repeat(500) + "x",
+  ])("rejects %p", (input) => {
+    expect(EMPTY_EXEC_OUTPUT_REGEX.test(input)).toBe(false);
   });
 });
 

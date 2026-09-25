@@ -224,6 +224,33 @@ test("event privacy admission rejects raw filesystem path bypass forms", () => {
   }
 });
 
+test("raw POSIX path admission keeps the rewritten boundary cases", () => {
+  for (const detail of [
+    "/a b/c",
+    "/a//b",
+    "x / y",
+    "a /",
+    "C:/x",
+    "cd /var/log/ && tail -f /var/log/syslog",
+    "/~user/x",
+    "/a\rb",
+    "/a\u0000b",
+    "name=/",
+    "/" + "a".repeat(4_000),
+  ]) {
+    try {
+      enforceEventStructureLimits({ detail });
+      throw new Error(`expected raw_path rejection for ${JSON.stringify(detail.slice(0, 80))}`);
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe("raw_path");
+    }
+  }
+
+  for (const detail of ["./a", "~/x", "a/b", "x/a/b", "https://x/y", "//x"]) {
+    expect(() => enforceEventStructureLimits({ detail })).not.toThrow();
+  }
+});
+
 test("invalid JSON contract artifacts classify as artifact_mismatch", () => {
   const home = tempHome();
   const artifactsDir = join(home, "artifacts");
