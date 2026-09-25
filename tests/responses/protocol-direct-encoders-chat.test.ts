@@ -58,6 +58,8 @@ function normalizeFrames(text: string): unknown[] {
   return text.split("\n\n").filter(block => block.trim().length > 0).map(block => {
     const data = block.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("");
     if (data === "[DONE]") return "[DONE]";
+    // Comment-only blocks (the wire heartbeat) stay comparable as raw text.
+    if (data === "") return block;
     const parsed = JSON.parse(data) as Record<string, unknown>;
     if ("id" in parsed) parsed.id = "ID";
     if ("created" in parsed) parsed.created = 0;

@@ -12,6 +12,7 @@ import type { AdapterEvent } from "../../types";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import { responsesUsage } from "../../bridge/internal";
 import {
+  CHAT_COMPLETIONS_HEARTBEAT_COMMENT,
   chatCompletionsErrorResponse,
   chatCompletionsFailedResponse,
   chatCompletionsIncompleteOutcome,
@@ -122,7 +123,11 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
 
   return {
     start: ensureRole,
-    heartbeat: ensureRole,
+    heartbeat() {
+      // The converter emits the role chunk, then the wire keepalive as an SSE comment.
+      ensureRole();
+      sink.emitKeepalive(CHAT_COMPLETIONS_HEARTBEAT_COMMENT);
+    },
     text(delta) {
       if (!delta) return;
       ensureRole();

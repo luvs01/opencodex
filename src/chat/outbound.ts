@@ -138,6 +138,13 @@ export function dataFrame(payload: Rec | "[DONE]"): string {
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
+/**
+ * The Chat wire's keepalive: an SSE comment, so idle-sensitive clients receive bytes without a
+ * semantic chunk parsers or usage counters could mistake for model output. Shared with the
+ * direct encoder (src/protocols/encoders/chat.ts) so both paths emit byte-identical keepalives.
+ */
+export const CHAT_COMPLETIONS_HEARTBEAT_COMMENT = ": opencodex heartbeat\n\n";
+
 export function chunkBase(id: string, model: string, created: number): Rec {
   return {
     id,
@@ -618,7 +625,7 @@ export function responsesSseToChatCompletionsSse(
             // that signal as an SSE comment so idle-sensitive Chat clients receive bytes without
             // inventing a semantic chunk that parsers, usage counters, or progress watchdogs could
             // mistake for model output.
-            enqueueLiveFrame(encoder.encode(": opencodex heartbeat\n\n"));
+            enqueueLiveFrame(encoder.encode(CHAT_COMPLETIONS_HEARTBEAT_COMMENT));
             emittedFrames++;
             break;
           case "response.output_text.delta": {
