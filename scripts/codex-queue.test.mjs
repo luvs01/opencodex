@@ -2,7 +2,7 @@
 // No real Codex process, credentials, daemon, or model requests are used.
 import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,6 +158,12 @@ for (const shell of shells) {
       assert.equal(run(f, { thread: name, message: 'continue' }).status, 0);
       assert.equal(records(f)[0].args[1], `--thread=${name}`);
     });
+    it('passes quotes and line breaks in an exact thread name as one argument', () => {
+      const f = fixture(); const name = 'project "alpha"\nnext line\\';
+      const result = run(f, { thread: name, message: 'continue' });
+      assert.equal(result.status, 0, result.output);
+      assert.deepEqual(records(f)[0].args, ['queue', `--thread=${name}`, '--message=continue']);
+    });
     it('preserves quotes, Unicode, multiline text, metacharacters and trailing backslashes', () => {
       const f = fixture(); const message = '- "한글"\n$(do-not-execute) & | ; %PATH% `quote` \\path\\';
       assert.equal(run(f, { thread: threadA, message }).status, 0);
@@ -250,6 +256,15 @@ for (const shell of shells) {
       assert.notEqual(run(f, { latest: true, message: 'do not send' }).status, 0);
       assert.deepEqual(records(f), []);
     });
+    it('hides the effective store and prompt when latest selection fails', () => {
+      const f = fixture(); const privateStore = join(f.root, 'private customer store');
+      const prompt = 'private fixture prompt';
+      const result = run(f, { latest: true, message: prompt, env: { CODEX_HOME: privateStore } });
+      assert.notEqual(result.status, 0);
+      for (const value of [privateStore, prompt]) assert.ok(!result.output.includes(value));
+      assert.deepEqual(probes(f), []);
+      assert.deepEqual(records(f), []);
+    });
     it('extracts the first UUID from two-UUID rollout names', () => {
       const f = fixture(); rollout(f.store, threadA, 100, '_' + rolloutId);
       assert.equal(run(f, { latest: true, message: 'continue' }).status, 0);
@@ -259,6 +274,25 @@ for (const shell of shells) {
       const f = fixture(); rollout(f.store, threadA, 100); rollout(f.store, 'not-a-thread', 200);
       assert.equal(run(f, { latest: true, message: 'continue' }).status, 0);
       assert.equal(records(f)[0].args[1], `--thread=${threadA}`);
+    });
+    it('selects by file activity even when the newest name sorts first', () => {
+      const f = fixture(); rollout(f.store, threadB, 100); rollout(f.store, threadA, 200);
+      const result = run(f, { latest: true, message: 'continue' });
+      assert.equal(result.status, 0, result.output);
+      assert.equal(records(f)[0].args[1], `--thread=${threadA}`);
+    });
+    it('breaks equal modification times by filename', () => {
+      const f = fixture(); rollout(f.store, threadA, 100); rollout(f.store, threadB, 100);
+      const result = run(f, { latest: true, message: 'continue' });
+      assert.equal(result.status, 0, result.output);
+      assert.equal(records(f)[0].args[1], `--thread=${threadB}`);
+    });
+    it('rejects a store containing only malformed rollouts before probing the CLI', () => {
+      const f = fixture(); rollout(f.store, 'not-a-thread', 100);
+      const result = run(f, { latest: true, message: 'do not send' });
+      assert.notEqual(result.status, 0);
+      assert.deepEqual(probes(f), []);
+      assert.deepEqual(records(f), []);
     });
     it('handles a large tree and selects the globally newest file', () => {
       const f = fixture();
@@ -287,6 +321,13 @@ for (const shell of shells) {
       assert.notEqual(run(f, { exe: join(f.root, 'missing'), thread: threadA, message: 'do not send' }).status, 0);
       assert.deepEqual(records(f), []);
     });
+    it('does not override an invalid CODEX_EXE with a discoverable CLI', () => {
+      const f = fixture(); makeStub(join(f.store, 'packages/standalone/current/bin', windows ? 'codex.exe' : 'codex'));
+      const result = run(f, { pin: false, thread: threadA, message: 'do not send', env: { CODEX_EXE: join(f.root, 'missing CLI') } });
+      assert.notEqual(result.status, 0);
+      assert.deepEqual(probes(f), []);
+      assert.deepEqual(records(f), []);
+    });
     it('accepts an explicit relative executable path without a PATH lookup', () => {
       const f = fixture(); const name = windows ? 'relative.exe' : 'relative'; makeStub(join(f.root, name));
       assert.equal(run(f, { exe: name, thread: threadA, message: 'continue' }).status, 0);
@@ -308,6 +349,22 @@ for (const shell of shells) {
       });
     }
     if (!ps) {
+      it('resolves a relative CODEX_HOME against the current directory', () => {
+        const f = fixture(); const relativeStore = 'relative [store]';
+        rollout(join(f.root, relativeStore), threadA, 100);
+        const result = run(f, { latest: true, message: 'continue', env: { CODEX_HOME: relativeStore } });
+        assert.equal(result.status, 0, result.output);
+        assert.equal(records(f)[0].home, relativeStore);
+        assert.equal(records(f)[0].args[1], `--thread=${threadA}`);
+      });
+      it('does not follow a symlink to a newer session outside the effective store', () => {
+        const f = fixture(); rollout(f.store, threadA, 100);
+        const outside = rollout(join(f.root, 'outside store'), threadB, 200);
+        symlinkSync(dirname(outside), join(f.store, 'sessions', 'linked sessions'), 'dir');
+        const result = run(f, { latest: true, message: 'continue' });
+        assert.equal(result.status, 0, result.output);
+        assert.equal(records(f)[0].args[1], `--thread=${threadA}`);
+      });
       it('supports -- before dash-prefixed positional text', () => {
         const f = fixture(); const message = '- quoted "message"';
         assert.equal(run(f, { thread: threadA, extra: ['--', message] }).status, 0);
