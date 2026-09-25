@@ -16,6 +16,7 @@ after(() => roots.forEach(root => rmSync(root, { recursive: true, force: true })
 const threadA = '00000000-0000-4000-8000-000000000001';
 const threadB = '00000000-0000-4000-8000-000000000002';
 const rolloutId = '00000000-0000-4000-8000-000000000099';
+/** Create a disposable test directory and register it for cleanup. */
 function scratch() {
   const root = mkdtempSync(join(tmpdir(), 'ocx queue test '));
   roots.push(root);
@@ -65,12 +66,14 @@ if (windows) {
   const result = spawnSync(compiler, ['/nologo', '/target:exe', `/out:${nativeStub}`, source], { encoding: 'utf8', timeout: 30000 });
   assert.equal(result.status, 0, result.stderr + result.stdout);
 }
+/** Install the platform's fake native CLI at the requested path. */
 function makeStub(path) {
   mkdirSync(dirname(path), { recursive: true });
   if (windows) copyFileSync(nativeStub, path);
   else { writeFileSync(path, stubJs); chmodSync(path, 0o755); }
   return path;
 }
+/** Create isolated homes, logs, and environment variables for one scenario. */
 function fixture() {
   const root = scratch();
   const home = join(root, 'home with spaces');
@@ -86,6 +89,7 @@ function fixture() {
   delete env.CODEX_EXE; delete env.STUB_HELP_FAIL; delete env.STUB_EXIT;
   return { root, home, store, exe, log, probeLog, ocxHome, env };
 }
+/** Write a rollout file with a controlled modification time in the chosen store. */
 function rollout(store, id, timestamp, suffix = '', subdir = '2026/01/01') {
   const path = join(store, 'sessions', subdir, `rollout-2026-01-01T00-00-00-${id}${suffix}.jsonl`);
   mkdirSync(dirname(path), { recursive: true });
@@ -93,6 +97,7 @@ function rollout(store, id, timestamp, suffix = '', subdir = '2026/01/01') {
   utimesSync(path, timestamp, timestamp);
   return path;
 }
+/** Decode the fake CLI's submitted arguments and inherited context. */
 function records(f) {
   if (!existsSync(f.log)) return [];
   return readFileSync(f.log, 'utf8').trim().split('\n').map(line => {
@@ -100,6 +105,7 @@ function records(f) {
     return { home, exe, cwd, ocxHome, args };
   });
 }
+/** Decode the fake CLI paths consulted during queue help probes. */
 function probes(f) {
   return existsSync(f.probeLog)
     ? readFileSync(f.probeLog, 'utf8').trim().split('\n').map(s => Buffer.from(s, 'base64').toString()) : [];
@@ -113,6 +119,7 @@ for (const shell of shells) {
   const available = spawnSync(shell, ps ? ['-NoProfile', '-Command', 'exit 0'] : ['--version']).status === 0;
   if (requiredShells.length) assert.ok(available, `Required shell is unavailable: ${shell}`);
   describe(`${shell} native queue helper`, { skip: !available }, () => {
+    /** Invoke a helper with fixture inputs and collect its exit status and output. */
     function run(f, options = {}) {
       const args = [join(scripts, ps ? 'codex-queue.ps1' : 'codex-queue.sh')];
       const flagPositions = new Set();
