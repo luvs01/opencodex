@@ -1,0 +1,196 @@
+name: PR 5778 scoped correction validation
+on:
+  push:
+    branches: [automation/pr-batch-audit-20260925]
+    paths: [.github/workflows/pr5778-correction-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 1e64a046e87406e4f8f1813a68f58c65d17de52e
+          persist-credentials: false
+      - name: Apply reviewed source corrections without running repository code
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          def replace(path, old, new):
+              p = pathlib.Path(path)
+              text = p.read_text()
+              assert text.count(old) == 1, (path, text.count(old))
+              p.write_text(text.replace(old, new))
+          p = pathlib.Path('src/combos/failover.ts')
+          text = p.read_text()
+          start = text.index('export function coolComboTarget(')
+          end = text.index('\nexport function earliestComboCooldown(', start)
+          old = text[start:end]
+          new = old.replace('): void {', '): boolean {', 1).replace('!liveComboTargets.has(ownerKey)) return;', '!liveComboTargets.has(ownerKey)) return false;').replace('  sweepExpiredOnWrite(now);\n}', '  sweepExpiredOnWrite(now);\n  return true;\n}')
+          assert new != old and 'return false;' in new and 'return true;' in new
+          p.write_text(text[:start] + new + text[end:])
+          replace('src/combos/resolve.ts', '    cooldownScope?: ComboFailureCooldownScope;\n', '    cooldownScope?: ComboFailureCooldownScope;\n    onCooldownRecorded?: (target: Pick<OcxComboTarget, "provider" | "model">) => void;\n')
+          replace('src/combos/resolve.ts', '      coolComboTarget(pick.comboId, target, {', '      const recorded = coolComboTarget(pick.comboId, target, {')
+          replace('src/combos/resolve.ts', '        writerGeneration: pick.writerGeneration,\n      });\n    }', '        writerGeneration: pick.writerGeneration,\n      });\n      if (recorded) options.onCooldownRecorded?.(target);\n    }')
+          replace('src/server/responses/core-combo.ts', '    const nextPick = advanceComboAfterFailure(config, pick, {', '    const failedTargetKey = targetKey(pick.target);\n    let failedTargetCooldownRecorded = false;\n    const nextPick = advanceComboAfterFailure(config, pick, {')
+          replace('src/server/responses/core-combo.ts', '      message: failure.classificationText,\n    });', '      message: failure.classificationText,\n      onCooldownRecorded: target => {\n        failedTargetCooldownRecorded ||= targetKey(target) === failedTargetKey;\n      },\n    });')
+          replace('src/server/responses/core-combo.ts', '    // Cooldown state is shared by every request using this target, so a concurrent failure\n    // can put it in cooldown while THIS failure recorded none. Scope "none" means the\n    // refusal described this request\'s shape rather than the target\'s health — the retry\n    // arms on any live cooldown for this target, whoever recorded it.\n    const failedTargetCooled = failureCooldownScope !== "none"\n', '    // A sibling cooldown is not this failure\'s write: stale-generation removal can\n    // refuse recording even for a cooldown-producing classification. Require both.\n    const failedTargetCooled = failureCooldownScope !== "none"\n      && failedTargetCooldownRecorded\n')
+          name = 'server-combo-cooldown-recording.test.ts'
+          path = pathlib.Path('tests/server') / name
+          assert not path.exists()
+          path.write_text('''import { afterEach, beforeEach, expect, test } from "bun:test";
+          import { mkdtempSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { join } from "node:path";
+          import { clearComboSelectionState } from "../../src/combos/resolve";
+          import { advanceComboAfterFailure, pickComboTarget } from "../../src/combos/resolve";
+          import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown, reconcileComboTargetCooldowns } from "../../src/combos/failover";
+          import { captureConfigGeneration, type GenerationContext } from "../../src/lib/state-store-sweeper";
+          import { handleResponses } from "../../src/server/responses";
+          import type { OcxConfig } from "../../src/types";
+          import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+          import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
+          import { removeTreeWithRetry } from "../helpers/remove-tree";
+          import { clearResponseStateForTests, flushResponseState } from "../../src/responses/state";
+          import { chatSuccess } from "../helpers/combo-failover-upstream";
+          
+          let home = "";
+          let previous: string | undefined;
+          let codex: IsolatedCodexHome | undefined;
+          let release: (() => void) | undefined;
+          let upstream: ReturnType<typeof Bun.serve> | undefined;
+          const target = { provider: "a", model: "m1" };
+          function removalContext(): GenerationContext {
+            return { generation: captureConfigGeneration() + 1, providerNames: new Set(["a"]),
+              comboIds: new Set(["free"]), comboTargets: new Set(), codexAccountIds: new Set(),
+              oauthAccountKeys: new Set(), configRoots: new Set([home]) };
+          }
+          function config(baseUrl = "http://127.0.0.1:1/v1"): OcxConfig {
+            return { port: 0, defaultProvider: "a",
+              providers: { a: { adapter: "openai-chat", baseUrl, apiKey: "synthetic-key" } },
+              combos: { free: { strategy: "failover", targets: [target], cooldownMs: 100, waitForCooldownMs: 1000 } } };
+          }
+          beforeEach(() => {
+            previous = process.env.OPENCODEX_HOME;
+            home = mkdtempSync(join(tmpdir(), "ocx-combo-recording-"));
+            process.env.OPENCODEX_HOME = home;
+            codex = installIsolatedCodexHome("ocx-combo-recording-codex-");
+            clearComboSelectionState();
+            clearComboTargetCooldowns();
+            clearResponseStateForTests();
+          });
+          afterEach(async () => {
+            try {
+              await upstream?.stop(true);
+              upstream = undefined;
+              await flushResponseState();
+              clearResponseStateForTests();
+              release?.();
+              release = undefined;
+              clearComboSelectionState();
+              clearComboTargetCooldowns();
+            } finally {
+              codex?.restore();
+              codex = undefined;
+              if (previous === undefined) delete process.env.OPENCODEX_HOME;
+              else process.env.OPENCODEX_HOME = previous;
+              removeTreeWithRetry(home);
+            }
+          });
+          test("cooldown recording distinguishes a successful write from a stale removed writer", () => {
+            expect(coolComboTarget("free", target, { cooldownMs: 1000 })).toBe(true);
+            reconcileComboTargetCooldowns(removalContext());
+            expect(isComboTargetInCooldown("free", target)).toBe(true);
+            expect(coolComboTarget("free", target, { cooldownMs: 1000 })).toBe(false);
+          });
+          test("advance reports only the current failure's committed cooldown", () => {
+            const cfg = config();
+            const pick = pickComboTarget(cfg, "free")!;
+            expect(pick).not.toBeNull();
+            const recorded: string[] = [];
+            advanceComboAfterFailure(cfg, pick, { cooldownScope: "target", onCooldownRecorded: t => recorded.push(t.model) });
+            expect(recorded).toEqual(["m1"]);
+            recorded.length = 0;
+            reconcileComboTargetCooldowns(removalContext());
+            advanceComboAfterFailure(cfg, pick, { cooldownScope: "target", onCooldownRecorded: t => recorded.push(t.model) });
+            expect(recorded).toEqual([]);
+            expect(isComboTargetInCooldown("free", target)).toBe(true);
+          });
+          test("a stale in-flight single-target request does not replay a reconciled-away target", async () => {
+            let hits = 0;
+            upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+              hits += 1;
+              if (hits > 1) return chatSuccess("unexpected replay", "m1");
+              // The request already captured its generation. A sibling records cooldown,
+              // then management removes the target before this response reaches failover.
+              expect(coolComboTarget("free", target, { cooldownMs: 100 })).toBe(true);
+              reconcileComboTargetCooldowns(removalContext());
+              return Response.json({ error: { message: "rate limited" } }, { status: 429 });
+            } });
+            release = acquireOwnedSpendHome();
+            const cfg = config(`${upstream.url.toString().replace(/\\/$/, "")}/v1`);
+            const response = await handleResponses(new Request("http://localhost/v1/responses", {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ model: "combo/free", input: "hello", stream: false }),
+            }), cfg, { model: "", provider: "" });
+            await response.text();
+            expect(response.status).toBe(429);
+            expect(hits).toBe(1);
+          }, 15000);
+          ''')
+          for file, explicit in [('scripts/test-layout/layout.json', True), ('tests/fixtures/test-layout-expected.json', False)]:
+              p = pathlib.Path(file); value = json.loads(p.read_text())
+              table = value['explicit'] if explicit else value
+              assert name not in table
+              table[name] = 'server'
+              p.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+          p = pathlib.Path('structure/transports/responses-failover.md')
+          text = p.read_text()
+          anchor = '## Combo per-target reasoning controls\n'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, '## Single-target cooldown retry ownership\n\n`src/combos/failover.ts` reports whether the current failure actually records a cooldown.\n`src/combos/resolve.ts` forwards that result for each target; `src/server/responses/core-combo.ts`\npermits its bounded same-target retry only when this failure records the failed target and its\ncooldown is live. A stale-generation refusal cannot borrow a sibling request\'s shared entry.\n\n' + anchor)
+          p.write_text(text)
+          PY
+      - name: Publish only isolated candidate
+        id: commit
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/combos/failover.ts src/combos/resolve.ts src/server/responses/core-combo.ts tests/server/server-combo-cooldown-recording.test.ts scripts/test-layout/layout.json tests/fixtures/test-layout-expected.json structure/transports/responses-failover.md
+          git commit -m 'fix(combos): require this failure to record the retried cooldown'
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/pr5778-candidate-20260925
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+      - name: Focused current-failure ownership regressions
+        run: bun test tests/server/server-combo-cooldown-recording.test.ts
+      - name: Existing combo failover regressions
+        run: bun test tests/server/server-combo-failover-e2e.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - run: git diff --exit-code
