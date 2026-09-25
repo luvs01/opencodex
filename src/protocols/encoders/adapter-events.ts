@@ -186,7 +186,7 @@ export function encodeAdapterEventStream(
   const relayed = (observation?: RelayedEventObservation) => {
     try { hooks.onRelayed?.(observation ?? {}); } catch { /* counters never break the stream */ }
   };
-  const enqueueCharged = (text: string, observation?: RelayedEventObservation, activity = true): void => {
+  const enqueueCharged = (text: string, observation?: RelayedEventObservation, activity = true, countAsRelayed = true): void => {
     if (closed) return;
     const frame = textEncoder.encode(text);
     const reservation = budget.reserveTransient(frame.byteLength, { kind: "live_transient" });
@@ -201,7 +201,9 @@ export function encodeAdapterEventStream(
     queuedFrameBytes.push(frame.byteLength);
     emittedFrames++;
     if (activity) wireActivity = true;
-    relayed(observation);
+    // Keepalives are wire bytes, not delivered model events — the legacy bridge's wire-silence
+    // heartbeat likewise bypasses the relayed-event counter.
+    if (countAsRelayed) relayed(observation);
   };
   const sink: ClientFrameSink = {
     budget,
@@ -244,7 +246,7 @@ export function encodeAdapterEventStream(
         closed = true;
       }
     },
-    emitKeepalive: text => enqueueCharged(text, undefined, false),
+    emitKeepalive: text => enqueueCharged(text, undefined, false, false),
     desiredSize: () => controller.desiredSize ?? 0,
   };
   const writer = createWriter(sink);
