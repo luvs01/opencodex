@@ -126,10 +126,11 @@ describe("isTrustedSystemdRunFile (real filesystem)", () => {
     }
   });
 
-  itPosix("accepts a real systemd-run install when one is present", () => {
-    const installed = ["/usr/bin/systemd-run", "/bin/systemd-run", "/usr/local/bin/systemd-run",
-      "/run/current-system/sw/bin/systemd-run"].find(path => existsSync(path));
-    if (!installed) return;
-    expect(isTrustedSystemdRunFile(installed)).toBe(true);
+  itRoot("accepts a root-owned executable in a root-only-writable directory", () => {
+    const { dir, file, cleanup } = fixture();
+    try {
+      chmodSync(dir, 0o755);
+      expect(isTrustedSystemdRunFile(file)).toBe(true);
+    } finally { cleanup(); }
   });
 });
