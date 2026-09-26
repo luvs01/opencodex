@@ -212,4 +212,18 @@ describe("wsl.conf automount root", () => {
       env: { ...deps.env, CODEX_HOME: windowsCodexHome },
     })).toBe(false);
   });
+
+  test("service ownership accepts an older lexical spelling of the current physical home", () => {
+    const lexicalHome = "/home/example/.codex";
+    const physicalHome = "/srv/codex-home";
+    const deps = {
+      env: {},
+      homedir: () => "/home/example",
+      statSync: (() => ({ isDirectory: () => true })) as never,
+      realpathSync: (path: string) => path === lexicalHome ? physicalHome : path,
+    };
+
+    expect(serviceCodexHomeMatchesInstall(lexicalHome, deps)).toBe(true);
+    expect(serviceCodexHomeMatchesInstall("/srv/other-home", deps)).toBe(false);
+  });
 });

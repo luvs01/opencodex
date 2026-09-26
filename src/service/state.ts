@@ -1,4 +1,4 @@
-import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { expandUserPath, getConfigDir } from "../config";
@@ -858,7 +858,14 @@ export function serviceHomeMatches(a: string, b: string): boolean {
 }
 
 export function serviceCodexHomeMatchesInstall(recordedHome: string, deps: CodexHomeDeps = {}): boolean {
-  return serviceHomeMatches(recordedHome, currentCodexHome(deps));
+  const currentHome = currentCodexHome(deps);
+  if (serviceHomeMatches(recordedHome, currentHome)) return true;
+  const realpath = deps.realpathSync ?? realpathSync;
+  try {
+    return serviceHomeMatches(realpath(recordedHome), realpath(currentHome));
+  } catch {
+    return false;
+  }
 }
 
 /** Single accessor for backend-sensitive service code — v1/legacy state maps to scheduler. */
