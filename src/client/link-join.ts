@@ -219,14 +219,23 @@ async function waitForReady(
   ]);
   for (;;) {
     try {
-      const response = await Promise.race([
+      // The tunnel can be alive without owning the port yet: an unrelated
+      // loopback listener must never receive the issued key, so the keyed
+      // request only goes to a listener answering the link-auth challenge.
+      const probe = await Promise.race([
         tunnelExited,
-        fetchImpl(`http://127.0.0.1:${port}/readyz`, {
-          headers: { "x-opencodex-api-key": key },
-        }),
+        fetchImpl(`http://127.0.0.1:${port}/readyz`),
       ]);
-      if (response.status === 200) return;
-      if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
+      if (probe.status === 401) {
+        const response = await Promise.race([
+          tunnelExited,
+          fetchImpl(`http://127.0.0.1:${port}/readyz`, {
+            headers: { "x-opencodex-api-key": key },
+          }),
+        ]);
+        if (response.status === 200) return;
+        if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
+      }
     } catch (error) {
       if (error instanceof ClientLinkJoinError) throw error;
     }
@@ -305,22 +314,28 @@ export async function joinHome(deps: ClientLinkJoinDeps, input: { alias: string 
   }
 
   try {
+    if (!tunnel) throw new ClientLinkJoinError("join_tunnel_failed");
     const connect = deps.connect ?? connectClient;
-    await connect({
-      serverUrl: `http://127.0.0.1:${tunnelPort}`,
-      managementUrl: `http://127.0.0.1:${tunnelPort}`,
-      credential: { kind: "link", apiKeyId: issued.apiKeyId, key: issued.key },
-      transport: "link",
-      link: { tunnelPort, linkId: issued.linkId },
-      selectedClients: deps.selectedClients ?? ["codex", "claude"],
-      managementTransport: "direct",
-    }, {
-      fetchImpl: deps.fetchImpl,
-      ...deps.connectDeps,
-    });
-  } catch {
+    // Keep watching the tunnel until the connection commits: an exited tunnel
+    // must not let the issued key ride out to whatever next holds the port.
+    await Promise.race([
+      tunnel.exited.then(() => { throw new ClientLinkJoinError("join_tunnel_failed"); }),
+      connect({
+        serverUrl: `http://127.0.0.1:${tunnelPort}`,
+        managementUrl: `http://127.0.0.1:${tunnelPort}`,
+        credential: { kind: "link", apiKeyId: issued.apiKeyId, key: issued.key },
+        transport: "link",
+        link: { tunnelPort, linkId: issued.linkId },
+        selectedClients: deps.selectedClients ?? ["codex", "claude"],
+        managementTransport: "direct",
+      }, {
+        fetchImpl: deps.fetchImpl,
+        ...deps.connectDeps,
+      }),
+    ]);
+  } catch (error) {
     await rollback(deps, issued.linkId, tunnel);
-    throw new ClientLinkJoinError("join_connect_failed");
+    throw new ClientLinkJoinError(error instanceof ClientLinkJoinError ? error.code : "join_connect_failed");
   }
 
   await stopTunnel(tunnel);

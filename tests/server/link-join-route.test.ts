@@ -37,6 +37,16 @@ function tunnelFor(order: string[]) {
   };
 }
 
+// The link listener answers an unauthenticated /readyz with the 401 challenge; the keyed
+// request earns 200. A foreign listener (any other status on the probe) must never see the key.
+function challengedFetch(order?: string[]) {
+  return async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const authed = new Headers(init?.headers).get("x-opencodex-api-key") === KEY;
+    order?.push(authed ? "readyz:key" : "readyz:probe");
+    return new Response(null, { status: authed ? 200 : 401 });
+  };
+}
+
 function joinDeps(overrides: Partial<ClientLinkJoinDeps> = {}): ClientLinkJoinDeps {
   const calls = overrides.runner ? [] : [];
   return {
@@ -158,10 +168,7 @@ describe("client initiated link join", () => {
           hostname: () => "client-host",
           writeState: state => { order.push("write-state"); Object.assign(sidecar, state); },
           spawnTunnel: () => { order.push("spawn-tunnel"); return tunnelFor(order); },
-          fetchImpl: async (_input, init) => {
-            order.push(`readyz:${new Headers(init?.headers).get("x-opencodex-api-key") === KEY ? "key" : "missing"}`);
-            return new Response(null, { status: 200 });
-          },
+          fetchImpl: challengedFetch(order),
           connect: (async () => { order.push("connect"); }) as typeof import("../../src/client/connect").connectClient,
           scheduleRestart: () => { order.push("restart"); },
         }, { alias: "home" })),
@@ -171,7 +178,7 @@ describe("client initiated link join", () => {
     expect(response?.status).toBe(202);
     expect(responseBody).toEqual({ linkId: LINK_ID, alias: "home", restarting: true });
     expect(sidecar).toMatchObject({ linkId: LINK_ID, tunnelPort: 23456, peerListenerPort: 45678 });
-    expect(order).toEqual(["write-state", "spawn-tunnel", "readyz:key", "connect", "stop-tunnel", "restart"]);
+    expect(order).toEqual(["write-state", "spawn-tunnel", "readyz:probe", "readyz:key", "connect", "stop-tunnel", "restart"]);
     expect(calls[0]?.some(value => value.includes("issue"))).toBe(true);
     expect(calls[0]?.some(value => value.includes("--json"))).toBe(true);
   });
@@ -213,6 +220,46 @@ describe("client initiated link join", () => {
     }
   });
 
+  test("never sends the issued key to a listener that skips the link-auth challenge", async () => {
+    const calls: string[][] = [];
+    let keyedFetches = 0;
+    let ticks = 0;
+    let stopped = 0;
+    await expect(joinHome(joinDeps({
+      runner: runnerFor(calls),
+      now: () => (ticks++ === 0 ? 0 : 15_002 * ticks),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => ({ pid: 1, exited: new Promise<number>(() => {}), stop: async () => { stopped += 1; } }),
+      fetchImpl: async (_input, init) => {
+        if (new Headers(init?.headers).has("x-opencodex-api-key")) keyedFetches += 1;
+        return new Response(null, { status: 200 });
+      },
+    }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+    expect(keyedFetches).toBe(0);
+    expect(stopped).toBe(1);
+    expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
+  });
+
+  test("a tunnel that exits during connect cannot commit the connection", async () => {
+    const calls: string[][] = [];
+    let releaseExit!: (code: number) => void;
+    const exited = new Promise<number>(resolve => { releaseExit = resolve; });
+    let stopped = 0;
+    let connectCommitted = false;
+    await expect(joinHome(joinDeps({
+      runner: runnerFor(calls),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => ({ pid: 1, exited, stop: async () => { stopped += 1; } }),
+      fetchImpl: challengedFetch(),
+      connect: (async () => { releaseExit(255); await new Promise(() => {}); connectCommitted = true; }) as typeof import("../../src/client/connect").connectClient,
+    }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+    expect(connectCommitted).toBe(false);
+    expect(stopped).toBe(1);
+    expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
+  });
+
   test("does not disclose the issued key when the tunnel exits during its spawn grace", async () => {
     const calls: string[][] = [];
     let fetches = 0;
@@ -239,7 +286,7 @@ describe("client initiated link join", () => {
         writeState: () => {},
         clearState: () => {},
         spawnTunnel: () => tunnelFor([]),
-        fetchImpl: async () => new Response(null, { status: 200 }),
+        fetchImpl: challengedFetch(),
         connect: (async () => { throw new Error(`connect failed ${KEY}`); }) as typeof import("../../src/client/connect").connectClient,
       }), { alias: "home" })).rejects.toMatchObject({ code: "join_connect_failed" });
     } finally {
@@ -281,7 +328,7 @@ describe("client initiated link join", () => {
       writeState: value => { sidecarPresent = true; Object.assign(sidecar, value); },
       clearState: () => { sidecarPresent = false; },
       spawnTunnel: () => ({ pid: 1, exited: new Promise<number>(() => {}), stop: async () => {} }),
-      fetchImpl: async () => new Response(null, { status: 200 }),
+      fetchImpl: challengedFetch(),
       connect: (async () => { throw new Error("connect failed"); }) as typeof import("../../src/client/connect").connectClient,
     });
     await expect(joinHome(base, { alias: "home" })).rejects.toMatchObject({ code: "join_rollback_failed", linkId: LINK_ID });
@@ -314,7 +361,7 @@ describe("client initiated link join", () => {
           writeState: state => { sidecar = { ...state }; },
           clearState: () => { cleared = true; },
           spawnTunnel: () => tunnelFor([]),
-          fetchImpl: async () => new Response(null, { status: 200 }),
+          fetchImpl: challengedFetch(),
           connect: (async () => { connected = true; }) as typeof import("../../src/client/connect").connectClient,
           scheduleRestart: () => { throw new Error("restart unavailable"); },
         }, input)) as typeof import("../../src/client/link-join").joinHome,
