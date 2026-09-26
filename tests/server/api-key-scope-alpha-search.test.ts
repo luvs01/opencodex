@@ -250,15 +250,23 @@ test("a scoped custom Devin route spends only that provider's OAuth credential",
 });
 
 test("a custom Devin route searches the tenant its credential names", async () => {
+  const customToken = "team-devin-token";
   await saveCredential("team-devin", {
-    access: "team-devin-token",
-    refresh: "team-devin-token",
+    access: customToken,
+    refresh: customToken,
     expires: Number.MAX_SAFE_INTEGER,
     apiBaseUrl: "https://eu.windsurf.com/_route/api_server",
   });
+  await saveCredential("devin", {
+    access: "canonical-devin-token",
+    refresh: "canonical-devin-token",
+    expires: Number.MAX_SAFE_INTEGER,
+    apiBaseUrl: "https://canonical-devin.example",
+  });
+  let requestBody = Buffer.alloc(0);
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     upstreamCalls.push(String(input));
-    expect(String(init?.body)).not.toContain("canonical-devin-token");
+    requestBody = Buffer.from(init?.body as Uint8Array);
     const result = Buffer.concat([
       encodeString(3, "https://example.test"),
       encodeString(4, "Result"),
@@ -285,6 +293,8 @@ test("a custom Devin route searches the tenant its credential names", async () =
   expect(upstreamCalls).toEqual([
     "https://eu.windsurf.com/_route/api_server/exa.api_server_pb.ApiServerService/GetWebSearchResults",
   ]);
+  expect(requestBody.includes(Buffer.from(customToken))).toBe(true);
+  expect(requestBody.includes(Buffer.from("canonical-devin-token"))).toBe(false);
 });
 
 test("the sidecar fallback refuses the backend it would have spent", async () => {
