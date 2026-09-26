@@ -219,6 +219,60 @@ test("a streamed sidecar response keeps the search probe until the stream settle
   }
 });
 
+test("a cancelled streamed sidecar response releases the search probe", async () => {
+  releasedFixtureProbe = false;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+  try {
+    const config = {
+      port: 0, defaultProvider: "fetchonly",
+      webSearchSidecar: { backend: "exa", exaApiKey: "fixture-search-key" },
+      providers: {
+        fetchonly: { adapter: "fetchonly", baseUrl: "https://fetchonly.test/v1", apiKey: "fixture-key", models: ["model"] },
+      },
+    } as OcxConfig;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json", "x-fixture-probe": "held" },
+      body: JSON.stringify({ model: "fetchonly/model", input: "search this", stream: true,
+        tools: [{ type: "web_search" }] }),
+    }), config, { model: "", provider: "" });
+
+    expect(response.status).toBe(200);
+    expect(releasedFixtureProbe).toBe(false);
+    // Client disconnect: the tracked stream's cancel path must settle the lease the same
+    // way a completed stream does, or the probe stays held until process exit.
+    await response.body!.cancel();
+    expect(releasedFixtureProbe).toBe(true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a media-bridge stream releases the search probe when it settles", async () => {
+  releasedFixtureProbe = false;
+  events = [[{ type: "text_delta", text: "media answer" }, { type: "done" }]];
+  const config = {
+    port: 0, defaultProvider: "cursor",
+    images: { bridgeEnabled: true },
+    providers: {
+      cursor: { adapter: "cursor", baseUrl: "https://api2.cursor.sh", authMode: "oauth", models: ["model"] },
+    },
+  } as OcxConfig;
+  const response = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json", "x-fixture-probe": "held" },
+    body: JSON.stringify({ model: "cursor/model", input: "draw a fixture", stream: true,
+      tools: [{ type: "image_generation" }] }),
+  }), config, { model: "", provider: "" });
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("event-stream");
+  expect(releasedFixtureProbe).toBe(false);
+  await response.text();
+  expect(releasedFixtureProbe).toBe(true);
+});
+
 // Streaming only: a first-event 429 replays the turn while the superseded
 // attempt is still in-flight (the buffered path awaits it before collecting
 // events, so the race cannot exist there). When that attempt finally returns,
