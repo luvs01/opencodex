@@ -857,15 +857,20 @@ export function serviceHomeMatches(a: string, b: string): boolean {
   return normalizePathForCompare(a) === normalizePathForCompare(b);
 }
 
-export function serviceCodexHomeMatchesInstall(recordedHome: string, deps: CodexHomeDeps = {}): boolean {
-  const currentHome = currentCodexHome(deps);
-  if (serviceHomeMatches(recordedHome, currentHome)) return true;
+/** Lexical compare first; when spellings differ, compare the directories both resolve to so a
+ * junction or symlink spelling recorded by an older install still names the same home. */
+export function servicePathMatchesInstall(recorded: string, current: string, deps: CodexHomeDeps = {}): boolean {
+  if (serviceHomeMatches(recorded, current)) return true;
   const realpath = deps.realpathSync ?? realpathSync;
   try {
-    return serviceHomeMatches(realpath(recordedHome), realpath(currentHome));
+    return serviceHomeMatches(realpath(recorded), realpath(current));
   } catch {
     return false;
   }
+}
+
+export function serviceCodexHomeMatchesInstall(recordedHome: string, deps: CodexHomeDeps = {}): boolean {
+  return servicePathMatchesInstall(recordedHome, currentCodexHome(deps), deps);
 }
 
 /** Single accessor for backend-sensitive service code — v1/legacy state maps to scheduler. */

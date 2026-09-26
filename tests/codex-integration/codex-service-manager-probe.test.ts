@@ -819,7 +819,7 @@ describe("ownership refuses what it cannot prove", () => {
    * homedir(), which no test sandbox moves. Left alone, these fixtures would
    * read the developer's real installation and call their own machine foreign.
    */
-  function own(extra: { run: ProbeRunner }) {
+  function own(extra: { run: ProbeRunner; realpathSync?: (path: string) => string }) {
     const codexHome = join(home, ".codex");
     const opencodexHome = join(home, ".opencodex");
     return {
@@ -862,6 +862,17 @@ describe("ownership refuses what it cannot prove", () => {
     writeState(opencodexHome, "/elsewhere/.codex", "/elsewhere/.opencodex");
     const { run } = recorder(() => ({ status: 113 }));
     expect(inspectNativeCodexOwnership(own({ run })).ownership).toBe("foreign");
+  });
+
+  // An older install may have recorded a junction or symlink spelling of the
+  // home this process now knows canonically — same directory, different name.
+  test("state spelling the current home through an alias is owned", () => {
+    const { codexHome, opencodexHome } = useHomes();
+    const aliasHome = join(home, "codex-alias");
+    writeState(opencodexHome, aliasHome, opencodexHome);
+    const { run } = recorder(() => ({ status: 113 }));
+    const realpathSync = (path: string) => path === aliasHome ? codexHome : path;
+    expect(inspectNativeCodexOwnership(own({ run, realpathSync })).ownership).toBe("owned");
   });
 
   /*
