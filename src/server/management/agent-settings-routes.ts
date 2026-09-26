@@ -1554,7 +1554,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       catch { return jsonResponse({ error: "Claude settings are unreadable", code: "unreadable" }, 500); }
       type FirstPartyMutation =
         | { refusal: { error: string; code: "intercept_disabled" | "intercept_unavailable" } }
-        | { claudeCode: OcxConfig["claudeCode"]; previous: { present: boolean; value: boolean }; pinnedMode: "first-party" | "gateway" | undefined };
+        | { claudeCode: OcxConfig["claudeCode"]; previous: { present: boolean; value: boolean };
+            pinnedMode: "first-party" | "gateway" | undefined; retainedAmbiguous: boolean };
       let outcome: ReturnType<typeof mutatePersistedConfig<FirstPartyMutation>>;
       try {
         outcome = mutatePersistedConfig<FirstPartyMutation>(persisted => {
@@ -1581,7 +1582,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         else delete nextBlock.cliFirstParty;
         if (pinnedMode) nextBlock.desktopMode = pinnedMode;
         commitClaudeCodeBlock(persisted, nextBlock);
-        return { changed: true, value: { claudeCode: structuredClone(persisted.claudeCode), previous, pinnedMode } };
+        // An opt-out that pins first-party from the shared env cannot tell whether that env was
+        // Desktop's or a hand-configured CLI-only one; the env is retained (Desktop keeps its
+        // route) and the caller is warned so it can pin gateway explicitly to release it.
+        const retainedAmbiguous = !body.cliFirstParty && previous.value && pinnedMode === "first-party";
+        return { changed: true, value: { claudeCode: structuredClone(persisted.claudeCode), previous, pinnedMode, retainedAmbiguous } };
         });
       } catch { return jsonResponse({ error: "Could not save Claude settings", code: "write_failed" }, 500); }
       if (outcome.status === "unavailable") return jsonResponse({ error: "Could not save Claude settings", code: "write_failed" }, 500);
@@ -1631,7 +1636,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const residual = !finalDesired.desktop && !finalDesired.cli
         && readFirstPartyProxyStatus(config, bound?.proxyPort ?? null) !== "none";
       return jsonResponse({ ok: true, enabled: config.claudeCode?.enabled !== false,
-        cliFirstParty: body.cliFirstParty, warnings: residual ? ["settings_residual"] : [] });
+        cliFirstParty: body.cliFirstParty,
+        warnings: [
+          ...(committed.retainedAmbiguous ? ["shared_proxy_retained"] : []),
+          ...(residual ? ["settings_residual"] : []),
+        ] });
     }
     for (const field of ["webSearchSidecar", "visionSidecar"] as const) {
       const section = body[field];

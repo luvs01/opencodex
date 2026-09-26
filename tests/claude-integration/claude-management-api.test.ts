@@ -384,7 +384,7 @@ test("CLI-off keeps a shared env Desktop could own, pinning first-party instead 
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cliFirstParty: false }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ cliFirstParty: false, warnings: [] });
+    expect(await response.json()).toMatchObject({ cliFirstParty: false, warnings: ["shared_proxy_retained"] });
     const claudeCode = loadConfig().claudeCode;
     expect(claudeCode?.cliFirstParty).toBeUndefined();
     expect(claudeCode?.desktopMode).toBe("first-party");
