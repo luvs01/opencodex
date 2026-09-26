@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { findAvailablePort } from "../server/ports";
+import { scanListenPidsForAddress, type ListenPidScan } from "../server/port-reclaim";
 import { isLinkPort } from "../link/ports";
 import { buildExecArgv } from "../link/ssh-argv";
 import type { SshRunner } from "../link/ssh-runner";
@@ -22,6 +23,7 @@ import type { OcxConnectedClientId } from "../types";
 
 const JOIN_TUNNEL_READY_TIMEOUT_MS = 15_000;
 const JOIN_TUNNEL_POLL_MS = 100;
+const JOIN_TUNNEL_SPAWN_GRACE_MS = 100;
 const JOIN_REVOKE_TIMEOUT_MS = 30_000;
 const JOIN_CONFIRM_TTL_MS = 5 * 60_000;
 const LINK_ID = /^lnk_[0-9a-f]{16}$/;
@@ -71,6 +73,12 @@ export interface ClientLinkJoinDeps {
   hostname?: () => string;
   randomBytes?: (size: number) => Uint8Array;
   fetchImpl?: typeof fetch;
+  /**
+   * LISTEN-owner probe for the tunnel port; defaults to the netstat/lsof/ss scan.
+   * Receives the loopback address the tunnel binds so listeners on unrelated
+   * addresses do not confuse the readiness check.
+   */
+  scanListenPids?: (port: number, address?: string) => ListenPidScan;
   spawnTunnel?: (spec: {
     linkId: string;
     alias: string;
@@ -203,6 +211,7 @@ async function compensateStaleSidecar(deps: ClientLinkJoinDeps): Promise<void> {
 
 async function waitForReady(
   deps: ClientLinkJoinDeps,
+  tunnel: ClientLinkTunnelHandle,
   port: number,
   key: string,
 ): Promise<void> {
@@ -210,13 +219,48 @@ async function waitForReady(
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
   const deadline = now() + JOIN_TUNNEL_READY_TIMEOUT_MS;
+  const tunnelExited = tunnel.exited.then(() => { throw new ClientLinkJoinError("join_tunnel_failed"); });
+  await Promise.race([
+    tunnelExited,
+    new Promise<void>(resolve => setTimeout(resolve, JOIN_TUNNEL_SPAWN_GRACE_MS)),
+  ]);
+  const listenPids = deps.scanListenPids ?? scanListenPidsForAddress;
+  // The tunnel binds 127.0.0.1; a listener on a different loopback or interface address
+  // never receives our requests, so ownership is only judged among sockets that serve it.
+  const tunnelAddress = "127.0.0.1";
   for (;;) {
     try {
-      const response = await fetchImpl(`http://127.0.0.1:${port}/readyz`, {
-        headers: { "x-opencodex-api-key": key },
-      });
-      if (response.status === 200) return;
-      if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
+      // A squatter answering the 401 challenge would otherwise collect the issued key:
+      // the only listener allowed a keyed request is the ssh process we spawned — it owns
+      // the port only after a successful bind, and ExitOnForwardFailure makes it exit when
+      // it cannot take the port. An unverifiable scan stays "not ready", never a pass.
+      const ownership = listenPids(port, tunnelAddress);
+      if (ownership.ok && ownership.pids.length === 1 && ownership.pids[0] === tunnel.pid) {
+        // Never follow redirects: a port occupant must not reroute the challenge, and a
+        // redirected keyed request would carry the issued key to an unrelated listener.
+        const probe = await Promise.race([
+          tunnelExited,
+          fetchImpl(`http://127.0.0.1:${port}/readyz`, { redirect: "manual" }),
+        ]);
+        if (probe.status === 401) {
+          // Ownership can flip between the probe and the keyed request (a squatter
+          // takes the port after the tunnel dies). Re-scan in the same iteration and
+          // skip the keyed request if the port is no longer solely the tunnel's.
+          const recheck = listenPids(port, tunnelAddress);
+          if (!recheck.ok || recheck.pids.length !== 1 || recheck.pids[0] !== tunnel.pid) {
+            continue;
+          }
+          const response = await Promise.race([
+            tunnelExited,
+            fetchImpl(`http://127.0.0.1:${port}/readyz`, {
+              headers: { "x-opencodex-api-key": key },
+              redirect: "manual",
+            }),
+          ]);
+          if (response.status === 200) return;
+          if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
+        }
+      }
     } catch (error) {
       if (error instanceof ClientLinkJoinError) throw error;
     }
@@ -287,7 +331,7 @@ export async function joinHome(deps: ClientLinkJoinDeps, input: { alias: string 
       configDir: deps.configDir,
       knownHostsFile: deps.knownHostsFile,
     });
-    await waitForReady(deps, tunnelPort, issued.key);
+    await waitForReady(deps, tunnel, tunnelPort, issued.key);
   } catch (error) {
     const code = error instanceof ClientLinkJoinError ? error.code : "join_tunnel_failed";
     await rollback(deps, issued.linkId, tunnel);
@@ -295,22 +339,28 @@ export async function joinHome(deps: ClientLinkJoinDeps, input: { alias: string 
   }
 
   try {
+    if (!tunnel) throw new ClientLinkJoinError("join_tunnel_failed");
     const connect = deps.connect ?? connectClient;
-    await connect({
-      serverUrl: `http://127.0.0.1:${tunnelPort}`,
-      managementUrl: `http://127.0.0.1:${tunnelPort}`,
-      credential: { kind: "link", apiKeyId: issued.apiKeyId, key: issued.key },
-      transport: "link",
-      link: { tunnelPort, linkId: issued.linkId },
-      selectedClients: deps.selectedClients ?? ["codex", "claude"],
-      managementTransport: "direct",
-    }, {
-      fetchImpl: deps.fetchImpl,
-      ...deps.connectDeps,
-    });
-  } catch {
+    // Keep watching the tunnel until the connection commits: an exited tunnel
+    // must not let the issued key ride out to whatever next holds the port.
+    await Promise.race([
+      tunnel.exited.then(() => { throw new ClientLinkJoinError("join_tunnel_failed"); }),
+      connect({
+        serverUrl: `http://127.0.0.1:${tunnelPort}`,
+        managementUrl: `http://127.0.0.1:${tunnelPort}`,
+        credential: { kind: "link", apiKeyId: issued.apiKeyId, key: issued.key },
+        transport: "link",
+        link: { tunnelPort, linkId: issued.linkId },
+        selectedClients: deps.selectedClients ?? ["codex", "claude"],
+        managementTransport: "direct",
+      }, {
+        fetchImpl: deps.fetchImpl,
+        ...deps.connectDeps,
+      }),
+    ]);
+  } catch (error) {
     await rollback(deps, issued.linkId, tunnel);
-    throw new ClientLinkJoinError("join_connect_failed");
+    throw new ClientLinkJoinError(error instanceof ClientLinkJoinError ? error.code : "join_connect_failed");
   }
 
   await stopTunnel(tunnel);

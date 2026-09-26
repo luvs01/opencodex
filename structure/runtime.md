@@ -77,7 +77,7 @@ verified matching processes regardless of the advisory freshness result.
 
 ## Hub management dashboard address
 
-When hub management ingress is enabled, `src/cli/dispatch.ts` opens the dashboard on the literal IPv4 loopback address and configured ingress port, matching the listener in `src/server/index.ts`. Other dashboard address selection is unchanged.
+When hub management ingress is enabled, `src/cli/dispatch.ts` opens the dashboard on the literal IPv4 loopback address and configured ingress port, matching the listener in `src/server/index.ts`. Other dashboard address selection is unchanged. Client-initiated Remote Link enrollment in `src/client/link-join.ts` watches the SSH tunnel from spawn grace through the connection commit. Readiness is accepted only while the LISTEN owner of the tunnel port is the spawned ssh process — a live tunnel does not prove it owns the socket, and a foreign listener answering the link-auth challenge would otherwise collect the issued key — and ownership is judged only among listeners that serve the tunnel's 127.0.0.1 bind, so an occupant on another loopback or interface address can neither satisfy the check nor block it. The socket scan (`src/server/port-reclaim.ts`) runs `lsof`, then `ss`, then `netstat`, so minimal Linux installs with only iproute2 still enumerate listeners. The ownership check repeats immediately before the keyed request, narrowing the takeover window between the 401 probe and the request that carries the issued key, and both requests run with `redirect: "manual"` so a redirecting occupant cannot reroute the challenge. An exited tunnel can neither deliver the issued data key to an unrelated loopback listener nor commit the connection.
 
 ## Codex desktop process membership
 
