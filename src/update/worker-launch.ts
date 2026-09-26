@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
+import { dirname } from "node:path";
 
 /**
  * How to launch the dashboard update worker on POSIX.
@@ -23,7 +24,9 @@ export interface WorkerLaunchContext {
 // Absolute install paths only — PATH is never consulted, so a caller-controlled entry cannot
 // redirect the launch. `/usr/local/bin` is where systemd lands when built or stowed outside the
 // distro layout, and `/run/current-system/sw/bin` is the NixOS layout, where the binary lives
-// nowhere else even though the user bus works.
+// nowhere else even though the user bus works. A candidate only counts when the binary and its
+// directory are root-owned and not group/world-writable, so a lower-trust local actor cannot
+// plant the launcher the scope probe execs.
 const TRUSTED_SYSTEMD_RUN_PATHS = [
   "/usr/bin/systemd-run", "/bin/systemd-run", "/usr/local/bin/systemd-run",
   "/run/current-system/sw/bin/systemd-run",
@@ -34,11 +37,31 @@ export interface SystemdRunHooks {
   probeScope: (path: string) => boolean;
 }
 
+const GROUP_OR_WORLD_WRITE = 0o022;
+
+// stat (follow) rather than lstat: a root-owned symlink to a user-writable directory must fail
+// on the target's mode, not pass on the symlink's (mirrors isTrustedSystemPath in
+// src/codex/desktop-app/linux.ts).
+function rootOnlyWritable(path: string): boolean {
+  try {
+    const st = statSync(path);
+    return st.uid === 0 && (st.mode & GROUP_OR_WORLD_WRITE) === 0;
+  } catch {
+    return false;
+  }
+}
+
 const systemdRunHooks: SystemdRunHooks = {
+  // "Executable" here includes trust: the binary and its directory must be root-owned and not
+  // group/world-writable. /usr/local/bin is group-writable on some systems, and a planted or
+  // replaced systemd-run there would be exec'd by the scope probe under the service account;
+  // the fallback is the plain detached spawn, so nothing breaks when it is skipped.
   isExecutableFile: path => {
     try {
       accessSync(path, constants.X_OK);
-      return statSync(path).isFile();
+      const st = statSync(path);
+      return st.isFile() && st.uid === 0 && (st.mode & GROUP_OR_WORLD_WRITE) === 0
+        && rootOnlyWritable(dirname(path));
     } catch {
       return false;
     }
