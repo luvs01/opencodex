@@ -164,6 +164,15 @@ describe("client link HTTP relay", () => {
     expect((await timedOut).status).toBe(503);
   });
 
+  test("a hub that predates relay authentication fails closed with an upgrade hint", async () => {
+    // An older hub has no challenge endpoint; refusing stays fail-closed but must name the
+    // migration instead of looking like a transient tunnel outage.
+    const legacyHub = (async () => Response.json({ error: "not_found" }, { status: 404 })) as typeof fetch;
+    const response = await relayLinkDataRequest(relayRequest({ method: "POST" }), target, { fetchImpl: legacyHub });
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("upgrade the hub");
+  });
+
   test("applies hub response caps to non-SSE responses", async () => {
     const response = await relayLinkDataRequest(relayRequest({ method: "POST" }), target, {
       fetchImpl: authenticatedFetch((async () => new Response("too large", {

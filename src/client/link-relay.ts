@@ -53,13 +53,15 @@ export function linkRelayDestination(url: URL, target: LinkRelayTarget): string 
   return `http://127.0.0.1:${target.tunnelPort}${url.pathname}${url.search}`;
 }
 
+type LinkRelayAuth = "authenticated" | "unavailable" | "unrecognized";
+
 async function authenticateLinkRelayTarget(
   target: LinkRelayTarget,
   fetchImpl: typeof fetch,
   signal: AbortSignal,
-): Promise<boolean> {
+): Promise<LinkRelayAuth> {
   if (!target.apiKeyId.trim() || !/^lnk_[0-9a-f]{16}$/.test(target.linkId)
-    || !/^[a-f0-9]{64}$/.test(target.tokenFingerprint)) return false;
+    || !/^[a-f0-9]{64}$/.test(target.tokenFingerprint)) return "unavailable";
   const challenge = linkRelayChallenge(target.tokenFingerprint, target.linkId);
   const url = new URL(`http://127.0.0.1:${target.tunnelPort}${LINK_RELAY_AUTH_PATH}`);
   url.searchParams.set("key", target.apiKeyId);
@@ -68,10 +70,12 @@ async function authenticateLinkRelayTarget(
   url.searchParams.set("proof", challenge.callerProof);
   try {
     const response = await fetchImpl(url, { method: "GET", redirect: "manual", signal });
+    if (response.status === 404) return "unrecognized";
     return response.status === 204
-      && linkRelayProofMatches(response.headers.get("x-opencodex-link-proof"), challenge.expectedProof);
+      && linkRelayProofMatches(response.headers.get("x-opencodex-link-proof"), challenge.expectedProof)
+      ? "authenticated" : "unavailable";
   } catch {
-    return false;
+    return "unavailable";
   }
 }
 
@@ -218,9 +222,15 @@ export async function relayLinkDataRequest(
   if (req.signal.aborted) onClientAbort();
   else if (timeoutSignal.aborted) onTimeout();
 
-  if (!await authenticateLinkRelayTarget(target, fetchImpl, relayAbort.signal)) {
+  const auth = await authenticateLinkRelayTarget(target, fetchImpl, relayAbort.signal);
+  if (auth !== "authenticated") {
     cleanup();
-    return jsonError(503, "link tunnel unavailable", true);
+    // A listener that answers 404 either predates relay authentication or no longer holds this
+    // link record — refusing stays fail-closed either way, but name the migration: the hub must
+    // be upgraded (or the link remade) before a newer client can carry data requests.
+    return jsonError(503, auth === "unrecognized"
+      ? "link tunnel refused the relay challenge — upgrade the hub to a version with link-relay auth"
+      : "link tunnel unavailable", true);
   }
 
   let upstream: Response;
