@@ -40,7 +40,7 @@ import { handoffWindowsTrayForUpdate, planWindowsTrayUpdate } from "./tray-updat
 import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
 import { packageVersion } from "../lib/package-version";
 import { selfLaunchArgv } from "../lib/self-launch-argv";
-import { PNPM_READ_CWD, pnpmReadEnvironment } from "./pnpm-read-policy";
+import { PNPM_READ_CWD, pnpmReadEnvironment } from "./pnpm-read-policy.mjs";
 
 /**
  * A `codex-history-backup-*.json` surviving a stop means the native-history restore was
@@ -98,10 +98,11 @@ function runPnpmCandidate(
   commandPath: string,
   args: readonly string[],
   capture = false,
+  spawn: typeof spawnSync = spawnSync,
 ): { status: number | null; stdout?: string | null; stderr?: string | null } {
   const invocation = pnpmInvocationForPath(commandPath, args);
   if (!invocation) return { status: 1 };
-  return spawnSync(invocation.file, invocation.args, {
+  return spawn(invocation.file, invocation.args, {
     stdio: capture ? "pipe" : "ignore",
     encoding: "utf8",
     timeout: 20_000,
@@ -113,13 +114,17 @@ function runPnpmCandidate(
 }
 
 /** Resolve the exact pnpm executable/group/bin that own this package. */
-export function resolveCurrentPnpmGlobalOwner(invoked = process.argv[1]): PnpmGlobalOwnerResult {
+export function resolveCurrentPnpmGlobalOwner(
+  invoked = process.argv[1],
+  deps: { commandPaths?: readonly string[]; spawn?: typeof spawnSync } = {},
+): PnpmGlobalOwnerResult {
+  const spawn = deps.spawn ?? spawnSync;
   return resolvePnpmGlobalOwner({
     packageName: PKG,
     packagePath: packageRoot(),
-    commandPaths: resolvePnpmCommands(),
+    commandPaths: deps.commandPaths ?? resolvePnpmCommands(),
     runningShimPath: runningPnpmShimPath(invoked),
-    runPnpm: runPnpmCandidate,
+    runPnpm: (commandPath, args, capture) => runPnpmCandidate(commandPath, args, capture, spawn),
   });
 }
 
@@ -150,7 +155,8 @@ function runOwnedPnpm(
     encoding: "utf8",
     timeout: 180_000,
     windowsHide: true,
-    env: unprivilegedOwnershipMutationEnvironment(target.env),
+    cwd: PNPM_READ_CWD,
+    env: pnpmReadEnvironment(unprivilegedOwnershipMutationEnvironment(target.env)),
     ...target.options,
   });
 }
@@ -277,12 +283,13 @@ export function latestVersion(
   tag: string,
   installer: Installer = detectInstall(),
   owner?: PnpmGlobalOwner,
+  spawn: typeof spawnSync = spawnSync,
 ): string | null {
   const resolvedOwner = installer === "pnpm" ? selectedPnpmOwner(owner) : undefined;
   if (installer === "pnpm" && !resolvedOwner) return null;
   const manager = registrySpawnTarget(installer, ["view", `${PKG}@${tag}`, "version"], resolvedOwner);
   if (!manager) return null;
-  const r = spawnSync(manager.bin, manager.args, {
+  const r = spawn(manager.bin, manager.args, {
     encoding: "utf8",
     timeout: 12000,
     windowsHide: true,
@@ -346,7 +353,10 @@ export function checkUpdatePackageIntegrity(
       encoding: "utf8",
       timeout: 12000,
       windowsHide: true,
-      env: unprivilegedOwnershipMutationEnvironment(target.env ?? process.env),
+      cwd: installer === "pnpm" ? PNPM_READ_CWD : undefined,
+      env: installer === "pnpm"
+        ? pnpmReadEnvironment(unprivilegedOwnershipMutationEnvironment(target.env ?? process.env))
+        : unprivilegedOwnershipMutationEnvironment(target.env ?? process.env),
       ...target.options,
     });
   });

@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { createRefreshScheduler, RETRY_BASE_MS, STALENESS_TICK_MS, type RefreshDeps } from "../../src/update/refresh-scheduler";
 import { latestVersionAsync, pnpmOwner, REGISTRY_DEADLINE_MS, REGISTRY_OUTPUT_LIMIT } from "../../src/update/async-check";
 import type { VersionCache } from "../../src/update/notify";
-import type { Channel, Installer } from "../../src/update/index";
-import { PNPM_READ_CWD, pnpmReadEnvironment } from "../../src/update/pnpm-read-policy";
+import { checkUpdatePackageIntegrity, latestVersion, resolveCurrentPnpmGlobalOwner, type Channel, type Installer } from "../../src/update/index";
+import { PNPM_READ_CWD, pnpmReadEnvironment } from "../../src/update/pnpm-read-policy.mjs";
 
 function fixture(installer: Installer = "npm", disabled = false, lookupFn?: RefreshDeps["lookup"]) {
   let now = 1_700_000_000_000;
@@ -285,7 +285,7 @@ test("pnpm read probes ignore caller project hooks from a trusted directory", ()
   const input = { npm_config_ignore_pnpmfile: "false", NPM_CONFIG_IGNORE_PNPMFILE: "false", SECRET: "retained" };
   expect(pnpmReadEnvironment(input)).toEqual({ npm_config_ignore_pnpmfile: "true", SECRET: "retained" });
   expect(input.npm_config_ignore_pnpmfile).toBe("false");
-  expect(PNPM_READ_CWD).toBe(dirname(fileURLToPath(new URL("../../src/update/pnpm-read-policy.ts", import.meta.url))));
+  expect(PNPM_READ_CWD).toBe(dirname(fileURLToPath(new URL("../../src/update/pnpm-read-policy.mjs", import.meta.url))));
 });
 
 test("pnpm registry lookup applies project isolation to its child", async () => {
@@ -305,6 +305,73 @@ test("pnpm registry lookup applies project isolation to its child", async () => 
   expect(await result).toBe("2.7.44");
   expect(options?.cwd).toBe(PNPM_READ_CWD);
   expect((options?.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");
+});
+
+test("non-pnpm registry lookups keep the caller's working directory", async () => {
+  const child = fakeChild();
+  let options: Record<string, unknown> | undefined;
+  const result = latestVersionAsync("latest", "npm", {
+    ownerFn: async () => null,
+    spawnFn: ((_bin: string, _args: string[], observed: Record<string, unknown>) => {
+      options = observed;
+      queueMicrotask(() => { child.stdout.write("2.7.44\n"); child.emit("close", 0); });
+      return child;
+    }) as never,
+  });
+  expect(await result).toBe("2.7.44");
+  expect(options?.cwd).toBeUndefined();
+});
+
+const TEST_PNPM_OWNER = {
+  commandPath: "/trusted/pnpm", packagePath: "/pkg", globalDir: "/global",
+  globalRoot: "/global", globalBinDir: "/bin",
+};
+
+test("synchronous pnpm registry lookup applies project isolation", () => {
+  let options: Record<string, unknown> | undefined;
+  const version = latestVersion("latest", "pnpm", TEST_PNPM_OWNER, ((
+    _bin: string,
+    _args: string[],
+    observed: Record<string, unknown>,
+  ) => {
+    options = observed;
+    return { status: 0, stdout: "2.7.44\n", stderr: "", pid: 1, output: [], signal: null };
+  }) as never);
+  expect(version).toBe("2.7.44");
+  expect(options?.cwd).toBe(PNPM_READ_CWD);
+  expect((options?.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");
+});
+
+test("synchronous pnpm integrity probe applies project isolation", () => {
+  let options: Record<string, unknown> | undefined;
+  const result = checkUpdatePackageIntegrity("2.7.44", ((
+    _bin: string,
+    _args: string[],
+    observed: Record<string, unknown>,
+  ) => {
+    options = observed;
+    return { status: 0, stdout: "sha512-AbC123+/=\n", stderr: "", pid: 1, output: [], signal: null };
+  }) as never, "pnpm", TEST_PNPM_OWNER);
+  expect(result.ok).toBe(true);
+  expect(options?.cwd).toBe(PNPM_READ_CWD);
+  expect((options?.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");
+});
+
+test("synchronous pnpm owner discovery applies project isolation", () => {
+  const observed: Array<Record<string, unknown>> = [];
+  const result = resolveCurrentPnpmGlobalOwner("not-a-shim", {
+    commandPaths: ["/trusted/pnpm"],
+    spawn: ((_bin: string, _args: string[], options: Record<string, unknown>) => {
+      observed.push(options);
+      return { status: 1, stdout: "", stderr: "", pid: 1, output: [], signal: null };
+    }) as never,
+  });
+  expect(result.ok).toBe(false);
+  expect(observed.length).toBeGreaterThan(0);
+  for (const options of observed) {
+    expect(options.cwd).toBe(PNPM_READ_CWD);
+    expect((options.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");
+  }
 });
 
 const CAN_RUN_BUN_WORKER = ["darwin", "linux", "win32"].includes(process.platform)
