@@ -31,6 +31,7 @@ mock.module("../../src/server/adapter-resolve", () => ({ ...resolver,
   },
 }));
 const { handleResponses } = await import("../../src/server/responses");
+let requestLog: Parameters<typeof handleResponses>[2];
 let home: ReturnType<typeof createTempHome>;
 let release: (() => void) | undefined;
 beforeEach(async () => {
@@ -63,10 +64,11 @@ function run({
     stallTimeoutSec,
     providers: { devin: { adapter: "devin", authMode: "oauth", baseUrl: "https://server.codeium.com", models: ["swe-2"] } },
   } as OcxConfig;
+  requestLog = { model: "", provider: "", surface };
   return handleResponses(new Request("http://localhost/v1/responses", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "devin/swe-2", input: "answer", stream }),
-  }), config, { model: "", provider: "", surface }, { comboAttempt, abortSignal });
+  }), config, requestLog, { comboAttempt, abortSignal });
 }
 
 async function waitForPreflightResponse(pending: Promise<Response>, started: Promise<void>, resume: () => void) {
@@ -101,6 +103,13 @@ test.each([
     message: limit.message, type: "rate_limit_error", code: "rate_limit_exceeded",
   } });
   expect(calls).toBe(1);
+});
+
+test.each([true, false])("pre-output 429 preserves metered usage (stream=%s)", async stream => {
+  const usage = { inputTokens: 23, outputTokens: 5, totalTokens: 28 };
+  events = [{ ...limit, usage }];
+  expect((await run({ stream })).status).toBe(429);
+  expect(requestLog.usage).toEqual(usage);
 });
 
 test.each([false, true])("first text is replayed once and later errors stay SSE (failure=%s)", async failure => {
