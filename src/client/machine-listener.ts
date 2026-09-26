@@ -93,7 +93,11 @@ export function startMachineListener(
       const url = new URL(req.url);
       if (!machineRouteAllowed(url, req, relayEnabled, linkMode)) return json404(req);
       if (linkMode && linkRouteAllowed(url, req)) {
-        return relayLinkDataRequest(req, { tunnelPort: connection.link!.tunnelPort }, { fetchImpl: deps.fetchImpl });
+        return relayLinkDataRequest(req, {
+          tunnelPort: connection.link!.tunnelPort,
+          apiKeyId: connection.apiKeyId,
+          tokenFingerprint: connection.tokenFingerprint,
+        }, { fetchImpl: deps.fetchImpl });
       }
       if (url.pathname === "/healthz" && req.method === "GET") {
         return Response.json({ service: "opencodex", version: VERSION, role: "client", uptime: process.uptime(), pid: process.pid, port: server.port });

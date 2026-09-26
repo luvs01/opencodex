@@ -7,12 +7,14 @@ import {
 } from "../../link/store";
 import { linkStorePath } from "../../link/paths";
 import { linkRouteAllowed } from "../../link/routes";
+import { LINK_RELAY_AUTH_PATH, linkRelayProof } from "../../link/relay-auth";
 
 export const LINK_INGRESS_HOSTNAME = "opencodex-link.invalid";
 
 export interface LinkListenerStartContext<T> {
   dispatch: (req: Request, server: Server<T>) => Promise<Response>;
   maxRequestBodySize: number;
+  keyFingerprint: (apiKeyId: string) => string | undefined;
 }
 
 export interface LinkListenerDeps {
@@ -94,7 +96,20 @@ export function createLinkListenerLifecycle<T>(deps: LinkListenerDeps = {}): Lin
         hostname: "127.0.0.1",
         port: requestedPort,
         maxRequestBodySize: startContext.maxRequestBodySize,
-        fetch: (req: Request, server: Server<unknown>) => startContext!.dispatch(req, server as Server<T>),
+        fetch: (req: Request, server: Server<unknown>) => {
+          const url = new URL(req.url);
+          if (req.method === "GET" && url.pathname === LINK_RELAY_AUTH_PATH) {
+            const keyId = url.searchParams.get("key") ?? "";
+            const nonce = url.searchParams.get("nonce") ?? "";
+            const linked = readStoreForAdmission().links.some(link => link.apiKeyId === keyId);
+            const fingerprint = linked ? startContext!.keyFingerprint(keyId) : undefined;
+            const proof = fingerprint ? linkRelayProof(fingerprint, nonce) : null;
+            return proof
+              ? new Response(null, { status: 204, headers: { "X-OpenCodex-Link-Proof": proof } })
+              : Response.json({ error: "not_found" }, { status: 404 });
+          }
+          return startContext!.dispatch(req, server as Server<T>);
+        },
       } as Parameters<typeof Bun.serve>[0]);
     } catch (error) {
       reportFailure("bind", error, "bind");

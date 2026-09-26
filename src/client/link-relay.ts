@@ -10,9 +10,12 @@ import {
 } from "./hub-relay";
 import { linkRouteAllowed } from "../link/routes";
 import { isLinkPort } from "../link/ports";
+import { LINK_RELAY_AUTH_PATH, linkRelayChallenge, linkRelayProofMatches } from "../link/relay-auth";
 
 export interface LinkRelayTarget {
   tunnelPort: number;
+  apiKeyId: string;
+  tokenFingerprint: string;
 }
 
 export interface LinkRelayClock {
@@ -47,6 +50,21 @@ export function linkRelayDestination(url: URL, target: LinkRelayTarget): string 
     throw new RangeError("invalid link tunnel port");
   }
   return `http://127.0.0.1:${target.tunnelPort}${url.pathname}${url.search}`;
+}
+
+async function authenticateLinkRelayTarget(target: LinkRelayTarget, fetchImpl: typeof fetch): Promise<boolean> {
+  if (!target.apiKeyId.trim() || !/^[a-f0-9]{64}$/.test(target.tokenFingerprint)) return false;
+  const challenge = linkRelayChallenge(target.tokenFingerprint);
+  const url = new URL(`http://127.0.0.1:${target.tunnelPort}${LINK_RELAY_AUTH_PATH}`);
+  url.searchParams.set("key", target.apiKeyId);
+  url.searchParams.set("nonce", challenge.nonce);
+  try {
+    const response = await fetchImpl(url, { method: "GET", redirect: "manual" });
+    return response.status === 204
+      && linkRelayProofMatches(response.headers.get("x-opencodex-link-proof"), challenge.expectedProof);
+  } catch {
+    return false;
+  }
 }
 
 export function forwardLinkRequestHeaders(source: Headers): Headers {
@@ -175,6 +193,11 @@ export async function relayLinkDataRequest(
     return jsonError(431, "link relay request headers too large");
   }
 
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  if (!await authenticateLinkRelayTarget(target, fetchImpl)) {
+    return jsonError(503, "link tunnel unavailable", true);
+  }
+
   const relayAbort = new AbortController();
   const timeoutMs = typeof deps.timeoutMs === "number" && Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0
     ? Math.min(Math.floor(deps.timeoutMs), 120_000)
@@ -200,7 +223,7 @@ export async function relayLinkDataRequest(
       signal: relayAbort.signal,
       ...(body ? { body, duplex: "half" } : {}),
     };
-    upstream = await (deps.fetchImpl ?? fetch)(destination, init);
+    upstream = await fetchImpl(destination, init);
   } catch {
     cleanup();
     return jsonError(503, "link tunnel unavailable", true);

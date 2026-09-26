@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Server } from "bun";
 import { createLinkListenerLifecycle } from "../../src/server/index/link-listener";
 import { emptyLinkStore, type LinkStore } from "../../src/link/store";
+import { LINK_RELAY_AUTH_PATH, linkRelayChallenge } from "../../src/link/relay-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const LINK_ID = "link-key";
@@ -28,7 +29,11 @@ function store(listenerPort: number | null = null): LinkStore {
 }
 
 function context() {
-  return { maxRequestBodySize: 1024 * 1024, dispatch: async () => new Response("link-handler") };
+  return {
+    maxRequestBodySize: 1024 * 1024,
+    dispatch: async () => new Response("link-handler"),
+    keyFingerprint: (apiKeyId: string) => apiKeyId === LINK_ID ? "a".repeat(64) : undefined,
+  };
 }
 
 function wrappedServer(actual: Server<unknown>, stop: () => Promise<void>): Server<unknown> {
@@ -122,6 +127,13 @@ describe("hub-link listener lifecycle", () => {
     await Promise.all([first, second]);
     expect(bindCount).toBe(1);
     expect(lifecycle.status().state).toBe("listening");
+    const challenge = linkRelayChallenge("a".repeat(64));
+    const authUrl = new URL(LINK_RELAY_AUTH_PATH, servers[0]!.url);
+    authUrl.searchParams.set("key", LINK_ID);
+    authUrl.searchParams.set("nonce", challenge.nonce);
+    const authenticated = await fetch(authUrl);
+    expect(authenticated.status).toBe(204);
+    expect(authenticated.headers.get("x-opencodex-link-proof")).toBe(challenge.expectedProof);
   });
 
   test("does not rebind until a close has completed", async () => {

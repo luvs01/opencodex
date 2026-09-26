@@ -16,6 +16,7 @@ import { saveConfigPreservingClaudeCode } from "../../config/live-reconcile";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 export { LINK_INGRESS_HOSTNAME } from "./link-listener";
 import type { ServerIngress } from "./serve-options";
+import { serviceApiTokenFingerprint } from "../../lib/service-secrets";
 
 export interface OptionalListenerStartContext<T> {
   config: OcxConfig;
@@ -80,7 +81,14 @@ export function createOptionalListenerSet<T>(linkDeps: LinkListenerDeps = {}): O
     linkSupervisor: () => supervisor,
     start(ctx) {
       activeConfig = ctx.config;
-      linkListener.start({ dispatch: ctx.dispatch, maxRequestBodySize: ctx.maxRequestBodySize });
+      linkListener.start({
+        dispatch: ctx.dispatch,
+        maxRequestBodySize: ctx.maxRequestBodySize,
+        keyFingerprint: apiKeyId => {
+          const key = activeConfig?.apiKeys?.find(entry => entry.id === apiKeyId)?.key;
+          return key ? serviceApiTokenFingerprint(key) : undefined;
+        },
+      });
       unregisterSupervisorAdmission ??= linkListener.onAuthenticatedCatalog(apiKeyId => supervisor.notifyAuthenticatedRequest?.(apiKeyId));
       supervisor.start();
       supervisorStop = () => supervisor.stop();
