@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,7 @@ import type {
   NativeProfileRecoveryState,
 } from "../../src/codex/native-profile-store";
 import {
+  blockNativeMainRecovery,
   completeNativeMainRecovery,
   flushNativeMainStartupReleases,
   isNativeMainTrafficBlocked,
@@ -132,6 +133,98 @@ function startLifecycle(deps: NativeMainStartupGateDeps): NativeMainStartupLifec
 }
 
 describe("a released native-main startup entry cannot leave the process fenced", () => {
+  test("a release preserves a recovery fence published after startup", async () => {
+    const f = fabricatedHome("transaction-recovery-home");
+    const lifecycle = startLifecycle({ manager: f.manager, probeRecoveryState: () => "none", owner: OWNER });
+
+    expect(await within(lifecycle.settled, "startup convergence")).toEqual({
+      status: "ready",
+      homeId: f.homeId,
+    });
+    expect(blockNativeMainRecovery(f.homeId, "manual")).toBe(true);
+
+    await within(lifecycle.release(), "the lifecycle release");
+    expect(nativeMainStartupGateSnapshot()).toEqual({
+      status: "blocked",
+      homeId: f.homeId,
+      reason: "manual-recovery",
+    });
+    expect(isNativeMainTrafficBlocked()).toBe(true);
+  });
+
+  test("a release after a completed transaction recovery still opens the gate", async () => {
+    const f = fabricatedHome("completed-recovery-fence-home");
+    const recovery = barrier();
+    const recoveryEntered = barrier();
+    let recoveryState: NativeProfileRecoveryState = "journal";
+    const lifecycle = startLifecycle({
+      manager: f.manager,
+      probeRecoveryState: () => recoveryState,
+      beforeRecovery: async () => { recoveryEntered.open(); await recovery.promise; recoveryState = "none"; },
+      owner: OWNER,
+    });
+    let flight: Promise<void> | undefined;
+    try {
+      await within(recoveryEntered.promise, "the owned recovery phase to start");
+      // A profile transaction fences the home while startup convergence is still in flight,
+      // advancing the global epoch past the entry's own.
+      expect(blockNativeMainRecovery(f.homeId, "manual")).toBe(true);
+      // Completing it re-arms the pending entry: the gate content is again the startup
+      // generation's own recovery-pending snapshot, just under an epoch the entry predates.
+      expect(completeNativeMainRecovery(f.homeId)).toBe(true);
+      expect(nativeMainStartupGateSnapshot()).toEqual({
+        status: "blocked",
+        homeId: f.homeId,
+        reason: "recovery-pending",
+      });
+
+      flight = lifecycle.release();
+      expect(nativeMainStartupGateSnapshot()).toEqual({ status: "ready", homeId: null });
+      expect(isNativeMainTrafficBlocked()).toBe(false);
+
+      recovery.open();
+      await within(flight, "the release flight to settle");
+      expect(nativeMainStartupGateSnapshot()).toEqual({ status: "ready", homeId: null });
+      expect(isNativeMainTrafficBlocked()).toBe(false);
+    } finally {
+      recovery.open();
+      await within(flight ?? lifecycle.release(), "the release flight to settle");
+    }
+  });
+
+  test("a release orphans no sweep-published cleanup fence after a completed recovery", async () => {
+    const f = fabricatedHome("sweep-fence-home");
+    // Hard lock off: completeNativeMainRecovery takes the direct ready(homeId) path, which used
+    // to leave the live entry's provenance stale while its own stage sweep republished the fence.
+    writeFileSync(join(process.env.OPENCODEX_HOME!, "config.json"), JSON.stringify({ codexMainAccountHardLock: false }));
+    const lifecycle = startLifecycle({
+      manager: fabricatedManager(f.context, { sweepStages: async () => ({ plaintextMayRemain: true }) }),
+      probeRecoveryState: () => "none",
+      owner: OWNER,
+      stageSweepIntervalMs: 10,
+    });
+    // Convergence ends fenced: the sweep always finds plaintext residue.
+    expect(await within(lifecycle.settled, "startup convergence")).toMatchObject({ status: "blocked" });
+
+    // The transaction fence + completion advance the global epoch past the entry's provenance.
+    expect(blockNativeMainRecovery(f.homeId, "manual")).toBe(true);
+    expect(completeNativeMainRecovery(f.homeId)).toBe(true);
+    expect(nativeMainStartupGateSnapshot()).toEqual({ status: "ready", homeId: f.homeId });
+
+    // The entry's next scheduled sweep republishes its cleanup fence under that provenance.
+    const deadline = Date.now() + 5_000;
+    while (nativeMainStartupGateSnapshot().status !== "blocked" && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(nativeMainStartupGateSnapshot()).toEqual({
+      status: "blocked", homeId: f.homeId, reason: "stage-cleanup-required",
+    });
+
+    await within(lifecycle.release(), "the lifecycle release");
+    expect(nativeMainStartupGateSnapshot()).toEqual({ status: "ready", homeId: null });
+    expect(isNativeMainTrafficBlocked()).toBe(false);
+  });
+
   test("a release during recovery resets the gate and ignores the convergence that follows", async () => {
     const f = fabricatedHome("release-during-recovery-home");
     const recovery = barrier();
@@ -342,4 +435,3 @@ describe("a released native-main startup entry cannot leave the process fenced",
     }
   });
 });
-
