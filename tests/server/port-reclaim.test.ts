@@ -1,5 +1,15 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { reclaimListenPort, type ReclaimListenPortOptions } from "../../src/server/port-reclaim";
+import { createServer } from "node:net";
+import {
+  listenAddressServes,
+  normalizeListenAddress,
+  parseListenEntriesFromLsof,
+  parseListenEntriesFromNetstat,
+  parseListenEntriesFromSs,
+  reclaimListenPort,
+  scanListenPidsForAddress,
+  type ReclaimListenPortOptions,
+} from "../../src/server/port-reclaim";
 import {
   isBareIpv6Address,
   parseTcpQuadsForLocalPort,
@@ -38,6 +48,99 @@ describe("parseListenPidsFromNetstat", () => {
       "tcp        0      0 127.0.0.1:22            0.0.0.0:*               LISTEN      1/sshd",
     ].join("\n");
     expect(parseListenPidsFromNetstat(output, 10100)).toEqual([4242]);
+  });
+});
+
+describe("listen-entry parsers keep the bound address", () => {
+  test("netstat entries report each listener's local address", () => {
+    const output = [
+      "tcp        0      0 127.0.0.1:10100         0.0.0.0:*               LISTEN      4242/bun",
+      "tcp        0      0 127.0.0.2:10100         0.0.0.0:*               LISTEN      7777/foreign",
+      "tcp        0      0 127.0.0.1:22            0.0.0.0:*               LISTEN      1/sshd",
+    ].join("\n");
+    expect(parseListenEntriesFromNetstat(output, 10100)).toEqual([
+      { pid: 4242, address: "127.0.0.1" },
+      { pid: 7777, address: "127.0.0.2" },
+    ]);
+  });
+
+  test("ss -Hltnp rows report address and pid; unattributed rows are dropped", () => {
+    const output = [
+      "LISTEN 0      128        127.0.0.1:10100       0.0.0.0:*    users:((\"bun\",pid=4242,fd=20))",
+      "LISTEN 0      128        127.0.0.2:10100       0.0.0.0:*    users:((\"foreign\",pid=7777,fd=6))",
+      "LISTEN 0      128        127.0.0.1:10100       0.0.0.0:*",
+      "LISTEN 0      511                *:22              *:*    users:((\"sshd\",pid=1,fd=3))",
+    ].join("\n");
+    expect(parseListenEntriesFromSs(output, 10100)).toEqual([
+      { pid: 4242, address: "127.0.0.1" },
+      { pid: 7777, address: "127.0.0.2" },
+    ]);
+  });
+
+  test("lsof NAME column supplies the bound address", () => {
+    const output = [
+      "COMMAND  PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME",
+      "bun     4242 devin   20u  IPv4 0xdeadbeef      0t0  TCP 127.0.0.1:10100 (LISTEN)",
+      "other   7777 devin   21u  IPv4 0xdeadbeef      0t0  TCP 127.0.0.2:10100 (LISTEN)",
+    ].join("\n");
+    expect(parseListenEntriesFromLsof(output, 10100)).toEqual([
+      { pid: 4242, address: "127.0.0.1" },
+      { pid: 7777, address: "127.0.0.2" },
+    ]);
+  });
+
+  test("address matching treats wildcards as serving any bound address", () => {
+    expect(listenAddressServes("127.0.0.1", "127.0.0.1")).toBe(true);
+    expect(listenAddressServes("127.0.0.2", "127.0.0.1")).toBe(false);
+    expect(listenAddressServes("0.0.0.0", "127.0.0.1")).toBe(true);
+    expect(listenAddressServes("*", "127.0.0.1")).toBe(true);
+    expect(listenAddressServes("::", "127.0.0.1")).toBe(true);
+    expect(listenAddressServes("[::1]:443", "::1")).toBe(true);
+    expect(normalizeListenAddress("::ffff:127.0.0.1")).toBe("127.0.0.1");
+    expect(listenAddressServes("::ffff:127.0.0.1", "127.0.0.1")).toBe(true);
+  });
+});
+
+describe("scanListenPidsForAddress (real scanner)", () => {
+  test("finds this process on its own bound port and filters other addresses", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    try {
+      const address = server.address();
+      if (typeof address === "object" && address) {
+        const scan = scanListenPidsForAddress(address.port, "127.0.0.1");
+        // The default scanner is whatever the platform ships (netstat/lsof/ss); when none
+        // is installed the scan reports a probe failure rather than an empty list.
+        if (scan.ok) {
+          expect(scan.pids).toContain(process.pid);
+        }
+      }
+    } finally {
+      server.close();
+    }
+  });
+
+  test("a listener on another loopback address does not serve 127.0.0.1", async () => {
+    const server = createServer();
+    const bound = await new Promise<boolean>(resolve => {
+      server.once("error", () => resolve(false));
+      server.listen(0, "127.0.0.2", () => resolve(true));
+    });
+    if (!bound) return; // platform does not allow the second loopback address
+    try {
+      const address = server.address();
+      if (typeof address === "object" && address) {
+        const scan = scanListenPidsForAddress(address.port, "127.0.0.1");
+        if (scan.ok) expect(scan.pids).not.toContain(process.pid);
+        const wide = scanListenPidsForAddress(address.port, "0.0.0.0");
+        if (wide.ok) expect(wide.pids).toContain(process.pid);
+      }
+    } finally {
+      server.close();
+    }
   });
 });
 

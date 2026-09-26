@@ -276,6 +276,50 @@ describe("client initiated link join", () => {
     expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
   });
 
+  test("the readiness scan is scoped to the tunnel's loopback address", async () => {
+    const seenAddresses: Array<string | undefined> = [];
+    const order: string[] = [];
+    await joinHome(joinDeps({
+      runner: runnerFor([]),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => tunnelFor(order),
+      // Only sockets serving 127.0.0.1 count: the real scanner reports listeners on
+      // other loopback/interface addresses too, and the dep must scope them out.
+      scanListenPids: (_port, address) => {
+        seenAddresses.push(address);
+        return { ok: true, pids: [123] };
+      },
+      fetchImpl: challengedFetch(order),
+      connect: (async () => {}) as never,
+      scheduleRestart: () => {},
+    }), { alias: "home" });
+    expect(seenAddresses.length).toBeGreaterThan(0);
+    for (const address of seenAddresses) expect(address).toBe("127.0.0.1");
+  });
+
+  test("a port flip between the probe and the keyed request never receives the key", async () => {
+    const calls: string[][] = [];
+    let keyedFetches = 0;
+    let ticks = 0;
+    let scans = 0;
+    await expect(joinHome(joinDeps({
+      runner: runnerFor(calls),
+      now: () => (ticks++ === 0 ? 0 : 15_002 * ticks),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => ({ pid: 123, exited: new Promise<number>(() => {}), stop: async () => {} }),
+      // First scan names the tunnel; by the time the 401 arrives a squatter holds the port.
+      scanListenPids: () => ({ ok: true, pids: scans++ === 0 ? [123] : [999] }),
+      fetchImpl: async (_input, init) => {
+        if (new Headers(init?.headers).has("x-opencodex-api-key")) keyedFetches += 1;
+        return new Response(null, { status: 401 });
+      },
+    }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+    expect(keyedFetches).toBe(0);
+    expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
+  });
+
   test("a redirect on the readiness probe is never followed with the issued key", async () => {
     const calls: string[][] = [];
     let keyedFetches = 0;
