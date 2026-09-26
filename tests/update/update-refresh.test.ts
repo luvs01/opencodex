@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { createRefreshScheduler, RETRY_BASE_MS, STALENESS_TICK_MS, type RefreshDeps } from "../../src/update/refresh-scheduler";
 import { latestVersionAsync, pnpmOwner, REGISTRY_DEADLINE_MS, REGISTRY_OUTPUT_LIMIT } from "../../src/update/async-check";
 import type { VersionCache } from "../../src/update/notify";
 import type { Channel, Installer } from "../../src/update/index";
+import { PNPM_READ_CWD, pnpmReadEnvironment } from "../../src/update/pnpm-read-policy";
 
 function fixture(installer: Installer = "npm", disabled = false, lookupFn?: RefreshDeps["lookup"]) {
   let now = 1_700_000_000_000;
@@ -276,6 +279,32 @@ test("pnpm owner resolution failure is unavailable, not an unowned PATH lookup",
     spawnFn: (() => { spawned = true; throw new Error("unexpected child"); }) as never,
   })).toBeNull();
   expect(spawned).toBe(false);
+});
+
+test("pnpm read probes ignore caller project hooks from a trusted directory", () => {
+  const input = { npm_config_ignore_pnpmfile: "false", NPM_CONFIG_IGNORE_PNPMFILE: "false", SECRET: "retained" };
+  expect(pnpmReadEnvironment(input)).toEqual({ npm_config_ignore_pnpmfile: "true", SECRET: "retained" });
+  expect(input.npm_config_ignore_pnpmfile).toBe("false");
+  expect(PNPM_READ_CWD).toBe(dirname(fileURLToPath(new URL("../../src/update/pnpm-read-policy.ts", import.meta.url))));
+});
+
+test("pnpm registry lookup applies project isolation to its child", async () => {
+  const child = fakeChild();
+  let options: Record<string, unknown> | undefined;
+  const result = latestVersionAsync("latest", "pnpm", {
+    ownerFn: async () => ({
+      commandPath: "/trusted/pnpm", packagePath: "/pkg", globalDir: "/global",
+      globalRoot: "/global", globalBinDir: "/bin",
+    }),
+    spawnFn: ((_bin: string, _args: string[], observed: Record<string, unknown>) => {
+      options = observed;
+      queueMicrotask(() => { child.stdout.write("2.7.44\n"); child.emit("close", 0); });
+      return child;
+    }) as never,
+  });
+  expect(await result).toBe("2.7.44");
+  expect(options?.cwd).toBe(PNPM_READ_CWD);
+  expect((options?.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");
 });
 
 const CAN_RUN_BUN_WORKER = ["darwin", "linux", "win32"].includes(process.platform)

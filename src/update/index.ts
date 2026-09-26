@@ -40,6 +40,7 @@ import { handoffWindowsTrayForUpdate, planWindowsTrayUpdate } from "./tray-updat
 import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
 import { packageVersion } from "../lib/package-version";
 import { selfLaunchArgv } from "../lib/self-launch-argv";
+import { PNPM_READ_CWD, pnpmReadEnvironment } from "./pnpm-read-policy";
 
 /**
  * A `codex-history-backup-*.json` surviving a stop means the native-history restore was
@@ -105,7 +106,8 @@ function runPnpmCandidate(
     encoding: "utf8",
     timeout: 20_000,
     windowsHide: true,
-    env: unprivilegedOwnershipMutationEnvironment(process.env),
+    cwd: PNPM_READ_CWD,
+    env: pnpmReadEnvironment(unprivilegedOwnershipMutationEnvironment(process.env)),
     ...invocation.options,
   });
 }
@@ -284,7 +286,10 @@ export function latestVersion(
     encoding: "utf8",
     timeout: 12000,
     windowsHide: true,
-    env: unprivilegedOwnershipMutationEnvironment(manager.env ?? process.env),
+    cwd: installer === "pnpm" ? PNPM_READ_CWD : undefined,
+    env: installer === "pnpm"
+      ? pnpmReadEnvironment(unprivilegedOwnershipMutationEnvironment(manager.env ?? process.env))
+      : unprivilegedOwnershipMutationEnvironment(manager.env ?? process.env),
     ...manager.options,
   });
   return r.status === 0 && typeof r.stdout === "string" ? (r.stdout.trim() || null) : null;
