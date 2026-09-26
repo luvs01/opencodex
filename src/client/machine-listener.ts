@@ -95,6 +95,7 @@ export function startMachineListener(
       if (linkMode && linkRouteAllowed(url, req)) {
         return relayLinkDataRequest(req, {
           tunnelPort: connection.link!.tunnelPort,
+          linkId: connection.link!.linkId,
           apiKeyId: connection.apiKeyId,
           tokenFingerprint: connection.tokenFingerprint,
         }, { fetchImpl: deps.fetchImpl });

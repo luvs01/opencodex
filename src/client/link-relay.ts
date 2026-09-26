@@ -14,6 +14,7 @@ import { LINK_RELAY_AUTH_PATH, linkRelayChallenge, linkRelayProofMatches } from 
 
 export interface LinkRelayTarget {
   tunnelPort: number;
+  linkId: string;
   apiKeyId: string;
   tokenFingerprint: string;
 }
@@ -52,14 +53,21 @@ export function linkRelayDestination(url: URL, target: LinkRelayTarget): string 
   return `http://127.0.0.1:${target.tunnelPort}${url.pathname}${url.search}`;
 }
 
-async function authenticateLinkRelayTarget(target: LinkRelayTarget, fetchImpl: typeof fetch): Promise<boolean> {
-  if (!target.apiKeyId.trim() || !/^[a-f0-9]{64}$/.test(target.tokenFingerprint)) return false;
-  const challenge = linkRelayChallenge(target.tokenFingerprint);
+async function authenticateLinkRelayTarget(
+  target: LinkRelayTarget,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (!target.apiKeyId.trim() || !/^lnk_[0-9a-f]{16}$/.test(target.linkId)
+    || !/^[a-f0-9]{64}$/.test(target.tokenFingerprint)) return false;
+  const challenge = linkRelayChallenge(target.tokenFingerprint, target.linkId);
   const url = new URL(`http://127.0.0.1:${target.tunnelPort}${LINK_RELAY_AUTH_PATH}`);
   url.searchParams.set("key", target.apiKeyId);
+  url.searchParams.set("link", target.linkId);
   url.searchParams.set("nonce", challenge.nonce);
+  url.searchParams.set("proof", challenge.callerProof);
   try {
-    const response = await fetchImpl(url, { method: "GET", redirect: "manual" });
+    const response = await fetchImpl(url, { method: "GET", redirect: "manual", signal });
     return response.status === 204
       && linkRelayProofMatches(response.headers.get("x-opencodex-link-proof"), challenge.expectedProof);
   } catch {
@@ -194,10 +202,6 @@ export async function relayLinkDataRequest(
   }
 
   const fetchImpl = deps.fetchImpl ?? fetch;
-  if (!await authenticateLinkRelayTarget(target, fetchImpl)) {
-    return jsonError(503, "link tunnel unavailable", true);
-  }
-
   const relayAbort = new AbortController();
   const timeoutMs = typeof deps.timeoutMs === "number" && Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0
     ? Math.min(Math.floor(deps.timeoutMs), 120_000)
@@ -213,6 +217,11 @@ export async function relayLinkDataRequest(
   };
   if (req.signal.aborted) onClientAbort();
   else if (timeoutSignal.aborted) onTimeout();
+
+  if (!await authenticateLinkRelayTarget(target, fetchImpl, relayAbort.signal)) {
+    cleanup();
+    return jsonError(503, "link tunnel unavailable", true);
+  }
 
   let upstream: Response;
   try {

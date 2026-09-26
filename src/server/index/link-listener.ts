@@ -7,7 +7,7 @@ import {
 } from "../../link/store";
 import { linkStorePath } from "../../link/paths";
 import { linkRouteAllowed } from "../../link/routes";
-import { LINK_RELAY_AUTH_PATH, linkRelayProof } from "../../link/relay-auth";
+import { LINK_RELAY_AUTH_PATH, linkRelayCallerProof, linkRelayProof, linkRelayProofMatches } from "../../link/relay-auth";
 
 export const LINK_INGRESS_HOSTNAME = "opencodex-link.invalid";
 
@@ -100,10 +100,15 @@ export function createLinkListenerLifecycle<T>(deps: LinkListenerDeps = {}): Lin
           const url = new URL(req.url);
           if (req.method === "GET" && url.pathname === LINK_RELAY_AUTH_PATH) {
             const keyId = url.searchParams.get("key") ?? "";
+            const linkId = url.searchParams.get("link") ?? "";
             const nonce = url.searchParams.get("nonce") ?? "";
-            const linked = readStoreForAdmission().links.some(link => link.apiKeyId === keyId);
+            const caller = url.searchParams.get("proof") ?? "";
+            const linked = readStoreForAdmission().links
+              .some(link => link.id === linkId && link.apiKeyId === keyId);
             const fingerprint = linked ? startContext!.keyFingerprint(keyId) : undefined;
-            const proof = fingerprint ? linkRelayProof(fingerprint, nonce) : null;
+            const expectedCaller = fingerprint ? linkRelayCallerProof(fingerprint, linkId, nonce) : null;
+            const verified = expectedCaller !== null && linkRelayProofMatches(caller, expectedCaller);
+            const proof = verified ? linkRelayProof(fingerprint!, linkId, nonce) : null;
             return proof
               ? new Response(null, { status: 204, headers: { "X-OpenCodex-Link-Proof": proof } })
               : Response.json({ error: "not_found" }, { status: 404 });

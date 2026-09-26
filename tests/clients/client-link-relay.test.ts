@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
-import { LINK_RELAY_AUTH_PATH, linkRelayProof } from "../../src/link/relay-auth";
+import { LINK_RELAY_AUTH_PATH, linkRelayCallerProof, linkRelayProof, linkRelayProofMatches } from "../../src/link/relay-auth";
 import {
   forwardLinkRequestHeaders,
   LINK_RELAY_SSE_IDLE_TIMEOUT_MS,
@@ -18,7 +18,8 @@ import { startMachineListener } from "../../src/client/machine-listener";
 import type { OcxClientConnectionConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const target = { tunnelPort: 12000, apiKeyId: "ocx_data_fixture", tokenFingerprint: "b".repeat(64) };
+const LINK_ID = `lnk_${"a".repeat(16)}`;
+const target = { tunnelPort: 12000, linkId: LINK_ID, apiKeyId: "ocx_data_fixture", tokenFingerprint: "b".repeat(64) };
 let servers: Server<unknown>[] = [];
 let root = "";
 let previousHome: string | undefined;
@@ -29,7 +30,7 @@ function linkConnection(tunnelPort: number): OcxClientConnectionConfig {
     managementUrl: `http://127.0.0.1:${tunnelPort}`,
     managementTransport: "direct",
     transport: "link",
-    link: { tunnelPort, linkId: `lnk_${"a".repeat(16)}` },
+    link: { tunnelPort, linkId: LINK_ID },
     selectedClients: ["codex"],
     tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
     apiKeyId: "ocx_data_fixture",
@@ -48,7 +49,13 @@ function authenticatedFetch(handler: typeof fetch): typeof fetch {
   return (async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.pathname === LINK_RELAY_AUTH_PATH) {
-      const proof = linkRelayProof(target.tokenFingerprint, url.searchParams.get("nonce") ?? "");
+      const linkId = url.searchParams.get("link") ?? "";
+      const nonce = url.searchParams.get("nonce") ?? "";
+      const expectedCaller = linkRelayCallerProof(target.tokenFingerprint, linkId, nonce);
+      if (!expectedCaller || !linkRelayProofMatches(url.searchParams.get("proof"), expectedCaller)) {
+        return Response.json({ error: "not_found" }, { status: 404 });
+      }
+      const proof = linkRelayProof(target.tokenFingerprint, linkId, nonce);
       return new Response(null, { status: 204, headers: { "X-OpenCodex-Link-Proof": proof! } });
     }
     return handler(input, init);
@@ -137,6 +144,26 @@ describe("client link HTTP relay", () => {
     expect(body).not.toContain("private");
   });
 
+  test("a stalled authentication handshake aborts on caller disconnect and the relay deadline", async () => {
+    const hangingAuth = (async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const signal = init!.signal!;
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })) as typeof fetch;
+
+    const caller = new AbortController();
+    let authSignal: AbortSignal | undefined;
+    const trackingAuth = (async (input, init) => { authSignal = init?.signal ?? undefined; return hangingAuth(input, init); }) as typeof fetch;
+    const pending = relayLinkDataRequest(relayRequest({ method: "POST", signal: caller.signal }), target, { fetchImpl: trackingAuth });
+    await Bun.sleep(0);
+    caller.abort();
+    expect((await pending).status).toBe(503);
+    expect(authSignal?.aborted).toBe(true);
+
+    const timedOut = relayLinkDataRequest(relayRequest({ method: "POST" }), target, { fetchImpl: hangingAuth, timeoutMs: 25 });
+    expect((await timedOut).status).toBe(503);
+  });
+
   test("applies hub response caps to non-SSE responses", async () => {
     const response = await relayLinkDataRequest(relayRequest({ method: "POST" }), target, {
       fetchImpl: authenticatedFetch((async () => new Response("too large", {
@@ -205,7 +232,13 @@ describe("client link HTTP relay", () => {
       async fetch(req) {
         const url = new URL(req.url);
         if (url.pathname === LINK_RELAY_AUTH_PATH) {
-          const proof = linkRelayProof("b".repeat(64), url.searchParams.get("nonce") ?? "");
+          const linkId = url.searchParams.get("link") ?? "";
+          const nonce = url.searchParams.get("nonce") ?? "";
+          const expectedCaller = linkRelayCallerProof("b".repeat(64), linkId, nonce);
+          if (!expectedCaller || !linkRelayProofMatches(url.searchParams.get("proof"), expectedCaller)) {
+            return Response.json({ error: "not_found" }, { status: 404 });
+          }
+          const proof = linkRelayProof("b".repeat(64), linkId, nonce);
           return new Response(null, { status: 204, headers: { "X-OpenCodex-Link-Proof": proof! } });
         }
         received = {

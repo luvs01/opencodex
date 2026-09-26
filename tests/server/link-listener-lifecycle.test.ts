@@ -127,13 +127,25 @@ describe("hub-link listener lifecycle", () => {
     await Promise.all([first, second]);
     expect(bindCount).toBe(1);
     expect(lifecycle.status().state).toBe("listening");
-    const challenge = linkRelayChallenge("a".repeat(64));
+    const challenge = linkRelayChallenge("a".repeat(64), "lnk_0123456789abcdef");
     const authUrl = new URL(LINK_RELAY_AUTH_PATH, servers[0]!.url);
     authUrl.searchParams.set("key", LINK_ID);
+    authUrl.searchParams.set("link", "lnk_0123456789abcdef");
     authUrl.searchParams.set("nonce", challenge.nonce);
+    authUrl.searchParams.set("proof", challenge.callerProof);
     const authenticated = await fetch(authUrl);
     expect(authenticated.status).toBe(204);
     expect(authenticated.headers.get("x-opencodex-link-proof")).toBe(challenge.expectedProof);
+    // The endpoint is not an oracle: it answers only callers that already hold the link's
+    // fingerprint, and only for the exact link record that key is bound to.
+    authUrl.searchParams.set("proof", "f".repeat(64));
+    expect((await fetch(authUrl)).status).toBe(404);
+    authUrl.searchParams.set("proof", challenge.callerProof);
+    authUrl.searchParams.set("link", "lnk_fedcba9876543210");
+    expect((await fetch(authUrl)).status).toBe(404);
+    authUrl.searchParams.set("link", "lnk_0123456789abcdef");
+    authUrl.searchParams.set("key", "unrelated-key");
+    expect((await fetch(authUrl)).status).toBe(404);
   });
 
   test("does not rebind until a close has completed", async () => {
