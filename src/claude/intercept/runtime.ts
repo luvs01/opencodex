@@ -201,13 +201,13 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
         // Capture the published bytes before ensurePickerCa replaces them: the untrust step below
         // must remove trust for the *outgoing* certificate, so it needs the old file contents.
         let publishedPem: string | undefined;
+        let publishedSha1: string | undefined;
         try {
           publishedPem = readFileSync(oldCaPath, "utf8");
-        } catch { /* unreadable: nothing identifiable to remove */ }
-        const publishedSha1 = publishedPem === undefined ? undefined
-          : pickerCaFingerprints(publishedPem).sha1;
+          publishedSha1 = pickerCaFingerprints(publishedPem).sha1;
+        } catch { /* unreadable or malformed: nothing identifiable to remove */ }
         const nextSha1 = pickerCaFingerprints(ensurePickerCa(configDir).certPem).sha1;
-        if (publishedPem !== undefined && publishedSha1 !== nextSha1) {
+        if (publishedPem !== undefined && publishedSha1 !== undefined && publishedSha1 !== nextSha1) {
           const { untrustPickerCa } = await import("./picker-trust");
           try {
             // remove-trusted-cert takes the certificate file; ca.pem now holds the replacement,
@@ -216,7 +216,7 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
             try {
               const outgoing = join(privateDir, "ca.pem");
               writeFileSync(outgoing, publishedPem, { mode: 0o600 });
-              const dropped = await untrustPickerCa(outgoing, publishedSha1!, options.pickerSecurity, options.pickerPlatform);
+              const dropped = await untrustPickerCa(outgoing, publishedSha1, options.pickerSecurity, options.pickerPlatform);
               pickerBlocked = !dropped.ok;
             } finally {
               rmSync(privateDir, { recursive: true, force: true });

@@ -462,6 +462,41 @@ describe("startClaudeIntercept wiring", () => {
     expect(getClaudePickerRuntime()).toBeNull();
   });
 
+  test("a malformed published certificate is unidentifiable, so startup still arms", async () => {
+    const port = await freePortPair();
+    // Damaged write: the file exists but is not a certificate. Nothing can be identified for
+    // removal, so startup must keep the intercept pair and picker running rather than fail.
+    ensurePickerCa(root);
+    writeFileSync(pickerCaCertPath(root), "not a certificate\n");
+    const trust = keychain({ trusted: false });
+    const fake = {
+      selectTunnel: () => null,
+      start: async () => {},
+      stop: async () => {},
+    } as unknown as PickerRuntime;
+    const handle = await startClaudeIntercept({
+      config: config({ claudeCode: { intercept: { port } } }),
+      publicPort: 10100,
+      configDir: root,
+      dispatch: async () => new Response("unused"),
+      loadPickerRoutes: async () => ({ nativeSlugs: [], routedModels: [] }),
+      createPicker: () => fake,
+      pickerSecurity: trust.run,
+      pickerPlatform: "darwin",
+    });
+    try {
+      expect(handle).not.toBeNull();
+      expect(getClaudePickerRuntime()).toBe(fake);
+      expect(await connectStatusLine(port, "api.anthropic.com")).toContain("200");
+      const names = trust.calls.map(call => call[0]);
+      expect(names).not.toContain("remove-trusted-cert");
+      expect(names).not.toContain("delete-certificate");
+    } finally {
+      await handle?.stop();
+    }
+    expect(getClaudePickerRuntime()).toBeNull();
+  });
+
   test("a failed rotation untrust refuses the picker but keeps the intercept pair serving", async () => {
     const port = await freePortPair();
     const stateDir = pickerStateDir(root);
