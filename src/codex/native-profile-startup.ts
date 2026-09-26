@@ -416,10 +416,15 @@ export function startNativeMainStartupLifecycle(
     //
     // Reset only a snapshot published by this startup generation. A profile transaction can
     // independently replace it with a same-home recovery fence, which must survive this release.
+    // The epoch provenance misses one case: that fence advances the global epoch while this
+    // generation's convergence is still in flight, and `completeNativeMainRecovery` then rebinds
+    // the shared `settled` to this entry's own pending chain without re-stamping either epoch.
+    // The pending snapshot is again this generation's own, so `settled` identity proves it too.
     // Do this synchronously and before the first await: a NEW entry created for the same home
     // afterwards re-arms its own gate and cannot be clobbered by this release. The epoch bump
     // retires any in-flight convergence write from the released generation.
-    if (snapshot.homeId === homeId && epoch === releasedEpoch && !startupEntries.has(homeId)) {
+    if (snapshot.homeId === homeId && !startupEntries.has(homeId)
+      && (epoch === releasedEpoch || settled === entry!.settled)) {
       epoch += 1;
       snapshot = ready(null);
       settled = Promise.resolve(snapshot);

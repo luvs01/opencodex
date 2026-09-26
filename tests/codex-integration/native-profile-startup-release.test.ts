@@ -152,6 +152,46 @@ describe("a released native-main startup entry cannot leave the process fenced",
     expect(isNativeMainTrafficBlocked()).toBe(true);
   });
 
+  test("a release after a completed transaction recovery still opens the gate", async () => {
+    const f = fabricatedHome("completed-recovery-fence-home");
+    const recovery = barrier();
+    const recoveryEntered = barrier();
+    let recoveryState: NativeProfileRecoveryState = "journal";
+    const lifecycle = startLifecycle({
+      manager: f.manager,
+      probeRecoveryState: () => recoveryState,
+      beforeRecovery: async () => { recoveryEntered.open(); await recovery.promise; recoveryState = "none"; },
+      owner: OWNER,
+    });
+    let flight: Promise<void> | undefined;
+    try {
+      await within(recoveryEntered.promise, "the owned recovery phase to start");
+      // A profile transaction fences the home while startup convergence is still in flight,
+      // advancing the global epoch past the entry's own.
+      expect(blockNativeMainRecovery(f.homeId, "manual")).toBe(true);
+      // Completing it re-arms the pending entry: the gate content is again the startup
+      // generation's own recovery-pending snapshot, just under an epoch the entry predates.
+      expect(completeNativeMainRecovery(f.homeId)).toBe(true);
+      expect(nativeMainStartupGateSnapshot()).toEqual({
+        status: "blocked",
+        homeId: f.homeId,
+        reason: "recovery-pending",
+      });
+
+      flight = lifecycle.release();
+      expect(nativeMainStartupGateSnapshot()).toEqual({ status: "ready", homeId: null });
+      expect(isNativeMainTrafficBlocked()).toBe(false);
+
+      recovery.open();
+      await within(flight, "the release flight to settle");
+      expect(nativeMainStartupGateSnapshot()).toEqual({ status: "ready", homeId: null });
+      expect(isNativeMainTrafficBlocked()).toBe(false);
+    } finally {
+      recovery.open();
+      await within(flight ?? lifecycle.release(), "the release flight to settle");
+    }
+  });
+
   test("a release during recovery resets the gate and ignores the convergence that follows", async () => {
     const f = fabricatedHome("release-during-recovery-home");
     const recovery = barrier();
