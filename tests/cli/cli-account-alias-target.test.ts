@@ -186,6 +186,20 @@ describe("ocx account: alias and auto as account arguments", () => {
       .toEqual({ id: "auto", paused: true });
   });
 
+  test("an account named auto pins through use while clear still restores automatic selection", async () => {
+    const h = harness();
+    h.accounts.push({ id: "auto", plan: "pro", quota: null });
+
+    const pinned = await h.run(["use", "openai", "auto"]);
+    expect(pinned.code).toBe(0);
+    expect(h.writes().at(-1)?.body).toEqual({ accountId: "auto" });
+
+    const cleared = await h.run(["clear", "openai"]);
+    expect(cleared.code).toBe(0);
+    expect(h.writes().at(-1)?.body).toEqual({ accountId: null });
+    expect(cleared.stdout).toContain("automatic account selection");
+  });
+
   test("missing and ambiguous aliases keep distinct errors before any write", async () => {
     const h = harness();
     h.accounts.push(

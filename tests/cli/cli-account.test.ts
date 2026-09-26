@@ -809,29 +809,6 @@ describe("ocx account CLI (issue #180 matrix)", () => {
     expect(put?.body).toEqual({ accountId: "__main__" });
   });
 
-  test("an account named auto pins through use while clear still restores automatic selection", async () => {
-    codexAccounts = [...codexAccounts, { id: "auto", email: "a***@example.test", quota: null }];
-
-    const pinned = await run(["use", "openai", "auto"]);
-    const pinPut = requests.findLast(request =>
-      request.method === "PUT" && request.path === "/api/codex-auth/active"
-    );
-
-    expect(pinned.code).toBe(0);
-    expect(pinPut?.body).toEqual({ accountId: "auto" });
-    expect(activeCodexAccountId).toBe("auto");
-
-    const cleared = await run(["clear", "openai"]);
-    const clearPut = requests.findLast(request =>
-      request.method === "PUT" && request.path === "/api/codex-auth/active"
-    );
-
-    expect(cleared.code).toBe(0);
-    expect(clearPut?.body).toEqual({ accountId: null });
-    expect(activeCodexAccountId).toBeNull();
-    expect(cleared.stdout).toContain("automatic account selection");
-  });
-
   test("8: an unknown provider exits one and stderr names candidates", async () => {
     const result = await run(["use", "nosuch", "x"]);
 
