@@ -415,19 +415,22 @@ interrupted package update removed either file, it logs one `installation is inc
 stops instead of retrying the same missing executable every five seconds. Reinstall opencodex, then
 run `ocx service repair` to refresh the task with the restored package paths.
 
-On macOS and Linux, the launchd plist and the systemd unit invoke the first regular, executable
-`ocx` file found on `PATH` at install time rather than the Bun and CLI paths inside the installed
-package tree. Version managers such as
-**mise** and **asdf** install into a versioned directory and delete the old one on upgrade, which
-used to leave the service definition pointing at files that no longer existed — systemd then
-restart-looped while still reporting the service as installed, and launchd kept the old build serving
-until it was restarted by hand. A shim path survives the upgrade, so the definition keeps resolving. Source checkouts without an `ocx` launcher keep the previous direct Bun + CLI form. A
-trusted `OPENCODEX_BUN_PATH` selected before Bun starts is preserved through the shim; package-local
-bundled Bun paths are deliberately rediscovered after upgrades instead of being pinned in the unit.
+On Linux, the systemd unit invokes the first regular, executable `ocx` file found on `PATH` at
+install time rather than the Bun and CLI paths inside the installed package tree. Version managers
+such as **mise** and **asdf** install into a versioned directory and delete the old one on upgrade;
+their stable shim keeps the unit resolving. Source checkouts without an `ocx` launcher keep the
+direct Bun + CLI form. A trusted `OPENCODEX_BUN_PATH` selected before Bun starts is preserved
+through the shim; package-local bundled Bun paths are rediscovered after upgrades.
+
+On macOS, launchd instead uses the package-local Bun and CLI paths selected during install or
+repair. This prevents a mutable PATH shim from receiving the service API token and configured proxy
+environment on a later restart. After upgrading a version-manager installation, run
+`ocx service repair` to refresh those paths before restarting the service.
 
 Definitions installed before this change still carry the old versioned paths and cannot migrate
 themselves — once the old executable is deleted, no opencodex code runs to fix it. Run
-`ocx service repair` once after upgrading; after that, each service start follows the launcher.
+`ocx service repair` once after upgrading. Linux service starts then follow the launcher; macOS
+repair writes the new package paths into the launchd definition.
 An already-running proxy is not replaced by an external upgrade: when the installed CLI is newer
 than the running proxy, run `ocx service restart` so the new build serves. On macOS, `repair` is not
 enough there: the definition did not change, and a repair that changes nothing reloads nothing.
@@ -582,6 +585,9 @@ deleted as an unsafe best-effort rollback.
 
 Wrap a script-based `codex` launcher on PATH with a lightweight autostart script. Real `codex.exe`
 targets are left untouched to avoid breaking exact executable invocations.
+If installation is refused or the resulting shim is unhealthy, the command exits nonzero and
+the dashboard reports the failure reason. A healthy existing shim still counts as success.
+For Windows installations that expose only `codex.exe`, use `ocx service install` for autostart.
 
 Before an install or repair is committed, OpenCodex runs the saved launcher with `--version` while
 service startup is bypassed. It refuses the change and rolls back when the launcher resolves
@@ -684,6 +690,7 @@ proxy controls. `start` and `stop` control the icon only; use its menu to contro
 `--no-start` applies to `install` and installs the tray without launching it immediately.
 Deprecated: the OpenCodex desktop app provides the tray on Windows, macOS, and Linux; `ocx tray`
 remains for installs without the desktop app.
+When a newer package version is known, the tray adds a blue dot to its online, warning, or offline icon and shows **Update available**. The tray checks its local cached badge about once a minute; stale or unavailable results remove the dot. The menu item opens the dashboard, where you can start the package update. It does not install automatically.
 
 ## Dashboard
 
@@ -703,6 +710,8 @@ package registry or install an update.
 ### `ocx update [--tag latest|preview]`
 
 When OpenCodex is installed through mise, this command exits unsuccessfully before stopping the proxy or changing package files and shows `mise upgrade <tool>`, using the verified local mise alias. Update checks remain available and report the installation as externally managed. An unreadable or inconsistent mise ownership record fails closed without guessing a tool name, and `--tag preview` never changes mise's configured selection.
+
+On Linux, a background service whose recorded launcher is mise's package launcher (`<tool>/latest/node_modules/.bin/ocx`, not a mise shim) follows `mise upgrade` by itself: within about ten seconds of the new version settling, it drains active requests and restarts onto it, and it recovers the same way if mise later prunes the version it was running. On macOS, for a service installed through a mise shim, and for a foreground proxy, restart it yourself after upgrading (on macOS, `ocx service repair` first).
 
 Self-update opencodex from npm. Stable installs use `@latest`; preview installs stay on `@preview`
 unless you pass `--tag latest|preview`. It detects a source checkout and tells you to
