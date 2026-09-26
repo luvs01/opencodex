@@ -79,6 +79,14 @@ provider-wide fallback. Exact model output limits precede the provider default o
   native rows from the output without rewriting the pristine backup or unrelated snapshots;
 - invalidates `$CODEX_HOME/models_cache.json` when model visibility changes.
 
+Per-catalog hashed backups are recorded only after `src/codex/catalog/parsing.ts` writes or `src/codex/internal/catalog-writer.ts` publishes a new one;
+preserving an existing file never registers it, even when its deterministic name or bytes match. Retained sync initializes metadata in an empty
+root before publication without claiming the hashed path, and publication attempts to record ownership before temporary-file cleanup, whose errors stay visible;
+a root with missing or invalid ownership metadata leaves the new backup unregistered, so uninstall reports it as a residual.
+Recorded paths keep their ownership; unrecorded pre-ledger backups remain residuals (after stopping OpenCodex and any needed restore, review and
+archive those exact paths, then remove only confirmed obsolete backups, never by glob). Legacy fixed-name manifest entries are not migrated by
+this rule, and uninstall keeps the [manifest validation and residual reporting contract](config.md#restore).
+
 Cache invalidation reports an unchanged derived cache separately from a failed rewrite. `ocx sync-cache` treats identical bytes as a successful no-op, preserving the cache mtime and avoiding a needless app-server restart; malformed catalogs and write failures remain errors.
 
 `src/codex/catalog/model-visibility.ts` also excludes models owned by disabled providers, including custom rows. `src/codex/catalog/routed-gather.ts` does not inherit provider configuration into custom rows while that provider is disabled.
@@ -150,12 +158,12 @@ before registration. Covered by `tests/codex-integration/configured-native-model
 Retirement is a catalog/evidence policy, not a universal request denylist. Manually supplied
 model ids still follow generic routing. User-selected config and historical usage remain stored.
 
-Account-gated native ids are a stricter subset. Their authenticated ChatGPT `/models` roster is
-cached per credential generation with a bounded timeout. A bare gated row is emitted only when at
-least one confirmed eligible account reports it; a selector-qualified row is emitted only when the
-mapped account reports it. A failed or malformed discovery is not positive evidence and therefore
-hides the gated row until a later refresh. The same snapshot gates Pool selection, so the catalog
-and runtime cannot disagree by advertising through one account and dispatching through another.
+Account-gated native ids use authenticated ChatGPT `/models` rosters cached per credential generation with a bounded timeout.
+A bare gated row requires a confirmed eligible account; a selector-qualified row requires its mapped account. Failed discovery
+grants neither. The same snapshot gates Pool selection, so catalog and runtime use consistent account evidence.
+The roster's per-model `available_access_programs` is projected separately: bare native rows use only confirmed main-account
+metadata, and selector-qualified rows use only their mapped account. An object requires a valid `cyber` string array; malformed values under other program keys are omitted without losing that grant. Explicit `null` stays null; omission stays omitted.
+Failed discovery or credential replacement removes stale access-program metadata. It changes presentation, not routing grants.
 
 `client_version` arrives on the inbound request and is part of that cache identity, so
 `src/codex/model-entitlements.ts` bounds the work as well as the state: stored versions per account, concurrent

@@ -46,6 +46,7 @@ export interface StructuredToolCallReference {
   names: ReadonlySet<string>;
   argumentsText: string;
   freeformTool?: FreeformToolIdentity;
+  recoveredParameterWrapper?: boolean;
 }
 
 const BLOCK_HEADER = /<tool_call>\s*<function=([^>\r\n]+)>/y;
@@ -193,19 +194,68 @@ function contextAfter(text: string, context: TextContext): TextContext {
 }
 
 /**
+ * A deferred header/fence can itself be long. While its unresolved portion only grows, a
+ * chunk-local check suffices; the first resolving character goes back through the full splitter.
+ * Each unbounded phase is scanned once on entry and once on exit, preserving its Markdown rules.
+ */
+function deferredContinuationBreak(text: string, context: TextContext): RegExp | undefined {
+  if (text.startsWith(OPEN_TAG)) {
+    if (/^<tool_call>\s*$/.test(text)) return /\S/;
+    if (/^<tool_call>\s*<function=[^>\r\n]*$/.test(text)) return /[>\r\n]/;
+  }
+  if (!context.inlineTicks && context.lineStart) {
+    const fence = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(text);
+    if (fence) {
+      if (!context.fence) return /\n/;
+      // Closing-fence ticks may grow only before its optional whitespace suffix.
+      if (!fence[2]) return fence[1]![0] === "`" ? /[^`]/ : /[^~]/;
+      return /[^ \t\r]/;
+    }
+  }
+  if (/^`+$/.test(text)) return /[^`]/;
+  return undefined;
+}
+
+/**
  * Holds possible duplicate text within the shared translator budget until the dispatch outcome is
  * known. While a block candidate is open, any other event (reasoning) is queued at its position in
  * the held text rather than overtaking it or forcing the block out early, and `drain` restores the
  * original order.
  */
 export class SerializedToolCallContentBuffer {
+  releasedAnswerText = false;
   private text = "";
   private bytes = 0;
   private hasOpenTag = false;
+  private continuationBreak: RegExp | undefined;
+  private delimiterSuffix = "";
+  private sawCloser = false;
+  private openAfterCloser = false;
+  private trailingProseChars = 0;
   private context: TextContext = { fence: null, lineStart: true };
   private queued: { offset: number; event: AdapterEvent }[] = [];
 
   constructor(private readonly budget: TranslatorBudget) {}
+
+  /** Remembers visible text released before a later structured call can be reconciled. */
+  private observeText(events: AdapterEvent[]): AdapterEvent[] {
+    if (events.some(event => event.type === "text_delta" && event.text.trim() !== "")) this.releasedAnswerText = true;
+    return events;
+  }
+
+  /** Measures an append exactly even when the runtime prices isolated UTF-16 surrogates differently. */
+  private appendedByteLength(delta: string): number {
+    let bytes = Buffer.byteLength(delta);
+    if (this.text.length === 0 || delta.length === 0) return bytes;
+    const tail = this.text[this.text.length - 1]!;
+    const head = delta[0]!;
+    const tailCode = tail.charCodeAt(0);
+    const headCode = head.charCodeAt(0);
+    if (tailCode >= 0xd800 && tailCode <= 0xdbff && headCode >= 0xdc00 && headCode <= 0xdfff) {
+      bytes += Buffer.byteLength(tail + head) - Buffer.byteLength(tail) - Buffer.byteLength(head);
+    }
+    return bytes;
+  }
 
   /** Reserves the replacement before releasing the old text, preserving it if the budget rejects growth. */
   private replace(next: string, hasOpenTag: boolean): void {
@@ -217,6 +267,12 @@ export class SerializedToolCallContentBuffer {
       this.text = next;
       this.bytes = nextBytes;
       this.hasOpenTag = hasOpenTag;
+      this.continuationBreak = undefined;
+      this.delimiterSuffix = "";
+      this.sawCloser = false;
+      this.openAfterCloser = false;
+      this.trailingProseChars = 0;
+      if (hasOpenTag) this.observeDelimiters(next);
     } catch (error) {
       reservation.release();
       throw error;
@@ -225,21 +281,41 @@ export class SerializedToolCallContentBuffer {
 
   /** Charges only the appended bytes, so holding an open block never needs twice its retained size. */
   private append(delta: string): void {
-    const deltaBytes = Buffer.byteLength(delta);
+    const deltaBytes = this.appendedByteLength(delta);
     this.budget.reserveTransient(deltaBytes, { kind: "live_transient" }).commitRetained();
+    if (this.hasOpenTag) this.observeDelimiters(delta);
     this.text += delta;
     this.bytes += deltaBytes;
   }
 
+  /** Scan new text plus a fixed overlap, never the retained body (which may be a large rope). */
+  private observeDelimiters(delta: string): void {
+    const scan = this.delimiterSuffix + delta;
+    const closer = scan.lastIndexOf(CLOSE_TAG);
+    const afterCloser = closer + CLOSE_TAG.length;
+    if (closer >= 0) {
+      this.sawCloser = true;
+      this.openAfterCloser = false;
+      this.trailingProseChars = 0;
+    }
+    if (scan.lastIndexOf(OPEN_TAG) >= (closer >= 0 ? afterCloser : 0)) {
+      this.openAfterCloser = true;
+    }
+    const tail = closer >= 0 ? scan.slice(afterCloser) : delta;
+    if (this.sawCloser) this.trailingProseChars += tail.replace(/\s+/g, "").length;
+    this.delimiterSuffix = scan.slice(-(Math.max(OPEN_TAG.length, CLOSE_TAG.length) - 1));
+  }
+
   /** Returns immediately safe text and retains only the suffix that still needs reconciliation. */
   ingest(delta: string): string {
-    if (this.hasOpenTag) {
+    if (this.hasOpenTag || (this.continuationBreak && !this.continuationBreak.test(delta))) {
       this.append(delta);
       return "";
     }
     const split = splitAtPossibleSerializedToolCall(this.text + delta, this.context);
     this.replace(split.defer, split.hasOpenTag);
     this.context = split.context;
+    if (!split.hasOpenTag) this.continuationBreak = deferredContinuationBreak(split.defer, split.context);
     return split.emit;
   }
 
@@ -250,22 +326,22 @@ export class SerializedToolCallContentBuffer {
    * context. The size bound is checked before the delta is retained.
    */
   ingestStreaming(delta: string): AdapterEvent[] {
-    const deltaBytes = Buffer.byteLength(delta);
+    const deltaBytes = this.appendedByteLength(delta);
     if (this.hasOpenTag && this.bytes + deltaBytes > MAX_HELD_BYTES) {
       const released = this.drain([]);
       // A delta that alone passes the bound is delivered as text rather than retained.
-      if (deltaBytes > MAX_HELD_BYTES) {
+      if (Buffer.byteLength(delta) > MAX_HELD_BYTES) {
         this.context = contextAfter(delta, this.context);
-        return [...released, ...textEvents(delta)];
+        return this.observeText([...released, ...textEvents(delta)]);
       }
-      return [...released, ...textEvents(this.ingest(delta))];
+      return this.observeText([...released, ...textEvents(this.ingest(delta))]);
     }
     const text = this.ingest(delta);
     // Checked after ingest too: one delta can open a block and already carry more than a bound.
-    if (this.hasOpenTag && (this.bytes > MAX_HELD_BYTES || proseAfterClosedBlock(this.text) > MAX_TRAILING_CHARS)) {
-      return [...textEvents(text), ...this.drain([])];
+    if (this.hasOpenTag && (this.bytes > MAX_HELD_BYTES || (this.sawCloser && !this.openAfterCloser && this.trailingProseChars > MAX_TRAILING_CHARS))) {
+      return this.observeText([...textEvents(text), ...this.drain([])]);
     }
-    return textEvents(text);
+    return this.observeText(textEvents(text));
   }
 
   /** Exposes held text as evidence for narrowly repairing duplicated argument prefixes. */
@@ -318,7 +394,7 @@ export class SerializedToolCallContentBuffer {
     this.context = contextAfter(this.text, this.context);
     this.queued = [];
     this.replace("", false);
-    return out;
+    return this.observeText(out);
   }
 
   /** Text-only drain for callers that never queued an event. */
@@ -334,6 +410,7 @@ export class SerializedToolCallContentBuffer {
     this.text = "";
     this.bytes = 0;
     this.hasOpenTag = false;
+    this.continuationBreak = undefined;
     this.queued = [];
   }
 }
@@ -406,7 +483,10 @@ function duplicatedSerializedToolCallRanges(
     const body = freeformBody(call.body);
     return structuredCalls.some(structured => {
       const input = structured.names.has(call.name) ? inputFromArguments(structured.argumentsText, structured.freeformTool) : undefined;
-      return input !== undefined && freeformBody(input) === body;
+      if (input === undefined) return false;
+      const normalized = freeformBody(input);
+      return normalized === body || (structured.recoveredParameterWrapper === true
+        && body.startsWith("<parameter=") && normalized === freeformBody(body.slice("<parameter=".length)));
     });
   });
 }
@@ -509,12 +589,46 @@ export interface StructuredToolCallInput {
 export function reconcileStructuredToolCalls(
   calls: readonly StructuredToolCallInput[],
   serializedText: string,
+  recoverEmptyMiMoFreeformInput = false,
 ): StructuredToolCallReference[] {
-  const references = calls.map(call => {
+  const references: StructuredToolCallReference[] = calls.map(call => {
     const names = new Set([call.wireName, call.restoredName]);
     return { names, freeformTool: call.freeformTool, argumentsText: repairArgumentsDuplicatedBesideSerializedCall(call.argumentsText, names, serializedText) };
   });
+  if (recoverEmptyMiMoFreeformInput && calls.length === 1 && calls[0]!.freeformTool
+      && emptyObjectArguments(references[0]!.argumentsText)) {
+    // A standalone MiMo block and one empty call to the exact wire tool provide the only
+    // unambiguous recovery shape. Prose before/after it or another call keeps text inert.
+    const blocks = callsIn(serializedText);
+    if (blocks.length === 1 && serializedText.slice(0, blocks[0]!.start).trim() === ""
+        && serializedText.slice(blocks[0]!.end).trim() === "") {
+      const block = blocks[0]!;
+      const wrappedBody = freeformBody(block.body);
+      // MiMo can put the freeform input after a malformed `<parameter=` opener.
+      const hasParameterOpener = wrappedBody.startsWith("<parameter=");
+      const body = hasParameterOpener
+        ? freeformBody(wrappedBody.slice("<parameter=".length)) : wrappedBody;
+      if (block.name === calls[0]!.wireName && body.trim() !== ""
+          && !/(?:^|\n)<tool_call>\s*<function=[^>\r\n]+>/.test(block.body)
+          && !(hasParameterOpener && /^<parameter=[A-Za-z_$][\w$.-]*>/.test(wrappedBody))
+          && !body.includes("<parameter=") && !body.includes("</parameter>")) {
+        references[0] = { ...references[0]!, argumentsText: JSON.stringify({ input: body }),
+          recoveredParameterWrapper: hasParameterOpener };
+      }
+    }
+  }
   return reduceUnambiguousDoubledInput(references, serializedText);
+}
+
+/** An empty JSON object means the structured freeform call supplied no input. */
+function emptyObjectArguments(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      && Object.keys(parsed).length === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -594,13 +708,4 @@ export function reconcileSerializedToolCallEvents(
 
 function textEvents(text: string): AdapterEvent[] {
   return text.length > 0 ? [{ type: "text_delta", text }] : [];
-}
-
-/** Non-whitespace characters after the last closed block, or 0 while a later block is still open. */
-function proseAfterClosedBlock(text: string): number {
-  const closer = text.lastIndexOf(CLOSE_TAG);
-  if (closer < 0) return 0;
-  const tail = text.slice(closer + CLOSE_TAG.length);
-  if (tail.includes(OPEN_TAG)) return 0;
-  return tail.replace(/\s+/g, "").length;
 }

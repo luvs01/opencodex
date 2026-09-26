@@ -39,6 +39,7 @@ export default function ProviderDetails({
   modelRevision,
   modelRowsReady,
   onOpenModels,
+  onCreateJevAuto,
   modelsLoading,
   modelsLoadFailed,
   onRetryModels,
@@ -79,6 +80,7 @@ export default function ProviderDetails({
   modelRevision: string;
   modelRowsReady: boolean;
   onOpenModels: () => void;
+  onCreateJevAuto?: () => void;
   modelsLoading?: boolean;
   modelsLoadFailed?: boolean;
   onRetryModels?: () => void;
@@ -292,6 +294,7 @@ export default function ProviderDetails({
             oauth={oauth}
             onEditSettings={() => switchTab("settings")}
             onViewUsage={() => switchTab("usage")}
+            onCreateJevAuto={onCreateJevAuto}
             onUpdateProvider={onUpdateProvider}
             reauthBusy={busyProvider === item.name}
             onCancelLogin={authHandlers?.onCancelLogin ? () => void authHandlers.onCancelLogin?.(item.name) : undefined}

@@ -5,14 +5,14 @@
  * the bridge produced: one role frame first, content and `reasoning_content` deltas, each
  * function call as ONE complete tool_call chunk at its completion (Chat tool-call fields are
  * append-only, so the converter never streamed partial arguments), a finish chunk carrying the
- * usage, then `[DONE]`; failures end with one `{error}` frame and no `[DONE]`. Ids, the finish
+ * usage, then `[DONE]`; failures end with one `{error}` frame and no `[DONE]`. Wire-silence
+ * heartbeats become `: opencodex heartbeat` SSE comments, as the converter relays them. Ids, the finish
  * and error mapping and the usage shape are the converter's own exported helpers.
  */
 import type { AdapterEvent } from "../../types";
 import type { TranslatorBudget } from "../../lib/translator-budget";
 import { responsesUsage } from "../../bridge/internal";
 import {
-  CHAT_COMPLETIONS_HEARTBEAT_COMMENT,
   chatCompletionsErrorResponse,
   chatCompletionsFailedResponse,
   chatCompletionsIncompleteOutcome,
@@ -124,9 +124,11 @@ function createChatCompletionWriter(sink: ClientFrameSink, model: string): Clien
   return {
     start: ensureRole,
     heartbeat() {
-      // The converter emits the role chunk, then the wire keepalive as an SSE comment.
+      // The converter answers each typed heartbeat with the role frame (once) and then an SSE
+      // comment (#5805): transport liveness without a chunk a parser could count as output.
+      if (terminated) return;
       ensureRole();
-      sink.emitKeepalive(CHAT_COMPLETIONS_HEARTBEAT_COMMENT);
+      sink.emitKeepalive(": opencodex heartbeat\n\n");
     },
     text(delta) {
       if (!delta) return;

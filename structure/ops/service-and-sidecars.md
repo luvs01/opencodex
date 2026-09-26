@@ -244,10 +244,18 @@ identity and proven-dead liveness; unknown or transferred ownership never starts
 Direct recovery retains the lease until readiness or its bounded deadline. The normal successful
 manual-runtime update still prints the existing restart hint.
 
+The npm launcher in `bin/ocx.mjs` makes one exception after a failed update: a service recovery
+releases the lease before the service refresh, as a successful update does. The service manager
+starts the proxy outside the updater's process tree, so that proxy has to take the lease itself;
+held through the repair's health wait, the lease kept it from starting, and recovery fell through
+to a second, directly started proxy (#5760). The recovery decision is made again after the release.
+
 The npm transaction creates each staging directory exclusively and may clean that fresh path
-while the creating process still owns it. A later update only reports staging leftovers. It does
-not recursively delete them from a marker: the marker is not an authorization secret, and a
-neighbouring writer could replace a previously checked pathname with a link before traversal.
+while the creating process still owns it. On POSIX it also creates the stage's `lib` directory,
+because npm's strict script policy plans the global tree before it creates the prefix layout
+(#5760). A later update only reports staging leftovers. It does not recursively delete them
+from a marker: the marker is not an authorization secret, and a neighbouring writer could
+replace a previously checked pathname with a link before traversal.
 
 The probe ceilings are module-load constants in `src/server/proxy-liveness.ts`: 750 ms for the
 shared default and 1500 ms (three attempts) for `SERVICE_STOP_LIVENESS` and
@@ -258,7 +266,7 @@ so an override can never shorten the budgets that prevent a duplicate proxy, and
 `src/service/orchestration.ts`) stays bounded. `tests/server/probe-timeout-env.test.ts` reads the
 constants in child processes.
 
-`src/update/install-detection.mjs` examines both lexical and resolved package paths. An enclosing mise installation owns its nested npm/aube package only when the adjacent `.mise.backend.toml` identifies the containing tool alias and the canonical `npm:@bitkyc08/opencodex` backend. That verified outer owner takes precedence over the inner npm layout. Two verified owners whose tool roots differ only by a symlinked ancestor (macOS `/var` -> `/private/var`) are compared by canonical directory and count as one install. An unreadable or contradictory ownership boundary on either path takes precedence over a verified owner on the other path, refusing mutation without inventing a tool name or recovery command. One boundary is not OpenCodex's at all: on Windows, npm -g under a mise-managed Node puts the package directly in `<mise>/installs/node/<version>/node_modules`, whose adjacent record is Node's own (`short = "node"`, `full = "core:node"`). That exact record with the package directly in the runtime's global `node_modules` is an npm install and falls through to npm detection; any other backend, alias or deeper layout stays fail-closed (`tests/update/update-mise-node-runtime.test.ts`). `ocx update`, dashboard update checks, and update workers expose `installer: "mise"`; checks remain read-only, while mutation is refused with `mise upgrade <verified-alias>` before any proxy stop, package write, or worker creation. The package-tree integrity guard remains active for mise packages.
+`src/update/install-detection.mjs` examines both lexical and resolved package paths. An enclosing mise installation owns its nested npm/aube package only when the adjacent `.mise.backend.toml` identifies the containing tool alias and the canonical `npm:@bitkyc08/opencodex` backend. That verified outer owner takes precedence over the inner npm layout. Two verified owners whose tool roots differ only by a symlinked ancestor (macOS `/var` -> `/private/var`) are compared by canonical directory and count as one install. An unreadable or contradictory ownership boundary on either path takes precedence over a verified owner on the other path, refusing mutation without inventing a tool name or recovery command. One boundary is not OpenCodex's at all: on Windows, npm -g under a mise-managed Node puts the package directly in `<mise>/installs/node/<version>/node_modules`, whose adjacent record is Node's own (`short = "node"`, `full = "core:node"`). That exact record with the package directly in the runtime's global `node_modules` is an npm install and falls through to npm detection; any other backend, alias or deeper layout stays fail-closed (`tests/update/update-mise-node-runtime.test.ts`). `ocx update`, dashboard update checks, and update workers expose `installer: "mise"`; checks remain read-only, while mutation is refused with `mise upgrade <verified-alias>` before any proxy stop, package write, or worker creation. The package-tree integrity guard remains active for mise packages, and the managed Linux service additionally follows its mise package launcher onto an upgraded version ([package-tree integrity fence](docs-and-release.md#package-tree-integrity-fence)).
 
 ## Package cache refresh
 
@@ -267,3 +275,5 @@ src/update/refresh-scheduler.ts owns the package cache timer and per-channel sin
 src/update/async-check.ts uses the existing owner-bound registry target with a bounded asynchronous child; pnpm owner discovery runs in src/update/pnpm-owner-worker.ts off the request loop. `src/update/notify.ts` writes successful results atomically and preserves a dismissal only for the same channel and version. The interactive pre-bind prompt reads the cache and does not launch a second detached refresh. `src/update/badge.ts` only reads the cache and reports unknown at 40 hours.
 
 The desktop badge snapshot in src/update/desktop-badge.ts is process-local display state keyed by a Tauri session id. A 60-second shell heartbeat renews receipt time; entries expire after 180 seconds and the store retains at most 32 sessions. It is separate from the package version cache and from the updater job/ownership transaction. A proxy restart reports unknown until a bound desktop shell republishes; no update installation can be authorized by this snapshot.
+
+On Linux, a dashboard update worker started from the systemd user service is launched through `systemd-run --user --scope --quiet --collect` (`src/update/worker-launch.ts`), so it leaves the service cgroup before the updater stops `opencodex-proxy.service`; the default `KillMode=control-group` otherwise kills it with the proxy (#5750). The path applies only when `INVOCATION_ID` is set and a no-op scope probe succeeds; every other case keeps the plain detached spawn. `--scope` moves `systemd-run` itself into the scope and then execs the worker, so the recorded PID is the worker's (`tests/update/update-worker-launch.test.ts`).

@@ -80,6 +80,10 @@ import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { DEVIN_MODEL_CONTEXT_WINDOWS } from "../adapters/devin/live-models";
 import { modelRecordValue } from "../reasoning-effort";
+import {
+  normalizePersistedJevDecision,
+  type PersistedJevDecisionV1,
+} from "../usage/jev-stats";
 import type { RequestMetricsRecorder } from "./request-metrics";
 import type {
   CacheDiagnosticDraft,
@@ -242,6 +246,8 @@ export interface RequestLogContext {
   terminalSource?: "upstream" | "synthetic";
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
+  /** Privacy-bounded JEV selection metadata; downstream usage is recorded on attempts[]. */
+  jevDecision?: PersistedJevDecisionV1;
   /** Opt-in shadow evidence, normalized again at the logging boundary. */
   claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
@@ -352,6 +358,8 @@ export interface RequestLogEntry {
   terminalSource?: "upstream" | "synthetic";
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
+  /** Privacy-bounded JEV selection metadata; downstream usage is recorded on attempts[]. */
+  jevDecision?: PersistedJevDecisionV1;
   /** Closed Claude protocol codes; no request or header values. */
   claudeCompatibility?: PersistedClaudeCompatibilityLog;
   /**
@@ -431,6 +439,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
   const terminalStatus = asTerminalStatus(entry.terminalStatus);
   const closeReason = asCloseReason(entry.closeReason);
   const routeDecision = normalizeRouteDecisionTraceForLog(entry.routeDecision);
+  const jevDecision = normalizePersistedJevDecision(entry.jevDecision);
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   const spend = normalizeRequestSpend(entry.spend);
   const protocolTrace = parseProtocolTraceV1(entry.protocolTrace);
@@ -484,6 +493,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(isKnownTransportPhase(entry.transportPhase) ? { transportPhase: entry.transportPhase } : {}),
     ...(isKnownTerminalSource(entry.terminalSource) ? { terminalSource: entry.terminalSource } : {}),
     ...(routeDecision ? { routeDecision } : {}),
+    ...(jevDecision ? { jevDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
     ...(entry.conversationStateScrub === "account-change"
       ? { conversationStateScrub: "account-change" }
@@ -580,8 +590,11 @@ export function addRequestLog(entry: RequestLogEntry) {
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
   const servedModel = modelIdentityLogFields(entry).servedModel;
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
+  const jevDecision = normalizePersistedJevDecision(entry.jevDecision);
   const retained: RequestLogEntry = shadowCallRewrittenFrom === entry.shadowCallRewrittenFrom
-    && servedModel === entry.servedModel && entry.claudeCompatibility === undefined
+    && servedModel === entry.servedModel
+    && entry.claudeCompatibility === undefined
+    && entry.jevDecision === undefined
     ? entry
     : { ...entry, ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}) };
   if (!shadowCallRewrittenFrom && retained !== entry) delete retained.shadowCallRewrittenFrom;
@@ -591,6 +604,8 @@ export function addRequestLog(entry: RequestLogEntry) {
   }
   if (claudeCompatibility) retained.claudeCompatibility = claudeCompatibility;
   else if (retained !== entry) delete retained.claudeCompatibility;
+  if (jevDecision) retained.jevDecision = jevDecision;
+  else if (retained !== entry) delete retained.jevDecision;
   entry = retained;
   retainRequestLogEntry(entry);
   for (const observer of requestLogObserversForTests) {
@@ -667,6 +682,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       // usage.jsonl, which is the surface the derived failure projection reads.
       ...normalizeRequestFailureAttribution(entry),
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
+      ...(entry.jevDecision ? { jevDecision: entry.jevDecision } : {}),
       ...(entry.claudeCompatibility ? { claudeCompatibility: entry.claudeCompatibility } : {}),
       ...(entry.protocolTrace ? { protocolTrace: entry.protocolTrace } : {}),
       ...(entry.conversationStateScrub === "account-change"
@@ -1511,6 +1527,7 @@ export function addFinalRequestLog(
   // the in-memory /api/logs row matches what usage.jsonl already stores.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(logCtx.shadowCallRewrittenFrom);
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(logCtx.claudeCompatibility);
+  const jevDecision = normalizePersistedJevDecision(logCtx.jevDecision);
   // Keyed by the live attempt objects, not the detached copies above.
   const protocolTrace = protocolTraceForRequest(logCtx, logCtx.attempts);
   addLog({
@@ -1572,6 +1589,7 @@ export function addFinalRequestLog(
     ...(logCtx.transportPhase ? { transportPhase: logCtx.transportPhase } : {}),
     ...(logCtx.terminalSource ? { terminalSource: logCtx.terminalSource } : {}),
     ...(logCtx.routeDecision ? { routeDecision: logCtx.routeDecision } : {}),
+    ...(jevDecision ? { jevDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
     ...(protocolTrace ? { protocolTrace } : {}),
     ...attribution,

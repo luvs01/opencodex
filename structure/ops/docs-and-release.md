@@ -84,7 +84,7 @@ Manual navigation is defined in `docs-site/astro.config.mjs`. When adding a publ
 sidebar and either add localized copies or intentionally accept Starlight fallback behavior.
 
 Provider preset totals are recounted from the current registry when a preset lands. The
-documented split is 98 total: 81 key-based, 13 OAuth, three local, and one default
+documented split is 99 total: 82 key-based, 13 OAuth, three local, and one default
 ChatGPT-forward preset. The English provider guide, all seven translated copies, and all eight
 quickstarts carry the same counts.
 
@@ -337,6 +337,22 @@ is polled until readable and then receives a fresh full stability interval, whil
 startup identity cancels the pending restart. Failed restart admission retries after the same
 bounded delay. Stopping the server before the accepted restart begins vetoes it, and a service child
 restarts only while it still owns the service home. Source checkouts and standalone binaries remain outside this fence.
+
+mise installs every version in its own directory and repoints a floating link, so `mise upgrade`
+never changes the manifest the fence watches: the proxy would keep serving the old version, and once
+mise pruned it the fence would report the tree unreadable and refuse traffic without restarting.
+`src/update/mise-launcher-target.ts` therefore plans a launcher watch, and
+`src/lib/package-tree-retarget.ts` runs it, only for the managed Linux service
+(`OCX_SERVICE_MANAGED=1`) of a verified mise owner whose recorded launcher is that tool's
+`<selector>/node_modules/.bin/ocx`, and only when that launcher resolves to the running package at
+boot. Shims, other layouts, launchd (which pins package paths) and foreground proxies are not
+followed. The watch re-resolves the launcher on its own unref'd timer, so an idle service notices an
+upgrade without a request. One complete target identity, canonical package root plus manifest
+identity, must hold for the settle interval; a change to either, an unresolvable target, a target
+outside the tool root, or a return to the running root restarts the wait. It then enters the same
+restart handler as the fence without fencing requests, retries a refused admission after another
+full interval, and reports the settled target's version as `installedVersion` when the fence has
+none. The replacement boots from the target, so it never restarts again.
 
 The fence withholds readiness, never identity (INV-FENCE-01). The fenced `/healthz` still answers a
 local attestation challenge and reports `restartCapability`, plus the `installedVersion` on disk

@@ -95,7 +95,7 @@ export interface ClientFrameSink {
   emitBatch(frames: { text: string; observation?: RelayedEventObservation }[]): void;
   /** A fixed, bounded frame that must reach the client even when the budget is exhausted. */
   emitBounded(text: string): void;
-  /** A transport keepalive; it does not count as wire activity. */
+  /** A transport keepalive; it counts as neither wire activity nor a relayed event. */
   emitKeepalive(text: string): void;
   desiredSize(): number;
 }
@@ -142,6 +142,11 @@ export interface AdapterEventEncodeOptions {
   freeformToolNames?: ReadonlySet<string>;
   toolSearchToolNames?: ReadonlySet<string>;
   stallTimeoutSec?: number;
+  /**
+   * Operator-trusted local upstream (loopback / private / `.local` / `.lan`): an unset budget
+   * resolves to disabled there instead of the 300 s default, matching the bridge (#5876).
+   */
+  localUpstream?: boolean;
   /** Wire-silence heartbeat and stall tick; the bridge's 2 s default. */
   heartbeatMs?: number;
   hooks?: ClientEncodeHooks;
@@ -165,7 +170,9 @@ export function encodeAdapterEventStream(
   const heartbeatMs = options.heartbeatMs ?? 2_000;
   const setTimer = options.timers?.setInterval ?? ((handler: () => void, ms: number) => setInterval(handler, ms));
   const clearTimer = options.timers?.clearInterval ?? ((id: unknown) => clearInterval(id as ReturnType<typeof setInterval>));
-  const maxStallTicks = Math.ceil((resolveStallTimeoutSec(options.stallTimeoutSec) * 1000) / heartbeatMs);
+  const maxStallTicks = Math.ceil(
+    (resolveStallTimeoutSec(options.stallTimeoutSec, { localUpstream: options.localUpstream }) * 1000) / heartbeatMs,
+  );
   const textEncoder = new TextEncoder();
 
   let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -186,7 +193,7 @@ export function encodeAdapterEventStream(
   const relayed = (observation?: RelayedEventObservation) => {
     try { hooks.onRelayed?.(observation ?? {}); } catch { /* counters never break the stream */ }
   };
-  const enqueueCharged = (text: string, observation?: RelayedEventObservation, activity = true, countAsRelayed = true): void => {
+  const enqueueCharged = (text: string, observation?: RelayedEventObservation, activity = true): void => {
     if (closed) return;
     const frame = textEncoder.encode(text);
     const reservation = budget.reserveTransient(frame.byteLength, { kind: "live_transient" });
@@ -201,9 +208,9 @@ export function encodeAdapterEventStream(
     queuedFrameBytes.push(frame.byteLength);
     emittedFrames++;
     if (activity) wireActivity = true;
-    // Keepalives are wire bytes, not delivered model events — the legacy bridge's wire-silence
-    // heartbeat likewise bypasses the relayed-event counter.
-    if (countAsRelayed) relayed(observation);
+    // A keepalive is transport liveness, not a relayed event: the bridge enqueues its heartbeat
+    // outside the relay counter, and the converters' keepalives never reach it either.
+    if (activity) relayed(observation);
   };
   const sink: ClientFrameSink = {
     budget,
@@ -246,7 +253,7 @@ export function encodeAdapterEventStream(
         closed = true;
       }
     },
-    emitKeepalive: text => enqueueCharged(text, undefined, false, false),
+    emitKeepalive: text => enqueueCharged(text, undefined, false),
     desiredSize: () => controller.desiredSize ?? 0,
   };
   const writer = createWriter(sink);
@@ -836,7 +843,7 @@ export function encodeAdapterEventStream(
         if (upstreamActivity) {
           upstreamActivity = false;
           stallTicks = 0;
-        } else if (++stallTicks >= maxStallTicks) {
+        } else if (maxStallTicks > 0 && ++stallTicks >= maxStallTicks) {
           stall();
           return;
         }

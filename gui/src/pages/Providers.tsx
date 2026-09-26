@@ -1,4 +1,4 @@
-import { usageSummary30dResourceKey } from "../usage-summary-resource";
+import { readUsageResponseJson, usageSummary30dResourceKey } from "../usage-summary-resource";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ProviderWorkspaceShell, { type AddProviderIntent } from "../components/provider-workspace/ProviderWorkspaceShell";
 import ProviderDetails from "../components/provider-workspace/ProviderDetails";
@@ -23,6 +23,7 @@ import { buildAccountLoginStatus, buildAddModalAccountRows } from "./providers-p
 import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
 import { useProviderModelsNotice } from "./use-provider-models-notice";
 import { navigateHash } from "../hash-routing";
+import { JEV_AUTO_CREATE_HASH } from "../app-routing";
 import { useProviderSettingsDeepLink } from "./providers-deep-link";
 
 /** The page's real refresh tickets: only the captured report epoch and account read can settle them. */
@@ -287,11 +288,13 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     setAccountsFocus(previous => ({ token: previous.token + 1, provider }));
   }, []);
   // Providers hash sync is owned by App (passive replaceHash / deliberate navigateHash).
-  // The one query it keeps here, `#providers?provider=<name>`, opens that provider's settings.
+  // The one query it keeps here, `#providers?provider=<name>`, opens that provider's settings;
+  // with `&tab=accounts` (the header quota strip) it opens the provider's Accounts tab instead.
   const settingsFocus = useProviderSettingsDeepLink(
     config ? Object.keys(config.providers) : null,
     workspaceSelected,
     setWorkspaceSelected,
+    revealProviderAccounts,
   );
 
   // Warm the Add Provider catalog cache while the page is open so opening the
@@ -313,8 +316,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     [apiBase],
     async (signal) => {
       const res = await fetch(`${apiBase}/api/usage?range=30d`, { signal });
-      if (!res.ok) throw new Error(String(res.status));
-      return await res.json() as { providers?: Array<{ provider: string; requests: number }> };
+      return await readUsageResponseJson<{ providers?: Array<{ provider: string; requests: number }> }>(res);
     },
     { deadlineMs: 60_000 }, // shared usage-summary key: all four subscribers raise the deadline together
   );
@@ -619,6 +621,9 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             modelRevision={data.modelRevision}
             modelRowsReady={data.modelRowsReady}
             onOpenModels={() => navigateHash("models")}
+            onCreateJevAuto={item.adapter === "jev-decision" && item.hasApiKey
+              ? () => navigateHash(JEV_AUTO_CREATE_HASH)
+              : undefined}
             modelsLoading={data.modelsLoading}
             modelsLoadFailed={data.modelsLoadFailed}
             onRetryModels={data.onRetryModels}

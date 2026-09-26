@@ -19,6 +19,8 @@ Shared parsing and streaming follow the [request-copy](byte-accounting.md#reques
 
 ## Heartbeat and stall deadline
 
+RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
+
 Native Chat uses the same resolved `stallTimeoutSec` with a pending-upstream-read allowance that
 pauses under downstream backpressure. Its Chat error and cancellation contract is documented in
 [native Chat completion lifecycle](../data-planes/inbound-compat.md#native-chat-completion-lifecycle).
@@ -27,10 +29,17 @@ The HTTP/SSE bridge emits an SSE comment-line keep-alive (`: opencodex heartbeat
 silence to re-arm Codex's idle timer (Codex's default `stream_idle_timeout` is 300 s and ANY SSE
 bytes re-arm it). A comment line is discarded by every eventsource parser without producing an event,
 so strict Responses decoders never see an unknown variant. Those bridge-enqueued keepalive frames do
-NOT count as activity for the bridge's own watchdog: a bounded stall deadline (default 300 s,
-configurable via `stallTimeoutSec`, checked on the 2 s heartbeat tick) closes the stream with
+NOT count as activity for the bridge's own watchdog: a bounded stall deadline closes the stream with
 `response.incomplete` / `upstream_stall_timeout` and cancels the upstream request if no real
-adapter events arrive. Adapter-yielded `{ type: "heartbeat" }` events DO reset the watchdog.
+adapter events arrive. The deadline is checked on the 2 s heartbeat tick and its budget is resolved
+by `src/stall-timeout.ts` (`resolveStallTimeoutSec`): a public upstream defaults to 300 s, a **local
+upstream** (loopback, RFC 1918 private, link-local, or a `.local`/`.lan` name — classified by
+`src/lib/local-upstream.ts`) defaults to **disabled**, and any explicit `stallTimeoutSec` overrides
+both — including `stallTimeoutSec: 0`, the operator's off switch, which disables the watchdog for
+public upstreams too. A disabled budget resolves to `0`, and the watchdog kill is gated on budget
+`> 0`, so a `0` never mis-arms a kill on the first beat; keep-alives keep flowing regardless, so a
+silent-but-healthy local model (CPU-bound thinking or a long time-to-first-token) stays connected.
+Adapter-yielded `{ type: "heartbeat" }` events DO reset the watchdog.
 The Anthropic adapter maps both SSE comments and `ping` events to that heartbeat (#5707), so an
 upstream that only pings while a long thinking block is silent still counts as live.
 When the Responses-to-Chat converter receives that typed heartbeat, it emits the same bounded SSE
@@ -52,6 +61,8 @@ caps and emits liveness heartbeats while held. A second empty result or retry fa
 502 `empty_completion_retry_failed`; usage is merged across sends, and the Logs attempt records
 recovery kind `empty-completion`.
 
+The fetch and runTurn web-search loops honor `streamRoutedModelOutput`: leading text and reasoning
+stream live until the first tool boundary, and final replay omits already delivered events.
 The web-search loop requests `stream: true` for every routed-model iteration, but buffers the events
 needed to decide whether to intercept a synthetic search call. Text explicitly phased as
 `commentary` is safe to forward live because it cannot terminate the turn; this keeps Kiro's
@@ -74,11 +85,12 @@ is emitted as `response.failed` SSE.
 
 ### Pending response-body reads
 
-`src/lib/response-body-inactivity.ts` bounds pending byte reads using the resolved
-`stallTimeoutSec` (the 300-second default and configuration schema are unchanged).
-Connect/stall budgets and this body-silence budget therefore read the same setting in
-different phases: one bounds event stalls on the bridge, the other bounds pending raw
-byte reads. There is no separate body-inactivity setting.
+`src/lib/response-body-inactivity.ts` bounds pending byte reads using the same resolved
+`stallTimeoutSec` budget (`resolveStallTimeoutMs`), so it inherits the same local-vs-public default
+and the `0`-disables rule: a disabled budget passes `0`, and the guard treats a non-positive budget
+as "arm no clock" rather than firing immediately. Connect/stall budgets and this body-silence budget
+therefore read the same setting in different phases: one bounds event stalls on the bridge, the
+other bounds pending raw byte reads. There is no separate body-inactivity setting.
 The guard has no read-ahead queue: it starts a monotonic deadline only when its
 consumer asks for bytes, pauses on a non-empty chunk, and does not reset on empty
 chunks. Discarded empty chunks yield to the macrotask queue periodically, so a large
