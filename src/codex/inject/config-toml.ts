@@ -1,5 +1,5 @@
 // Holds INV-TOML-01 from structure/overview.md; keep the id here if this file is split or renamed.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { contextCompatibleBaseLine } from "../context-compat";
 import { resolveEffectiveProjectModelProvider } from "../project-config-warnings";
 import {
@@ -34,7 +34,24 @@ export function externalCodexModelProvider(content: string): string | null {
     : null;
 }
 
+/**
+ * The ownership answer for read/write paths — inject, sync, connect, restore, and the
+ * shutdown gate. It deliberately reads the whole file like Codex does (links included):
+ * a large or link-mediated config is still a valid config, and these callers must
+ * classify it exactly rather than degrade to "undetermined".
+ */
 export function currentExternalCodexModelProvider(): string | null {
+  if (!existsSync(CODEX_CONFIG_PATH)) return null;
+  return externalCodexModelProvider(readFileSync(CODEX_CONFIG_PATH, "utf8"));
+}
+
+/**
+ * The same ownership answer for read-only observation (the settings GET / poll path),
+ * through a bounded read so a special or oversized config.toml cannot stall a request.
+ * A present-but-unreadable config throws so the caller reports undetermined ownership
+ * instead of "none".
+ */
+export function observedExternalCodexModelProvider(): string | null {
   const content = readBoundedCodexConfig(CODEX_CONFIG_PATH);
   return content === null ? null : externalCodexModelProvider(content);
 }

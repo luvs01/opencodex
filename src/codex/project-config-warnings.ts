@@ -5,13 +5,13 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readFileSync,
   readSync,
   realpathSync,
 } from "node:fs";
 import path, { dirname, join, resolve } from "node:path";
 import { expandUserPath } from "../config";
 import { defaultCodexHome } from "./home";
+import { readBoundedCodexConfig } from "./inject/bounded-config-reader";
 import { readRootTomlString } from "./paths";
 import { truncateRetainedUtf8 } from "../lib/admission";
 
@@ -269,12 +269,12 @@ export function isGlobalOpencodexRoutingActive(
 ): boolean {
   let text = content;
   if (text === undefined) {
-    if (!existsSync(codexConfigPath)) return false;
     try {
-      text = readFileSync(codexConfigPath, "utf-8");
+      text = readBoundedCodexConfig(codexConfigPath) ?? undefined;
     } catch {
       return false;
     }
+    if (text === undefined) return false;
   }
   if (hasInjectedOpenaiBaseUrl(text)) return true;
   if (readRootTomlString(text, "model_provider") === "opencodex") return true;
@@ -416,15 +416,15 @@ export function discoverProjectCodexConfigPaths(options: {
     cwd = parent;
   }
 
-  if (existsSync(codexConfigPath)) {
-    try {
-      const global = readFileSync(codexConfigPath, "utf-8");
+  try {
+    const global = readBoundedCodexConfig(codexConfigPath);
+    if (global !== null) {
       for (const projectPath of parseTrustedProjectPathsFromCodexConfig(global)) {
         addIfExists(projectPath);
       }
-    } catch {
-      /* ignore unreadable global config */
     }
+  } catch {
+    /* ignore unreadable global config */
   }
 
   return [...found];
