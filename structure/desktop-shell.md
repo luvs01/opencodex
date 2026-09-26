@@ -27,6 +27,21 @@ on macOS and Linux Tauri injects a keydown polyfill that calls `set_webview_zoom
 is loaded, including the loopback dashboard. `capabilities/dashboard-zoom.json` grants that single
 command to the main window for `http://127.0.0.1:*`, and a test in `window.rs` pins its shape.
 
+The main window carries an integrated title bar on macOS: the builder sets
+`TitleBarStyle::Overlay` with `hidden_title`, so the webview draws to the top of the window and
+the traffic lights land inside it at a fixed `traffic_light_position`. The layout that receives
+them is the GUI's: the dashboard keeps a top strip across the sidebar and the main area, reserves
+the lights' inset on macOS only, and moves or zooms the window through `plugin:window` commands.
+`capabilities/dashboard-titlebar.json` grants `start_dragging`, `toggle_maximize`, and a read-only
+`scale_factor` query to `main` for the loopback origin. The dashboard uses the native window scale
+and page device-pixel ratio to keep the traffic-light row and inset clear at reduced WebKit zoom;
+the macOS window has a 360-point minimum width. The same test pins the capability shape, and
+`capabilities/default.json` grants the drag/zoom pair
+on the app origin because the bundled bootstrap and update pages draw their own matching strip —
+a page with an overlay title bar and no strip cannot be dragged or zoomed at all. Windows and
+Linux keep the native title bar: the shell ships no min/max/close widgets of its own, and the
+sidebar-top layout applies unchanged beneath it.
+
 ## Startup, quit and the tray
 
 The window is created and shown before anything is registered, resolved, probed or started, and
@@ -173,6 +188,7 @@ Allowlisted GETs use the existing single-use read-v1 capability; the snapshot PO
 Both grants bind a fresh nonce, PID, port and ten-second expiry to the recorded runtime secret. The snapshot additionally signs the SHA-256 digest of the exact serialized JSON bytes.
 The server consumes the grant once and verifies the bounded body before parsing or storing it; the snapshot grant authorizes no other read or write. Existing admin-token publishers remain compatible, but GUI sessions and browser-origin writes are refused.
 The unauthenticated health body is only a discovery hint. Minting re-confirms the recorded runtime against the current identity and binding generation; an earlier binding does not authorize a request after the shell rebinds.
+The native panel's account switch uses a third body-bound grant (`put_account_switch`) for exactly one of `PUT /api/codex-auth/active`, `/api/oauth/accounts/active` or `/api/providers/keys/active`, contract in [GUI and management API](gui-and-management-api.md). The panel passes only a provider id and the provider's own account id through `ocx_native_tray_set_switch_handler`; `desktop/src-tauri/src/native_tray.rs` bounds and copies those strings on the main thread, picks the route and body from its own provider sources (`native_tray_accounts::switch_request`), sends the request, and refreshes the panel or lists the failure.
 
 `desktop/src-tauri/src/tray_availability.rs` asks the session bus whether
 `org.kde.StatusNotifierWatcher` reports a host registered; macOS and Windows answer yes without a
