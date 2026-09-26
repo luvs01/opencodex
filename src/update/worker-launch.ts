@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
+import { dirname } from "node:path";
 
 /**
  * How to launch the dashboard update worker on POSIX.
@@ -16,19 +18,83 @@ export const SYSTEMD_SCOPE_ARGS = ["--user", "--scope", "--quiet", "--collect", 
 export interface WorkerLaunchContext {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
-  hasSystemdRun?: () => boolean;
+  resolveSystemdRun?: () => string | undefined;
 }
 
-let systemdRunProbe: boolean | undefined;
+// Absolute install paths only — PATH is never consulted, so a caller-controlled entry cannot
+// redirect the launch. `/usr/local/bin` is where systemd lands when built or stowed outside the
+// distro layout, and `/run/current-system/sw/bin` is the NixOS layout, where the binary lives
+// nowhere else even though the user bus works. A candidate only counts when the binary and its
+// directory are root-owned and not group/world-writable, so a lower-trust local actor cannot
+// plant the launcher the scope probe execs.
+const TRUSTED_SYSTEMD_RUN_PATHS = [
+  "/usr/bin/systemd-run", "/bin/systemd-run", "/usr/local/bin/systemd-run",
+  "/run/current-system/sw/bin/systemd-run",
+] as const;
 
-function probeSystemdRun(): boolean {
-  if (systemdRunProbe === undefined) {
-    // Run a real no-op scope rather than `--version`: a present binary without a reachable user
-    // bus would otherwise pass the probe and then fail to start the worker at all.
-    const probe = spawnSync("systemd-run", [...SYSTEMD_SCOPE_ARGS, "true"], { stdio: "ignore", timeout: 5_000 });
-    systemdRunProbe = !probe.error && probe.status === 0;
+export interface SystemdRunHooks {
+  isExecutableFile: (path: string) => boolean;
+  probeScope: (path: string) => boolean;
+}
+
+const GROUP_OR_WORLD_WRITE = 0o022;
+
+// stat (follow) rather than lstat: a root-owned symlink to a user-writable directory must fail
+// on the target's mode, not pass on the symlink's (mirrors isTrustedSystemPath in
+// src/codex/desktop-app/linux.ts).
+function rootOnlyWritable(path: string): boolean {
+  try {
+    const st = statSync(path);
+    return st.uid === 0 && (st.mode & GROUP_OR_WORLD_WRITE) === 0;
+  } catch {
+    return false;
   }
-  return systemdRunProbe;
+}
+
+// "Executable" here includes trust: the binary and its directory must be root-owned and not
+// group/world-writable. /usr/local/bin is group-writable on some systems, and a planted or
+// replaced systemd-run there would be exec'd by the scope probe under the service account;
+// the fallback is the plain detached spawn, so nothing breaks when it is skipped.
+// Exported for unit tests.
+export function isTrustedSystemdRunFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    const st = statSync(path);
+    return st.isFile() && st.uid === 0 && (st.mode & GROUP_OR_WORLD_WRITE) === 0
+      && rootOnlyWritable(dirname(path));
+  } catch {
+    return false;
+  }
+}
+
+const systemdRunHooks: SystemdRunHooks = {
+  isExecutableFile: isTrustedSystemdRunFile,
+  // Run a real no-op scope rather than `--version`: a present binary without a reachable user
+  // bus would otherwise pass the probe and then fail to start the worker at all.
+  probeScope: path => {
+    const probe = spawnSync(path, [...SYSTEMD_SCOPE_ARGS, "true"], { stdio: "ignore", timeout: 5_000 });
+    return !probe.error && probe.status === 0;
+  },
+};
+
+let systemdRunProbe: string | null | undefined;
+
+export function resolveSystemdRun(hooks: SystemdRunHooks = systemdRunHooks): string | undefined {
+  if (systemdRunProbe === undefined) {
+    systemdRunProbe = null;
+    for (const command of TRUSTED_SYSTEMD_RUN_PATHS) {
+      if (!hooks.isExecutableFile(command)) continue;
+      if (hooks.probeScope(command)) {
+        systemdRunProbe = command;
+        break;
+      }
+    }
+  }
+  return systemdRunProbe ?? undefined;
+}
+
+export function resetSystemdRunProbeForTests(): void {
+  systemdRunProbe = undefined;
 }
 
 export function guiUpdateWorkerCommand(
@@ -39,8 +105,9 @@ export function guiUpdateWorkerCommand(
   const platform = context.platform ?? process.platform;
   const env = context.env ?? process.env;
   const underSystemd = platform === "linux" && Boolean(env.INVOCATION_ID);
-  if (underSystemd && (context.hasSystemdRun ?? probeSystemdRun)()) {
-    return { command: "systemd-run", argv: [...SYSTEMD_SCOPE_ARGS, execPath, ...args] };
+  const systemdRun = underSystemd ? (context.resolveSystemdRun ?? resolveSystemdRun)() : undefined;
+  if (systemdRun) {
+    return { command: systemdRun, argv: [...SYSTEMD_SCOPE_ARGS, execPath, ...args] };
   }
   return { command: execPath, argv: [...args] };
 }
