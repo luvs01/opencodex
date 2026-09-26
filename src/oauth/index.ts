@@ -466,7 +466,7 @@ export function publicOAuthAuthenticationErrorMessage(error: unknown): string {
   return "OAuth authentication failed. Check the OpenCodex account status and retry.";
 }
 
-function accessSnapshot(provider: string, accountId: string, cred: OAuthCredentials): OAuthAccessSnapshot {
+function accessSnapshot(provider: string, accountId: string, cred: OAuthCredentials, oauthProvider = provider): OAuthAccessSnapshot {
   // Derived, not read back: a stored `authType` is trusted when present, but a credential imported
   // before the field existed still routes correctly because the client pair implies SSO OIDC.
   const kiroAuthType = cred.kiro?.authType
@@ -484,9 +484,11 @@ function accessSnapshot(provider: string, accountId: string, cred: OAuthCredenti
   // Validated here, not at the call site: an unvalidated origin from a legacy or crafted
   // credential must never travel with a bearer, and dropping it makes the transport fall back to
   // the canonical host rather than to whatever the previous account was using.
-  const accountApiBaseUrl = provider === "github-copilot"
+  // The host rides on the OAuth definition the snapshot was resolved through, not the routed
+  // slot name: a custom provider reusing the Devin definition keeps its stored tenant URL.
+  const accountApiBaseUrl = oauthProvider === "github-copilot"
     ? validateCopilotApiBaseUrl(cred.apiBaseUrl)
-    : provider === "devin" || provider === "devin-cli"
+    : oauthProvider === "devin" || oauthProvider === "devin-cli"
       ? validateDevinApiBaseUrl(cred.apiBaseUrl)
       : undefined;
   return {
@@ -562,7 +564,7 @@ async function resolveAccessSnapshotForAccount(
   if (!row) throw new OAuthLoginRequiredError(provider);
   if (requireUsableAccount && row.needsReauth) throw new OAuthLoginRequiredError(provider);
   const cred = row.credential;
-  const current = accessSnapshot(provider, accountId, cred);
+  const current = accessSnapshot(provider, accountId, cred, oauthProvider);
   if (rejectedGeneration !== undefined && current.generation !== rejectedGeneration) return current;
   if (rejectedGeneration === undefined && cred.expires > Date.now() + REFRESH_SKEW_MS) return current;
 
@@ -596,7 +598,7 @@ async function resolveAccessSnapshotForAccount(
     if (persisted.access !== accessToken) {
       throw new Error(`OAuth refresh persisted an unexpected access token for ${provider}`);
     }
-    return accessSnapshot(provider, accountId, persisted);
+    return accessSnapshot(provider, accountId, persisted, oauthProvider);
   })().catch(error => {
     if (abort.signal.reason instanceof OAuthTokenRefreshStaleError) throw abort.signal.reason;
     throw error;

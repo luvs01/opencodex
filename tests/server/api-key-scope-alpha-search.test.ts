@@ -249,6 +249,44 @@ test("a scoped custom Devin route spends only that provider's OAuth credential",
   expect(requestBody.includes(Buffer.from("canonical-devin-token"))).toBe(false);
 });
 
+test("a custom Devin route searches the tenant its credential names", async () => {
+  await saveCredential("team-devin", {
+    access: "team-devin-token",
+    refresh: "team-devin-token",
+    expires: Number.MAX_SAFE_INTEGER,
+    apiBaseUrl: "https://eu.windsurf.com/_route/api_server",
+  });
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    upstreamCalls.push(String(input));
+    expect(String(init?.body)).not.toContain("canonical-devin-token");
+    const result = Buffer.concat([
+      encodeString(3, "https://example.test"),
+      encodeString(4, "Result"),
+    ]);
+    return new Response(encodeMessage(1, result), { status: 200 });
+  }) as typeof fetch;
+  const config = {
+    port: 0,
+    defaultProvider: "team-devin",
+    providers: {
+      "team-devin": { adapter: "devin", authMode: "oauth", baseUrl: "https://server.codeium.com" },
+    },
+    apiKeys: keys({ allowedProviders: ["team-devin"] }),
+  } as OcxConfig;
+
+  const response = await handleSearch(
+    sidecarRequest(searchBody("team-devin/swe-2")),
+    config,
+    logContext(),
+    undefined,
+    SCOPED,
+  );
+  expect(response.status).toBe(200);
+  expect(upstreamCalls).toEqual([
+    "https://eu.windsurf.com/_route/api_server/exa.api_server_pb.ApiServerService/GetWebSearchResults",
+  ]);
+});
+
 test("the sidecar fallback refuses the backend it would have spent", async () => {
   const response = await handleSearch(
     sidecarRequest(searchBody(SEARCH_MODEL)),
