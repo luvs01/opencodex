@@ -1,5 +1,7 @@
 import type { Server } from "bun";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OcxConfig } from "../../types";
 import { getConfigDir } from "../../config/paths";
 import type { DesktopPickerController } from "../desktop-picker";
@@ -196,16 +198,29 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
         // a redundant keychain prompt. When removal of a genuinely different predecessor fails,
         // the picker must not arm at all: the outgoing signing key would otherwise stay trusted
         // beside the new authority, and the already-bound main intercept pair keeps serving alone.
-        let publishedSha1: string | undefined;
+        // Capture the published bytes before ensurePickerCa replaces them: the untrust step below
+        // must remove trust for the *outgoing* certificate, so it needs the old file contents.
+        let publishedPem: string | undefined;
         try {
-          publishedSha1 = pickerCaFingerprints(readFileSync(oldCaPath, "utf8")).sha1;
+          publishedPem = readFileSync(oldCaPath, "utf8");
         } catch { /* unreadable: nothing identifiable to remove */ }
+        const publishedSha1 = publishedPem === undefined ? undefined
+          : pickerCaFingerprints(publishedPem).sha1;
         const nextSha1 = pickerCaFingerprints(ensurePickerCa(configDir).certPem).sha1;
-        if (publishedSha1 !== undefined && publishedSha1 !== nextSha1) {
+        if (publishedPem !== undefined && publishedSha1 !== nextSha1) {
           const { untrustPickerCa } = await import("./picker-trust");
           try {
-            const dropped = await untrustPickerCa(oldCaPath, publishedSha1, options.pickerSecurity, options.pickerPlatform);
-            pickerBlocked = !dropped.ok;
+            // remove-trusted-cert takes the certificate file; ca.pem now holds the replacement,
+            // so untrust from a private copy of the bytes that were actually trusted.
+            const privateDir = mkdtempSync(join(tmpdir(), "ocx-picker-untrust-"));
+            try {
+              const outgoing = join(privateDir, "ca.pem");
+              writeFileSync(outgoing, publishedPem, { mode: 0o600 });
+              const dropped = await untrustPickerCa(outgoing, publishedSha1!, options.pickerSecurity, options.pickerPlatform);
+              pickerBlocked = !dropped.ok;
+            } finally {
+              rmSync(privateDir, { recursive: true, force: true });
+            }
           } catch {
             pickerBlocked = true;
           }

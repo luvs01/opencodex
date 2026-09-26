@@ -412,6 +412,56 @@ describe("startClaudeIntercept wiring", () => {
     expect(getClaudePickerRuntime()).toBeNull();
   });
 
+  test("a restart with a foreign published CA untrusts the outgoing certificate and arms the picker", async () => {
+    const port = await freePortPair();
+    // The file on disk holds a different authority than this process will publish — e.g. written
+    // by a since-exited peer — so startup must drop its keychain trust before arming.
+    ensurePickerCa(root);
+    const foreign = createCertificateAuthority({ commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST] });
+    writeFileSync(pickerCaCertPath(root), foreign.certPem);
+    const foreignSha1 = pickerCaFingerprints(foreign.certPem).sha1;
+    let trusted = true;
+    let removedTargetSha1: string | null = null;
+    const run: SecurityRunner = async args => {
+      if (args[0] === "find-certificate") {
+        return trusted ? { code: 0, stdout: `SHA-1 hash: ${foreignSha1}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
+      }
+      if (args[0] === "remove-trusted-cert") {
+        // The file passed to the keychain must be the outgoing certificate, not the replacement
+        // now occupying ca.pem.
+        removedTargetSha1 = pickerCaFingerprints(readFileSync(args[1]!, "utf8")).sha1;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "delete-certificate") { trusted = false; }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const fake = {
+      selectTunnel: () => null,
+      start: async () => {},
+      stop: async () => {},
+    } as unknown as PickerRuntime;
+    const handle = await startClaudeIntercept({
+      config: config({ claudeCode: { intercept: { port } } }),
+      publicPort: 10100,
+      configDir: root,
+      dispatch: async () => new Response("unused"),
+      loadPickerRoutes: async () => ({ nativeSlugs: [], routedModels: [] }),
+      createPicker: () => fake,
+      pickerSecurity: run,
+      pickerPlatform: "darwin",
+    });
+    try {
+      expect(handle).not.toBeNull();
+      expect(removedTargetSha1).toBe(foreignSha1);
+      expect(trusted).toBe(false);
+      expect(pickerCaFingerprints(readFileSync(pickerCaCertPath(root), "utf8")).sha1).not.toBe(foreignSha1);
+      expect(getClaudePickerRuntime()).toBe(fake);
+    } finally {
+      await handle?.stop();
+    }
+    expect(getClaudePickerRuntime()).toBeNull();
+  });
+
   test("a failed rotation untrust refuses the picker but keeps the intercept pair serving", async () => {
     const port = await freePortPair();
     const stateDir = pickerStateDir(root);
