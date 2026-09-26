@@ -40,7 +40,7 @@ import { handoffWindowsTrayForUpdate, planWindowsTrayUpdate } from "./tray-updat
 import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
 import { packageVersion } from "../lib/package-version";
 import { selfLaunchArgv } from "../lib/self-launch-argv";
-import { PNPM_READ_CWD, pnpmReadEnvironment } from "./pnpm-read-policy.mjs";
+import { PNPM_READ_CWD, pnpmCommandCwd, pnpmReadEnvironment } from "./pnpm-read-policy.mjs";
 
 /**
  * A `codex-history-backup-*.json` surviving a stop means the native-history restore was
@@ -155,7 +155,9 @@ function runOwnedPnpm(
     encoding: "utf8",
     timeout: 180_000,
     windowsHide: true,
-    cwd: PNPM_READ_CWD,
+    // Reads probe from the package dir; `add -g`/rollback children run from a neutral
+    // directory so a Windows cwd handle never pins open the package pnpm is replacing.
+    cwd: pnpmCommandCwd(args),
     env: pnpmReadEnvironment(unprivilegedOwnershipMutationEnvironment(target.env)),
     ...target.options,
   });

@@ -7,7 +7,7 @@ import { createRefreshScheduler, RETRY_BASE_MS, STALENESS_TICK_MS, type RefreshD
 import { latestVersionAsync, pnpmOwner, REGISTRY_DEADLINE_MS, REGISTRY_OUTPUT_LIMIT } from "../../src/update/async-check";
 import type { VersionCache } from "../../src/update/notify";
 import { checkUpdatePackageIntegrity, latestVersion, resolveCurrentPnpmGlobalOwner, type Channel, type Installer } from "../../src/update/index";
-import { PNPM_READ_CWD, pnpmReadEnvironment } from "../../src/update/pnpm-read-policy.mjs";
+import { PNPM_MUTATION_CWD, PNPM_READ_CWD, pnpmCommandCwd, pnpmReadEnvironment } from "../../src/update/pnpm-read-policy.mjs";
 
 function fixture(installer: Installer = "npm", disabled = false, lookupFn?: RefreshDeps["lookup"]) {
   let now = 1_700_000_000_000;
@@ -355,6 +355,17 @@ test("synchronous pnpm integrity probe applies project isolation", () => {
   expect(result.ok).toBe(true);
   expect(options?.cwd).toBe(PNPM_READ_CWD);
   expect((options?.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");
+});
+
+test("pnpm mutations run outside the installed package while reads stay isolated", () => {
+  // On Windows a cwd inside the replaced package pins it open; mutations go to a neutral dir.
+  for (const read of [["list", "-g"], ["root", "-g"], ["view", "pkg@1", "version"], ["config", "get", "global-dir"]]) {
+    expect(pnpmCommandCwd(read)).toBe(PNPM_READ_CWD);
+  }
+  for (const mutation of [["add", "-g", "pkg@1"], ["install", "-g", "pkg@1"], ["remove", "-g", "pkg"], ["update", "-g"], ["uninstall", "-g", "pkg"]]) {
+    expect(pnpmCommandCwd(mutation)).toBe(PNPM_MUTATION_CWD);
+  }
+  expect(PNPM_MUTATION_CWD).not.toBe(PNPM_READ_CWD);
 });
 
 test("synchronous pnpm owner discovery applies project isolation", () => {
