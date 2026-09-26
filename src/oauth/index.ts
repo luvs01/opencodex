@@ -550,9 +550,10 @@ async function resolveAccessSnapshotForAccount(
   accountId: string,
   rejectedGeneration?: string,
   requireUsableAccount = false,
+  oauthProvider = provider,
 ): Promise<OAuthAccessSnapshot> {
-  const def = OAUTH_PROVIDERS[provider];
-  if (!def) throw new UnsupportedOAuthProviderError(provider);
+  const def = OAUTH_PROVIDERS[oauthProvider];
+  if (!def) throw new UnsupportedOAuthProviderError(oauthProvider);
   // One store read answers both questions. A caller that opts in gets the account REJECTED
   // when it needs reauthentication, which a bare credential read cannot detect: a revoked
   // account keeps a readable credential, so resolution would otherwise succeed and the
@@ -607,10 +608,13 @@ async function resolveAccessSnapshotForAccount(
   return refresh;
 }
 
-export async function getValidAccessTokenSnapshot(provider: string): Promise<OAuthAccessSnapshot> {
+export async function getValidAccessTokenSnapshot(
+  provider: string,
+  options: { oauthProvider?: string } = {},
+): Promise<OAuthAccessSnapshot> {
   const set = getAccountSet(provider);
   if (!set) throw new OAuthLoginRequiredError(provider);
-  return resolveAccessSnapshotForAccount(provider, set.activeAccountId);
+  return resolveAccessSnapshotForAccount(provider, set.activeAccountId, undefined, false, options.oauthProvider);
 }
 
 /** Providers whose upstream-401 replay path may force a snapshot refresh. */
