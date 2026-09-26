@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { applyDesktopFirstParty } from "../../src/claude/desktop-first-party";
 import { applyDesktopPickerProfile, inspectDesktopPickerProfile } from "../../src/claude/desktop-picker-profile";
 import { claudeDesktopIntegrationEnabled } from "../../src/codex/desired-state";
-import { ensurePickerCa, pickerCaCertPath, pickerCaFingerprints, pickerStateDir } from "../../src/claude/intercept/picker-ca";
+import { ensurePickerCa, pickerCaCertPath, pickerCaFingerprints, pickerStateDir, PICKER_CA_COMMON_NAME, PICKER_HOST } from "../../src/claude/intercept/picker-ca";
+import { createCertificateAuthority } from "../../src/claude/intercept/local-ca";
 import { readClaudeInterceptProxyToken } from "../../src/claude/intercept/proxy-auth";
 import type { PickerListenerOptions } from "../../src/claude/intercept/picker-listener";
 import {
@@ -321,7 +322,7 @@ describe("startClaudeIntercept wiring", () => {
     });
   }
 
-  test("a restart with an applied picker profile re-trusts the rotated CA and reselects the profile", { timeout: 30_000 }, async () => {
+  test("a restart with an applied picker profile keeps the reused CA trusted and reselects the profile", { timeout: 30_000 }, async () => {
     const port = await freePortPair();
     const pickerPort = port + 1;
     // Before the restart: an authority was published and Desktop had the picker profile selected.
@@ -354,15 +355,14 @@ describe("startClaudeIntercept wiring", () => {
       pickerPlatform: "darwin",
     });
     try {
-      // The cleanup untrusted the old authority; the applied row survives in place, so the enable
-      // cannot be awaited through a kind flip. Poll until the restore enable has re-trusted the
-      // current authority AND rewritten the row's proxy URL — the metadata's atomic rewrite can
-      // otherwise be observed mid-write as a transient absence. On Windows each lifecycle-lock
-      // acquisition is a PowerShell SID lookup, so allow several seconds of slack.
+      // The restart reuses this process's authority, so cleanup must NOT untrust it — the applied
+      // row survives in place and the restore enable only rewrites the row's proxy URL. Poll until
+      // that rewrite lands; the metadata's atomic write can otherwise be observed as a transient
+      // absence. On Windows each lifecycle-lock acquisition is a PowerShell SID lookup, so allow
+      // several seconds of slack.
       const settled = () => {
         const profile = inspectDesktopPickerProfile({ configDir: root, platform: "darwin" });
-        return profile.kind === "applied" && profile.proxyUrl === `http://127.0.0.1:${pickerPort}`
-          && trust.calls.some(call => call[0] === "add-trusted-cert");
+        return profile.kind === "applied" && profile.proxyUrl === `http://127.0.0.1:${pickerPort}`;
       };
       for (let i = 0; i < 1600 && !settled(); i += 1) {
         await Bun.sleep(5);
@@ -370,8 +370,9 @@ describe("startClaudeIntercept wiring", () => {
       expect(inspectDesktopPickerProfile({ configDir: root, platform: "darwin" }))
         .toMatchObject({ kind: "applied", proxyUrl: `http://127.0.0.1:${pickerPort}` });
       const names = trust.calls.map(call => call[0]);
-      expect(names).toContain("remove-trusted-cert");
-      expect(names).toContain("add-trusted-cert");
+      // Same authority on disk and in the process cache: trust is retained, not removed and re-added.
+      expect(names).not.toContain("remove-trusted-cert");
+      expect(names).not.toContain("add-trusted-cert");
       expect(getClaudePickerRuntime()?.selectTunnel("claude.ai", 443)).toEqual(INTERCEPT);
     } finally {
       await handle?.stop();
@@ -379,21 +380,11 @@ describe("startClaudeIntercept wiring", () => {
     expect(getClaudePickerRuntime()).toBeNull();
   });
 
-  test("a failed rotation untrust degrades the picker but keeps the intercept pair serving", async () => {
+  test("a restart keeps a reused authority trusted without touching the keychain", async () => {
     const port = await freePortPair();
-    const stateDir = pickerStateDir(root);
-    // Legacy state: a published certificate and the exportable signing key it paired with.
+    // Published authority is the process cache's — restarting in-process must not revoke its trust.
     ensurePickerCa(root);
-    writeFileSync(join(stateDir, "ca.key"), "legacy-exportable-key\n");
-    // Untrusting the old CA fails, so the rotation cannot complete — but the already-bound main
-    // proxy must keep serving first-party Claude Code traffic instead of going down with it.
-    const broken: SecurityRunner = async args => {
-      if (args[0] === "find-certificate") {
-        const { sha1 } = pickerCaFingerprints(readFileSync(pickerCaCertPath(root), "utf8"));
-        return { code: 0, stdout: `SHA-1 hash: ${sha1}\n`, stderr: "" };
-      }
-      return { code: 1, stdout: "", stderr: "" };
-    };
+    const trust = keychain({ trusted: true });
     const fake = {
       selectTunnel: () => null,
       start: async () => {},
@@ -406,6 +397,47 @@ describe("startClaudeIntercept wiring", () => {
       dispatch: async () => new Response("unused"),
       loadPickerRoutes: async () => ({ nativeSlugs: [], routedModels: [] }),
       createPicker: () => fake,
+      pickerSecurity: trust.run,
+      pickerPlatform: "darwin",
+    });
+    try {
+      expect(handle).not.toBeNull();
+      expect(getClaudePickerRuntime()).toBe(fake);
+      const names = trust.calls.map(call => call[0]);
+      expect(names).not.toContain("remove-trusted-cert");
+      expect(names).not.toContain("delete-certificate");
+    } finally {
+      await handle?.stop();
+    }
+    expect(getClaudePickerRuntime()).toBeNull();
+  });
+
+  test("a failed rotation untrust refuses the picker but keeps the intercept pair serving", async () => {
+    const port = await freePortPair();
+    const stateDir = pickerStateDir(root);
+    // Legacy state: a published certificate and the exportable signing key it paired with.
+    ensurePickerCa(root);
+    writeFileSync(join(stateDir, "ca.key"), "legacy-exportable-key\n");
+    // A different authority than this process will publish — e.g. written by a since-exited peer —
+    // must actually leave the keychain before the replacement arms.
+    const foreign = createCertificateAuthority({ commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST] });
+    writeFileSync(pickerCaCertPath(root), foreign.certPem);
+    const foreignSha1 = pickerCaFingerprints(foreign.certPem).sha1;
+    // The keychain still trusts the foreign certificate; every removal attempt fails.
+    const broken: SecurityRunner = async args => {
+      if (args[0] === "find-certificate") {
+        return { code: 0, stdout: `SHA-1 hash: ${foreignSha1}\n`, stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: "" };
+    };
+    let pickerCreated = false;
+    const handle = await startClaudeIntercept({
+      config: config({ claudeCode: { intercept: { port } } }),
+      publicPort: 10100,
+      configDir: root,
+      dispatch: async () => new Response("unused"),
+      loadPickerRoutes: async () => ({ nativeSlugs: [], routedModels: [] }),
+      createPicker: () => { pickerCreated = true; throw new Error("must not start"); },
       pickerSecurity: broken,
       pickerPlatform: "darwin",
     });
@@ -413,10 +445,12 @@ describe("startClaudeIntercept wiring", () => {
       expect(handle).not.toBeNull();
       // The exportable key still cannot outlive the failed cleanup.
       expect(existsSync(join(stateDir, "ca.key"))).toBe(false);
+      // Failing closed: the picker never arms while a foreign signing key stays trusted.
+      expect(pickerCreated).toBe(false);
+      expect(getClaudePickerRuntime()).toBeNull();
       // The main intercept proxy stayed bound and still terminates api.anthropic.com CONNECTs.
       expect(await canBind(port)).toBe(false);
       expect(await connectStatusLine(port, "api.anthropic.com")).toContain("200");
-      expect(getClaudePickerRuntime()).toBe(fake);
     } finally {
       await handle?.stop();
     }

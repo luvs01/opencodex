@@ -149,10 +149,19 @@ function pickerTrustPaths(deps: ApplyProfileDeps, configDir = getConfigDir()): {
   };
 }
 
-async function trustPickerLocally(deps: ApplyProfileDeps): Promise<{ ok: true; callerAddedTrust: boolean; caPath: string; sha1: string } | { ok: false; reason: string }> {
+async function trustPickerLocally(
+  deps: ApplyProfileDeps,
+  expectedCaSha256?: string | null,
+): Promise<{ ok: true; callerAddedTrust: boolean; caPath: string; sha1: string } | { ok: false; reason: string }> {
   try {
     const configDir = getConfigDir();
     const paths = pickerTrustPaths(deps, configDir);
+    if (!deps.ensurePickerCaImpl) {
+      // The bytes in ca.pem are only safe to trust when they match the authority the running
+      // server actually owns — a replaced file must never land in the login keychain.
+      const live = pickerCaFingerprints(paths.certPem).sha256;
+      if (expectedCaSha256 == null || expectedCaSha256 !== live) return { ok: false, reason: "ca_unverified" };
+    }
     const inspect = deps.inspectPickerTrustImpl ?? inspectPickerTrust;
     const before = await inspect(paths.leafPath, paths.sha1, deps.security, deps.platform);
     if (before === "trusted") return { ok: true, callerAddedTrust: false, caPath: paths.caPath, sha1: paths.sha1 };
@@ -601,17 +610,28 @@ async function handleClaudeDesktopPickerCommand(
   });
 
   if (action === "trust") {
-    const trusted = await trustPickerLocally(deps);
+    if (!(await liveDesktopProxy(deps))) {
+      console.error("proxy_unavailable");
+      return 1;
+    }
+    // Verify the published CA file against the authority the live server reports — the status
+    // response carries caSha256, and a first enable materializes one when none exists yet.
+    let caSha256: string | null;
+    try {
+      caSha256 = (await pickerRuntimeRequest<{ ok?: boolean; picker?: DesktopPickerStatus }>(
+        "/api/claude-desktop/picker", {}, deps,
+      )).picker?.caSha256 ?? null;
+      if (caSha256 === null) caSha256 = (await sendEnable(false)).picker?.caSha256 ?? null;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
+    const trusted = await trustPickerLocally(deps, caSha256);
     if (!trusted.ok) {
       console.error(trusted.reason);
       return 1;
     }
     localTrust = trusted;
-    if (!(await liveDesktopProxy(deps))) {
-      await compensateLocalPickerTrust(localTrust, deps);
-      console.error("proxy_unavailable");
-      return 1;
-    }
   }
 
   let response: PickerRouteResponse;
@@ -623,7 +643,7 @@ async function handleClaudeDesktopPickerCommand(
       return 1;
     }
     if (action === "on" && response.picker?.reason === "trust_pending") {
-      const trusted = await trustPickerLocally(deps);
+      const trusted = await trustPickerLocally(deps, response.picker.caSha256);
       if (!trusted.ok) {
         console.error(trusted.reason);
         return 1;

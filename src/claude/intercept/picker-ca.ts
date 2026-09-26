@@ -137,6 +137,12 @@ export function ensurePickerCa(configDir: string): PickerCa {
   return pickerCa;
 }
 
+/** Fingerprint of this process's authority only — null until ensurePickerCa has run. */
+export function publishedPickerCaSha256(configDir: string): string | null {
+  const cached = processAuthorities.get(pickerStateDir(configDir));
+  return cached ? pickerCaFingerprints(cached.certPem).sha256 : null;
+}
+
 /** Persist only the public leaf, so trust inspection verifies this exact local issuer. */
 export function issuePickerLeaf(ca: PickerCa, configDir: string): PemKeyPair {
   const leaf = issueServerLeaf(ca, PICKER_CA_COMMON_NAME, [PICKER_HOST]);

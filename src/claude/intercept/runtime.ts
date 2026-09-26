@@ -8,7 +8,7 @@ import { classifyInterceptClient, interceptRouteFor } from "./client-class";
 import { CLAUDE_INTERCEPT_HOSTS, isBrowserConnect, startConnectProxy, type ConnectProxyHandle } from "./connect-proxy";
 import { startClaudeInterceptListener } from "./listener";
 import { claudeInterceptCaCertPath, ensureLocalInterceptCaForStartup, issueLocalInterceptLeaf } from "./local-ca";
-import { discardPickerCaKey, pickerCaCertPath, pickerCaFingerprints } from "./picker-ca";
+import { discardPickerCaKey, ensurePickerCa, pickerCaCertPath, pickerCaFingerprints } from "./picker-ca";
 import type { PickerRouteInput } from "./picker-models";
 import { createPickerRuntime, type CreatePickerRuntimeOptions, type PickerRuntime } from "./picker-runtime";
 import type { SecurityRunner } from "./picker-trust";
@@ -189,22 +189,32 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
         ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
       }).kind === "applied";
       const oldCaPath = pickerCaCertPath(configDir);
+      let pickerBlocked = false;
       if (existsSync(oldCaPath)) {
-        // The only rotation cleanup is dropping the old authority's keychain trust. A failure
-        // degrades the picker (a dead authority stays trusted until it expires) but must never
-        // take the already-bound main intercept pair down with it.
-        const { untrustPickerCa } = await import("./picker-trust");
+        // Rotation cleanup drops the *replaced* authority's keychain trust. A reused process
+        // authority keeps its trust — removing it would revoke picker access mid-flight and force
+        // a redundant keychain prompt. When removal of a genuinely different predecessor fails,
+        // the picker must not arm at all: the outgoing signing key would otherwise stay trusted
+        // beside the new authority, and the already-bound main intercept pair keeps serving alone.
+        let publishedSha1: string | undefined;
         try {
-          const sha1 = pickerCaFingerprints(readFileSync(oldCaPath, "utf8")).sha1;
-          const dropped = await untrustPickerCa(oldCaPath, sha1, options.pickerSecurity, options.pickerPlatform);
-          if (!dropped.ok) {
-            console.warn("⚠ Claude Desktop picker authority rotation could not untrust the previous certificate");
+          publishedSha1 = pickerCaFingerprints(readFileSync(oldCaPath, "utf8")).sha1;
+        } catch { /* unreadable: nothing identifiable to remove */ }
+        const nextSha1 = pickerCaFingerprints(ensurePickerCa(configDir).certPem).sha1;
+        if (publishedSha1 !== undefined && publishedSha1 !== nextSha1) {
+          const { untrustPickerCa } = await import("./picker-trust");
+          try {
+            const dropped = await untrustPickerCa(oldCaPath, publishedSha1, options.pickerSecurity, options.pickerPlatform);
+            pickerBlocked = !dropped.ok;
+          } catch {
+            pickerBlocked = true;
           }
-        } catch (error) {
-          console.warn(`⚠ Claude Desktop picker authority rotation could not untrust the previous certificate: ${error instanceof Error ? error.message : String(error)}`);
+          if (pickerBlocked) {
+            console.warn("⚠ Claude Desktop picker disabled: the previous certificate could not be untrusted");
+          }
         }
       }
-      picker = (options.createPicker ?? createPickerRuntime)({
+      picker = pickerBlocked ? null : (options.createPicker ?? createPickerRuntime)({
         config: options.config,
         configDir,
         loadRoutes: options.loadPickerRoutes,
