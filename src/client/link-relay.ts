@@ -225,11 +225,11 @@ export async function relayLinkDataRequest(
   const auth = await authenticateLinkRelayTarget(target, fetchImpl, relayAbort.signal);
   if (auth !== "authenticated") {
     cleanup();
-    // A listener that answers 404 either predates relay authentication or no longer holds this
-    // link record — refusing stays fail-closed either way, but name the migration: the hub must
-    // be upgraded (or the link remade) before a newer client can carry data requests.
+    // The same 404 covers a hub that predates relay authentication, a link record the hub
+    // dropped, and a fingerprint the hub no longer accepts — the relay cannot tell them apart,
+    // so the refusal names all three instead of pointing only at an upgrade.
     return jsonError(503, auth === "unrecognized"
-      ? "link tunnel refused the relay challenge — upgrade the hub to a version with link-relay auth"
+      ? "link tunnel refused the relay challenge — the hub predates link-relay auth or no longer recognizes this link; re-link or upgrade the hub"
       : "link tunnel unavailable", true);
   }
 

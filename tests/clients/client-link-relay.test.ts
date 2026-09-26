@@ -166,11 +166,14 @@ describe("client link HTTP relay", () => {
 
   test("a hub that predates relay authentication fails closed with an upgrade hint", async () => {
     // An older hub has no challenge endpoint; refusing stays fail-closed but must name the
-    // migration instead of looking like a transient tunnel outage.
+    // migration instead of looking like a transient tunnel outage. The same 404 also means a
+    // dropped link record or a rejected fingerprint, so the hint covers re-linking too.
     const legacyHub = (async () => Response.json({ error: "not_found" }, { status: 404 })) as typeof fetch;
     const response = await relayLinkDataRequest(relayRequest({ method: "POST" }), target, { fetchImpl: legacyHub });
     expect(response.status).toBe(503);
-    expect(await response.text()).toContain("upgrade the hub");
+    const message = await response.text();
+    expect(message).toContain("upgrade the hub");
+    expect(message).toContain("re-link");
   });
 
   test("applies hub response caps to non-SSE responses", async () => {
