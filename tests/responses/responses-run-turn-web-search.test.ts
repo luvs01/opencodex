@@ -40,6 +40,20 @@ mock.module("../../src/providers/request-pacing", () => ({ ...pacing,
     return originalWaitForSlot(...args);
   },
 }));
+const sidecarAuth = await import("../../src/server/responses/request-sidecar-auth");
+const prepareResponsesSidecarAuth = sidecarAuth.prepareResponsesSidecarAuth;
+let releasedFixtureProbe = false;
+mock.module("../../src/server/responses/request-sidecar-auth", () => ({ ...sidecarAuth,
+  prepareResponsesSidecarAuth: async (...args: Parameters<typeof sidecarAuth.prepareResponsesSidecarAuth>) => {
+    if (args[0].req.headers.get("x-fixture-probe") !== "held") {
+      return prepareResponsesSidecarAuth(...args);
+    }
+    return {
+      routedCompaction: false,
+      openAiSidecar: { releaseProbeLease: () => { releasedFixtureProbe = true; } },
+    } as Awaited<ReturnType<typeof sidecarAuth.prepareResponsesSidecarAuth>>;
+  },
+}));
 const { handleResponses } = await import("../../src/server/responses");
 const originalHome = process.env.OPENCODEX_HOME;
 let home = "";
@@ -129,6 +143,27 @@ test.each(["image", "video"] as const)("media-only %s bridge still injects its t
   expect(await run(true, false, media, false)).toContain("media answer");
   expect(attempts[0].context.tools?.some(t => t.name === `${media}_gen`)).toBe(true);
   expect(attempts[0].context.tools?.some(t => t.webSearch)).toBe(false);
+});
+
+test("releases a search probe when pre-dispatch validation rejects the request", async () => {
+  releasedFixtureProbe = false;
+  const config = {
+    port: 0, defaultProvider: "cursor",
+    webSearchSidecar: { backend: "exa", exaApiKey: "fixture-search-key" },
+    providers: {
+      cursor: { adapter: "cursor", baseUrl: "https://api2.cursor.sh", authMode: "oauth", models: ["model"] },
+    },
+  } as OcxConfig;
+  const response = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json", "x-fixture-probe": "held" },
+    body: JSON.stringify({ model: "cursor/model", input: [{
+      type: "function_call_output", output: "fixture result",
+    }], tools: [{ type: "web_search" }] }),
+  }), config, { model: "", provider: "" });
+
+  expect(response.status).toBe(400);
+  expect(releasedFixtureProbe).toBe(true);
+  expect(attempts).toHaveLength(0);
 });
 
 // Streaming only: a first-event 429 replays the turn while the superseded
