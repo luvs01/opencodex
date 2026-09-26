@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultCodexHome, wslAutomountRoot, listWslWindowsCodexHomes } from "../../src/codex/home";
@@ -225,5 +225,24 @@ describe("wsl.conf automount root", () => {
 
     expect(serviceCodexHomeMatchesInstall(lexicalHome, deps)).toBe(true);
     expect(serviceCodexHomeMatchesInstall("/srv/other-home", deps)).toBe(false);
+  });
+
+  // The injected realpath seam above isolates the policy; this exercises the production
+  // resolver itself — a real junction (Windows) or directory symlink spells the same
+  // physical home two ways.
+  test("service ownership accepts a real junction spelling of the physical home", () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-junction-home-"));
+    try {
+      const physical = join(root, "real-codex");
+      const alias = join(root, "alias-codex");
+      mkdirSync(physical, { recursive: true });
+      symlinkSync(physical, alias, "junction");
+
+      const deps = { env: { CODEX_HOME: physical }, homedir: () => root };
+      expect(serviceCodexHomeMatchesInstall(alias, deps)).toBe(true);
+      expect(serviceCodexHomeMatchesInstall(join(root, "other-codex"), deps)).toBe(false);
+    } finally {
+      removeTreeWithRetry(root);
+    }
   });
 });
