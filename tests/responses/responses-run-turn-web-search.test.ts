@@ -211,6 +211,9 @@ test("a streamed sidecar response keeps the search probe until the stream settle
     expect(response.headers.get("content-type")).toContain("event-stream");
     expect(releasedFixtureProbe).toBe(false);
     await response.text();
+    // The routed model answered without a web_search call, so no sidecar outcome
+    // settled the lease — the stream's own completion hands the probe back.
+    expect(releasedFixtureProbe).toBe(true);
   } finally {
     globalThis.fetch = realFetch;
   }
