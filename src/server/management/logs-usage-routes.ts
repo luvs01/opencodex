@@ -84,7 +84,12 @@ import {
   getUsageSummaryCacheEntry,
   setUsageSummaryCacheEntry,
 } from "./usage-summary-cache";
-import { getFilteredUsageAggregate, getUsageAggregate } from "./usage-aggregate-cache";
+import {
+  getFilteredUsageAggregate,
+  getJevStatsAggregate,
+  getUsageAggregate,
+} from "./usage-aggregate-cache";
+import { normalizeJevStatsComboId } from "../../usage/jev-stats";
 
 function nextLocalMidnight(now: number): number {
   const next = new Date(now);
@@ -180,6 +185,31 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
   }
 
   if (url.pathname === "/api/usage" && req.method === "GET") {
+    if (url.searchParams.get("jev") === "1") {
+      const range = parseRange(url.searchParams.get("range"));
+      const rawComboId = url.searchParams.get("comboId");
+      const comboId = rawComboId === null ? undefined : normalizeJevStatsComboId(rawComboId);
+      if (rawComboId !== null && (comboId === undefined || comboId !== rawComboId.trim())) {
+        return jsonResponse({ error: "invalid comboId" }, 400);
+      }
+      const now = Date.now();
+      const { since } = rangeWindow(range, now);
+      try {
+        const aggregate = await getJevStatsAggregate({ comboId, since });
+        return jsonResponse({
+          ...aggregate.accumulator.summarize(range, now),
+          ...(aggregate.usageIncomplete
+            ? { usageIncomplete: true as const, usageIncompleteReason: "oversized_rows" as const }
+            : {}),
+          historyTruncated: false,
+          truncatedPrefixBytes: 0,
+          entriesTruncated: false,
+          entriesDropped: 0,
+        });
+      } catch {
+        return jsonResponse({ error: "read_failed" }, 500);
+      }
+    }
     // A sub-resource on the same route rather than a route of its own. It answers a different
     // question -- which failures keep recurring, rather than what was spent -- and it costs a
     // ledger scan, so it is opt-in: a dashboard asking for the usage summary must not pay for
@@ -317,45 +347,11 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       }
       return jsonResponse(requestedSummary);
     } catch {
-      return jsonResponse({
-        range,
-        surface,
-        since: window?.since ?? null,
-        ...(window ? { customWindow: true, until: window.until } : {}),
-        generatedAt: now,
-        summary: {
-          requests: 0,
-          attemptCount: 0,
-          measuredRequests: 0,
-          reportedRequests: 0,
-          unreportedRequests: 0,
-          unsupportedRequests: 0,
-          estimatedRequests: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          cachedInputTokens: 0,
-          cacheReadInputTokens: 0,
-          cacheCreationInputTokens: 0,
-          reasoningOutputTokens: 0,
-          totalTokens: 0,
-          coverageRatio: 0,
-          estimatedCostUsd: 0,
-          pricedRequests: 0,
-          unpricedRequests: 0,
-          unmeteredRequests: 0,
-        },
-        days: [],
-        models: [],
-        providers: [],
-        accounts: [],
-        historyTruncated: false,
-        truncatedPrefixBytes: 0,
-        entriesTruncated: false,
-        entriesDropped: 0,
-        snapshotWindowStart: null,
-        snapshotWindowEnd: null,
-        error: "read_failed",
-      });
+      // A missing ledger is handled as an empty installation by the reader. Reaching this catch
+      // therefore means the report is unavailable, not that usage was measured as zero. Keep the
+      // transport status aligned with the JEV projection above so every dashboard consumer can
+      // retain its last valid snapshot instead of caching fabricated zero totals.
+      return jsonResponse({ error: "read_failed" }, 500);
     }
   }
 
