@@ -21,10 +21,12 @@ export interface WorkerLaunchContext {
 }
 
 // Absolute install paths only — PATH is never consulted, so a caller-controlled entry cannot
-// redirect the launch. `/run/current-system/sw/bin` is the NixOS layout, where the binary lives
+// redirect the launch. `/usr/local/bin` is where systemd lands when built or stowed outside the
+// distro layout, and `/run/current-system/sw/bin` is the NixOS layout, where the binary lives
 // nowhere else even though the user bus works.
 const TRUSTED_SYSTEMD_RUN_PATHS = [
-  "/usr/bin/systemd-run", "/bin/systemd-run", "/run/current-system/sw/bin/systemd-run",
+  "/usr/bin/systemd-run", "/bin/systemd-run", "/usr/local/bin/systemd-run",
+  "/run/current-system/sw/bin/systemd-run",
 ] as const;
 
 export interface SystemdRunHooks {

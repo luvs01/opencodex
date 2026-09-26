@@ -46,7 +46,10 @@ describe("trusted systemd-run discovery", () => {
       probeScope: () => true,
     });
     expect(found).toBe("/run/current-system/sw/bin/systemd-run");
-    expect(seen).toEqual(["/usr/bin/systemd-run", "/bin/systemd-run", "/run/current-system/sw/bin/systemd-run"]);
+    expect(seen).toEqual([
+      "/usr/bin/systemd-run", "/bin/systemd-run", "/usr/local/bin/systemd-run",
+      "/run/current-system/sw/bin/systemd-run",
+    ]);
     expect(seen.every(path => path.startsWith("/"))).toBe(true);
   });
 
@@ -68,7 +71,7 @@ describe("trusted systemd-run discovery", () => {
     };
     expect(resolveSystemdRun(hooks)).toBeUndefined();
     expect(resolveSystemdRun(hooks)).toBeUndefined();
-    expect(calls).toBe(3);
+    expect(calls).toBe(4);
     resetSystemdRunProbeForTests();
   });
 });
