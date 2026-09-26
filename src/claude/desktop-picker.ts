@@ -231,7 +231,7 @@ export function createDesktopPickerController(deps: DesktopPickerControllerDeps)
       let trust = await inspectPickerTrust(pickerLeafCertPath(deps.configDir), caSha1, deps.security, platform);
       observedTrust = trust;
       if (trust !== "trusted" && options.context === "server") {
-        const added = await trustPickerCa(caPath, deps.security, platform);
+        const added = await trustPickerCa(caPath, deps.security, platform, { pem: ca.certPem });
         trustedByAttempt = added.ok;
         trust = await inspectPickerTrust(pickerLeafCertPath(deps.configDir), caSha1, deps.security, platform);
         observedTrust = trust;
