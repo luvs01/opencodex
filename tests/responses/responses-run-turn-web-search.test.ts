@@ -28,9 +28,23 @@ function fixture(provider: OcxProviderConfig): ProviderAdapter {
     },
   };
 }
+function fetchFixture(provider: OcxProviderConfig): ProviderAdapter {
+  return {
+    name: "fetchonly",
+    buildRequest: () => ({ url: provider.baseUrl, method: "POST", headers: {}, body: "{}" }),
+    fetchResponse: async () => new Response("{}", { status: 200 }),
+    async *parseStream() {
+      yield { type: "text_delta", text: "search-enabled answer" } as AdapterEvent;
+      yield { type: "done" } as AdapterEvent;
+    },
+    async parseResponse() { return [{ type: "done" }] as AdapterEvent[]; },
+  };
+}
 mock.module("../../src/server/adapter-resolve", () => ({ ...resolver,
   resolveAdapter: (provider: OcxProviderConfig, cache?: "none" | "short" | "long") =>
-    provider.adapter === "cursor" ? fixture(provider) : resolveAdapter(provider, cache),
+    provider.adapter === "cursor" ? fixture(provider)
+      : provider.adapter === "fetchonly" ? fetchFixture(provider)
+      : resolveAdapter(provider, cache),
 }));
 const pacing = await import("../../src/providers/request-pacing");
 const originalWaitForSlot = pacing.waitForProviderRequestSlot;
@@ -164,6 +178,42 @@ test("releases a search probe when pre-dispatch validation rejects the request",
   expect(response.status).toBe(400);
   expect(releasedFixtureProbe).toBe(true);
   expect(attempts).toHaveLength(0);
+});
+
+test("a streamed sidecar response keeps the search probe until the stream settles", async () => {
+  releasedFixtureProbe = false;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(typeof input === "object" && "url" in input ? input.url : input);
+    if (url.includes("exa")) {
+      return new Response(JSON.stringify({ results: [{ title: "fixture", url: "https://fixture.test" }] }),
+        { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(
+      'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  try {
+    const config = {
+      port: 0, defaultProvider: "fetchonly",
+      webSearchSidecar: { backend: "exa", exaApiKey: "fixture-search-key" },
+      providers: {
+        fetchonly: { adapter: "fetchonly", baseUrl: "https://fetchonly.test/v1", apiKey: "fixture-key", models: ["model"] },
+      },
+    } as OcxConfig;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json", "x-fixture-probe": "held" },
+      body: JSON.stringify({ model: "fetchonly/model", input: "search this", stream: true,
+        tools: [{ type: "web_search" }] }),
+    }), config, { model: "", provider: "" });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("event-stream");
+    expect(releasedFixtureProbe).toBe(false);
+    await response.text();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 // Streaming only: a first-event 429 replays the turn while the superseded
