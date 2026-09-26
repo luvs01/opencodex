@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
+import { LINK_RELAY_AUTH_PATH, linkRelayCallerProof, linkRelayProof, linkRelayProofMatches } from "../../src/link/relay-auth";
 import {
   forwardLinkRequestHeaders,
   LINK_RELAY_SSE_IDLE_TIMEOUT_MS,
@@ -17,7 +18,8 @@ import { startMachineListener } from "../../src/client/machine-listener";
 import type { OcxClientConnectionConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const target = { tunnelPort: 12000 };
+const LINK_ID = `lnk_${"a".repeat(16)}`;
+const target = { tunnelPort: 12000, linkId: LINK_ID, apiKeyId: "ocx_data_fixture", tokenFingerprint: "b".repeat(64) };
 let servers: Server<unknown>[] = [];
 let root = "";
 let previousHome: string | undefined;
@@ -28,7 +30,7 @@ function linkConnection(tunnelPort: number): OcxClientConnectionConfig {
     managementUrl: `http://127.0.0.1:${tunnelPort}`,
     managementTransport: "direct",
     transport: "link",
-    link: { tunnelPort, linkId: `lnk_${"a".repeat(16)}` },
+    link: { tunnelPort, linkId: LINK_ID },
     selectedClients: ["codex"],
     tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
     apiKeyId: "ocx_data_fixture",
@@ -41,6 +43,23 @@ function linkConnection(tunnelPort: number): OcxClientConnectionConfig {
 
 function relayRequest(init: RequestInit = {}): Request {
   return new Request("http://127.0.0.1:10100/v1/responses?trace=1", init);
+}
+
+function authenticatedFetch(handler: typeof fetch): typeof fetch {
+  return (async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname === LINK_RELAY_AUTH_PATH) {
+      const linkId = url.searchParams.get("link") ?? "";
+      const nonce = url.searchParams.get("nonce") ?? "";
+      const expectedCaller = linkRelayCallerProof(target.tokenFingerprint, linkId, nonce);
+      if (!expectedCaller || !linkRelayProofMatches(url.searchParams.get("proof"), expectedCaller)) {
+        return Response.json({ error: "not_found" }, { status: 404 });
+      }
+      const proof = linkRelayProof(target.tokenFingerprint, linkId, nonce);
+      return new Response(null, { status: 204, headers: { "X-OpenCodex-Link-Proof": proof! } });
+    }
+    return handler(input, init);
+  }) as typeof fetch;
 }
 
 beforeEach(() => {
@@ -116,7 +135,7 @@ describe("client link HTTP relay", () => {
       headers: { "X-OpenCodex-API-Key": key, "Content-Type": "application/json" },
       body: JSON.stringify({ input: "private" }),
     }), target, {
-      fetchImpl: (async () => { throw new Error("connection refused"); }) as typeof fetch,
+      fetchImpl: authenticatedFetch((async () => { throw new Error("connection refused"); }) as typeof fetch),
     });
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("1");
@@ -125,11 +144,43 @@ describe("client link HTTP relay", () => {
     expect(body).not.toContain("private");
   });
 
+  test("a stalled authentication handshake aborts on caller disconnect and the relay deadline", async () => {
+    const hangingAuth = (async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      const signal = init!.signal!;
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })) as typeof fetch;
+
+    const caller = new AbortController();
+    let authSignal: AbortSignal | undefined;
+    const trackingAuth = (async (input, init) => { authSignal = init?.signal ?? undefined; return hangingAuth(input, init); }) as typeof fetch;
+    const pending = relayLinkDataRequest(relayRequest({ method: "POST", signal: caller.signal }), target, { fetchImpl: trackingAuth });
+    await Bun.sleep(0);
+    caller.abort();
+    expect((await pending).status).toBe(503);
+    expect(authSignal?.aborted).toBe(true);
+
+    const timedOut = relayLinkDataRequest(relayRequest({ method: "POST" }), target, { fetchImpl: hangingAuth, timeoutMs: 25 });
+    expect((await timedOut).status).toBe(503);
+  });
+
+  test("a hub that predates relay authentication fails closed with an upgrade hint", async () => {
+    // An older hub has no challenge endpoint; refusing stays fail-closed but must name the
+    // migration instead of looking like a transient tunnel outage. The same 404 also means a
+    // dropped link record or a rejected fingerprint, so the hint covers re-linking too.
+    const legacyHub = (async () => Response.json({ error: "not_found" }, { status: 404 })) as typeof fetch;
+    const response = await relayLinkDataRequest(relayRequest({ method: "POST" }), target, { fetchImpl: legacyHub });
+    expect(response.status).toBe(503);
+    const message = await response.text();
+    expect(message).toContain("upgrade the hub");
+    expect(message).toContain("re-link");
+  });
+
   test("applies hub response caps to non-SSE responses", async () => {
     const response = await relayLinkDataRequest(relayRequest({ method: "POST" }), target, {
-      fetchImpl: (async () => new Response("too large", {
+      fetchImpl: authenticatedFetch((async () => new Response("too large", {
         headers: { "Content-Length": String(HUB_RELAY_RESPONSE_BODY_MAX_BYTES + 1) },
-      })) as typeof fetch,
+      })) as typeof fetch),
     });
     expect(response.status).toBe(502);
   });
@@ -143,10 +194,10 @@ describe("client link HTTP relay", () => {
       cancel() { cancelled = true; },
     });
     const response = await relayLinkDataRequest(relayRequest({ method: "POST", signal: caller.signal }), target, {
-      fetchImpl: (async (_input, init) => {
+      fetchImpl: authenticatedFetch((async (_input, init) => {
         init!.signal!.addEventListener("abort", () => upstream.abort(), { once: true });
         return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
-      }) as typeof fetch,
+      }) as typeof fetch),
     });
     const reader = response.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready");
@@ -170,12 +221,12 @@ describe("client link HTTP relay", () => {
         }) as typeof setTimeout,
         clearTimeout: (() => {}) as typeof clearTimeout,
       },
-      fetchImpl: (async (_input, init) => {
+      fetchImpl: authenticatedFetch((async (_input, init) => {
         upstreamSignal = init!.signal!;
         return new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }), {
           headers: { "Content-Type": "text/event-stream" },
         });
-      }) as typeof fetch,
+      }) as typeof fetch),
     });
     const reader = response.body!.getReader();
     const pending = reader.read();
@@ -191,6 +242,17 @@ describe("client link HTTP relay", () => {
       hostname: "127.0.0.1",
       port: 0,
       async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === LINK_RELAY_AUTH_PATH) {
+          const linkId = url.searchParams.get("link") ?? "";
+          const nonce = url.searchParams.get("nonce") ?? "";
+          const expectedCaller = linkRelayCallerProof("b".repeat(64), linkId, nonce);
+          if (!expectedCaller || !linkRelayProofMatches(url.searchParams.get("proof"), expectedCaller)) {
+            return Response.json({ error: "not_found" }, { status: 404 });
+          }
+          const proof = linkRelayProof("b".repeat(64), linkId, nonce);
+          return new Response(null, { status: 204, headers: { "X-OpenCodex-Link-Proof": proof! } });
+        }
         received = {
           method: req.method,
           path: new URL(req.url).pathname + new URL(req.url).search,
@@ -217,5 +279,35 @@ describe("client link HTTP relay", () => {
     });
     expect((await fetch(new URL("/v1/unknown", machine.url))).status).toBe(404);
     expect((await fetch(new URL("/api/machine/hub-relay/api/config", machine.url))).status).toBe(404);
+  });
+
+  test("does not disclose credentials or a body to a replacement tunnel listener", async () => {
+    let captured: { authorization: string | null; apiKey: string | null; body: string } | undefined;
+    const attacker = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        captured = {
+          authorization: req.headers.get("authorization"),
+          apiKey: req.headers.get("x-opencodex-api-key"),
+          body: await req.text(),
+        };
+        return Response.json({ forged: true });
+      },
+    });
+    servers.push(attacker);
+    const machine = startMachineListener(0, { state: linkConnection(attacker.port) });
+    servers.push(machine);
+    const response = await fetch(new URL("/v1/responses", machine.url), {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer caller-secret",
+        "X-OpenCodex-API-Key": "ocx_data_caller",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ input: "private prompt" }),
+    });
+    expect(response.status).toBe(503);
+    expect(captured).toEqual({ authorization: null, apiKey: null, body: "" });
   });
 });

@@ -10,9 +10,13 @@ import {
 } from "./hub-relay";
 import { linkRouteAllowed } from "../link/routes";
 import { isLinkPort } from "../link/ports";
+import { LINK_RELAY_AUTH_PATH, linkRelayChallenge, linkRelayProofMatches } from "../link/relay-auth";
 
 export interface LinkRelayTarget {
   tunnelPort: number;
+  linkId: string;
+  apiKeyId: string;
+  tokenFingerprint: string;
 }
 
 export interface LinkRelayClock {
@@ -47,6 +51,32 @@ export function linkRelayDestination(url: URL, target: LinkRelayTarget): string 
     throw new RangeError("invalid link tunnel port");
   }
   return `http://127.0.0.1:${target.tunnelPort}${url.pathname}${url.search}`;
+}
+
+type LinkRelayAuth = "authenticated" | "unavailable" | "unrecognized";
+
+async function authenticateLinkRelayTarget(
+  target: LinkRelayTarget,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal,
+): Promise<LinkRelayAuth> {
+  if (!target.apiKeyId.trim() || !/^lnk_[0-9a-f]{16}$/.test(target.linkId)
+    || !/^[a-f0-9]{64}$/.test(target.tokenFingerprint)) return "unavailable";
+  const challenge = linkRelayChallenge(target.tokenFingerprint, target.linkId);
+  const url = new URL(`http://127.0.0.1:${target.tunnelPort}${LINK_RELAY_AUTH_PATH}`);
+  url.searchParams.set("key", target.apiKeyId);
+  url.searchParams.set("link", target.linkId);
+  url.searchParams.set("nonce", challenge.nonce);
+  url.searchParams.set("proof", challenge.callerProof);
+  try {
+    const response = await fetchImpl(url, { method: "GET", redirect: "manual", signal });
+    if (response.status === 404) return "unrecognized";
+    return response.status === 204
+      && linkRelayProofMatches(response.headers.get("x-opencodex-link-proof"), challenge.expectedProof)
+      ? "authenticated" : "unavailable";
+  } catch {
+    return "unavailable";
+  }
 }
 
 export function forwardLinkRequestHeaders(source: Headers): Headers {
@@ -175,6 +205,7 @@ export async function relayLinkDataRequest(
     return jsonError(431, "link relay request headers too large");
   }
 
+  const fetchImpl = deps.fetchImpl ?? fetch;
   const relayAbort = new AbortController();
   const timeoutMs = typeof deps.timeoutMs === "number" && Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0
     ? Math.min(Math.floor(deps.timeoutMs), 120_000)
@@ -191,6 +222,17 @@ export async function relayLinkDataRequest(
   if (req.signal.aborted) onClientAbort();
   else if (timeoutSignal.aborted) onTimeout();
 
+  const auth = await authenticateLinkRelayTarget(target, fetchImpl, relayAbort.signal);
+  if (auth !== "authenticated") {
+    cleanup();
+    // The same 404 covers a hub that predates relay authentication, a link record the hub
+    // dropped, and a fingerprint the hub no longer accepts — the relay cannot tell them apart,
+    // so the refusal names all three instead of pointing only at an upgrade.
+    return jsonError(503, auth === "unrecognized"
+      ? "link tunnel refused the relay challenge — the hub predates link-relay auth or no longer recognizes this link; re-link or upgrade the hub"
+      : "link tunnel unavailable", true);
+  }
+
   let upstream: Response;
   try {
     const init: RequestInit & { duplex?: "half" } = {
@@ -200,7 +242,7 @@ export async function relayLinkDataRequest(
       signal: relayAbort.signal,
       ...(body ? { body, duplex: "half" } : {}),
     };
-    upstream = await (deps.fetchImpl ?? fetch)(destination, init);
+    upstream = await fetchImpl(destination, init);
   } catch {
     cleanup();
     return jsonError(503, "link tunnel unavailable", true);

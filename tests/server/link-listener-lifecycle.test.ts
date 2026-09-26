@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { Server } from "bun";
 import { createLinkListenerLifecycle } from "../../src/server/index/link-listener";
 import { emptyLinkStore, type LinkStore } from "../../src/link/store";
+import { LINK_RELAY_AUTH_PATH, linkRelayChallenge } from "../../src/link/relay-auth";
+import { relayLinkDataRequest } from "../../src/client/link-relay";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const LINK_ID = "link-key";
@@ -28,7 +30,11 @@ function store(listenerPort: number | null = null): LinkStore {
 }
 
 function context() {
-  return { maxRequestBodySize: 1024 * 1024, dispatch: async () => new Response("link-handler") };
+  return {
+    maxRequestBodySize: 1024 * 1024,
+    dispatch: async () => new Response("link-handler"),
+    keyFingerprint: (apiKeyId: string) => apiKeyId === LINK_ID ? "a".repeat(64) : undefined,
+  };
 }
 
 function wrappedServer(actual: Server<unknown>, stop: () => Promise<void>): Server<unknown> {
@@ -122,6 +128,60 @@ describe("hub-link listener lifecycle", () => {
     await Promise.all([first, second]);
     expect(bindCount).toBe(1);
     expect(lifecycle.status().state).toBe("listening");
+    const challenge = linkRelayChallenge("a".repeat(64), "lnk_0123456789abcdef");
+    const authUrl = new URL(LINK_RELAY_AUTH_PATH, servers[0]!.url);
+    authUrl.searchParams.set("key", LINK_ID);
+    authUrl.searchParams.set("link", "lnk_0123456789abcdef");
+    authUrl.searchParams.set("nonce", challenge.nonce);
+    authUrl.searchParams.set("proof", challenge.callerProof);
+    const authenticated = await fetch(authUrl);
+    expect(authenticated.status).toBe(204);
+    expect(authenticated.headers.get("x-opencodex-link-proof")).toBe(challenge.expectedProof);
+    // The endpoint is not an oracle: it answers only callers that already hold the link's
+    // fingerprint, and only for the exact link record that key is bound to.
+    authUrl.searchParams.set("proof", "f".repeat(64));
+    expect((await fetch(authUrl)).status).toBe(404);
+    authUrl.searchParams.set("proof", challenge.callerProof);
+    authUrl.searchParams.set("link", "lnk_fedcba9876543210");
+    expect((await fetch(authUrl)).status).toBe(404);
+    authUrl.searchParams.set("link", "lnk_0123456789abcdef");
+    authUrl.searchParams.set("key", "unrelated-key");
+    expect((await fetch(authUrl)).status).toBe(404);
+  });
+
+  /*
+   * The mocked relay and the stubbed key lookup each cover one side; this closes the loop —
+   * the real store record and live key fingerprint authenticate the real challenge endpoint,
+   * then a caller data request crosses the same listener.
+   */
+  test("a persisted link and live key relay a data request end to end", async () => {
+    tempHome = mkdtempSync(join(tmpdir(), "ocx-link-e2e-"));
+    const current = { value: store() };
+    const lifecycle = makeLifecycle(current, {
+      writeStore: (_path, next) => { current.value = next; },
+      serve: options => {
+        const actual = Bun.serve(options);
+        servers.push(actual);
+        return actual;
+      },
+    });
+    lifecycle.start(context());
+    await lifecycle.ensureStarted();
+    const port = servers[0]!.port;
+
+    const relayed = await relayLinkDataRequest(
+      new Request(`http://127.0.0.1:${port}/v1/catalog`, { method: "GET" }),
+      { tunnelPort: port, linkId: "lnk_0123456789abcdef", apiKeyId: LINK_ID, tokenFingerprint: "a".repeat(64) },
+    );
+    expect(relayed.status).toBe(200);
+    expect(await relayed.text()).toBe("link-handler");
+
+    // A caller that does not hold the data-key fingerprint gets no proof and no forward.
+    const denied = await relayLinkDataRequest(
+      new Request(`http://127.0.0.1:${port}/v1/catalog`, { method: "GET" }),
+      { tunnelPort: port, linkId: "lnk_0123456789abcdef", apiKeyId: LINK_ID, tokenFingerprint: "c".repeat(64) },
+    );
+    expect(denied.status).toBe(503);
   });
 
   test("does not rebind until a close has completed", async () => {
