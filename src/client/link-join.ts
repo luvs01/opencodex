@@ -22,6 +22,7 @@ import type { OcxConnectedClientId } from "../types";
 
 const JOIN_TUNNEL_READY_TIMEOUT_MS = 15_000;
 const JOIN_TUNNEL_POLL_MS = 100;
+const JOIN_TUNNEL_SPAWN_GRACE_MS = 100;
 const JOIN_REVOKE_TIMEOUT_MS = 30_000;
 const JOIN_CONFIRM_TTL_MS = 5 * 60_000;
 const LINK_ID = /^lnk_[0-9a-f]{16}$/;
@@ -203,6 +204,7 @@ async function compensateStaleSidecar(deps: ClientLinkJoinDeps): Promise<void> {
 
 async function waitForReady(
   deps: ClientLinkJoinDeps,
+  tunnel: ClientLinkTunnelHandle,
   port: number,
   key: string,
 ): Promise<void> {
@@ -210,11 +212,19 @@ async function waitForReady(
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
   const deadline = now() + JOIN_TUNNEL_READY_TIMEOUT_MS;
+  const tunnelExited = tunnel.exited.then(() => { throw new ClientLinkJoinError("join_tunnel_failed"); });
+  await Promise.race([
+    tunnelExited,
+    new Promise<void>(resolve => setTimeout(resolve, JOIN_TUNNEL_SPAWN_GRACE_MS)),
+  ]);
   for (;;) {
     try {
-      const response = await fetchImpl(`http://127.0.0.1:${port}/readyz`, {
-        headers: { "x-opencodex-api-key": key },
-      });
+      const response = await Promise.race([
+        tunnelExited,
+        fetchImpl(`http://127.0.0.1:${port}/readyz`, {
+          headers: { "x-opencodex-api-key": key },
+        }),
+      ]);
       if (response.status === 200) return;
       if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
     } catch (error) {
@@ -287,7 +297,7 @@ export async function joinHome(deps: ClientLinkJoinDeps, input: { alias: string 
       configDir: deps.configDir,
       knownHostsFile: deps.knownHostsFile,
     });
-    await waitForReady(deps, tunnelPort, issued.key);
+    await waitForReady(deps, tunnel, tunnelPort, issued.key);
   } catch (error) {
     const code = error instanceof ClientLinkJoinError ? error.code : "join_tunnel_failed";
     await rollback(deps, issued.linkId, tunnel);

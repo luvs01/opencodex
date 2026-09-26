@@ -32,7 +32,7 @@ function runnerFor(calls: string[][], issueResult = true): SshRunner {
 function tunnelFor(order: string[]) {
   return {
     pid: 123,
-    exited: Promise.resolve(0),
+    exited: new Promise<number>(() => {}),
     stop: async () => { order.push("stop-tunnel"); },
   };
 }
@@ -201,7 +201,7 @@ describe("client initiated link join", () => {
         sleep: async () => {},
         writeState: () => {},
         clearState: () => { cleared += 1; },
-        spawnTunnel: () => ({ pid: 1, exited: Promise.resolve(0), stop: async () => { stopped += 1; } }),
+        spawnTunnel: () => ({ pid: 1, exited: new Promise<number>(() => {}), stop: async () => { stopped += 1; } }),
         fetchImpl: async () => readiness === "unauthorized" ? new Response(null, { status: 401 }) : new Response(null, { status: 503 }),
       });
       await expect(joinHome(deps, { alias: "home" })).rejects.toMatchObject({
@@ -211,6 +211,23 @@ describe("client initiated link join", () => {
       expect(stopped).toBe(1);
       expect(cleared).toBe(1);
     }
+  });
+
+  test("does not disclose the issued key when the tunnel exits during its spawn grace", async () => {
+    const calls: string[][] = [];
+    let fetches = 0;
+    await expect(joinHome(joinDeps({
+      runner: runnerFor(calls),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => ({ pid: 1, exited: Promise.resolve(255), stop: async () => {} }),
+      fetchImpl: async () => {
+        fetches += 1;
+        return new Response(null, { status: 200 });
+      },
+    }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+    expect(fetches).toBe(0);
+    expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
   });
 
   test("rolls back on connect failure and never exposes the issued key", async () => {
@@ -263,7 +280,7 @@ describe("client initiated link join", () => {
       readSidecar: () => sidecarPresent ? sidecar : null,
       writeState: value => { sidecarPresent = true; Object.assign(sidecar, value); },
       clearState: () => { sidecarPresent = false; },
-      spawnTunnel: () => ({ pid: 1, exited: Promise.resolve(0), stop: async () => {} }),
+      spawnTunnel: () => ({ pid: 1, exited: new Promise<number>(() => {}), stop: async () => {} }),
       fetchImpl: async () => new Response(null, { status: 200 }),
       connect: (async () => { throw new Error("connect failed"); }) as typeof import("../../src/client/connect").connectClient,
     });

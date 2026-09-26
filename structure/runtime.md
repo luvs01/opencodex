@@ -77,7 +77,7 @@ verified matching processes regardless of the advisory freshness result.
 
 ## Hub management dashboard address
 
-When hub management ingress is enabled, `src/cli/dispatch.ts` opens the dashboard on the literal IPv4 loopback address and configured ingress port, matching the listener in `src/server/index.ts`. Other dashboard address selection is unchanged.
+When hub management ingress is enabled, `src/cli/dispatch.ts` opens the dashboard on the literal IPv4 loopback address and configured ingress port, matching the listener in `src/server/index.ts`. Other dashboard address selection is unchanged. Client-initiated Remote Link enrollment in `src/client/link-join.ts` observes the SSH tunnel through a spawn grace and every credential-bearing readiness request. A tunnel that exits cannot deliver its issued data key to an unrelated loopback listener or commit the connection.
 
 ## Codex desktop process membership
 
