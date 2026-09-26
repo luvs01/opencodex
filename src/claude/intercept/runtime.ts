@@ -9,7 +9,7 @@ import { claudeInterceptCaCertPath, ensureLocalInterceptCaForStartup, issueLocal
 import type { PickerRouteInput } from "./picker-models";
 import { createPickerRuntime, type CreatePickerRuntimeOptions, type PickerRuntime } from "./picker-runtime";
 import type { SecurityRunner } from "./picker-trust";
-import { pickerCaCertPath } from "./picker-ca";
+import { discardPickerCaKey, pickerCaCertPath } from "./picker-ca";
 
 /**
  * Lifecycle for the Claude intercept pair (CONNECT proxy + TLS listener).
@@ -151,12 +151,25 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
   let pickerProxyLive = false;
   try {
     if (options.loadPickerRoutes) {
-      // A picker authority is process-scoped. Before rotating it, release Desktop from the old
-      // proxy and remove the old public root from the login keychain. This also migrates releases
-      // that persisted an exportable ca.key: ensurePickerCa removes that key after this cleanup.
+      // A picker authority is process-scoped, and older releases persisted an exportable ca.key
+      // next to the published certificate. Drop that key before anything else: a cleanup failure
+      // below must never leave a signing key on disk that outlives this process.
+      discardPickerCaKey(configDir);
+      // Before rotating the authority, release Desktop from the old proxy and remove the old
+      // public root from the login keychain.
       let pickerCleanupOk = true;
+      let pickerProfileApplied = false;
       if (existsSync(pickerCaCertPath(configDir))) {
-        const { removeDesktopPickerArtifacts } = await import("../desktop-picker");
+        const [{ inspectDesktopPickerProfile }, { removeDesktopPickerArtifacts }] = await Promise.all([
+          import("../desktop-picker-profile"),
+          import("../desktop-picker"),
+        ]);
+        // Remember whether Desktop was pinned to the picker so the new authority can restore the
+        // user's selection once the runtime is up.
+        pickerProfileApplied = inspectDesktopPickerProfile({
+          configDir,
+          ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
+        }).kind === "applied";
         const cleanup = await removeDesktopPickerArtifacts({
           configDir,
           ...(options.pickerSecurity ? { security: options.pickerSecurity } : {}),
@@ -224,6 +237,14 @@ export async function startClaudeIntercept<T>(options: StartClaudeInterceptOptio
           ...(options.pickerPlatform ? { platform: options.pickerPlatform } : {}),
         });
         await picker.start();
+        // The rotation cleanup released the profile Desktop had selected; run the regular enable
+        // flow to put it back, so a server restart does not silently turn the picker off. The
+        // rotated authority still needs the user's consent in the login keychain — a decline
+        // reports trust_pending, and the picker stays a blind tunnel until trust is granted.
+        if (pickerProfileApplied && controller) {
+          void controller.enable({ persist: false, context: "server" })
+            .catch(error => console.warn(`⚠ Claude Desktop picker restore failed: ${error instanceof Error ? error.message : String(error)}`));
+        }
       }
     }
   } catch (error) {

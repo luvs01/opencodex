@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, createServer } from "node:tls";
@@ -136,4 +136,22 @@ test("picker authority keeps its private key in process memory and removes a leg
   expect(ensurePickerCa(dir).fingerprint).toBe(first.fingerprint);
   expect(existsSync(join(stateDir, "ca.key"))).toBe(false);
   expect(constraints(readFileSync(pickerCaCertPath(dir), "utf8"))?.dnsNames).toEqual([PICKER_HOST]);
+});
+
+test("a cached authority still removes a restored legacy key and republishes a stale certificate", () => {
+  const dir = tempDir();
+  const stateDir = pickerStateDir(dir);
+  const ca = ensurePickerCa(dir);
+  // Another process published a different certificate while a legacy key reappeared on disk.
+  writeFileSync(join(stateDir, "ca.key"), "legacy-exportable-key\n");
+  writeFileSync(pickerCaCertPath(dir), createCertificateAuthority({
+    commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST],
+  }).certPem);
+  expect(ensurePickerCa(dir).fingerprint).toBe(ca.fingerprint);
+  expect(readFileSync(pickerCaCertPath(dir), "utf8")).toBe(ca.certPem);
+  expect(existsSync(join(stateDir, "ca.key"))).toBe(false);
+  // A certificate that went missing entirely is republished the same way.
+  rmSync(pickerCaCertPath(dir));
+  expect(ensurePickerCa(dir).fingerprint).toBe(ca.fingerprint);
+  expect(readFileSync(pickerCaCertPath(dir), "utf8")).toBe(ca.certPem);
 });
