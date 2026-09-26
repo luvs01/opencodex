@@ -735,6 +735,10 @@ export function completeNativeMainRecovery(homeId: string): boolean {
   clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
   snapshot = ready(homeId);
   settled = Promise.resolve(snapshot);
+  // Keep the live entry provably the snapshot's owner: the global epoch just advanced past it,
+  // so without this rebind a release mistakes a later entry-published cleanup fence for an
+  // independent transaction snapshot and orphans it behind 503s.
+  if (entry) entry.settled = settled;
   return true;
 }
 
