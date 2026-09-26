@@ -1569,7 +1569,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         const before = structuredClone(persisted);
         const previous = { present: Object.hasOwn(persisted.claudeCode ?? {}, "cliFirstParty"),
           value: persisted.claudeCode?.cliFirstParty === true };
-        const pinnedMode = body.cliFirstParty && persisted.claudeCode?.desktopMode === undefined
+        const pinnedMode = persisted.claudeCode?.desktopMode === undefined
           ? resolveClaudeDesktopMode(before, observeClaudeDesktopMode(before)) : undefined;
         const nextBlock = { ...(persisted.claudeCode ?? {}) };
         if (body.cliFirstParty) nextBlock.cliFirstParty = true;

@@ -367,6 +367,28 @@ test("CLI-off reports a tokenless local proxy with foreign CA as residue", async
   } finally { await server.stop(true); }
 });
 
+test("CLI-off pins Desktop mode before removing directly configured CLI settings", async () => {
+  const current = loadConfig();
+  current.port = 10100;
+  current.claudeCode = { ...current.claudeCode, cliFirstParty: true };
+  saveConfig(current);
+  const settingsPath = join(process.env.CLAUDE_CONFIG_DIR!, "settings.json");
+  mkdirSync(process.env.CLAUDE_CONFIG_DIR!, { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify({ env: desktopFirstPartyTarget(current).env }));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/api/claude-code", server.url), {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cliFirstParty: false }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ cliFirstParty: false, warnings: [] });
+    expect(loadConfig().claudeCode).toMatchObject({ desktopMode: "gateway" });
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).env).toBeUndefined();
+    expect(await (await fetch(new URL("/api/claude-code", server.url))).json())
+      .toMatchObject({ cliFirstParty: false, desktopFirstParty: false, sharedProxy: "none" });
+  } finally { await server.stop(true); }
+});
+
 test("CLI-off persists intent despite unreadable settings cleanup", async () => {
   const current = loadConfig();
   current.claudeCode = { ...current.claudeCode, cliFirstParty: true, desktopMode: "gateway" };
