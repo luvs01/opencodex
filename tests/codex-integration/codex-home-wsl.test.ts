@@ -245,4 +245,23 @@ describe("wsl.conf automount root", () => {
       removeTreeWithRetry(root);
     }
   });
+
+  // The home directory itself can sit under a junctioned ancestor — then the recorded
+  // spelling resolves through an intermediate link, not a link at the final component.
+  test("service ownership resolves a home through a junctioned parent directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-junction-parent-"));
+    try {
+      const parentReal = join(root, "parent-real");
+      const physical = join(parentReal, ".codex");
+      mkdirSync(physical, { recursive: true });
+      const parentAlias = join(root, "parent-alias");
+      symlinkSync(parentReal, parentAlias, "junction");
+
+      const deps = { env: { CODEX_HOME: physical }, homedir: () => root };
+      expect(serviceCodexHomeMatchesInstall(join(parentAlias, ".codex"), deps)).toBe(true);
+      expect(serviceCodexHomeMatchesInstall(join(parentAlias, "other"), deps)).toBe(false);
+    } finally {
+      removeTreeWithRetry(root);
+    }
+  });
 });
