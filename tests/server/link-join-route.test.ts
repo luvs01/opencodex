@@ -1,5 +1,6 @@
 import { describe, expect, test, spyOn } from "bun:test";
 import { ClientLinkJoinError, joinHome, type ClientLinkJoinDeps } from "../../src/client/link-join";
+import { spawnClientLinkTunnel } from "../../src/client/link-tunnel";
 import { handleLinkRoutes, type LinkRouteState } from "../../src/server/management/link-routes";
 import type { ManagementContext } from "../../src/server/management/context";
 import type { SshRunner } from "../../src/link/ssh-runner";
@@ -49,6 +50,10 @@ function challengedFetch(order?: string[]) {
 
 function joinDeps(overrides: Partial<ClientLinkJoinDeps> = {}): ClientLinkJoinDeps {
   const calls = overrides.runner ? [] : [];
+  // The readiness gate only trusts the port when the LISTEN pid is the spawned tunnel's;
+  // wrap whichever spawnTunnel is under test so the default scan reports that pid.
+  let tunnelPid = 0;
+  const spawn = overrides.spawnTunnel ?? spawnClientLinkTunnel;
   return {
     runner: overrides.runner ?? runnerFor(calls),
     knownHostsFile: "/tmp/ocx-known-hosts",
@@ -60,6 +65,12 @@ function joinDeps(overrides: Partial<ClientLinkJoinDeps> = {}): ClientLinkJoinDe
     readSidecar: () => null,
     readConnectionState: () => ({ kind: "disconnected" }),
     ...overrides,
+    spawnTunnel: (spec, spawnDeps) => {
+      const handle = spawn(spec, spawnDeps);
+      tunnelPid = handle.pid;
+      return handle;
+    },
+    scanListenPids: overrides.scanListenPids ?? (() => ({ ok: true, pids: [tunnelPid] })),
   };
 }
 
@@ -168,6 +179,7 @@ describe("client initiated link join", () => {
           hostname: () => "client-host",
           writeState: state => { order.push("write-state"); Object.assign(sidecar, state); },
           spawnTunnel: () => { order.push("spawn-tunnel"); return tunnelFor(order); },
+          scanListenPids: () => ({ ok: true, pids: [123] }),
           fetchImpl: challengedFetch(order),
           connect: (async () => { order.push("connect"); }) as typeof import("../../src/client/connect").connectClient,
           scheduleRestart: () => { order.push("restart"); },
@@ -238,6 +250,49 @@ describe("client initiated link join", () => {
     }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
     expect(keyedFetches).toBe(0);
     expect(stopped).toBe(1);
+    expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
+  });
+
+  test("a squatter answering the 401 challenge never receives the issued key", async () => {
+    const calls: string[][] = [];
+    let keyedFetches = 0;
+    let ticks = 0;
+    let stopped = 0;
+    await expect(joinHome(joinDeps({
+      runner: runnerFor(calls),
+      now: () => (ticks++ === 0 ? 0 : 15_002 * ticks),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => ({ pid: 123, exited: new Promise<number>(() => {}), stop: async () => { stopped += 1; } }),
+      // A foreign process holds the port: a live ssh does not prove it owns the socket.
+      scanListenPids: () => ({ ok: true, pids: [999] }),
+      fetchImpl: async (_input, init) => {
+        if (new Headers(init?.headers).has("x-opencodex-api-key")) keyedFetches += 1;
+        return new Response(null, { status: 401 });
+      },
+    }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+    expect(keyedFetches).toBe(0);
+    expect(stopped).toBe(1);
+    expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
+  });
+
+  test("a redirect on the readiness probe is never followed with the issued key", async () => {
+    const calls: string[][] = [];
+    let keyedFetches = 0;
+    let ticks = 0;
+    await expect(joinHome(joinDeps({
+      runner: runnerFor(calls),
+      now: () => (ticks++ === 0 ? 0 : 15_002 * ticks),
+      writeState: () => {},
+      clearState: () => {},
+      spawnTunnel: () => ({ pid: 123, exited: new Promise<number>(() => {}), stop: async () => {} }),
+      fetchImpl: async (_input, init) => {
+        if (new Headers(init?.headers).has("x-opencodex-api-key")) keyedFetches += 1;
+        // A port occupant redirecting the probe used to let the challenge pass at a foreign URL.
+        return new Response(null, { status: 302, headers: { location: "http://169.254.1.1/fake-readyz" } });
+      },
+    }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+    expect(keyedFetches).toBe(0);
     expect(calls.filter(argv => argv.some(value => value.includes("revoke")))).toHaveLength(1);
   });
 
@@ -361,6 +416,7 @@ describe("client initiated link join", () => {
           writeState: state => { sidecar = { ...state }; },
           clearState: () => { cleared = true; },
           spawnTunnel: () => tunnelFor([]),
+          scanListenPids: () => ({ ok: true, pids: [123] }),
           fetchImpl: challengedFetch(),
           connect: (async () => { connected = true; }) as typeof import("../../src/client/connect").connectClient,
           scheduleRestart: () => { throw new Error("restart unavailable"); },

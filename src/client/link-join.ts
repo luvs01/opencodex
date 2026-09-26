@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { findAvailablePort } from "../server/ports";
+import { scanListenPids, type ListenPidScan } from "../server/port-reclaim";
 import { isLinkPort } from "../link/ports";
 import { buildExecArgv } from "../link/ssh-argv";
 import type { SshRunner } from "../link/ssh-runner";
@@ -72,6 +73,8 @@ export interface ClientLinkJoinDeps {
   hostname?: () => string;
   randomBytes?: (size: number) => Uint8Array;
   fetchImpl?: typeof fetch;
+  /** LISTEN-owner probe for the tunnel port; defaults to the netstat/lsof scan. */
+  scanListenPids?: (port: number) => ListenPidScan;
   spawnTunnel?: (spec: {
     linkId: string;
     alias: string;
@@ -217,24 +220,32 @@ async function waitForReady(
     tunnelExited,
     new Promise<void>(resolve => setTimeout(resolve, JOIN_TUNNEL_SPAWN_GRACE_MS)),
   ]);
+  const listenPids = deps.scanListenPids ?? scanListenPids;
   for (;;) {
     try {
-      // The tunnel can be alive without owning the port yet: an unrelated
-      // loopback listener must never receive the issued key, so the keyed
-      // request only goes to a listener answering the link-auth challenge.
-      const probe = await Promise.race([
-        tunnelExited,
-        fetchImpl(`http://127.0.0.1:${port}/readyz`),
-      ]);
-      if (probe.status === 401) {
-        const response = await Promise.race([
+      // A squatter answering the 401 challenge would otherwise collect the issued key:
+      // the only listener allowed a keyed request is the ssh process we spawned — it owns
+      // the port only after a successful bind, and ExitOnForwardFailure makes it exit when
+      // it cannot take the port. An unverifiable scan stays "not ready", never a pass.
+      const ownership = listenPids(port);
+      if (ownership.ok && ownership.pids.length === 1 && ownership.pids[0] === tunnel.pid) {
+        // Never follow redirects: a port occupant must not reroute the challenge, and a
+        // redirected keyed request would carry the issued key to an unrelated listener.
+        const probe = await Promise.race([
           tunnelExited,
-          fetchImpl(`http://127.0.0.1:${port}/readyz`, {
-            headers: { "x-opencodex-api-key": key },
-          }),
+          fetchImpl(`http://127.0.0.1:${port}/readyz`, { redirect: "manual" }),
         ]);
-        if (response.status === 200) return;
-        if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
+        if (probe.status === 401) {
+          const response = await Promise.race([
+            tunnelExited,
+            fetchImpl(`http://127.0.0.1:${port}/readyz`, {
+              headers: { "x-opencodex-api-key": key },
+              redirect: "manual",
+            }),
+          ]);
+          if (response.status === 200) return;
+          if (response.status === 401) throw new ClientLinkJoinError("admission_failed");
+        }
       }
     } catch (error) {
       if (error instanceof ClientLinkJoinError) throw error;
