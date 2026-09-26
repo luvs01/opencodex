@@ -1,5 +1,5 @@
 // Holds INV-TOML-01 from structure/overview.md; keep the id here if this file is split or renamed.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { contextCompatibleBaseLine } from "../context-compat";
 import { resolveEffectiveProjectModelProvider } from "../project-config-warnings";
 import {
@@ -18,6 +18,7 @@ import {
   resolveCodexConfigPath,
   tomlString,
 } from "../paths";
+import { readBoundedCodexConfig } from "./bounded-config-reader";
 import {
   type CodexRoutingTarget,
   providerBaseHost,
@@ -34,8 +35,8 @@ export function externalCodexModelProvider(content: string): string | null {
 }
 
 export function currentExternalCodexModelProvider(): string | null {
-  if (!existsSync(CODEX_CONFIG_PATH)) return null;
-  return externalCodexModelProvider(readFileSync(CODEX_CONFIG_PATH, "utf8"));
+  const content = readBoundedCodexConfig(CODEX_CONFIG_PATH);
+  return content === null ? null : externalCodexModelProvider(content);
 }
 
 /**

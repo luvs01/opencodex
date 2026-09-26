@@ -214,6 +214,42 @@ test("GET /api/settings survives an unreadable config.toml during ownership dete
   }
 }, 15_000);
 
+test.skipIf(process.platform === "win32")(
+  "GET /api/settings refuses a config.toml FIFO without blocking",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-settings-fifo-cfg-"));
+    const codexHome = join(root, "codex");
+    mkdirSync(codexHome, { recursive: true });
+    const fifo = spawnSync("mkfifo", [join(codexHome, "config.toml")], { encoding: "utf8" });
+    expect(fifo.status).toBe(0);
+
+    try {
+      const response = runIsolatedSettingsRequest({
+        root,
+        codexHome,
+        routeConfig: ISOLATED_PROVIDER_CONFIG,
+        scriptBody: `
+          const request = new Request("http://127.0.0.1:10100/api/settings", {
+            headers: { host: "127.0.0.1:10100" },
+          });
+          const response = await handleManagementAPI(request, new URL(request.url), config, {
+            getCachedStartupHealth: async () => startupHealthFixture(),
+          });
+        `,
+      });
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        codexDesktopSwitches: {
+          apply: { applied: false, reason: "ownership_undetermined", retryable: true },
+        },
+      });
+    } finally {
+      removeTreeWithRetry(root);
+    }
+  },
+  15_000,
+);
+
 test("PUT /api/settings keeps the undetermined-ownership explanation on a locked save", () => {
   // clientIntegrations.codex = false trips the apply gate before the injector runs, and an
   // unreadable config.toml leaves ownership undetermined. The locked save must still report
