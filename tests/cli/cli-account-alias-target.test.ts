@@ -166,14 +166,24 @@ describe("ocx account: alias and auto as account arguments", () => {
     expect(result.stdout).toContain("chatgpt_2");
   });
 
-  test("use auto clears the pin and says the pool decides from here", async () => {
+  test("use auto selects an exact account id before treating auto as the pool selector", async () => {
     const h = harness();
-    const result = await h.run(["use", "openai", "auto"]);
+    const automatic = await h.run(["use", "openai", "auto"]);
 
-    expect(result.code).toBe(0);
+    expect(automatic.code).toBe(0);
     expect(h.writes().at(-1)?.body).toEqual({ accountId: null });
-    expect(result.stdout).toContain("automatic account selection");
-    expect(result.stderr).not.toContain("may override this pin");
+    expect(automatic.stdout).toContain("automatic account selection");
+    expect(automatic.stderr).not.toContain("may override this pin");
+
+    h.accounts.push({ id: "auto", plan: "pro", quota: null });
+    const selected = await h.run(["use", "openai", "auto"]);
+    expect(selected.code).toBe(0);
+    expect(h.writes().at(-1)?.body).toEqual({ accountId: "auto" });
+
+    const paused = await h.run(["pause", "openai", "auto"]);
+    expect(paused.code).toBe(0);
+    expect(h.requests.filter(r => r.path === "/api/codex-auth/accounts/pause").at(-1)?.body)
+      .toEqual({ id: "auto", paused: true });
   });
 
   test("missing and ambiguous aliases keep distinct errors before any write", async () => {
@@ -220,8 +230,12 @@ describe("ocx account: alias and auto as account arguments", () => {
     const pause = await h.run(["pause", "openai", "auto"]);
     expect(pause.code).toBe(1);
     expect(pause.stderr).toContain("reserved");
-    // The list only serves alias resolution: without it the argument is sent as an id, as before.
     h.listFailure = { status: 500, error: "list unavailable" };
+    const automatic = await h.run(["use", "openai", "auto"]);
+    expect(automatic.code).toBe(1);
+    expect(automatic.stderr).toContain("Cannot safely resolve");
+    expect(h.writes()).toHaveLength(0);
+    // The list only serves alias resolution: without it the argument is sent as an id, as before.
     const raw = await h.run(["use", "openai", "chatgpt_1"]);
     expect(raw.code).toBe(0);
     expect(h.writes().at(-1)?.body).toEqual({ accountId: "chatgpt_1" });
