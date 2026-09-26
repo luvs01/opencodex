@@ -53,7 +53,8 @@ function resolveCodexConfigPath(): string {
   return join(home, "config.toml");
 }
 
-export type ProjectCodexConfigIssueCode = "model_providers_table" | "profile_selector" | "model_provider_root";
+export type ProjectCodexConfigIssueCode = "model_providers_table" | "profile_selector" | "model_provider_root"
+  | "global_config_unreadable";
 
 export interface ProjectCodexConfigWarning {
   path: string;
@@ -437,9 +438,31 @@ export function collectProjectCodexConfigWarnings(options: {
 } = {}): ProjectCodexConfigWarning[] {
   const codexConfigPath = options.codexConfigPath ?? resolveCodexConfigPath();
   const requireRouting = options.requireOpencodexRouting ?? true;
-  if (requireRouting && !isGlobalOpencodexRoutingActive(codexConfigPath)) return [];
+
+  // The routing question has three answers: active, inactive, and unreadable. An oversized
+  // or swapped-underneath global config must not silently collapse to "inactive" — that
+  // would erase both project-bypass coverage and trusted-path discovery without a trace.
+  let globalContent: string | null | undefined;
+  let globalUnreadable = false;
+  try {
+    globalContent = readBoundedCodexConfig(codexConfigPath);
+  } catch {
+    globalUnreadable = true;
+  }
+  if (requireRouting && !globalUnreadable
+    && !isGlobalOpencodexRoutingActive(codexConfigPath, globalContent ?? undefined)) {
+    return [];
+  }
 
   const warnings: ProjectCodexConfigWarning[] = [];
+  if (globalUnreadable) {
+    warnings.push({
+      path: codexConfigPath,
+      code: "global_config_unreadable",
+      detail: "unreadable",
+      message: "The global Codex config could not be read within the 1 MiB bound — whether it routes through OpenCodex, and which projects it declares trusted, is undetermined.",
+    });
+  }
   for (const path of discoverProjectCodexConfigPaths({ cwd: options.cwd, codexConfigPath })) {
     const content = readBoundedProjectConfig(path);
     if (content !== null) warnings.push(...analyzeProjectCodexConfig(content, path));
@@ -480,6 +503,8 @@ export function summarizeProjectCodexIssue(warning: ProjectCodexConfigWarning): 
       return warning.profileName ? `profile="${warning.profileName}"` : `model_provider="${warning.detail}"`;
     case "model_provider_root":
       return `model_provider="${warning.detail}"`;
+    case "global_config_unreadable":
+      return "config.toml unreadable or oversized";
   }
 }
 
@@ -501,6 +526,8 @@ export interface ProjectCodexConfigWarningGroup {
   path: string;
   issues: string[];
   bypass: string;
+  /** True when the group is the global-config-unreadable caveat, not a project bypass. */
+  globalUnreadable?: boolean;
 }
 
 export function groupProjectCodexConfigWarningsByPath(
@@ -512,22 +539,34 @@ export function groupProjectCodexConfigWarningsByPath(
     list.push(warning);
     grouped.set(warning.path, list);
   }
-  return [...grouped.entries()].map(([path, pathWarnings]) => ({
-    path,
-    issues: pathWarnings.map(summarizeProjectCodexIssue),
-    bypass: explainProjectConfigBypass(pathWarnings),
-  }));
+  return [...grouped.entries()].map(([path, pathWarnings]) => {
+    const globalUnreadable = pathWarnings.every(warning => warning.code === "global_config_unreadable");
+    return {
+      path,
+      issues: pathWarnings.map(summarizeProjectCodexIssue),
+      bypass: globalUnreadable ? pathWarnings[0]!.message : explainProjectConfigBypass(pathWarnings),
+      ...(globalUnreadable ? { globalUnreadable } : {}),
+    };
+  });
 }
 
 export function formatProjectCodexConfigWarningsForDoctor(warnings: ProjectCodexConfigWarning[]): string[] {
   const grouped = groupProjectCodexConfigWarningsByPath(warnings);
   if (grouped.length === 0) return [];
   const lines: string[] = [];
-  for (const { path, issues, bypass } of grouped) {
+  let hasBypassEntries = false;
+  for (const { path, issues, bypass, globalUnreadable } of grouped) {
     lines.push(`  --     ${relPath(path)} — ${issues.join(", ")}`);
     lines.push(`         ${bypass}`);
+    if (globalUnreadable) {
+      lines.push("       fix: keep the global config.toml a readable regular file within the 1 MiB bound");
+    } else {
+      hasBypassEntries = true;
+    }
   }
-  lines.push("       fix: remove those entries so OpenCodex proxy routing applies in this project");
+  if (hasBypassEntries) {
+    lines.push("       fix: remove those entries so OpenCodex proxy routing applies in this project");
+  }
   return lines;
 }
 
@@ -535,11 +574,19 @@ export function formatProjectCodexConfigWarningsForConsole(warnings: ProjectCode
   const grouped = groupProjectCodexConfigWarningsByPath(warnings);
   if (grouped.length === 0) return [];
   const lines = ["⚠️  Project Codex config bypasses OpenCodex:"];
-  for (const { path, issues, bypass } of grouped) {
+  let hasBypassEntries = false;
+  for (const { path, issues, bypass, globalUnreadable } of grouped) {
     lines.push(`    ${relPath(path)} — ${issues.join(", ")}`);
     lines.push(`    ${bypass}`);
+    if (globalUnreadable) {
+      lines.push("    fix: keep the global config.toml a readable regular file within the 1 MiB bound");
+    } else {
+      hasBypassEntries = true;
+    }
   }
-  lines.push("    fix: remove those entries so OpenCodex proxy routing applies in this project");
+  if (hasBypassEntries) {
+    lines.push("    fix: remove those entries so OpenCodex proxy routing applies in this project");
+  }
   return lines;
 }
 

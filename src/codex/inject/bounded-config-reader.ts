@@ -34,6 +34,9 @@ export function readBoundedCodexConfig(path: string): string | null {
       : (constants.O_NONBLOCK ?? 0);
     fd = openSync(path, constants.O_RDONLY | guardedFlags);
     const before = fstatSync(fd);
+    if (before.dev !== namedBefore.dev || before.ino !== namedBefore.ino) {
+      throw new Error("config.toml changed while it was read");
+    }
     if (!before.isFile() || before.size > MAX_CODEX_CONFIG_BYTES) {
       throw new Error("config.toml is not a bounded regular file");
     }
