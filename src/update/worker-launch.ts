@@ -51,21 +51,24 @@ function rootOnlyWritable(path: string): boolean {
   }
 }
 
+// "Executable" here includes trust: the binary and its directory must be root-owned and not
+// group/world-writable. /usr/local/bin is group-writable on some systems, and a planted or
+// replaced systemd-run there would be exec'd by the scope probe under the service account;
+// the fallback is the plain detached spawn, so nothing breaks when it is skipped.
+// Exported for unit tests.
+export function isTrustedSystemdRunFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    const st = statSync(path);
+    return st.isFile() && st.uid === 0 && (st.mode & GROUP_OR_WORLD_WRITE) === 0
+      && rootOnlyWritable(dirname(path));
+  } catch {
+    return false;
+  }
+}
+
 const systemdRunHooks: SystemdRunHooks = {
-  // "Executable" here includes trust: the binary and its directory must be root-owned and not
-  // group/world-writable. /usr/local/bin is group-writable on some systems, and a planted or
-  // replaced systemd-run there would be exec'd by the scope probe under the service account;
-  // the fallback is the plain detached spawn, so nothing breaks when it is skipped.
-  isExecutableFile: path => {
-    try {
-      accessSync(path, constants.X_OK);
-      const st = statSync(path);
-      return st.isFile() && st.uid === 0 && (st.mode & GROUP_OR_WORLD_WRITE) === 0
-        && rootOnlyWritable(dirname(path));
-    } catch {
-      return false;
-    }
-  },
+  isExecutableFile: isTrustedSystemdRunFile,
   // Run a real no-op scope rather than `--version`: a present binary without a reachable user
   // bus would otherwise pass the probe and then fail to start the worker at all.
   probeScope: path => {
