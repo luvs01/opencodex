@@ -136,8 +136,10 @@ decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop i
 trusted in the login keychain (`picker-trust.ts`). The picker CA (`picker-ca.ts`) carries critical
 name constraints permitting only `claude.ai` and excluding every IPv4 and IPv6 address. Its signing
 key exists only in the server process; only public certificates are written under
-`<OPENCODEX_HOME>/claude-picker/`. On restart the lifecycle releases the selected profile and removes
-the prior public root before creating a new process-scoped authority. Trust is added without a policy string: Chromium
+`<OPENCODEX_HOME>/claude-picker/`. On restart the lifecycle drops any legacy `ca.key`, releases the
+selected profile and removes the prior public root before creating a new process-scoped authority,
+then re-runs the controller's enable flow when that profile had been applied so the replacement
+authority is trusted (with the user's keychain consent) and the selection restored. Trust is added without a policy string: Chromium
 skips host-scoped trust settings, so `inspectPickerTrust` treats a current CA whose exported user
 trust settings carry `kSecTrustSettingsPolicyString` as untrusted and the trust step replaces it; an
 export it cannot read makes trust `unknown`, which never arms. A rotated-out picker certificate is
