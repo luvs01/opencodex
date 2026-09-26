@@ -105,12 +105,13 @@ Répertoriez et changez de compte de fournisseur et de pools de clés API via le
 la surface est :
 
 ```text
-Usage: ocx account <list|history|current|use|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
+Usage: ocx account <list|history|current|use|clear|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 history openai <pool-account-id> [--limit <1-200>]  Recent routing decisions for one Codex pool account.
 current <provider>  Show the active account or key.
-use <provider> <id|alias|main|auto> Switch the active credential; 'main' selects the Codex App login, 'auto' clears the selection.
+use <provider> <id|alias|main|auto> Switch the active credential; 'main' selects the Codex App login, 'auto' clears the selection unless an account carries that id.
+clear <provider>  Clear the manual Codex account selection unconditionally.
 refresh <provider>  Force-refresh Codex or provider quota reports.
 auto-switch <provider> <on|off|status|threshold N>  Control the Codex pool threshold.
 alias <provider> <id|alias> <display-name|->  Set or clear an account's display name; '-' clears it.
@@ -186,7 +187,7 @@ cet état et quitte toujours 0. `--json` renvoie :
 
 ### `ocx account use <provider> <account-or-key-id|alias|main|auto> [--json]`
 
-`auto` efface la sélection manuelle pour que le pool place à nouveau le travail selon sa propre stratégie. Un compte Codex peut être désigné par l'alias défini avec `ocx account alias` au lieu de son id ; cela vaut aussi pour `priority`, `pause`, `resume`, `clear-cooldown`, `remove` et `alias`. Pour les comptes Codex, `auto`, `main` et `__main__` sont réservés sans distinction de casse et ne peuvent pas être attribués comme alias. Les noms affichés des comptes OAuth et des clés API conservent leurs règles existantes.
+`auto` efface la sélection manuelle pour que le pool place à nouveau le travail selon sa propre stratégie — sauf si un compte Codex porte littéralement l'id `auto`, qui l'emporte par correspondance exacte d'id ; `ocx account clear <provider>` rétablit toujours la sélection automatique. Un compte Codex peut être désigné par l'alias défini avec `ocx account alias` au lieu de son id ; cela vaut aussi pour `priority`, `pause`, `resume`, `clear-cooldown`, `remove` et `alias`. Pour les comptes Codex, `auto`, `main` et `__main__` sont réservés sans distinction de casse et ne peuvent pas être attribués comme alias. Les noms affichés des comptes OAuth et des clés API conservent leurs règles existantes.
 
 Sélectionne un compte Codex, un compte OAuth ou une clé API existant. Pour `openai`, `main` sélectionne la
 connexion Codex App. Une sélection en mode Codex Pool efface l'affinité locale du processus et s'applique à la requête suivante,
@@ -206,6 +207,10 @@ faire basculer la requête vers un autre compte de pool admissible. Ces transiti
 ```text
 { ok: true, provider, type, activeId }
 ```
+
+### `ocx account clear <provider> [--json]`
+
+Efface la sélection manuelle du compte Codex sans résoudre d'id de compte, donc fonctionne même lorsqu'un compte s'appelle littéralement `auto`. Pools Codex uniquement ; les autres types de fournisseur n'ont pas de sélection automatique à rétablir.
 
 ### `ocx account refresh <provider> [--json]`
 
