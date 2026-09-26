@@ -18,9 +18,10 @@ import {
 import {
   currentServiceHomes,
   inspectServiceStateEvidence,
-  serviceHomeMatches,
+  servicePathMatchesInstall,
   type ServiceStateEvidence,
 } from "../../service";
+import type { CodexHomeDeps } from "../../codex/home";
 import {
   createWindowsTaskListingCache,
   inspectServiceManagerInstallation,
@@ -73,11 +74,12 @@ export interface OwnershipInspection {
 function claimNamesDifferentHome(
   claim: ServiceManagerClaim,
   current: { codexHome: string; opencodexHome: string },
+  deps: CodexHomeDeps,
 ): boolean {
   // A definition that OMITS a home is not a definition that disagrees about it:
   // an install run without CODEX_HOME set writes no such key at all.
-  if (claim.homes.codexHome !== null && !serviceHomeMatches(claim.homes.codexHome, current.codexHome)) return true;
-  if (claim.homes.opencodexHome !== null && !serviceHomeMatches(claim.homes.opencodexHome, current.opencodexHome)) return true;
+  if (claim.homes.codexHome !== null && !servicePathMatchesInstall(claim.homes.codexHome, current.codexHome, deps)) return true;
+  if (claim.homes.opencodexHome !== null && !servicePathMatchesInstall(claim.homes.opencodexHome, current.opencodexHome, deps)) return true;
   return false;
 }
 
@@ -109,6 +111,8 @@ export interface OwnershipDeps extends ProbeDeps {
    */
   readonly statePaths?: readonly string[];
   readonly currentHomes?: { codexHome: string; opencodexHome: string };
+  /** Test seam for resolving recorded home aliases to their physical directory. */
+  readonly realpathSync?: (path: string) => string;
 }
 
 export function inspectNativeCodexOwnership(deps: OwnershipDeps = {}): OwnershipInspection {
@@ -130,16 +134,16 @@ export function inspectNativeCodexOwnership(deps: OwnershipDeps = {}): Ownership
   // Mirrors that disagree with each other are not a majority vote.
   for (const one of valid) {
     for (const other of valid) {
-      if (!serviceHomeMatches(one.state.codexHome, other.state.codexHome)
-        || !serviceHomeMatches(one.state.opencodexHome, other.state.opencodexHome)) {
+      if (!servicePathMatchesInstall(one.state.codexHome, other.state.codexHome, deps)
+        || !servicePathMatchesInstall(one.state.opencodexHome, other.state.opencodexHome, deps)) {
         return { ownership: "unknown", reason: "two service state files disagree about which homes are installed" };
       }
     }
   }
 
   const foreign = valid.find(e =>
-    !serviceHomeMatches(e.state.codexHome, current.codexHome)
-    || !serviceHomeMatches(e.state.opencodexHome, current.opencodexHome));
+    !servicePathMatchesInstall(e.state.codexHome, current.codexHome, deps)
+    || !servicePathMatchesInstall(e.state.opencodexHome, current.opencodexHome, deps));
   if (foreign) {
     return {
       ownership: "foreign",
@@ -162,7 +166,7 @@ export function inspectNativeCodexOwnership(deps: OwnershipDeps = {}): Ownership
     return { ownership: "unknown", reason: "more than one service manager holds a registration for this proxy" };
   }
   if (manager.kind === "present") {
-    const disagreeing = manager.claims.find(claim => claimNamesDifferentHome(claim, current));
+    const disagreeing = manager.claims.find(claim => claimNamesDifferentHome(claim, current, deps));
     if (disagreeing) {
       /*
        * The state file says this home and the definition says another. An
