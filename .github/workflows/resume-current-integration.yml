@@ -1,0 +1,125 @@
+name: Current author integration candidates
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-current-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.publish.outputs.candidates }}
+    steps:
+      - name: Merge observed revisions without executing repository code
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess,tempfile,urllib.request
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'integrate';root.mkdir()
+          base='06d7914e6a736b0ab5b112c1198efbfd683b9bc1'
+          cases={6037:'75f8497d83d2ca293ebbafc4ea26eca75b79f60d',6050:'ff1ad0b72e4b5dd669b3c68938d3261a9912fcd4',6049:'e598ebc56c4f041d0899d63e9531760284e5b69a',6043:'05548a4137808261eb3c7349212690d2f43e3434'}
+          rows=[]; missing=object()
+          def git(cwd,*args):return subprocess.check_output(['git','-C',str(cwd),*args],text=True).strip()
+          def merge_value(b,o,t):
+              if o==b:return t
+              if t==b or o==t:return o
+              if all(isinstance(x,dict) for x in [b,o,t]):
+                  result={}
+                  for k in set(b)|set(o)|set(t):
+                      v=merge_value(b.get(k,missing),o.get(k,missing),t.get(k,missing))
+                      if v is not missing:result[k]=v
+                  return result
+              raise ValueError('Competing semantic JSON edit')
+          def unique(pairs):
+              d={}
+              for k,v in pairs:
+                  if k in d:raise ValueError('duplicate JSON key')
+                  d[k]=v
+              return d
+          for n,sha in cases.items():
+              cwd=root/str(n);cwd.mkdir();git(cwd,'init');git(cwd,'config','core.hooksPath','/dev/null')
+              git(cwd,'config','user.name','github-actions[bot]');git(cwd,'config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+              git(cwd,'fetch','--no-tags','--depth=800','https://github.com/lidge-jun/opencodex',sha,base);git(cwd,'checkout','--detach',sha)
+              if n==6043:
+                  fix='ebdc73d54bfddb45b78dc8c0ff682142c2c4ce84'
+                  git(cwd,'fetch','--no-tags','--depth=2','https://github.com/luvs01/opencodex',fix)
+                  result=subprocess.run(['git','-C',str(cwd),'cherry-pick',fix],capture_output=True,text=True)
+                  if result.returncode:print('BLOCKED_CHERRY_PICK',n,result.stdout,result.stderr);continue
+              subprocess.run(['git','-C',str(cwd),'merge','--no-commit','--no-ff',base],capture_output=True,text=True)
+              conflicts=git(cwd,'diff','--name-only','--diff-filter=U').splitlines()
+              allowed={'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'}
+              if set(conflicts)-allowed:
+                  print('BLOCKED_MERGE',n,conflicts)
+                  print(git(cwd,'diff','--',*conflicts)[:24000]);continue
+              try:
+                  for name in conflicts:
+                      versions=[git(cwd,'show',f':{stage}:{name}')+'\n' for stage in [1,2,3]]
+                      expected=merge_value(*[json.loads(s) for s in versions])
+                      with tempfile.TemporaryDirectory() as tmp:
+                          paths=[]
+                          for i,s in enumerate(versions):
+                              p=pathlib.Path(tmp)/str(i);p.write_text(s);paths.append(str(p))
+                          union=subprocess.check_output(['git','merge-file','--stdout','--union',paths[1],paths[0],paths[2]],text=True)
+                      assert json.loads(union,object_pairs_hook=unique)==expected
+                      (cwd/name).write_text(union);git(cwd,'add',name)
+                  assert not git(cwd,'diff','--name-only','--diff-filter=U')
+                  git(cwd,'diff','--cached','--check',base)
+                  if (cwd/'.git/MERGE_HEAD').exists():git(cwd,'commit','-m',f'Merge observed dev into PR {n} without rewriting author history')
+                  git(cwd,'merge-base','--is-ancestor',sha,'HEAD');git(cwd,'merge-base','--is-ancestor',base,'HEAD')
+                  paths=git(cwd,'ls-files').splitlines()
+                  if n==6037:tests=[p for p in paths if p.startswith('tests/') and p.endswith('.test.ts') and any(s in p for s in ['worker-launch','update-job','update-mise'])]
+                  elif n==6043:tests=['tests/codex-integration/native-profile-startup-release.test.ts']
+                  elif n==6049:tests=['tests/codex-integration/project-config-warning-snapshot.test.ts','tests/codex-integration/project-config-warnings.test.ts','tests/config/settings-desktop-switch-apply.test.ts']
+                  else:
+                      with urllib.request.urlopen(f'https://api.github.com/repos/lidge-jun/opencodex/pulls/{n}/files?per_page=100',timeout=30) as r:files=json.load(r)
+                      tests=[f['filename'] for f in files if f['filename'].startswith('tests/') and f['filename'].endswith('.test.ts')]
+                  assert tests and len(tests)<15 and all((cwd/p).is_file() for p in tests)
+                  rows.append({'pr':str(n),'sha':git(cwd,'rev-parse','HEAD'),'tests':tests})
+                  print('CANDIDATE',n,git(cwd,'rev-parse','HEAD'),'TESTS',tests,'DIFF',git(cwd,'diff','--stat',base,'HEAD'))
+              except Exception as error:print('BLOCKED_RESOLUTION',n,type(error).__name__,str(error))
+          assert rows,'No safe candidates prepared'
+          (root/'candidates.json').write_text(json.dumps({'include':rows}))
+          PY
+      - name: Publish isolated candidates only
+        id: publish
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)";echo "::add-mask::$auth"
+          export PUSH_HEADER="AUTHORIZATION: basic $auth"
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'integrate'; data=json.loads((root/'candidates.json').read_text())
+          for row in data['include']:
+              subprocess.run(['git','-C',str(root/row['pr']),'-c','http.https://github.com/.extraheader='+os.environ['PUSH_HEADER'],'push','https://github.com/luvs01/opencodex','HEAD:refs/heads/automation/resume-integrated-pr'+row['pr']+'-20260927'],check=True)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(data)+'\n')
+          PY
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Run exact focused files
+        env:
+          TEST_FILES: ${{ toJSON(matrix.tests) }}
+        run: python3 -c 'import json,os,subprocess; subprocess.run(["bun","test",*json.loads(os.environ["TEST_FILES"])],check=True)'
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/ci-workflows/file-size-ratchet.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - run: git diff --exit-code
