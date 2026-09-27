@@ -363,6 +363,40 @@ describe("codebuddy stream-json event mapping", () => {
     expect(state.openToolBlocks?.get(2)?.argParts).toHaveLength(1);
   });
 
+  test("capture admits and closes a valid object at exactly the byte ceiling", () => {
+    const state: StreamParseState = {
+      sawPartialText: false, sawPartialThinking: false, sawTerminalResult: false, strictToolBlockCapture: true,
+    };
+    const feed = (event: unknown) => mapStreamMessageToEvents({ type: "stream_event", event: event as Record<string, unknown> }, state);
+    feed({ type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "tu_a", name: "alpha" } });
+    const pad = TRANSLATOR_MAX_CALL_ARGUMENT_BYTES - `{"k":""}`.length;
+    const args = `{"k":"${"x".repeat(pad)}"}`;
+    expect(Buffer.byteLength(args)).toBe(TRANSLATOR_MAX_CALL_ARGUMENT_BYTES);
+    // Split mid-string to prove fragment admission plus successful closure at the boundary.
+    expect(feed({ type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: args.slice(0, pad) } })).toEqual([]);
+    expect(feed({ type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: args.slice(pad) } })).toEqual([]);
+    const stop = feed({ type: "content_block_stop", index: 2 });
+    expect(stop.map(event => event.type)).toEqual(["tool_call_start", "tool_call_delta", "tool_call_delta", "tool_call_end"]);
+    expect(state.completedToolCalls).toBe(1);
+  });
+
+  test("a surrogate pair split across argument deltas counts its joined bytes", () => {
+    const state: StreamParseState = {
+      sawPartialText: false, sawPartialThinking: false, sawTerminalResult: false, strictToolBlockCapture: true,
+    };
+    const feed = (partial_json: string) => mapStreamMessageToEvents({
+      type: "stream_event", event: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json } },
+    }, state);
+    mapStreamMessageToEvents({
+      type: "stream_event", event: { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "tu_a", name: "alpha" } },
+    }, state);
+    feed('{"emoji":"😀'.slice(0, -1));   // ends in a lone high surrogate
+    feed('{"emoji":"😀'.slice(-1) + '"}'); // opens with the matching low surrogate
+    const block = state.openToolBlocks?.get(2);
+    expect(block?.argumentBytes).toBe(Buffer.byteLength('{"emoji":"😀"}'));
+    expect(state.openToolBlocks?.get(2)?.trailingHighSurrogate).toBeNull();
+  });
+
   test("an unindexed argument delta cannot be dropped from the sole indexed CodeBuddy tool block", () => {
     const state: StreamParseState = {
       sawPartialText: false,

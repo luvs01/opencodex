@@ -109,26 +109,32 @@ function createIterationEventBudget() {
   const budget = createTranslatorBudget();
   let firstEvent = true;
   let argumentBytes: number | undefined;
-  let trailingHighSurrogate = false;
+  let trailingHighSurrogate: string | null = null;
   return {
     retain(event: AdapterEvent, coalescedIntoTail = false): void {
       // Heartbeats are never retained or passed to scanEventsForImageCall.
       if (event.type === "heartbeat") return;
       if (event.type === "tool_call_start") {
         argumentBytes = 0;
-        trailingHighSurrogate = false;
+        trailingHighSurrogate = null;
       } else if (event.type === "tool_call_delta" && argumentBytes !== undefined) {
         const chunk = event.arguments;
         argumentBytes += Buffer.byteLength(chunk);
         // A surrogate pair may straddle adapter deltas; count the concatenated UTF-8 string.
-        if (trailingHighSurrogate && /^[\uDC00-\uDFFF]/.test(chunk)) argumentBytes -= 2;
-        if (chunk.length > 0) trailingHighSurrogate = /[\uD800-\uDBFF]$/.test(chunk);
+        // A lone surrogate's byteLength is runtime-defined, so measure join-vs-separate.
+        if (trailingHighSurrogate !== null && /^[\uDC00-\uDFFF]/.test(chunk)) {
+          argumentBytes += Buffer.byteLength(trailingHighSurrogate + chunk[0]!)
+            - Buffer.byteLength(trailingHighSurrogate) - Buffer.byteLength(chunk[0]!);
+        }
+        if (chunk.length > 0) {
+          trailingHighSurrogate = /[\uD800-\uDBFF]$/.test(chunk) ? chunk[chunk.length - 1]! : null;
+        }
         if (argumentBytes > TRANSLATOR_MAX_CALL_ARGUMENT_BYTES) {
           throw new TranslatorBudgetExceededError("tool_args", TRANSLATOR_MAX_CALL_ARGUMENT_BYTES);
         }
       } else {
         argumentBytes = undefined;
-        trailingHighSurrogate = false;
+        trailingHighSurrogate = null;
       }
       // A delta the queue merged into its buffered tail leaves one object behind, not two,
       // so it costs the appended payload rather than another envelope. Charging the whole
