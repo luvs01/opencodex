@@ -23,8 +23,8 @@ pub fn selected(settings: &Value, row: &Value) -> bool {
             models.iter().any(|item| {
                 item.as_str()
                     .is_some_and(|item| item == model || item == format!("{provider}/{model}"))
-            }),
-        }
+            })
+        })
 }
 
 const TOTAL_KEYS: [&str; 9] = [
