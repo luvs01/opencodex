@@ -1,0 +1,185 @@
+name: Resumed focused author fixes
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-focused-fixes.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.publish.outputs.candidates }}
+    steps:
+      - name: Prepare exact reviewed changes without executing repository code
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, json
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'resume-candidates'
+          root.mkdir()
+          cases={6038:'49e60302d7f820264c5a66a884d3783a0cf8679e',6047:'1681984ab28eef5261aa16a3fcbbdfe4fa2c72d7',6049:'cccb8c2fa3a7c92646fa687b9d56c7467e42d4ed'}
+          def git(cwd,*args): return subprocess.check_output(['git','-C',str(cwd),*args],text=True).strip()
+          def replace(cwd,path,old,new,count=1):
+              p=cwd/path; text=p.read_text(); assert text.count(old)==count,(path,text.count(old),count)
+              p.write_text(text.replace(old,new))
+          for n,sha in cases.items():
+              cwd=root/str(n); cwd.mkdir()
+              git(cwd,'init'); git(cwd,'config','core.hooksPath','/dev/null')
+              git(cwd,'fetch','--no-tags','--depth=1','https://github.com/luvs01/opencodex',sha)
+              git(cwd,'checkout','--detach',sha)
+              git(cwd,'config','user.name','github-actions[bot]')
+              git(cwd,'config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+              if n==6038:
+                  p='tests/server/api-key-scope-alpha-search.test.ts'
+                  replace(cwd,p,'import { encodeMessage, encodeString }','import { encodeMessage, encodeString, iterFields }')
+                  helper='''/** Decode the request Metadata.api_key field, not an incidental token substring. */
+          function metadataApiKey(body: Buffer): string {
+            const metadata = [...iterFields(body)].filter(field => field.num === 1 && field.wire === 2);
+            expect(metadata).toHaveLength(1);
+            if (!Buffer.isBuffer(metadata[0]?.value)) throw new Error("Missing request Metadata");
+            const credentials = [...iterFields(metadata[0].value)].filter(field => field.num === 3 && field.wire === 2);
+            expect(credentials).toHaveLength(1);
+            if (!Buffer.isBuffer(credentials[0]?.value)) throw new Error("Missing Metadata.api_key");
+            return credentials[0].value.toString("utf8");
+          }
+          
+          '''
+                  replace(cwd,p,'type Scope = ',helper+'type Scope = ')
+                  replace(cwd,p,'  expect(requestBody.includes(Buffer.from(customToken))).toBe(true);\n  expect(requestBody.includes(Buffer.from("canonical-devin-token"))).toBe(false);','  expect(metadataApiKey(requestBody)).toBe(customToken);\n  expect(metadataApiKey(requestBody)).not.toBe("canonical-devin-token");',2)
+              if n==6049:
+                  replace(cwd,'src/codex/project-config-warnings.ts','  const lines = ["⚠️  Project Codex config bypasses OpenCodex:"];','  const lines = [grouped.some(entry => entry.globalUnreadable)\n    ? "⚠️  Codex configuration warnings:"\n    : "⚠️  Project Codex config bypasses OpenCodex:"];')
+                  p='tests/codex-integration/project-config-warning-snapshot.test.ts'
+                  replace(cwd,p,'collectProjectCodexConfigWarnings, discoverProjectCodexConfigPaths, isGlobalOpencodexRoutingActive','collectProjectCodexConfigWarnings, discoverProjectCodexConfigPaths, formatProjectCodexConfigWarningsForConsole, isGlobalOpencodexRoutingActive')
+                  with (cwd/p).open('a') as f:f.write('''
+          test("console diagnostics do not describe an unreadable global config as a project bypass", () => {
+            const global = { path: "/fixture/global/config.toml", code: "global_config_unreadable" as const,
+              detail: "unreadable", message: "Global ownership could not be determined" };
+            const project = { path: "/fixture/project/.codex/config.toml", code: "model_provider_root" as const,
+              detail: "external", message: "Project selects an external provider" };
+            for (const warnings of [[global], [global, project]]) {
+              const lines = formatProjectCodexConfigWarningsForConsole(warnings);
+              expect(lines[0]).toBe("⚠️  Codex configuration warnings:");
+              expect(lines.join("\\n")).toContain("readable regular file");
+            }
+            expect(formatProjectCodexConfigWarningsForConsole([project])[0])
+              .toBe("⚠️  Project Codex config bypasses OpenCodex:");
+            expect(formatProjectCodexConfigWarningsForConsole([])).toEqual([]);
+          });
+          ''')
+              if n==6047:
+                  replace(cwd,'src/server/responses/core.ts','    if (sidecarPlans instanceof Response && !sidecarPlans.ok) sidecarState.openAiSidecar?.releaseProbeLease?.();\n','')
+                  p='src/server/responses/sidecar-execution.ts'
+                  replace(cwd,p,'      // Never interpolate the tool output: this message reaches the client and the logs.\n','      // Validation has no active sidecar work, unlike an upstream error body.\n      releaseSearchProbeLease();\n      // Never interpolate the tool output: this message reaches the client and the logs.\n')
+                  replace(cwd,p,'      if (imgPlan) {\n        return formatErrorResponse(400, "invalid_request_error", "image bridge requires stream=true");','      if (imgPlan) {\n        releaseSearchProbeLease();\n        return formatErrorResponse(400, "invalid_request_error", "image bridge requires stream=true");')
+                  p='tests/responses/responses-run-turn-web-search.test.ts'
+                  helper='''let fixtureSidecarResponse: Response | undefined;
+          const webSearchModule = await import("../../src/web-search");
+          const executeWebSearch = webSearchModule.runWithWebSearch;
+          mock.module("../../src/web-search", () => ({ ...webSearchModule,
+            runWithWebSearch: async (...args: Parameters<typeof executeWebSearch>) =>
+              fixtureSidecarResponse ?? executeWebSearch(...args),
+          }));
+          '''
+                  replace(cwd,p,'const { handleResponses } = await import("../../src/server/responses");',helper+'const { handleResponses } = await import("../../src/server/responses");')
+                  replace(cwd,p,'beforeEach(async () => {\n','beforeEach(async () => {\n  fixtureSidecarResponse = undefined;\n')
+                  with (cwd/p).open('a') as f:f.write('''
+          for (const settlement of ["complete", "cancel"] as const) {
+            test(`a non-success sidecar body retains its probe until ${settlement}`, async () => {
+              releasedFixtureProbe = false;
+              let controller!: ReadableStreamDefaultController<Uint8Array>;
+              fixtureSidecarResponse = new Response(new ReadableStream<Uint8Array>({
+                start(value) { controller = value; },
+              }), { status: 503, headers: { "content-type": "text/event-stream" } });
+              const config = {
+                port: 0, defaultProvider: "fetchonly",
+                webSearchSidecar: { backend: "exa", exaApiKey: "fixture-search-key" },
+                providers: { fetchonly: { adapter: "fetchonly", baseUrl: "https://fetchonly.test/v1",
+                  apiKey: "fixture-key", models: ["model"] } },
+              } as OcxConfig;
+              let response: Response | undefined;
+              try {
+                response = await handleResponses(new Request("http://localhost/v1/responses", {
+                  method: "POST", headers: { "content-type": "application/json", "x-fixture-probe": "held" },
+                  body: JSON.stringify({ model: "fetchonly/model", input: "search this", stream: true,
+                    tools: [{ type: "web_search" }] }),
+                }), config, { model: "", provider: "" });
+                expect(response.status).toBe(503);
+                expect(releasedFixtureProbe).toBe(false);
+                if (settlement === "complete") {
+                  controller.enqueue(new TextEncoder().encode("data: fixture-error\\n\\n"));
+                  controller.close();
+                  expect(await response.text()).toContain("fixture-error");
+                } else {
+                  await response.body!.cancel();
+                }
+                expect(releasedFixtureProbe).toBe(true);
+              } finally {
+                if (response?.body && !response.bodyUsed) await response.body.cancel();
+                fixtureSidecarResponse = undefined;
+              }
+            });
+          }
+          ''')
+                  replace(cwd,'structure/transports/responses.md','### Semantic progress ownership\n','### Sidecar probe lifetime\n\n`src/server/responses/sidecar-execution.ts` releases an acquired search probe immediately for local validation refusals. An upstream response with a body retains the probe through completion, error, or cancellation, regardless of HTTP status; the core dispatcher does not infer body settlement from a non-success status. Bodyless sidecar responses release before returning.\n\n### Semantic progress ownership\n')
+              git(cwd,'diff','--check'); git(cwd,'add','-u')
+              messages={6038:'test(search): assert Devin credential in its protobuf field',6047:'fix(search): retain probes for unsettled error response bodies',6049:'fix(codex): use neutral global ownership warning headings'}
+              git(cwd,'commit','-m',messages[n]); print('CANDIDATE',n,git(cwd,'rev-parse','HEAD'))
+          PY
+      - name: Publish isolated candidates only
+        id: publish
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          for n in 6038 6047 6049; do
+            git -C "$RUNNER_TEMP/resume-candidates/$n" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex "HEAD:refs/heads/automation/resume-pr${n}-20260927"
+          done
+          python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'resume-candidates'
+          tests={'6038':['tests/server/api-key-scope-alpha-search.test.ts'],'6047':['tests/responses/responses-run-turn-web-search.test.ts'],'6049':['tests/codex-integration/project-config-warning-snapshot.test.ts','tests/codex-integration/project-config-warnings.test.ts']}
+          rows=[{'pr':n,'sha':subprocess.check_output(['git','-C',str(root/n),'rev-parse','HEAD'],text=True).strip(),'tests':v} for n,v in tests.items()]
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidates='+json.dumps({'include':rows})+'\n')
+          PY
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Run focused native tests
+        env:
+          TEST_FILES: ${{ toJSON(matrix.tests) }}
+        run: python3 -c 'import json,os,subprocess; subprocess.run(["bun","test",*json.loads(os.environ["TEST_FILES"])],check=True)'
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Prove the old dispatcher fails the unsettled-error regression
+        if: matrix.pr == '6047'
+        run: |
+          set -euo pipefail
+          git show HEAD^:src/server/responses/core.ts > src/server/responses/core.ts
+          set +e
+          bun test tests/responses/responses-run-turn-web-search.test.ts --test-name-pattern 'non-success sidecar body' > "$RUNNER_TEMP/negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/negative.log"
+          git restore src/server/responses/core.ts
+          test "$status" -ne 0
+          grep -q '2 fail' "$RUNNER_TEMP/negative.log"
+      - run: git diff --exit-code
