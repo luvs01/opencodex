@@ -267,9 +267,12 @@ async function canBind(port: number): Promise<boolean> {
   });
 }
 
+// Probing releases the port before the intercept binds it, so the pick must stay below the
+// ephemeral floor (32768 on Linux, 49152 on macOS/Windows): a port-0 bind inside startup —
+// the lifecycle's own TLS listener — is otherwise free to take the observed pair.
 async function freePortPair(): Promise<number> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    const port = 20_000 + Math.floor(Math.random() * 30_000);
+    const port = 20_000 + Math.floor(Math.random() * 12_000);
     if (await canBind(port) && await canBind(port + 1)) return port;
   }
   throw new Error("no free port pair");
