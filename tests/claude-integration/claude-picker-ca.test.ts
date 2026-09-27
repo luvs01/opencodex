@@ -1,11 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { connect, createServer } from "node:tls";
-import { createCertificateAuthority, createLocalInterceptCa, issueServerLeaf } from "../../src/claude/intercept/local-ca";
+import { createCertificateAuthority, createLocalInterceptCa, issueServerLeaf, mintAuthorityWithExtensionsForTests } from "../../src/claude/intercept/local-ca";
 import {
   acceptsPickerAuthority, ensurePickerCa, issuePickerLeaf, pickerCaCertPath, pickerCaFingerprints,
   pickerCaOwnerPath, pickerLeafCertPath, pickerStateDir, PICKER_CA_COMMON_NAME, PICKER_HOST,
@@ -56,6 +56,106 @@ function constraints(certPem: string): { critical: boolean; dnsNames: string[]; 
 }
 
 const ALL_IPS = ["00".repeat(8), "00".repeat(32)];
+
+// ── acceptsPickerAuthority trust-boundary fixtures ─────────────────────────────
+//
+// Adversarial profiles are built by splicing real extension items out of certificates the
+// production mint issues and re-minting them on a fresh self-signed authority, so every forged
+// certificate still parses and verifies.
+
+function rawTlvs(bytes: Buffer): Buffer[] {
+  const items: Buffer[] = [];
+  for (let at = 0; at < bytes.length;) {
+    const item = der(bytes, at);
+    items.push(bytes.subarray(at, item.next));
+    at = item.next;
+  }
+  return items;
+}
+
+function extensionItems(certPem: string): Buffer[] {
+  const root = der(new X509Certificate(certPem).raw, 0);
+  const tbs = parts(root.body)[0]!;
+  const wrapper = parts(tbs.body).find(item => item.tag === 0xa3)!;
+  return rawTlvs(der(wrapper.body, 0).body);
+}
+
+function hasOid(oid: number[]): (item: Buffer) => boolean {
+  return item => {
+    const first = parts(der(item, 0).body)[0];
+    return first?.tag === 0x06 && first.body.equals(Buffer.from(oid));
+  };
+}
+
+const OID_BASIC_CONSTRAINTS = [0x55, 0x1d, 0x13];
+const OID_KEY_USAGE = [0x55, 0x1d, 0x0f];
+const OID_SUBJECT_KEY_IDENTIFIER = [0x55, 0x1d, 0x0e];
+const OID_SUBJECT_ALT_NAME = [0x55, 0x1d, 0x11];
+const OID_EXTENDED_KEY_USAGE = [0x55, 0x1d, 0x25];
+const OID_NAME_CONSTRAINTS = [0x55, 0x1d, 0x1e];
+
+function testTlv(tag: number, body: Buffer): Buffer {
+  const head: number[] = [tag];
+  if (body.length < 0x80) head.push(body.length);
+  else if (body.length < 0x100) head.push(0x81, body.length);
+  else head.push(0x82, body.length >> 8, body.length & 0xff);
+  return Buffer.concat([Buffer.from(head), body]);
+}
+
+/** Re-encode an Extension SEQUENCE without its critical BOOLEAN (the non-critical form). */
+function asNonCritical(extension: Buffer): Buffer {
+  const fields = rawTlvs(der(extension, 0).body).filter(field => der(field, 0).tag !== 0x01);
+  return testTlv(0x30, Buffer.concat(fields));
+}
+
+const mintPickerCa = () => createCertificateAuthority({ commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST] });
+const mintedExtension = (certPem: string, oid: number[]) => extensionItems(certPem).find(hasOid(oid))!;
+const forgeAuthority = (extensions: Buffer[]) =>
+  mintAuthorityWithExtensionsForTests(PICKER_CA_COMMON_NAME, extensions).certPem;
+
+test("acceptsPickerAuthority accepts the minted picker root and rejects other profiles", () => {
+  expect(acceptsPickerAuthority(mintPickerCa().certPem)).toBe(true);
+  expect(acceptsPickerAuthority(ensurePickerCa(tempDir()).certPem)).toBe(true);
+  expect(acceptsPickerAuthority("not a certificate")).toBe(false);
+  // A foreign common name with an otherwise valid constraint set is not a picker authority.
+  expect(acceptsPickerAuthority(createCertificateAuthority({
+    commonName: "other root", permittedDnsNames: [PICKER_HOST],
+  }).certPem)).toBe(false);
+});
+
+test("acceptsPickerAuthority rejects relaxed name-constraint profiles", () => {
+  // An additional permitted DNS subtree widens the root beyond claude.ai.
+  expect(acceptsPickerAuthority(createCertificateAuthority({
+    commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST, "example.com"],
+  }).certPem)).toBe(false);
+  // Without the all-IP exclusion the address-space name form stays unconstrained.
+  expect(acceptsPickerAuthority(createCertificateAuthority({
+    commonName: PICKER_CA_COMMON_NAME, permittedDnsNames: [PICKER_HOST], excludeAllIpAddresses: false,
+  }).certPem)).toBe(false);
+  // A non-critical nameConstraints extension may be ignored by consumers; it is not the profile.
+  const items = extensionItems(mintPickerCa().certPem);
+  expect(acceptsPickerAuthority(forgeAuthority(
+    items.map(item => hasOid(OID_NAME_CONSTRAINTS)(item) ? asNonCritical(item) : item),
+  ))).toBe(false);
+});
+
+test("acceptsPickerAuthority rejects leaf privileges or loosened CA bits on a picker-named root", () => {
+  const legit = mintPickerCa();
+  const leaf = issueServerLeaf(legit, PICKER_CA_COMMON_NAME, ["example.com"]);
+  const bc = mintedExtension(legit.certPem, OID_BASIC_CONSTRAINTS);
+  const keyUsage = mintedExtension(legit.certPem, OID_KEY_USAGE);
+  const ski = mintedExtension(legit.certPem, OID_SUBJECT_KEY_IDENTIFIER);
+  const nc = mintedExtension(legit.certPem, OID_NAME_CONSTRAINTS);
+  // The spoofed-listener shape: right CN, right critical claude.ai constraint, plus leaf extras.
+  expect(acceptsPickerAuthority(forgeAuthority([bc, keyUsage, ski, nc, mintedExtension(leaf.certPem, OID_SUBJECT_ALT_NAME)]))).toBe(false);
+  expect(acceptsPickerAuthority(forgeAuthority([bc, keyUsage, ski, nc, mintedExtension(leaf.certPem, OID_EXTENDED_KEY_USAGE)]))).toBe(false);
+  // Leaf-shaped key usage (digitalSignature) or a CA:FALSE constraint are not the profile.
+  expect(acceptsPickerAuthority(forgeAuthority([bc, mintedExtension(leaf.certPem, OID_KEY_USAGE), ski, nc]))).toBe(false);
+  expect(acceptsPickerAuthority(forgeAuthority([mintedExtension(leaf.certPem, OID_BASIC_CONSTRAINTS), keyUsage, ski, nc]))).toBe(false);
+  // Dropping a required extension or duplicating one also breaks the profile.
+  expect(acceptsPickerAuthority(forgeAuthority([bc, keyUsage, nc]))).toBe(false);
+  expect(acceptsPickerAuthority(forgeAuthority([bc, keyUsage, ski, nc, nc]))).toBe(false);
+});
 
 test("picker root has a critical claude.ai-only DNS constraint that excludes every IP; intercept root remains unconstrained", () => {
   const ca = ensurePickerCa(tempDir());
@@ -216,77 +316,4 @@ test("a live foreign owner is never clobbered; a dead one is reclaimed", async (
   } finally {
     child.kill();
   }
-});
-
-// Minimal DER writers for minting nonstandard authorities that the issuer API cannot emit.
-function tlv(tag: number, body: Buffer): Buffer {
-  const hdr = body.length < 0x80 ? [body.length]
-    : body.length < 0x100 ? [0x81, body.length]
-      : [0x82, body.length >> 8, body.length & 0xff];
-  return Buffer.concat([Buffer.from([tag, ...hdr]), body]);
-}
-const seq = (...items: Buffer[]) => tlv(0x30, Buffer.concat(items));
-const oid = (...bytes: number[]) => tlv(0x06, Buffer.from(bytes));
-const octet = (body: Buffer) => tlv(0x04, body);
-const extension = (oidBytes: number[], critical: boolean, value: Buffer) =>
-  seq(oid(...oidBytes), ...(critical ? [tlv(0x01, Buffer.from([0xff]))] : []), octet(value));
-const dnsName = (name: string) => tlv(0x82, Buffer.from(name, "ascii"));
-
-/** The nameConstraints extnValue this process emits (claude.ai permitted, all IPs excluded). */
-const pickerConstraints = () => seq(
-  tlv(0xa0, seq(dnsName(PICKER_HOST))),
-  tlv(0xa1, Buffer.concat([seq(tlv(0x87, Buffer.alloc(8))), seq(tlv(0x87, Buffer.alloc(32)))])),
-);
-
-/** Flips the keyUsage bits byte inside an emitted certificate (the gate does not verify signatures). */
-function withKeyUsageBits(pem: string, bits: number): string {
-  const raw = Buffer.from(pem.replace(/-----[A-Z ]+-----|\s/g, ""), "base64");
-  const tbs = parts(der(raw, 0).body)[0]!;
-  const wrapper = parts(tbs.body).find(item => item.tag === 0xa3)!;
-  for (const item of parts(der(wrapper.body, 0).body)) {
-    const fields = parts(item.body);
-    if (fields[0]?.tag === 0x06 && fields[0].body.equals(Buffer.from([0x55, 0x1d, 0x0f]))) {
-      const value = fields.at(-1)!; // OCTET STRING wrapping `03 02 <unused> <bits>`
-      raw[value.body.byteOffset + 3] = bits;
-      const b64 = raw.toString("base64").replace(/.{1,64}/g, "$&\n");
-      return `-----BEGIN CERTIFICATE-----\n${b64}-----END CERTIFICATE-----\n`;
-    }
-  }
-  throw new Error("keyUsage extension not found");
-}
-
-const pickable = (overrides: Parameters<typeof createCertificateAuthority>[0]) =>
-  createCertificateAuthority({ commonName: PICKER_CA_COMMON_NAME, ...overrides }).certPem;
-
-describe("acceptsPickerAuthority", () => {
-  test("accepts exactly the authority profile this process issues", () => {
-    expect(acceptsPickerAuthority(pickable({ permittedDnsNames: [PICKER_HOST] }))).toBe(true);
-    expect(acceptsPickerAuthority(ensurePickerCa(tempDir()).certPem)).toBe(true);
-  });
-
-  test.each<[string, Parameters<typeof createCertificateAuthority>[0]]>([
-    ["an extra permitted DNS subtree", { permittedDnsNames: [PICKER_HOST, "evil.example"] }],
-    ["missing IP exclusions", { permittedDnsNames: [PICKER_HOST], excludeAllIpAddresses: false }],
-    ["no name constraint at all", {}],
-    ["a non-critical name constraint", { additionalExtensions: [extension([0x55, 0x1d, 0x1e], false, pickerConstraints())] }],
-    ["a second nameConstraints extension", { permittedDnsNames: [PICKER_HOST], additionalExtensions: [extension([0x55, 0x1d, 0x1e], true, pickerConstraints())] }],
-    // SAN + serverAuth would let the trust anchor itself terminate an off-host handshake.
-    ["a subjectAltName for an off-host name", { permittedDnsNames: [PICKER_HOST], additionalExtensions: [extension([0x55, 0x1d, 0x11], false, seq(dnsName("example.com")))] }],
-    ["a serverAuth extended key usage", { permittedDnsNames: [PICKER_HOST], additionalExtensions: [extension([0x55, 0x1d, 0x25], false, seq(oid(0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01)))] }],
-    ["a critical key identifier", { permittedDnsNames: [PICKER_HOST], additionalExtensions: [extension([0x55, 0x1d, 0x0e], true, octet(Buffer.alloc(20)))] }],
-  ])("rejects a root with %s", (_name, options) => {
-    expect(acceptsPickerAuthority(pickable(options))).toBe(false);
-  });
-
-  test("rejects a root whose key usage also grants digitalSignature", () => {
-    const forged = withKeyUsageBits(pickable({ permittedDnsNames: [PICKER_HOST] }), 0x87);
-    expect(acceptsPickerAuthority(forged)).toBe(false);
-  });
-
-  test("rejects the unconstrained intercept root and a wrong common name", () => {
-    expect(acceptsPickerAuthority(createLocalInterceptCa().certPem)).toBe(false);
-    expect(acceptsPickerAuthority(createCertificateAuthority({
-      commonName: "not the picker", permittedDnsNames: [PICKER_HOST],
-    }).certPem)).toBe(false);
-  });
 });

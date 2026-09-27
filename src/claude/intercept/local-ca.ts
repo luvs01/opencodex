@@ -198,8 +198,6 @@ export interface AuthorityOptions {
   permittedDnsNames?: readonly string[];
   /** With permittedDnsNames: also exclude every IP address (default true). */
   excludeAllIpAddresses?: boolean;
-  /** Extra DER-encoded Extension entries appended after the built-ins (e.g. for profile tests). */
-  additionalExtensions?: readonly Uint8Array[];
 }
 
 export function createCertificateAuthority(options: AuthorityOptions): LocalInterceptCa {
@@ -223,7 +221,6 @@ export function createCertificateAuthority(options: AuthorityOptions): LocalInte
       ...(options.permittedDnsNames?.length
         ? [extension(OID.nameConstraints, true, nameConstraints(options.permittedDnsNames, options.excludeAllIpAddresses !== false))]
         : []),
-      ...(options.additionalExtensions ?? []),
     ],
   });
   return {
@@ -236,6 +233,30 @@ export function createCertificateAuthority(options: AuthorityOptions): LocalInte
 
 export function createLocalInterceptCa(): LocalInterceptCa {
   return createCertificateAuthority({ commonName: CLAUDE_INTERCEPT_CA_COMMON_NAME });
+}
+
+/**
+ * Test hook for trust-boundary suites: mint a self-signed authority carrying an arbitrary list of
+ * DER-encoded Extension items so adversarial profiles still bear a valid signature. Production
+ * issuance always goes through createCertificateAuthority's fixed extension set.
+ */
+export function mintAuthorityWithExtensionsForTests(commonName: string, extensions: Uint8Array[]): LocalInterceptCa {
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const name = distinguishedName(commonName);
+  const der = issueCertificate({
+    subject: name,
+    issuer: name,
+    subjectKey: publicKey,
+    signingKey: privateKey,
+    validityDays: CA_VALIDITY_DAYS,
+    extensions,
+  });
+  return {
+    certPem: toPem("CERTIFICATE", der),
+    keyPem: privateKey.export({ type: "pkcs8", format: "pem" }) as string,
+    publicKey,
+    privateKey,
+  };
 }
 
 /** IPv4 literal to its four octets, or null. Only the leaf SAN encoder needs it. */
