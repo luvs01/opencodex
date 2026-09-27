@@ -38,9 +38,13 @@ function isTinyCap(value: unknown): value is number {
 }
 
 function hasConversationEnvelope(transcript: string): boolean {
-  const normalized = transcript.toLowerCase();
-  const opening = normalized.indexOf("<conversation>");
-  return opening !== -1 && normalized.indexOf("</conversation>", opening + 14) !== -1;
+  // Case-insensitive tag search in place: request bodies can reach hundreds of MiB, so
+  // lowercasing a copy would roughly double peak memory for an already large request.
+  const opening = /<conversation>/i.exec(transcript);
+  if (opening === null) return false;
+  const closing = /<\/conversation>/gi;
+  closing.lastIndex = opening.index + opening[0].length;
+  return closing.test(transcript);
 }
 
 /**
