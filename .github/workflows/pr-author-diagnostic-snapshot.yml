@@ -1,0 +1,157 @@
+name: Author diagnostics snapshot correction
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-diagnostic-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 70b8a77cf0784d2bd0b793c25826c6f51072926c
+          persist-credentials: false
+      - name: Apply explicit snapshot plumbing and regression source
+        id: prepare
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          import pathlib,json
+          p=pathlib.Path('src/codex/project-config-warnings.ts'); s=p.read_text()
+          def replace(old,new):
+              global s
+              assert s.count(old)==1,old
+              s=s.replace(old,new)
+          replace('  content?: string,\n): boolean {','  content?: string | null,\n): boolean {')
+          replace('  if (hasInjectedOpenaiBaseUrl(text)) return true;','  if (text === null) return false;\n  if (hasInjectedOpenaiBaseUrl(text)) return true;')
+          replace('  maxWalkParents?: number;\n} = {}): string[] {','  maxWalkParents?: number;\n  /** Explicit null keeps an absent/unreadable observation; undefined permits a fresh read. */\n  globalContent?: string | null;\n} = {}): string[] {')
+          replace('    const global = readBoundedCodexConfig(codexConfigPath);','    const global = options.globalContent === undefined\n      ? readBoundedCodexConfig(codexConfigPath) : options.globalContent;')
+          replace('  let globalContent: string | null | undefined;','  let globalContent: string | null = null;')
+          replace('!isGlobalOpencodexRoutingActive(codexConfigPath, globalContent ?? undefined)','!isGlobalOpencodexRoutingActive(codexConfigPath, globalContent)')
+          replace('discoverProjectCodexConfigPaths({ cwd: options.cwd, codexConfigPath })','discoverProjectCodexConfigPaths({ cwd: options.cwd, codexConfigPath, globalContent })')
+          p.write_text(s)
+          p=pathlib.Path('structure/config.md'); s=p.read_text()
+          old='''Read-only ownership, doctor, and project-routing diagnostics use bounded regular-file reads rather
+          than mutating or normalizing the user's file: the read resolves links to a bounded regular target,
+          opens nonblocking, and verifies the descriptor before and after — absent at lookup reads as none,
+          changed or unreadable reports undetermined ownership. The TOML reader must lexically skip basic and
+          literal multiline string bodies (prose holds key-shaped examples, `[table]` snippets — data, not
+          configuration), and formatted doctor lines pass retained real paths through user-path redaction.'''
+          new='''Read-only global ownership/doctor diagnostics follow links only to bounded regular files; an absent
+          lookup reads as none and an unreadable/changed observation reports undetermined ownership.
+          Project discovery instead skips links/oversized entries, and its guarded reader skips unsafe files.
+          Each project-warning collection shares one global snapshot for routing and trusted-path discovery,
+          including explicit absence or read failure. TOML parsing skips multiline string bodies rather than
+          reading prose as configuration; formatted doctor paths pass through user-path redaction.'''
+          assert old in s
+          p.write_text(s.replace(old,new))
+          p=pathlib.Path('tests/codex-integration/project-config-warning-snapshot.test.ts')
+          assert not p.exists()
+          p.write_text('''import { expect, spyOn, test } from "bun:test";
+          import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { join } from "node:path";
+          import * as bounded from "../../src/codex/inject/bounded-config-reader";
+          import { collectProjectCodexConfigWarnings, discoverProjectCodexConfigPaths, isGlobalOpencodexRoutingActive } from "../../src/codex/project-config-warnings";
+          import { removeTreeWithRetry } from "../helpers/remove-tree";
+
+          for (const kind of ["present", "absent", "unreadable"] as const) {
+            test(`project warnings read exactly one global ${kind} snapshot`, () => {
+              const root = mkdtempSync(join(tmpdir(), "ocx-warning-snapshot-"));
+              const global = join(root, "global.toml");
+              const project = join(root, "project");
+              mkdirSync(join(project, ".codex"), { recursive: true });
+              const projectConfig = join(project, ".codex", "config.toml");
+              writeFileSync(projectConfig, 'model_provider = "external"\\n');
+              const text = 'model_provider = "opencodex"\\n';
+              writeFileSync(global, text);
+              const read = spyOn(bounded, "readBoundedCodexConfig").mockImplementation(() => {
+                if (kind === "unreadable") throw new Error("fixture read failure");
+                return kind === "absent" ? null : text;
+              });
+              try {
+                const warnings = collectProjectCodexConfigWarnings({ cwd: project, codexConfigPath: global });
+                expect(read).toHaveBeenCalledTimes(1);
+                expect(warnings.some(w => w.code === "global_config_unreadable")).toBe(kind === "unreadable");
+                expect(warnings.some(w => w.path === projectConfig)).toBe(kind !== "absent");
+              } finally { read.mockRestore(); removeTreeWithRetry(root); }
+            });
+          }
+
+          test("explicit absent snapshots never become fresh global reads", () => {
+            const root = mkdtempSync(join(tmpdir(), "ocx-warning-absent-"));
+            const global = join(root, "global.toml");
+            writeFileSync(global, 'model_provider = "opencodex"\\n');
+            const read = spyOn(bounded, "readBoundedCodexConfig").mockImplementation(() => { throw new Error("unexpected reread"); });
+            try {
+              expect(isGlobalOpencodexRoutingActive(global, null)).toBe(false);
+              expect(discoverProjectCodexConfigPaths({ cwd: root, codexConfigPath: global, maxWalkParents: 1, globalContent: null })).toEqual([]);
+              expect(read).not.toHaveBeenCalled();
+            } finally { read.mockRestore(); removeTreeWithRetry(root); }
+          });
+          ''')
+          for file in ('scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'):
+              p=pathlib.Path(file); obj=json.loads(p.read_text()); table=obj['explicit'] if file.endswith('/layout.json') else obj
+              key='project-config-warning-snapshot.test.ts'; assert key not in table
+              table[key]='codex-integration'; p.write_text(json.dumps(obj,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git add src/codex/project-config-warnings.ts structure/config.md tests/codex-integration/project-config-warning-snapshot.test.ts scripts/test-layout/layout.json tests/fixtures/test-layout-expected.json
+          git diff --cached --check
+          git commit -m 'fix(diagnostics): reuse one bounded global config observation per warning scan'
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Publish isolated candidate only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/automation/author-6049-20260927
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Focused diagnostics and ownership regressions
+        run: |
+          set -euo pipefail
+          for file in tests/codex-integration/project-config-warning-snapshot.test.ts tests/codex-integration/project-config-warnings.test.ts tests/config/settings-desktop-switch-apply.test.ts; do
+            echo "TEST: $file"
+            if bun test "$file" > /tmp/author-focused.log 2>&1; then tail -n 6 /tmp/author-focused.log; else cat /tmp/author-focused.log; exit 1; fi
+          done
+      - name: Negative control for snapshot reuse
+        run: |
+          set -euo pipefail
+          git show HEAD^:src/codex/project-config-warnings.ts > src/codex/project-config-warnings.ts
+          set +e
+          bun test tests/codex-integration/project-config-warning-snapshot.test.ts > /tmp/author-negative.log 2>&1
+          code=$?
+          set -e
+          tail -n 70 /tmp/author-negative.log
+          git restore src/codex/project-config-warnings.ts
+          test "$code" -ne 0
+          grep -q 'CalledTimes\|called\|calls' /tmp/author-negative.log
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/tooling/file-size.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - run: git diff --exit-code
