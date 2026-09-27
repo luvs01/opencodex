@@ -1,0 +1,177 @@
+name: Author clear and cleanup verification
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-clear-and-gates.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: e6f432d0155eee1a983d7a52c3fb3c3b28e4af52
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Prepare exact reviewed corrections as source data
+        id: prepare
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          import subprocess,pathlib,json,os
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          # The composition-root follow-up does not change the existing lease behavior.
+          # Keep its reviewed contract document unchanged rather than exceed its budget.
+          doc='structure/transports/responses.md'
+          pathlib.Path(doc).write_bytes(subprocess.check_output(['git','show','b82bb02e1fa73ac38533b5eaf75fabe0136e0b04:'+doc]))
+          git('add',doc); git('commit','-m','docs(responses): retain existing contract without exceeding its size budget')
+          first=git('rev-parse','HEAD')
+          git('fetch','--no-tags','origin','ba479b4030c5ce1aaff0157423598c9d7c8b8181')
+          git('checkout','--detach','ba479b4030c5ce1aaff0157423598c9d7c8b8181')
+          p=pathlib.Path('src/codex/auth-api/routes.ts'); s=p.read_text()
+          old='    if (isCodexAccountPaused(runtimeConfig, targetAccountId)) {'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'    if (body.accountId != null && isCodexAccountPaused(runtimeConfig, targetAccountId)) {'))
+          path='tests/codex-integration/codex-account-clear-paused.test.ts'
+          assert not pathlib.Path(path).exists()
+          pathlib.Path(path).write_text('''import { afterEach, beforeEach, expect, test } from "bun:test";
+          import { getDefaultConfig, loadConfig } from "../../src/config";
+          import { handleCodexAuthAPI } from "../../src/codex/auth-api/routes";
+          import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
+          import { pinnedCodexAccountId, setCodexAccountPin } from "../../src/codex/account-priority";
+          import { createTempHome } from "../helpers/temp-home";
+
+          let home: ReturnType<typeof createTempHome>;
+          beforeEach(() => { home = createTempHome("ocx-clear-paused-account-"); });
+          afterEach(() => { home.remove(); });
+
+          const url = new URL("http://127.0.0.1/api/codex-auth/active");
+          function request(accountId: string | null): Request {
+            return new Request(url, { method: "PUT", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ accountId }) });
+          }
+
+          test("null clears active selection and pin even when the main account is paused", async () => {
+            const config = getDefaultConfig();
+            config.activeCodexAccountId = MAIN_CODEX_ACCOUNT_ID;
+            config.pausedCodexAccountIds = [MAIN_CODEX_ACCOUNT_ID];
+            setCodexAccountPin(config, MAIN_CODEX_ACCOUNT_ID);
+            const response = await handleCodexAuthAPI(request(null), url, config);
+            expect(response?.status).toBe(200);
+            expect(await response!.json()).toMatchObject({ ok: true, activeCodexAccountId: null });
+            expect(config.activeCodexAccountId).toBeUndefined();
+            expect(pinnedCodexAccountId(config)).toBeUndefined();
+            const stored = loadConfig();
+            expect(stored.activeCodexAccountId).toBeUndefined();
+            expect(pinnedCodexAccountId(stored)).toBeUndefined();
+            expect(stored.pausedCodexAccountIds).toContain(MAIN_CODEX_ACCOUNT_ID);
+          });
+
+          test("clearing with paused main is idempotent and does not select it", async () => {
+            const config = getDefaultConfig();
+            config.pausedCodexAccountIds = [MAIN_CODEX_ACCOUNT_ID];
+            for (let i = 0; i < 2; i++) {
+              const response = await handleCodexAuthAPI(request(null), url, config);
+              expect(response?.status).toBe(200);
+              expect(config.activeCodexAccountId).toBeUndefined();
+              expect(pinnedCodexAccountId(config)).toBeUndefined();
+            }
+          });
+
+          test("an explicit paused main selection still fails without clearing an existing pin", async () => {
+            const config = getDefaultConfig();
+            config.activeCodexAccountId = "pool-fixture";
+            config.pausedCodexAccountIds = [MAIN_CODEX_ACCOUNT_ID];
+            setCodexAccountPin(config, "pool-fixture");
+            const response = await handleCodexAuthAPI(request(MAIN_CODEX_ACCOUNT_ID), url, config);
+            expect(response?.status).toBe(409);
+            expect(await response!.json()).toEqual({ error: "Account is paused" });
+            expect(config.activeCodexAccountId).toBe("pool-fixture");
+            expect(pinnedCodexAccountId(config)).toBe("pool-fixture");
+          });
+          ''')
+          for file in ['scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json']:
+              p=pathlib.Path(file); obj=json.loads(p.read_text()); table=obj['explicit'] if file.endswith('/layout.json') else obj
+              key='codex-account-clear-paused.test.ts'
+              assert key not in table
+              table[key]='codex-integration'; p.write_text(json.dumps(obj,ensure_ascii=False,indent=2)+'\n')
+          git('add','src/codex/auth-api/routes.ts',path,'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json')
+          git('diff','--cached','--check')
+          git('commit','-m','fix(codex): permit clearing selection while the main account is paused')
+          second=git('rev-parse','HEAD')
+          rows=[{'pr':6047,'sha':first},{'pr':6050,'sha':second}]
+          pathlib.Path('/tmp/ocx-author-next-candidates.json').write_text(json.dumps(rows))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('candidates='+json.dumps(rows)+'\n')
+          print(json.dumps(rows))
+          PY
+      - name: Publish isolated candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-20260927"
+          done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/ocx-author-next-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+          fetch-depth: 3
+      - id: bun
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + require('./package.json').dependencies.bun + '\n')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ steps.bun.outputs.version }}
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 6047
+        name: Verify unchanged tested code and corrected documentation gate
+        run: |
+          git diff --exit-code e6f432d0155eee1a983d7a52c3fb3c3b28e4af52 HEAD -- src tests package.json bun.lock
+          bun run structure:check
+      - if: matrix.pr == 6050
+        run: |
+          bun test tests/codex-integration/codex-account-clear-paused.test.ts
+          bun test tests/cli/cli-account-alias-target.test.ts
+          bun test tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - if: matrix.pr == 6050
+        name: Negative control for the paused-main clear regression
+        run: |
+          set -euo pipefail
+          git show HEAD^:src/codex/auth-api/routes.ts > src/codex/auth-api/routes.ts
+          set +e
+          bun test tests/codex-integration/codex-account-clear-paused.test.ts > /tmp/clear-negative.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/clear-negative.log
+          git restore src/codex/auth-api/routes.ts
+          test "$code" -ne 0
+          grep -q '409' /tmp/clear-negative.log
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Enforce unchanged file-size budgets
+        run: |
+          guard=$(git ls-files 'tests/*/*file-size*.test.ts' | head -n1)
+          test -n "$guard"
+          bun test "$guard"
+      - run: git diff --exit-code
