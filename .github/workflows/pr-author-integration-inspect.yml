@@ -1,0 +1,57 @@
+name: Author integration inspection
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-integration-inspect.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 83dc9d12769838b2f20a799ab34ef39460fa8f67
+          fetch-depth: 500
+          persist-credentials: false
+      - name: Inspect exact heads against current dev without executing repository code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os,json,subprocess,urllib.request,pathlib
+          def get(path):
+              request=urllib.request.Request('https://api.github.com'+path,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','User-Agent':'author-integration-audit'})
+              with urllib.request.urlopen(request,timeout=30) as r: return json.load(r)
+          def git(*args,check=True): return subprocess.run(['git',*args],check=check,capture_output=True,text=True)
+          git('config','core.hooksPath','/dev/null'); git('config','user.name','github-actions[bot]'); git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          base=get('/repos/lidge-jun/opencodex/git/ref/heads/dev')['object']['sha']
+          print('OBSERVED_BASE',base,flush=True)
+          git('fetch','--no-tags','--depth=500','https://github.com/lidge-jun/opencodex',base)
+          for number in (5964,6035,6042,6043,6044):
+              pr=get('/repos/lidge-jun/opencodex/pulls/'+str(number)); head=pr['head']['sha']
+              print('PR',number,'HEAD',head,'STATE',pr['state'],'DRAFT',pr['draft'],flush=True)
+              git('fetch','--no-tags','--depth=500','origin',head); git('checkout','--detach',head)
+              result=git('merge','--no-ff','--no-commit',base,check=False)
+              conflicts=git('diff','--name-only','--diff-filter=U').stdout.splitlines()
+              print('CONFLICTS',number,json.dumps(conflicts),flush=True)
+              print(result.stdout[-4000:],flush=True)
+              for file in conflicts:
+                  text=pathlib.Path(file).read_text(errors='replace')
+                  lines=text.splitlines(); starts=[i for i,l in enumerate(lines) if l.startswith('<<<<<<<')]
+                  for start in starts:
+                      end=next((i for i in range(start+1,len(lines)) if lines[i].startswith('>>>>>>>')),min(start+100,len(lines)-1))
+                      excerpt=lines[max(0,start-3):min(len(lines),end+4)]
+                      if len(excerpt)>180: excerpt=excerpt[:85]+['... conflict excerpt truncated ...']+excerpt[-85:]
+                      print('FILE',file,'\n'+'\n'.join(excerpt),flush=True)
+              if number==5964:
+                  print('TESTFILES',git('ls-files','tests/*/*command-code*','tests/*/*mimo*').stdout,flush=True)
+              git('merge','--abort',check=False)
+              git('reset','--hard',head)
+          job=get('/repos/lidge-jun/opencodex/actions/jobs/108546391165')
+          check=job.get('check_run_url')
+          if check:
+              checkpath=check.removeprefix('https://api.github.com')
+              print('6049_ANNOTATIONS',json.dumps(get(checkpath+'/annotations?per_page=100')),flush=True)
+          PY
