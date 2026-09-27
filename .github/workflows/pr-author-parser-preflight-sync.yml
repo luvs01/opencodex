@@ -1,0 +1,112 @@
+name: Author parser and preflight integration
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-parser-preflight-sync.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 83dc9d12769838b2f20a799ab34ef39460fa8f67
+          fetch-depth: 500
+          persist-credentials: false
+      - name: Integrate exact reviewed base and preserve both test contributions
+        id: prepare
+        run: |
+          python3 - <<'PY'
+          import subprocess,pathlib,re,json,os
+          def git(*args,check=True):
+              result=subprocess.run(['git',*args],text=True,capture_output=True)
+              if check and result.returncode: raise RuntimeError(result.stdout+result.stderr)
+              return result.stdout.strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          base='99d0a9400ebd8dedbefee9882698ecfb1f7bbaa7'
+          git('fetch','--no-tags','--depth=500','https://github.com/lidge-jun/opencodex',base)
+          rows=[]
+          for pr,head in [(5964,'83dc9d12769838b2f20a799ab34ef39460fa8f67'),(6035,'3f9ebcf79f44e22afe506e872f9b2e2ea465f8d7')]:
+              git('fetch','--no-tags','--depth=500','origin',head);git('checkout','--detach',head)
+              git('merge','--no-commit','--no-ff',base,check=False)
+              conflicts=git('diff','--name-only','--diff-filter=U').splitlines()
+              if pr==5964:
+                  assert conflicts==[],conflicts
+                  p=pathlib.Path('src/adapters/command-code-tool-text.ts');s=p.read_text()
+                  old=' * started, later markers stay presentation text rather than opening a held call, so a quoted\n * example can never reach the wire as an executable tool call.'
+                  new=' * started, later markers stay presentation text rather than opening a held call. This protects\n * prose-prefixed examples; a leading bare envelope remains eligible under the declared-tool rules.'
+                  assert old in s;p.write_text(s.replace(old,new))
+              else:
+                  file='tests/responses/responses-grok-devin-preflight.test.ts'
+                  assert conflicts==[file],conflicts
+                  p=pathlib.Path(file);s=p.read_text()
+                  pattern=re.compile(r'^<<<<<<< HEAD\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]+\n',re.M|re.S)
+                  blocks=list(pattern.finditer(s));assert len(blocks)==2
+                  def resolve(m):
+                      ours,theirs=m.groups()
+                      if ours.startswith('import '):
+                          assert 'afterAll' in theirs and 'existsSync' in ours
+                          return ours.replace('import { afterEach,','import { afterAll, afterEach,',1)
+                      assert 'pre-output 429 preserves metered usage' in ours
+                      assert 'buffered cooldown heartbeat' in theirs and 'a timed-out preflight' in theirs
+                      return ours+'});\n\n'+theirs
+                  s=pattern.sub(resolve,s)
+                  s=s.replace('pre-output 429 settles durable spend in usage.jsonl','pre-output 429 persists bound usage in the usage journal')
+                  old='''  // handleResponses only populates the log context; the route layer's addFinalRequestLog is the
+            // seam that settles the spend tracker and appends usage.jsonl. Drive it with this request's
+            // context so the durable row proves the bound usage survives finalization.'''
+                  new='''  // Exercise usage-journal finalization with this request's bound metering context.
+            // The durable row proves usage survives logging, not that a separate API-key budget
+            // reservation was settled. This preflight refusal returns HTTP before starting SSE.'''
+                  assert old in s;s=s.replace(old,new);p.write_text(s)
+              git('add','-u')
+              assert not git('diff','--name-only','--diff-filter=U')
+              git('diff','--cached','--check',base)
+              git('commit','-m',f'Merge reviewed dev into PR {pr} and clarify regression scope')
+              sha=git('rev-parse','HEAD');git('merge-base','--is-ancestor',head,sha);git('merge-base','--is-ancestor',base,sha)
+              print('SCOPED_DIFF',pr,git('diff','--stat',base,sha),flush=True)
+              rows.append({'pr':pr,'sha':sha})
+          pathlib.Path('/tmp/parser-preflight-candidates.json').write_text(json.dumps(rows))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(rows)+'\n')
+          print(json.dumps(rows))
+          PY
+      - name: Publish isolated integration candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/parser-preflight-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 5964
+        run: bun test tests/providers/command-code-tool-text.test.ts tests/providers/command-code-tool-text-prose-split.test.ts tests/providers/command-code-error-finish.test.ts tests/providers/command-code-provider.test.ts
+      - if: matrix.pr == 6035
+        run: bun test tests/responses/responses-grok-devin-preflight.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/tooling/file-size.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - run: git diff --exit-code
