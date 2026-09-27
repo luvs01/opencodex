@@ -43,5 +43,5 @@ jobs:
       - run: bun run typecheck
       - run: bun run privacy:scan
       - run: bun run structure:check
-      - run: bun test tests/tooling/file-size.test.ts
+      - run: bun test tests/ci-workflows/file-size-ratchet.test.ts
       - run: git diff --exit-code
