@@ -1,0 +1,173 @@
+name: Link enrollment cancellation validation
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-join-cancellation.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 651ead09253ecd86b6e1e793b891374767550e7b
+          persist-credentials: false
+      - name: Prepare bounded cancellation changes without executing repository code
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path,old,new,count=1):
+              p=Path(path);s=p.read_text();assert s.count(old)==count,(path,s.count(old));p.write_text(s.replace(old,new))
+          p='src/client/connect.ts'
+          replace(p,'export interface ClientConnectDeps {\n  fetchImpl?: typeof fetch;', 'export interface ClientConnectDeps {\n  /** Abort enrollment network work and refuse subsequent writes; rollback still drains. */\n  signal?: AbortSignal;\n  fetchImpl?: typeof fetch;')
+          file=Path(p);text=file.read_text();start=text.index('export async function connectClient(');end=text.index('\nexport async function syncConnectedClient(',start)
+          segment=text[start:end]
+          segment=segment.replace('  let serverUrl = "";', '''  deps.signal?.throwIfAborted();
+            const rawFetch = deps.fetchImpl ?? fetch;
+            const fetchImpl: typeof fetch = deps.signal ? async (input, init = {}) => {
+              deps.signal!.throwIfAborted();
+              const signals = [deps.signal, init.signal, input instanceof Request ? input.signal : undefined]
+                .filter((signal): signal is AbortSignal => signal != null);
+              return rawFetch(input, { ...init, signal: AbortSignal.any(signals), redirect: "manual" });
+            } : rawFetch;
+            const assertActiveConnectingState = (fingerprint?: string) => {
+              deps.signal?.throwIfAborted();
+              assertConnectingState(fingerprint);
+            };
+            let serverUrl = "";''')
+          # Only enrollment's existing persistence guards gain the abort check, not rollback/rotation.
+          marker=segment.index('  let serverUrl = "";')
+          segment=segment[:marker]+segment[marker:].replace('assertConnectingState(', 'assertActiveConnectingState(')
+          segment=segment.replace('const upstreamFetch = deps.fetchImpl ?? fetch;', 'const upstreamFetch = fetchImpl;')
+          segment=segment.replace('fetchImpl: deps.fetchImpl', 'fetchImpl')
+          file.write_text(text[:start]+segment+text[end:])
+          p='src/client/link-join.ts';file=Path(p);text=file.read_text()
+          start=text.index('  try {\n    if (!tunnel) throw new ClientLinkJoinError("join_tunnel_failed");')
+          end=text.index('\n  await stopTunnel(tunnel);',start)
+          block=text[start:end]
+          block=block.replace('  try {','''  const enrollmentAbort = new AbortController();
+            let enrollment: Promise<unknown> | undefined;
+            let enrollmentFinished = false;
+            try {''',1)
+          block=block.replace('    await Promise.race([\n      tunnel.exited.then(() => { throw new ClientLinkJoinError("join_tunnel_failed"); }),\n      connect({','''    const tunnelFailure = tunnel.exited.then(() => {
+                const error = new ClientLinkJoinError("join_tunnel_failed");
+                if (!enrollmentFinished) enrollmentAbort.abort(error);
+                throw error;
+              });
+              const signal = deps.connectDeps?.signal
+                ? AbortSignal.any([enrollmentAbort.signal, deps.connectDeps.signal]) : enrollmentAbort.signal;
+              enrollment = Promise.resolve().then(() => connect({''')
+          block=block.replace('        ...deps.connectDeps,\n      }),\n    ]);','''        ...deps.connectDeps,
+                  signal,
+                }));
+              await Promise.race([tunnelFailure, enrollment]);
+              enrollmentFinished = true;''')
+          block=block.replace('  } catch (error) {\n    await rollback', '''  } catch (error) {
+              enrollmentAbort.abort(error);
+              // An observed tunnel exit is not completion of the losing exchange. Drain its
+              // cancellation and local rollback before stopping/revoking the shared link.
+              if (enrollment) await Promise.allSettled([enrollment]);
+              await rollback''')
+          block=block.replace(' : "join_connect_failed");\n  }',' : "join_connect_failed");\n  } finally {\n    enrollmentFinished = true;\n  }')
+          assert 'signal,' in block and 'Promise.allSettled([enrollment])' in block
+          file.write_text(text[:start]+block+text[end:])
+          p='tests/server/link-join-route.test.ts'
+          replace(p,'    let connectCommitted = false;','    let connectCommitted = false;\n    let connectDrained = false;')
+          replace(p,'      connect: (async () => { releaseExit(255); await new Promise(() => {}); connectCommitted = true; }) as typeof import("../../src/client/connect").connectClient,','''      connect: (async (_options, deps) => {
+                  releaseExit(255);
+                  try {
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                    deps?.signal?.throwIfAborted();
+                    connectCommitted = true;
+                  } finally { connectDrained = true; }
+                }) as typeof import("../../src/client/connect").connectClient,''')
+          replace(p,'    expect(connectCommitted).toBe(false);','    expect(connectDrained).toBe(true);\n    expect(connectCommitted).toBe(false);')
+          p='tests/clients/client-link-connect.test.ts'
+          new='''  test("cancellation during catalog download prevents late enrollment writes and drains token rollback", async () => {
+              await withLinkHome(async home => {
+                const prior = '{"models":[{"id":"prior"}]}\\n';
+                writeFileSync(DEFAULT_CATALOG_PATH, prior);
+                const abort = new AbortController();
+                let cancelledFetch = false;
+                await expect(connectClient(linkOptions(), {
+                  signal: abort.signal,
+                  fetchImpl: async (input, init) => {
+                    if (String(input).endsWith("/readyz")) return Response.json({
+                      service: "opencodex", version: "0.0.0", uptime: 1, pid: 1, port: 34567,
+                      status: "ready", protocol: 1, minimumClientProtocol: 1,
+                      managementUrl: "http://127.0.0.1:34567",
+                    });
+                    abort.abort(new Error("fixture enrollment cancelled"));
+                    cancelledFetch = init?.signal?.aborted === true;
+                    // Even a fetch implementation returning after abort cannot authorize a write.
+                    return Response.json({ models: [] });
+                  },
+                  lifecycleLockDeps: { lockPath: join(home, "lifecycle.sqlite") },
+                })).rejects.toThrow("fixture enrollment cancelled");
+                expect(cancelledFetch).toBe(true);
+                expect(readFileSync(DEFAULT_CATALOG_PATH, "utf8")).toBe(prior);
+                expect(readServiceApiTokenState()).toEqual({ kind: "absent" });
+                expect(readClientConnectionState()).toEqual({ kind: "disconnected" });
+              });
+            });
+          
+          '''
+          replace(p,'  test("catalog failure removes the pending link token and leaves config.client unset",',new+'  test("catalog failure removes the pending link token and leaves config.client unset",')
+          p=Path('structure/remote-link.md');s=p.read_text()
+          s+='\n### Enrollment cancellation\n\nTunnel exit aborts the enrollment signal and its physical fetches. Every later enrollment write rechecks that signal; the join waits for the cancelled enrollment and its local rollback before tunnel/key compensation. This does not eliminate the separate listener-observation-to-connect race.\n'
+          assert len(s.splitlines())<=600;p.write_text(s)
+          PY
+          git diff --check
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -u
+          git commit -m 'fix(link): cancel and drain enrollment before tunnel rollback'
+      - name: Publish isolated candidate only
+        id: publish
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)";echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/resume-cancel-pr6042-20260927
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/server/link-join-route.test.ts tests/server/port-reclaim.test.ts tests/clients/client-link-connect.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/ci-workflows/file-size-ratchet.test.ts
+      - name: Verify that the prior enrollment still loses the cancellation race
+        run: |
+          set -euo pipefail
+          git show HEAD^:src/client/link-join.ts > src/client/link-join.ts
+          git show HEAD^:src/client/connect.ts > src/client/connect.ts
+          set +e
+          bun test tests/server/link-join-route.test.ts tests/clients/client-link-connect.test.ts --test-name-pattern 'exits during connect|cancellation during catalog' > "$RUNNER_TEMP/negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/negative.log"
+          git restore src/client/link-join.ts src/client/connect.ts
+          test "$status" -ne 0
+          grep -q '(fail)' "$RUNNER_TEMP/negative.log"
+      - run: git diff --exit-code
