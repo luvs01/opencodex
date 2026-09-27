@@ -64,4 +64,4 @@ Regression coverage lives in `tests/clients/link-ssh-argv.test.ts`, `tests/clien
 
 ### Enrollment cancellation
 
-Tunnel exit aborts the enrollment signal and its physical fetches. Every later enrollment write rechecks that signal; the join waits for the cancelled enrollment and its local rollback before tunnel/key compensation. This does not eliminate the separate listener-observation-to-connect race.
+During readiness, tunnel exit interrupts the bounded polling sleep. Tunnel exit aborts the enrollment signal and its physical fetches. Every later enrollment write rechecks that signal; the join waits for the cancelled enrollment and its local rollback before tunnel/key compensation. This does not eliminate the separate listener-observation-to-connect race.

@@ -287,7 +287,7 @@ async function waitForReady(
     }
     const remaining = deadline - now();
     if (remaining <= 0) throw new ClientLinkJoinError("join_tunnel_failed");
-    await sleep(Math.min(JOIN_TUNNEL_POLL_MS, remaining));
+    await Promise.race([tunnelExited, sleep(Math.min(JOIN_TUNNEL_POLL_MS, remaining))]);
   }
 }
 
