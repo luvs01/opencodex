@@ -459,8 +459,13 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
         }
         if (block) {
           let addedBytes = Buffer.byteLength(partial);
-          // Count the concatenated UTF-8 value exactly when a surrogate pair spans deltas.
-          if (block.trailingHighSurrogate && /^[\uDC00-\uDFFF]/.test(partial)) addedBytes -= 2;
+          // Count the concatenated UTF-8 value exactly when a surrogate pair spans deltas:
+          // runtimes price a lone surrogate differently, so measure the join delta.
+          if (block.trailingHighSurrogate && /^[\uDC00-\uDFFF]/.test(partial)) {
+            const tail = block.argParts[block.argParts.length - 1]!.slice(-1);
+            const head = partial[0]!;
+            addedBytes += Buffer.byteLength(tail + head) - Buffer.byteLength(tail) - Buffer.byteLength(head);
+          }
           const argumentBytes = block.argumentBytes + addedBytes;
           if (state.strictToolBlockCapture && argumentBytes > TRANSLATOR_MAX_CALL_ARGUMENT_BYTES) {
             throw new CodingAgentProtocolError("Coding-agent CLI tool arguments exceeded the per-call byte ceiling.");
