@@ -184,6 +184,20 @@ working. OpenCodex only writes two variables into the `env` block of `~/.claude/
 
 Claude Desktop first-party routes its Code tab and subagents through OpenCodex. The standalone Claude Code CLI has a separate first-party switch. Both clients read the same `~/.claude/settings.json` proxy and CA settings: if only one switch is on, the other client still transits the local proxy, where TLS terminates, but its Messages requests relay to Anthropic unchanged. Other Anthropic paths relay unchanged and unrelated hosts remain blind tunnels.
 
+:::note[Windows system proxy (Clash, v2rayN, corporate proxies)]
+When a Windows system proxy is on, Claude Desktop hands it to the Code tab as `HTTPS_PROXY`, and
+that value takes precedence over the OpenCodex proxy in `~/.claude/settings.json`. The Code tab
+then goes around OpenCodex and routed models fail there, while the standalone CLI keeps working.
+Add `api.anthropic.com` to your proxy client's system-proxy bypass list (in Clash Verge,
+`system_proxy_bypass`), then fully quit and reopen Claude Desktop. `ocx doctor` reports this
+under "Claude Desktop first-party vs Windows system proxy". It cannot evaluate a PAC script or
+automatic proxy detection (WPAD, "Automatically detect settings"), so it reports those as unknown;
+with either, make the script return `DIRECT` for `api.anthropic.com` or turn detection off. If the
+first-party settings are stale, it asks you to run `ocx ensure` instead of reporting `ok`.
+:::
+
+Subagents on routed (non-Claude) models do not use Claude Code's server-side message threads, because only Anthropic stores that state. OpenCodex declines a threaded request for such a model, and Claude Code resends that turn, and the turns after it, with the full conversation.
+
 Mode is persisted as `claudeCode.desktopMode`. Installs that already applied either mode retain it,
 including first-party installs from before the mode was persisted. An explicit mode takes priority;
 otherwise an owned selected gateway row, an applied gateway fingerprint, or owned first-party
@@ -209,7 +223,9 @@ Picker mode is part of first-party mode. On macOS it is on by default when first
 unless `claudeCode.intercept.picker: false` is set. It changes the first-party Desktop Code-tab picker
 so it lists available opencodex models by name. The first time it is enabled, macOS may ask you to
 trust a local certificate authority in the login keychain. That authority is constrained to `claude.ai`
-and its subdomains; the prompt is a one-time trust step for this local CA.
+and its subdomains. Its signing key exists only inside the running OpenCodex process, so every
+OpenCodex restart publishes a fresh authority and macOS asks you to trust it again — approve the
+prompt, or later run `ocx claude desktop picker trust`, after each restart.
 
 While picker mode is on, Claude Desktop reaches the network through OpenCodex. If OpenCodex stops,
 Desktop is offline until you fully restart it or turn picker mode off. Check the state with
@@ -886,3 +902,7 @@ An explicit first-party apply recreates a missing token and refreshes the owned 
 requiring a proxy restart; existing tunnels are not revoked. Invalid, linked, oversized or
 non-token files are refused rather than overwritten. Inspect such an entry before removing only
 the confirmed obsolete token file and applying first-party mode again; never delete its link target.
+
+### First-party picker context markers
+
+The Desktop Code-tab picker adds `[1m]` to routed models whose authoritative context window is at least one million tokens, so Claude uses its 1M accounting instead of the smaller custom-model fallback. Labels, profile order, and provider routes stay unchanged. Unknown and sub-million windows remain unmarked, including native long-window opt-ins: the picker cannot guarantee that a Desktop or remote runner receives the matching compaction environment. The paired auto-context setup for `ocx claude` is unchanged. An existing conversation keeps its saved selector until you select the model again from the refreshed picker.

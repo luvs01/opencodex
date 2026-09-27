@@ -21,6 +21,8 @@ import {
 } from "../../lib/response-body-inactivity";
 import { resolveStallTimeoutMs } from "../../stall-timeout";
 import { clientEncoderForDelivery, deliverClientEncodedResponse } from "../inference/client-encoder-delivery";
+import { noteKiroServedSuccess } from "../../providers/kiro-usage";
+import { persistKiroAccountState } from "../../providers/kiro-account-state-disk";
 
 /** One responsibility of the Responses request pipeline; state owners are explicit. */
 export async function deliverAdapterResponse(
@@ -33,7 +35,7 @@ export async function deliverAdapterResponse(
     | "rememberKiroDeliveredFinalAnswer"
     | "responseStateOptions"
   >,
-  transportState: Pick<ResponsesTransport, "activeAdapter" | "bindKeyUsageFromBridge">,
+  transportState: Pick<ResponsesTransport, "activeAdapter" | "bindKeyUsageFromBridge" | "sentOAuthSnapshot">,
   sidecarState: Pick<ResponsesSidecarAuth, "routedCompaction">,
   responseEffects: Pick<
     ResponsesEffects,
@@ -76,12 +78,15 @@ export async function deliverAdapterResponse(
     // same mapping or the bridge catch reports this upstream timeout as a 500 proxy_error.
     const initialEventStream = (async function* (): AsyncGenerator<AdapterEvent> {
       try {
-        yield* readResponseStreamWithInactivity(
+        for await (const event of readResponseStreamWithInactivity(
           upstreamResponse,
           upstream.signal,
           bodyInactivityMs,
           response => transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
-        );
+        )) {
+          options.onCompactionRecoveryAdapterEvent?.(event);
+          yield event;
+        }
       } catch (error) {
         if (error instanceof ResponseBodyInactivityError) {
           yield {
@@ -114,10 +119,13 @@ export async function deliverAdapterResponse(
           continuation: fetchGuardedEmptyCompletionRetry,
         })
       : eventStream;
-    const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames } = toolBridgeMaps;
     // One completion owner for both deliveries: the bridge calls it from its terminal, the
     // direct client encoder from the fold of the same events.
     const onCompletedResponse = (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+      const served = transportState.sentOAuthSnapshot;
+      if (transportState.activeAdapter.name === "kiro" && response.status === "completed" && served
+        && noteKiroServedSuccess(served.accountId, served.generation)) persistKiroAccountState();
       commitReasoningReplayServingRoute();
       rememberKiroDeliveredFinalAnswer(transportState.activeAdapter.name, response);
       // Compaction turns must NOT enter the continuation cache: _rawBody still holds the full
@@ -145,7 +153,7 @@ export async function deliverAdapterResponse(
         fold: {
           replayCacheScope: parsed._reasoningReplayScope,
           hideThinkingSummary: parsed.options.hideThinkingSummary,
-          toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames,
+          toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames,
         },
         stallTimeoutSec: config.stallTimeoutSec,
         localUpstream,
@@ -168,8 +176,9 @@ export async function deliverAdapterResponse(
         localUpstream,
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         declaredToolNames,
+        bareCustomToolNames,
         enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
-      toolParameterSchemas,
+        toolParameterSchemas,
         ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
         ...(routedCompaction ? { compaction: true } : {}),
         // Same grok-surface split as the runTurn branch above.
@@ -197,6 +206,7 @@ export async function deliverAdapterResponse(
         bodyInactivityMs,
         response => transportState.activeAdapter.parseResponse!(response, translatorBudget, logCtx.activeTierMetadata),
       );
+      for (const event of initialEvents) options.onCompactionRecoveryAdapterEvent?.(event);
       let guardedEvents: AdapterEvent[];
       if (terminalGuardEnabled) {
         guardedEvents = [];
@@ -227,7 +237,7 @@ export async function deliverAdapterResponse(
     } finally {
       cleanupUpstreamAbort();
     }
-    const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames } = toolBridgeMaps;
     let providerState: OcxProviderContinuationState | undefined;
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
@@ -235,6 +245,7 @@ export async function deliverAdapterResponse(
       hideThinkingSummary: parsed.options.hideThinkingSummary,
       toolNsMap,
       declaredToolNames,
+      bareCustomToolNames,
       enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
       toolParameterSchemas,
       freeformToolNames,
@@ -258,6 +269,9 @@ export async function deliverAdapterResponse(
     // #1926 gap 2: same buffered-path durability bound as the primary branch.
     await awaitThoughtSignatureDurability();
     if (adapterResponseReachedServingTerminal(events, json)) {
+      const served = transportState.sentOAuthSnapshot;
+      if (transportState.activeAdapter.name === "kiro" && json.status === "completed" && served
+        && noteKiroServedSuccess(served.accountId, served.generation)) persistKiroAccountState();
       commitReasoningReplayServingRoute();
     }
     notifyResponseComplete(json);

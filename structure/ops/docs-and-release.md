@@ -1,5 +1,7 @@
 # Docs And Release
 
+The activation scheduling contract is covered by `tests/codex-integration/codex-quota-auto-refresh.test.ts`, including restart recovery and bounded retries. See the [quota activation contract](../providers/openai-tiers.md#public-provider-contract).
+
 Automatic package-tree restart holds a releasable data-plane drain until its scheduled
 service-home check succeeds. A veto releases that fence; a committed shutdown uses the
 permanent drain latch.
@@ -179,6 +181,14 @@ Those controls still have no owner, so there is no image-publish workflow or off
 > Decision record: [ADR-0081](../decisions/ADR-0081-container-deployment-recipe.md)
 
 ## Windows service wrapper and incomplete updates
+
+The scheduler wrapper retries child exits, including zero, after five seconds. Only the
+opt-in CLI stay-out code ends it successfully; missing Bun/CLI paths still exit with
+installation error 3. Explicit service stop terminates the wrapper itself.
+`src/service/windows-wrapper-exit.ts` defines the opt-in contract: new wrappers set
+`OCX_WINDOWS_WRAPPER_PROTOCOL=1`, and all three CLI live-owner exits return 42 in that
+service context. The wrapper translates 42 into a successful exit; legacy service
+contexts retain exit 0.
 
 > Decision record: [ADR-0082](../decisions/ADR-0082-windows-service-wrapper-and-incomplete-updates.md)
 
