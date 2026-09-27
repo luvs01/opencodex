@@ -1,0 +1,118 @@
+name: Link readiness exit regression
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-join-poll-exit.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 5672d3bc4891f418d747854faa5d761c505afd0d
+          persist-credentials: false
+      - name: Prepare only the verified polling and regression change
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/client/link-join.ts');text=p.read_text()
+          old='    await sleep(Math.min(JOIN_TUNNEL_POLL_MS, remaining));'
+          new='    await Promise.race([tunnelExited, sleep(Math.min(JOIN_TUNNEL_POLL_MS, remaining))]);'
+          assert text.count(old)==1;p.write_text(text.replace(old,new))
+          p=Path('tests/server/link-join-route.test.ts');text=p.read_text()
+          marker='  test("a tunnel that exits during connect cannot commit the connection", async () => {'
+          addition='''  test("readiness polling stops after tunnel exit without waiting for its deadline", async () => {
+              const calls: string[][] = [];
+              let clock = 1, scans = 0, sleeps = 0, fetched = 0, connected = 0;
+              let releaseExit!: (code: number) => void;
+              const exited = new Promise<number>(resolve => { releaseExit = resolve; });
+              await expect(joinHome(joinDeps({
+                runner: runnerFor(calls),
+                now: () => clock,
+                sleep: async ms => {
+                  sleeps += 1; clock += ms; releaseExit(255);
+                  await Promise.resolve();
+                },
+                writeState: () => {}, clearState: () => {},
+                spawnTunnel: () => ({ pid: 123, exited, stop: async () => {} }),
+                scanListenPids: () => { scans += 1; return { ok: true, pids: [] }; },
+                fetchImpl: async () => { fetched += 1; return new Response(null, { status: 401 }); },
+                connect: (async () => { connected += 1; }) as typeof import("../../src/client/connect").connectClient,
+              }), { alias: "home" })).rejects.toMatchObject({ code: "join_tunnel_failed" });
+              expect(scans).toBe(1);
+              expect(sleeps).toBe(1);
+              expect(clock).toBe(101);
+              expect(fetched).toBe(0);
+              expect(connected).toBe(0);
+              expect(revokeCalls(calls)).toHaveLength(1);
+            });
+          
+          '''
+          assert text.count(marker)==1;p.write_text(text.replace(marker,addition+marker))
+          p=Path('structure/remote-link.md');text=p.read_text()
+          old='Tunnel exit aborts the enrollment signal and its physical fetches.'
+          new='During readiness, tunnel exit interrupts the bounded polling sleep. Tunnel exit aborts the enrollment signal and its physical fetches.'
+          assert text.count(old)==1;p.write_text(text.replace(old,new))
+          PY
+          git diff --check
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -u
+          git commit -m 'fix(link): interrupt readiness polling when the tunnel exits'
+      - name: Publish isolated candidate only
+        id: publish
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"; echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/resume-poll-pr6042-20260927
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/server/link-join-route.test.ts tests/server/port-reclaim.test.ts tests/clients/client-link-connect.test.ts
+      - run: bun run typecheck
+      - if: matrix.os == 'ubuntu-latest'
+        run: bun run privacy:scan
+      - if: matrix.os == 'ubuntu-latest'
+        run: bun run structure:check
+      - if: matrix.os == 'ubuntu-latest'
+        run: bun test tests/ci-workflows/file-size-ratchet.test.ts
+      - name: Verify that the previous polling waits until the deadline
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          git show HEAD^:src/client/link-join.ts > src/client/link-join.ts
+          set +e
+          bun test tests/server/link-join-route.test.ts --test-name-pattern 'readiness polling stops' > "$RUNNER_TEMP/negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/negative.log"
+          git restore src/client/link-join.ts
+          test "$status" -ne 0
+          grep -q '(fail)' "$RUNNER_TEMP/negative.log"
+      - run: git diff --exit-code
