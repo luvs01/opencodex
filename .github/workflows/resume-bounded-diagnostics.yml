@@ -1,0 +1,44 @@
+name: Bounded author diagnostics
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-bounded-diagnostics.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read only exact public evidence
+        env:
+          API_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json,os,re,urllib.request,urllib.parse
+          class SafeRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,headers,newurl):
+                  if urllib.parse.urlsplit(newurl).scheme!='https': raise RuntimeError('Insecure redirect')
+                  result=super().redirect_request(req,fp,code,msg,headers,newurl)
+                  if urllib.parse.urlsplit(req.full_url).hostname!=urllib.parse.urlsplit(newurl).hostname: result.remove_header('Authorization')
+                  return result
+          opener=urllib.request.build_opener(SafeRedirect)
+          def read(url):
+              req=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['API_TOKEN'],'User-Agent':'bounded-author-review'})
+              with opener.open(req,timeout=45) as r:return r.read(35_000_000).decode('utf-8','replace')
+          jobs=[('lidge-jun/opencodex',108559029939),('lidge-jun/opencodex',108559029925),('luvs01/opencodex',108564581473)]
+          for repo,job in jobs:
+              print('BEGIN_JOB',job,flush=True)
+              text=read(f'https://api.github.com/repos/{repo}/actions/jobs/{job}/logs'); lines=text.splitlines(); selected=set()
+              for i,line in enumerate(lines):
+                  if re.search(r'\(fail\)|##\[error\]|SSOT failure|file-size|[Tt]ransient.*FAIL',line) and '\x1b[36;1m' not in line:
+                      selected.update(range(max(0,i-9),min(len(lines),i+12)))
+              out='\n'.join(lines[i] for i in sorted(selected))
+              print(out[-19000:]); print('END_JOB',job,len(out))
+          for n in [6057,6056,6051,6050,6049,6048,6047,6046,6044,6043,6042,6038,6037,6036,6035,5964]:
+              p=json.loads(read(f'https://api.github.com/repos/lidge-jun/opencodex/pulls/{n}'))
+              print('CURRENT_PR',json.dumps({k:p.get(k) for k in ['number','state','draft','mergeable','mergeable_state','merged','updated_at']}|{'sha':p['head']['sha'],'branch':p['head']['ref']}))
+          for n in [6056,6020]:
+              commits=json.loads(read(f'https://api.github.com/repos/lidge-jun/opencodex/pulls/{n}/commits?per_page=100'))
+              print('CREDIT',n,json.dumps([{'sha':c['sha'],'message':c['commit']['message'],'author':c['commit']['author']} for c in commits]))
+          PY
