@@ -1,0 +1,152 @@
+name: Author concurrent follow-ups
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-concurrent-followups.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 331441a89d4727e5e72797f7692def33076cf72d
+          persist-credentials: false
+      - name: Preserve concurrent author work and apply only remaining verified changes
+        id: prepare
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,json,os
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          p=pathlib.Path('src/update/worker-launch.ts');s=p.read_text()
+          s=s.replace('import { dirname } from "node:path";','import { dirname, isAbsolute } from "node:path";')
+          old='    (deps.accessSync ?? accessSync)(path, constants.X_OK);';assert s.count(old)==1
+          s=s.replace(old,'    if (!isAbsolute(path)) return false;\n'+old)
+          old='''    for (let dir = dirname(resolved), previous = ""; dir !== previous; previous = dir, dir = dirname(dir)) {
+                if (!rootOnlyWritable(dir, stat)) return false;
+              }'''
+          old='\n'.join(line[10:] if i else line for i,line in enumerate(old.splitlines()))
+          actual='    for (let dir = dirname(resolved), previous = ""; dir !== previous; previous = dir, dir = dirname(dir)) {\n      if (!rootOnlyWritable(dir, stat)) return false;\n    }'
+          assert actual in s
+          s=s.replace(actual,'    for (const start of [dirname(path), dirname(resolved)]) {\n      for (let dir = start, previous = ""; dir !== previous; previous = dir, dir = dirname(dir)) {\n        if (!rootOnlyWritable(dir, stat)) return false;\n      }\n    }')
+          marker='const systemdRunHooks: SystemdRunHooks = {';assert s.count(marker)==1
+          s=s.replace(marker,'''/** Scope discovery gets only user-bus identity, never inherited management credentials. */
+          function scopeProbeEnvironment(): NodeJS.ProcessEnv {
+            const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin" };
+            for (const name of ["HOME", "USER", "LOGNAME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
+              if (process.env[name] !== undefined) env[name] = process.env[name];
+            }
+            return env;
+          }
+
+          '''+marker)
+          s=s.replace('// Run a real no-op scope rather than `--version`: a present binary without a reachable user\n  // bus would otherwise pass the probe and then fail to start the worker at all.', '// Run a real scope with the same absolute binary as its harmless version payload.\n  // Probing only the outer --version would not verify the user bus.')
+          old='spawnSync(path, [...SYSTEMD_SCOPE_ARGS, "true"], { stdio: "ignore", timeout: 5_000 })';assert old in s
+          s=s.replace(old,'spawnSync(path, [...SYSTEMD_SCOPE_ARGS, path, "--version"], { stdio: "ignore", timeout: 5_000, env: scopeProbeEnvironment() })')
+          old='spawn(path, [...SYSTEMD_SCOPE_ARGS, "true"], { stdio: "ignore" })';assert old in s
+          s=s.replace(old,'spawn(path, [...SYSTEMD_SCOPE_ARGS, path, "--version"], { stdio: "ignore", env: scopeProbeEnvironment() })')
+          s=s.replace('try { probe.kill(); } catch { /* already exited */ }','try { probe.kill("SIGKILL"); } catch { /* failed termination is not a successful probe */ }')
+          p.write_text(s)
+          p=pathlib.Path('tests/update/update-worker-launch.test.ts');s=p.read_text()
+          s+='''
+          test("launcher trust also checks lexical ancestors of a canonical system target", () => {
+            const candidate = "/usr/local/bin/systemd-run";
+            const target = "/nix/store/systemd/bin/systemd-run";
+            const deps = (bad: string | undefined) => ({ realpathSync: () => target, accessSync: () => {},
+              statSync: (path: string) => ({ isFile: () => path === target, uid: 0, mode: path === bad ? 0o777 : 0o755 }) });
+            expect(isTrustedSystemdRunFile(candidate, deps(undefined))).toBe(true);
+            expect(isTrustedSystemdRunFile(candidate, deps("/usr/local"))).toBe(false);
+            expect(isTrustedSystemdRunFile(candidate, deps("/nix/store"))).toBe(false);
+            expect(isTrustedSystemdRunFile("relative/systemd-run", deps(undefined))).toBe(false);
+          });
+          '''
+          p.write_text(s)
+          git('add','src/update/worker-launch.ts','tests/update/update-worker-launch.test.ts');git('diff','--cached','--check')
+          git('commit','-m','fix(update): preserve async discovery and validate both launcher namespaces')
+          rows=[{'pr':6037,'sha':git('rev-parse','HEAD')}]
+          git('fetch','--no-tags','origin','9102474eb3c032b5ecb57ffdc228832e2639b636');git('checkout','--detach','9102474eb3c032b5ecb57ffdc228832e2639b636')
+          p=pathlib.Path('tests/update/update-refresh.test.ts');s=p.read_text()
+          old='expect(pnpmReadEnvironment(input)).toEqual({ npm_config_ignore_pnpmfile: "true", SECRET: "retained" });';assert s.count(old)==1
+          s=s.replace(old,'expect(pnpmReadEnvironment(input)).toEqual({ npm_config_ignore_pnpmfile: "true", pnpm_config_ignore_pnpmfile: "true", SECRET: "retained" });');p.write_text(s)
+          git('add',str(p));git('commit','-m','test(update): expect both supported pnpm hook-control prefixes')
+          rows.append({'pr':6048,'sha':git('rev-parse','HEAD')})
+          pathlib.Path('/tmp/concurrent-author-candidates.json').write_text(json.dumps(rows))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(rows)+'\n')
+          print(json.dumps(rows))
+          PY
+      - name: Publish isolated candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-reconciled-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/concurrent-author-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 6037
+        run: bun test tests/update/update-worker-launch.test.ts tests/update/update-job.test.ts tests/update/update-mise.test.ts
+      - if: matrix.pr == 6048
+        run: bun test tests/update/pnpm-command-isolation.test.ts tests/update/update-refresh.test.ts
+      - if: matrix.pr == 6048
+        name: Validate configuration with real pnpm 10 and 11 executables
+        run: |
+          set -euo pipefail
+          for version in 10.17.1 11.0.0; do
+            destination="$RUNNER_TEMP/ocx-pnpm-$version"
+            npm install --prefix "$destination" --ignore-scripts --no-audit --no-fund "pnpm@$version" > /tmp/pnpm-install.log 2>&1 || { tail -n 30 /tmp/pnpm-install.log; exit 1; }
+            PNPM_TEST_ROOT="$destination" node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { pnpmReadEnvironment, withPnpmCommandCwd } from './src/update/pnpm-read-policy.mjs';
+          const home=mkdtempSync(join(tmpdir(),'ocx-pnpm-native-'));
+          try {
+            const root=join(process.env.PNPM_TEST_ROOT,'node_modules/pnpm');
+            const pkg=JSON.parse(readFileSync(join(root,'package.json'),'utf8'));
+            const cli=join(root,typeof pkg.bin==='string'?pkg.bin:pkg.bin.pnpm);
+            const env=pnpmReadEnvironment({PATH:process.env.PATH, HOME:home, USERPROFILE:home, XDG_CONFIG_HOME:home, npm_config_ignore_pnpmfile:'false', PNPM_CONFIG_IGNORE_PNPMFILE:'false'});
+            withPnpmCommandCwd(['add'],cwd=>{
+              const value=execFileSync(process.execPath,[cli,'config','get','ignore-pnpmfile'],{cwd,env,encoding:'utf8',timeout:10000}).trim();
+              if(value!=='true') throw new Error('ignore-pnpmfile not honored: '+value);
+              console.log('pnpm '+pkg.version+': '+value);
+            });
+          } finally { rmSync(home,{recursive:true,force:true}); }
+          JS
+          done
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Existing file-size and layout gates for this branch
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts')
+          test "${#guards[@]}" -gt 0
+          bun test "${guards[@]}"
+          mapfile -t layouts < <(git ls-files '*test-layout.test.ts' '*test-layout-tooling.test.ts')
+          test "${#layouts[@]}" -gt 0
+          bun test "${layouts[@]}"
+      - run: git diff --exit-code
