@@ -355,8 +355,7 @@ export interface OpenToolBlock {
   name: string;
   argParts: string[];
   argumentBytes: number;
-  /** The last code unit of the buffered fragments when it is a high surrogate. */
-  trailingHighSurrogate: string | null;
+  trailingHighSurrogate: boolean;
   indexed: boolean;
 }
 
@@ -460,20 +459,19 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
         }
         if (block) {
           let addedBytes = Buffer.byteLength(partial);
-          // Count the concatenated UTF-8 value exactly when a surrogate pair spans deltas. A
-          // lone surrogate's byteLength is runtime-defined, so measure join-vs-separate rather
-          // than assume a fixed discount.
+          // Count the concatenated UTF-8 value exactly when a surrogate pair spans deltas:
+          // runtimes price a lone surrogate differently, so measure the join delta.
           if (block.trailingHighSurrogate && /^[\uDC00-\uDFFF]/.test(partial)) {
-            const edge = block.trailingHighSurrogate;
+            const tail = block.argParts[block.argParts.length - 1]!.slice(-1);
             const head = partial[0]!;
-            addedBytes += Buffer.byteLength(edge + head) - Buffer.byteLength(edge) - Buffer.byteLength(head);
+            addedBytes += Buffer.byteLength(tail + head) - Buffer.byteLength(tail) - Buffer.byteLength(head);
           }
           const argumentBytes = block.argumentBytes + addedBytes;
           if (state.strictToolBlockCapture && argumentBytes > TRANSLATOR_MAX_CALL_ARGUMENT_BYTES) {
             throw new CodingAgentProtocolError("Coding-agent CLI tool arguments exceeded the per-call byte ceiling.");
           }
           block.argumentBytes = argumentBytes;
-          block.trailingHighSurrogate = /[\uD800-\uDBFF]$/.test(partial) ? partial[partial.length - 1]! : null;
+          block.trailingHighSurrogate = /[\uD800-\uDBFF]$/.test(partial);
           block.argParts.push(partial);
         }
       }
@@ -501,7 +499,7 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
           name,
           argParts: [],
           argumentBytes: 0,
-          trailingHighSurrogate: null,
+          trailingHighSurrogate: false,
           indexed: typeof event.index === "number" && Number.isInteger(event.index),
         });
         state.toolBlockStarts = (state.toolBlockStarts ?? 0) + 1;
