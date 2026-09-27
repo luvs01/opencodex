@@ -190,6 +190,13 @@ otherwise an owned selected gateway row, an applied gateway fingerprint, or owne
 settings in `~/.claude/settings.json` determine the existing mode before the gateway default.
 A catalog sync or roster update never writes a gateway profile over a resolved first-party install.
 A CLI-only first-party env is not evidence that Desktop is in first-party mode.
+For legacy installs with no explicit Desktop mode and no stronger gateway ownership evidence,
+CLI opt-out can preserve an existing shared first-party proxy rather than disconnect Desktop.
+The API reports `shared_proxy_retained`; the CLI prints a warning and the dashboard retains
+its shared-proxy notice after refreshing status. Turning the CLI switch off therefore does
+not, by itself, promise that CLI traffic no longer traverses that proxy. To leave Desktop
+first-party mode too, explicitly run `ocx claude desktop apply --gateway` and inspect the result.
+Successful removal of the shared settings does not report a retained-proxy warning.
 Switching first applies the replacement,
 then removes the other mode's configuration (only values OpenCodex wrote — a foreign `HTTPS_PROXY` or
 `NODE_EXTRA_CA_CERTS`, for example a corporate proxy, is never overwritten and the apply is

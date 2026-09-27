@@ -1638,7 +1638,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       return jsonResponse({ ok: true, enabled: config.claudeCode?.enabled !== false,
         cliFirstParty: body.cliFirstParty,
         warnings: [
-          ...(committed.retainedAmbiguous ? ["shared_proxy_retained"] : []),
+          ...(committed.retainedAmbiguous && result.action !== "removed" ? ["shared_proxy_retained"] : []),
           ...(residual ? ["settings_residual"] : []),
         ] });
     }

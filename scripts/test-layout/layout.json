@@ -168,6 +168,7 @@
     }
   },
   "explicit": {
+    "cli-claude-retained-proxy-warning.test.ts": "cli",
     "deepseek-artifact-tool-schema.test.ts": "providers",
     "client-config-export-output-limit.test.ts": "config",
     "openai-chat-serialized-tool-call-scaling.test.ts": "adapters/openai",

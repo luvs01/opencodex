@@ -367,13 +367,14 @@ test("CLI-off reports a tokenless local proxy with foreign CA as residue", async
   } finally { await server.stop(true); }
 });
 
-test("CLI-off keeps a shared env Desktop could own, pinning first-party instead of removing it", async () => {
+test.each([true, false])("CLI-off reports retained proxy only when Desktop stays enabled (%s)", async desktopEnabled => {
   // A legacy install can carry an owned shared proxy and cliFirstParty without a desktopMode
   // marker. The env is ambiguous while the flag is set, so opt-out must not pin gateway and
   // remove a connection Desktop may still be using.
   const current = loadConfig();
   current.port = 10100;
   current.claudeCode = { ...current.claudeCode, cliFirstParty: true };
+  current.clientIntegrations = { ...current.clientIntegrations, "claude-desktop": desktopEnabled };
   saveConfig(current);
   const settingsPath = join(process.env.CLAUDE_CONFIG_DIR!, "settings.json");
   mkdirSync(process.env.CLAUDE_CONFIG_DIR!, { recursive: true });
@@ -384,13 +385,13 @@ test("CLI-off keeps a shared env Desktop could own, pinning first-party instead 
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cliFirstParty: false }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ cliFirstParty: false, warnings: ["shared_proxy_retained"] });
+    expect(await response.json()).toMatchObject({ cliFirstParty: false, warnings: desktopEnabled ? ["shared_proxy_retained"] : [] });
     const claudeCode = loadConfig().claudeCode;
     expect(claudeCode?.cliFirstParty).toBeUndefined();
     expect(claudeCode?.desktopMode).toBe("first-party");
-    expect(JSON.parse(readFileSync(settingsPath, "utf8")).env).toBeDefined();
+    expect(Boolean(JSON.parse(readFileSync(settingsPath, "utf8")).env?.HTTPS_PROXY)).toBe(desktopEnabled);
     expect(await (await fetch(new URL("/api/claude-code", server.url))).json())
-      .toMatchObject({ cliFirstParty: false, desktopFirstParty: true });
+      .toMatchObject({ cliFirstParty: false, desktopFirstParty: desktopEnabled });
   } finally { await server.stop(true); }
 });
 

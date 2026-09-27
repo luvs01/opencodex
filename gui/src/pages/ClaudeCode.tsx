@@ -82,6 +82,7 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
   const connectionInFlight = useRef(false);
   const [firstPartyPending, setFirstPartyPending] = useState(false);
   const firstPartyInFlight = useRef(false);
+  const [sharedProxyRetained, setSharedProxyRetained] = useState(false);
 
   const fetchCode = useCallback(async (signal: AbortSignal): Promise<CachedClaudeCode> => {
     const res = await fetch(`${apiBase}/api/claude-code`, { signal });
@@ -191,6 +192,7 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
     firstPartyInFlight.current = true;
     setFirstPartyPending(true);
     setStatus("");
+    setSharedProxyRetained(false);
     try {
       const response = await fetch(`${apiBase}/api/claude-code`, {
         method: "PUT",
@@ -212,7 +214,8 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
           : "claude.saveFailed";
         throw new Error(t(key));
       }
-      await readJsonOrThrow(response, t("claude.saveFailed"));
+      const payload = await readJsonOrThrow<{ warnings?: unknown }>(response, t("claude.saveFailed"));
+      setSharedProxyRetained(Array.isArray(payload?.warnings) && payload.warnings.includes("shared_proxy_retained"));
       await fetchCode(new AbortController().signal);
       codeResource.refresh();
     } catch (error) {
@@ -354,6 +357,10 @@ export default function ClaudeCode({ apiBase, active = true }: { apiBase: string
               label={t("claude.firstParty.aria")}
             />
           </div>
+          {sharedProxyRetained && state.desktopFirstParty && state.sharedProxy !== "none"
+          && selectFirstPartyNotice(state) !== "shared" && (
+            <Notice tone="warn">{t("claude.firstParty.shared")}</Notice>
+          )}
           {state.cliFirstParty && (
             <Notice tone="warn">{t("claude.firstParty.risk")}</Notice>
           )}

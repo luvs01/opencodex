@@ -126,7 +126,14 @@ export async function handleClaudeConfigCommand(argv: string[], deps: RuntimeApi
     }
     if (Object.keys(body).length === 0) throw new CliUsageError("at least one Claude setting is required", CLAUDE_USAGE);
     const result = await runtimeRequest("/api/claude-code", { method: "PUT", body: JSON.stringify(body) }, deps);
-    printData(result, wantsJson, ["Claude Code settings updated."]);
+    const warnings = result && typeof result === "object" && "warnings" in result && Array.isArray(result.warnings)
+  ? result.warnings : [];
+const lines = ["Claude Code settings updated."];
+if (warnings.includes("shared_proxy_retained")) lines.push(
+  "Warning: the shared first-party proxy was retained for an ambiguous legacy Desktop setup; CLI traffic may still use it.",
+  "To leave first-party mode for Desktop too, explicitly run: ocx claude desktop apply --gateway",
+);
+printData(result, wantsJson, lines);
   });
 }
 
