@@ -45,11 +45,13 @@ jobs:
               git(cwd,'fetch','--no-tags','--depth=800','https://github.com/lidge-jun/opencodex',sha,base);git(cwd,'checkout','--detach',sha)
               if n==6043:
                   fix='ebdc73d54bfddb45b78dc8c0ff682142c2c4ce84'
-                  git(cwd,'fetch','--no-tags','--depth=2','https://github.com/luvs01/opencodex',fix)
+                  git(cwd,'fetch','--no-tags','--depth=800','https://github.com/luvs01/opencodex',fix)
                   result=subprocess.run(['git','-C',str(cwd),'cherry-pick',fix],capture_output=True,text=True)
                   if result.returncode:print('BLOCKED_CHERRY_PICK',n,result.stdout,result.stderr);continue
-              subprocess.run(['git','-C',str(cwd),'merge','--no-commit','--no-ff',base],capture_output=True,text=True)
+              result=subprocess.run(['git','-C',str(cwd),'merge','--no-commit','--no-ff',base],capture_output=True,text=True)
               conflicts=git(cwd,'diff','--name-only','--diff-filter=U').splitlines()
+              if result.returncode and not conflicts:
+                  print('BLOCKED_MERGE',n,(result.stdout+result.stderr)[:4000]);continue
               allowed={'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'}
               if set(conflicts)-allowed:
                   print('BLOCKED_MERGE',n,conflicts)
@@ -63,7 +65,14 @@ jobs:
                           for i,s in enumerate(versions):
                               p=pathlib.Path(tmp)/str(i);p.write_text(s);paths.append(str(p))
                           union=subprocess.check_output(['git','merge-file','--stdout','--union',paths[1],paths[0],paths[2]],text=True)
-                      assert json.loads(union,object_pairs_hook=unique)==expected
+                      try:
+                          resolved=json.loads(union,object_pairs_hook=unique)
+                      except ValueError:
+                          # union re-emits context entries as duplicate keys; accept the last-wins
+                          # parse only when it still lands on the semantic merge, then emit it canonically
+                          resolved=json.loads(union)
+                          union=json.dumps(resolved,indent=2)+'\n'
+                      assert resolved==expected
                       (cwd/name).write_text(union);git(cwd,'add',name)
                   assert not git(cwd,'diff','--name-only','--diff-filter=U')
                   git(cwd,'diff','--cached','--check',base)
