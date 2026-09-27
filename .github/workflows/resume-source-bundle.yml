@@ -1,0 +1,64 @@
+name: Exact-ref author workspace
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-source-bundle.yml]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Fetch public exact revisions without repository credentials
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/author-bundle"
+          cd "$RUNNER_TEMP/author-bundle"
+          git init --bare source.git
+          git -C source.git fetch --no-tags --depth=600 https://github.com/lidge-jun/opencodex \
+            8923ad9835cfb62b028ac88072c4d90ea866e9a4:refs/heads/base \
+            9e39c066ea991fc206dc918229c63c1db3b56ef8:refs/heads/pr6057 \
+            37b4b4e409bb137a77bfbee5b5f4e32146c68dda:refs/heads/pr6056 \
+            987b8097624e50e6c39b00aca145fe4755043c4b:refs/heads/pr6051 \
+            ff1ad0b72e4b5dd669b3c68938d3261a9912fcd4:refs/heads/pr6050 \
+            cccb8c2fa3a7c92646fa687b9d56c7467e42d4ed:refs/heads/pr6049 \
+            86c0b5b4774aa067ce9f0c5cbd59f050a9b64ea8:refs/heads/pr6048 \
+            1681984ab28eef5261aa16a3fcbbdfe4fa2c72d7:refs/heads/pr6047 \
+            1788ae43208b2ed81e3ea7ad5779e9ef1d66a04c:refs/heads/pr6046 \
+            b2a256f61661227878dd05abb70bdd65ebe84938:refs/heads/pr6044 \
+            c9c936c71d6d3191fec179b7f5fc1598eb816b93:refs/heads/pr6043 \
+            651ead09253ecd86b6e1e793b891374767550e7b:refs/heads/pr6042 \
+            49e60302d7f820264c5a66a884d3783a0cf8679e:refs/heads/pr6038 \
+            75f8497d83d2ca293ebbafc4ea26eca75b79f60d:refs/heads/pr6037 \
+            8cf6eaa18de0e41ccc5370d10b7d5d770c9d6853:refs/heads/pr6036 \
+            064170078c749519645a617309ea1a8942b7e040:refs/heads/pr6035 \
+            6ac0a3d01d9594be1344d8d16586817c2b07989d:refs/heads/pr5964
+          git -C source.git symbolic-ref HEAD refs/heads/base
+          git clone --no-hardlinks source.git work
+          git -C work config core.hooksPath /dev/null
+          git -C work remote remove origin
+          git -C source.git show-ref > revisions.txt
+          tar -czf "$RUNNER_TEMP/source-bundle.tar.gz" source.git revisions.txt
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - name: Install public locked development dependencies without credentials
+        working-directory: ${{ runner.temp }}/author-bundle/work
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          (cd gui && bun install --frozen-lockfile)
+          cp "$(command -v bun)" "$RUNNER_TEMP/author-bundle/bun"
+          tar -czf "$RUNNER_TEMP/dependencies-bundle.tar.gz" node_modules gui/node_modules package.json bun.lock gui/package.json gui/bun.lock
+          tar -czf "$RUNNER_TEMP/bun-bundle.tar.gz" -C "$RUNNER_TEMP/author-bundle" bun
+      - name: Upload credential-free workspace files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: author-workspace
+          path: |
+            ${{ runner.temp }}/source-bundle.tar.gz
+            ${{ runner.temp }}/dependencies-bundle.tar.gz
+            ${{ runner.temp }}/bun-bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 2
