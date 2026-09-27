@@ -1,0 +1,51 @@
+name: Author follow-up status snapshot
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-audit-status.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Read public PR metadata, comments and exact-head checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.parse, concurrent.futures
+          root = 'https://api.github.com'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'opencodex-author-follow-up'}
+          def get(path):
+              with urllib.request.urlopen(urllib.request.Request(root+path, headers=headers), timeout=30) as response:
+                  return json.load(response)
+          def pages(path):
+              result=[]
+              for n in range(1,21):
+                  rows=get(path+('&&' if False else '&' if '?' in path else '?')+'per_page=100&page='+str(n))
+                  result.extend(rows)
+                  if len(rows)<100: return result
+              raise RuntimeError('pagination bound exceeded')
+          repo='/repos/lidge-jun/opencodex'
+          nums=[5964,6035,6036,6037,6038,6042,6043,6044,6046,6047,6048,6049,6050,6051]
+          def inspect(n):
+              pr=get(repo+'/pulls/'+str(n)); sha=pr['head']['sha']
+              checks=get(repo+'/commits/'+sha+'/check-runs?per_page=100')['check_runs']
+              comments=pages(repo+'/issues/'+str(n)+'/comments')
+              reviews=pages(repo+'/pulls/'+str(n)+'/reviews')
+              return {'number':n,'state':pr['state'],'draft':pr['draft'],'merged':pr['merged'],'mergeable':pr['mergeable'],'mergeable_state':pr['mergeable_state'],'head':sha,'branch':pr['head']['ref'],'base':pr['base']['sha'],
+                'checks':[{'name':c['name'],'status':c['status'],'conclusion':c['conclusion'],'url':c['details_url']} for c in checks],
+                'human_comments':[{'id':c['id'],'author':c['user']['login'],'body':c['body'],'url':c['html_url']} for c in comments if c['user']['type']!='Bot'],
+                'human_reviews':[{'author':r['user']['login'],'state':r['state'],'body':r['body'],'commit':r['commit_id'],'url':r['html_url']} for r in reviews if r['user']['type']!='Bot']}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              report=list(pool.map(inspect,nums))
+          with open('author-pr-status.json','w',encoding='utf-8') as f: json.dump(report,f,ensure_ascii=False,indent=2)
+          for row in report: print(json.dumps(row,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: author-pr-status
+          path: author-pr-status.json
+          retention-days: 1
