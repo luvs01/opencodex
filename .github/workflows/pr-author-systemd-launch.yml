@@ -248,7 +248,7 @@ jobs:
       - name: Native worker and update-job regressions
         run: |
           set -euo pipefail
-          for file in tests/update/update-worker-launch.test.ts tests/update/update-job-repair-flow.test.ts; do
+          for file in tests/update/update-worker-launch.test.ts tests/update/update-job.test.ts; do
             echo "TEST: $file"
             if bun test "$file" > /tmp/worker-test.log 2>&1; then tail -n 6 /tmp/worker-test.log; else tail -n 160 /tmp/worker-test.log; exit 1; fi
           done
