@@ -37,6 +37,12 @@ function isTinyCap(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 1024;
 }
 
+function hasConversationEnvelope(transcript: string): boolean {
+  const normalized = transcript.toLowerCase();
+  const opening = normalized.indexOf("<conversation>");
+  return opening !== -1 && normalized.indexOf("</conversation>", opening + 14) !== -1;
+}
+
 /**
  * Aside's emergency checkpoint is a standalone summary, not an ordinary short answer (#5465).
  * Runs at the physical Chat destination, after all combo effort overrides, so `effort` is the
@@ -64,7 +70,7 @@ export function protectGlmSummaryBudget(
   const transcript = textContent(user.content);
   if (instruction === undefined || transcript === undefined) return false;
   if (!/\b(?:summari[sz](?:e|ation|er|ing)|summary|checkpoint)\b/i.test(instruction)) return false;
-  if (!/<conversation>[\s\S]*<\/conversation>/i.test(transcript)) return false;
+  if (!hasConversationEnvelope(transcript)) return false;
   if (transcript.length < MIN_CHECKPOINT_TRANSCRIPT_CHARS) return false;
   if (isTinyCap(body.max_tokens)) body.max_tokens = PROTECTED_SUMMARY_CAP;
   if (isTinyCap(body.max_completion_tokens)) body.max_completion_tokens = PROTECTED_SUMMARY_CAP;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../../../src/adapters/openai-chat";
+import { protectGlmSummaryBudget } from "../../../src/adapters/openai-chat/summary-budget";
 import { chatCompletionsToResponsesBody } from "../../../src/chat/inbound";
 import { concreteComboRequestBody } from "../../../src/combos/request";
 import { parseRequest } from "../../../src/responses/parser";
@@ -83,6 +84,15 @@ describe("GLM summary mitigation stays inside its boundary (#5953 review)", () =
   test("a checkpoint transcript under the minimum length is not rewritten", () => {
     const short = [messages[0], { role: "user", content: "<conversation>User: hi.</conversation>" }];
     for (const body of bodies({ messages: short })) untouched(body);
+  });
+  test("rejects many unmatched conversation openings without repeatedly rescanning the transcript", () => {
+    const started = performance.now();
+    const protectedSummary = protectGlmSummaryBudget({
+      model, max_tokens: 512,
+      messages: [messages[0], { role: "user", content: "<conversation>".repeat(32_000) }],
+    }, provider.baseUrl, "max");
+    expect(protectedSummary).toBeFalse();
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
   test.each(["low", "medium"])("an effective %s effort is not overridden", effort => {
     for (const body of bodies({ reasoning_effort: effort })) untouched(body, effort);
