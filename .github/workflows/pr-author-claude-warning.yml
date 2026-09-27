@@ -1,0 +1,223 @@
+name: Author retained proxy warning
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-claude-warning.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 1788ae43208b2ed81e3ea7ad5779e9ef1d66a04c
+          persist-credentials: false
+      - name: Prepare explicit outcome-based warning corrections
+        id: prepare
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,json,os
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          p=pathlib.Path('src/server/management/agent-settings-routes.ts');s=p.read_text()
+          old='...(committed.retainedAmbiguous ? ["shared_proxy_retained"] : [])';assert s.count(old)==1
+          p.write_text(s.replace(old,'...(committed.retainedAmbiguous && result.action !== "removed" ? ["shared_proxy_retained"] : [])'))
+          p=pathlib.Path('src/cli/integrations.ts');s=p.read_text()
+          old='  printData(result, wantsJson, ["Claude Code settings updated."]);';assert s.count(old)==1
+          new='''  const warnings = result && typeof result === "object" && "warnings" in result && Array.isArray(result.warnings)
+            ? result.warnings : [];
+          const lines = ["Claude Code settings updated."];
+          if (warnings.includes("shared_proxy_retained")) lines.push(
+            "Warning: the shared first-party proxy was retained for an ambiguous legacy Desktop setup; CLI traffic may still use it.",
+            "To leave first-party mode for Desktop too, explicitly run: ocx claude desktop apply --gateway",
+          );
+          printData(result, wantsJson, lines);'''
+          p.write_text(s.replace(old,new))
+          p=pathlib.Path('tests/claude-integration/claude-management-api.test.ts');s=p.read_text()
+          start=s.index('test("CLI-off keeps a shared env Desktop could own, pinning first-party instead of removing it"')
+          end=s.index('test("CLI-off pins gateway',start)
+          block=s[start:end]
+          block=block.replace('test("CLI-off keeps a shared env Desktop could own, pinning first-party instead of removing it", async () => {','test.each([true, false])("CLI-off reports retained proxy only when Desktop stays enabled (%s)", async desktopEnabled => {')
+          block=block.replace('  saveConfig(current);','  current.clientIntegrations = { ...current.clientIntegrations, "claude-desktop": desktopEnabled };\n  saveConfig(current);',1)
+          block=block.replace('warnings: ["shared_proxy_retained"]','warnings: desktopEnabled ? ["shared_proxy_retained"] : []')
+          block=block.replace('expect(JSON.parse(readFileSync(settingsPath, "utf8")).env).toBeDefined();','expect(Boolean(JSON.parse(readFileSync(settingsPath, "utf8")).env?.HTTPS_PROXY)).toBe(desktopEnabled);')
+          block=block.replace('desktopFirstParty: true','desktopFirstParty: desktopEnabled')
+          p.write_text(s[:start]+block+s[end:])
+          path='tests/cli/cli-claude-retained-proxy-warning.test.ts'
+          pathlib.Path(path).write_text('''import { expect, spyOn, test } from "bun:test";
+          import { handleClaudeConfigCommand } from "../../src/cli/integrations";
+          import { createTempHome } from "../helpers/temp-home";
+
+          for (const json of [false, true]) {
+            test(`CLI ${json ? "JSON" : "human"} output retains the shared-proxy warning`, async () => {
+              const home = createTempHome("ocx-retained-proxy-cli-");
+              const output: string[] = [];
+              const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { output.push(args.join(" ")); });
+              const payload = { ok: true, cliFirstParty: false, warnings: ["shared_proxy_retained"] };
+              try {
+                await handleClaudeConfigCommand(["set", "--first-party", "off", ...(json ? ["--json"] : [])], {
+                  baseUrl: "http://127.0.0.1:19100",
+                  fetchImpl: (async () => Response.json(payload)) as typeof fetch,
+                });
+                const text = output.join("\\n");
+                if (json) expect(JSON.parse(text)).toEqual(payload);
+                else { expect(text).toContain("CLI traffic may still use it"); expect(text).toContain("ocx claude desktop apply --gateway"); }
+              } finally { log.mockRestore(); home.remove(); }
+            });
+          }
+          ''')
+          for file in ('scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'):
+              p=pathlib.Path(file);s=p.read_text();key='cli-claude-retained-proxy-warning.test.ts';assert '"'+key+'"' not in s
+              marker='  "explicit": {\n' if file.endswith('/layout.json') else '{\n'
+              p.write_text(s.replace(marker,marker+('    ' if file.endswith('/layout.json') else '  ')+json.dumps(key)+': "cli",\n',1))
+          p=pathlib.Path('gui/src/pages/ClaudeCode.tsx');s=p.read_text()
+          old='  const firstPartyInFlight = useRef(false);';assert s.count(old)==1
+          s=s.replace(old,old+'\n  const [sharedProxyRetained, setSharedProxyRetained] = useState(false);')
+          start=s.index('  const toggleFirstParty = async () => {');end=s.index('  const save = async () => {',start)
+          block=s[start:end].replace('    setStatus("");','    setStatus("");\n    setSharedProxyRetained(false);',1)
+          old='      await readJsonOrThrow(response, t("claude.saveFailed"));';assert block.count(old)==1
+          block=block.replace(old,'      const payload = await readJsonOrThrow<{ warnings?: unknown }>(response, t("claude.saveFailed"));\n      setSharedProxyRetained(Array.isArray(payload?.warnings) && payload.warnings.includes("shared_proxy_retained"));')
+          s=s[:start]+block+s[end:]
+          anchor='          {state.cliFirstParty && (\n';assert s.count(anchor)==1
+          s=s.replace(anchor,'''          {sharedProxyRetained && state.desktopFirstParty && state.sharedProxy !== "none"
+                    && selectFirstPartyNotice(state) !== "shared" && (
+                      <Notice tone="warn">{t("claude.firstParty.shared")}</Notice>
+                    )}
+          '''.replace('          {state.cliFirstParty','          {state.cliFirstParty')+anchor)
+          p.write_text(s)
+          pathlib.Path('gui/tests/claude-code-retained-warning.test.tsx').write_text('''import { afterEach, beforeEach, expect, test } from "bun:test";
+          import { Window } from "happy-dom";
+          import { act } from "react";
+          import { LanguageProvider } from "../src/i18n/provider";
+          import { en } from "../src/i18n/en";
+          import ClaudeCode from "../src/pages/ClaudeCode";
+          import type { Root } from "react-dom/client";
+
+          const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "IS_REACT_ACT_ENVIRONMENT", "fetch"] as const;
+          let saved: Record<string, PropertyDescriptor | undefined>;
+          let win: Window;
+          let root: Root | undefined;
+          beforeEach(() => {
+            saved = Object.fromEntries(globals.map(k => [k,Object.getOwnPropertyDescriptor(globalThis,k)]));
+            win = new Window({ url: "http://localhost/" });
+            Object.defineProperty(win.navigator,"language",{configurable:true,value:"en-US"});
+            for (const name of globals.slice(0,5)) Object.defineProperty(globalThis,name,{configurable:true,value:win[name as keyof Window]});
+            Object.defineProperty(globalThis,"IS_REACT_ACT_ENVIRONMENT",{configurable:true,writable:true,value:true});
+          });
+          afterEach(async () => {
+            if(root) await act(async()=>root!.unmount()); root=undefined;
+            win.close();
+            for(const key of globals) { const d=saved[key]; if(d) Object.defineProperty(globalThis,key,d); else Reflect.deleteProperty(globalThis,key); }
+          });
+          for(const warned of [true,false]) {
+            test(`successful PUT ${warned ? "preserves" : "does not invent"} a retained warning across GET refresh`,async()=>{
+              let changed=false;
+              const state=()=>({enabled:true,cliFirstParty:!changed,cliFirstPartyApplied:!changed,desktopFirstParty:changed,
+                interceptRunning:false,interceptEligible:true,sharedProxy:"stopped",authMode:"proxy",autoConnectSupported:false,
+                systemEnv:false,fastMode:null,maxContextTokens:null,autoContext:true,autoCompactWindow:null,injectAgents:true,
+                smallFastModel:"",effectiveModelEnv:{},available:[],aliases:[],port:10100});
+              Object.defineProperty(globalThis,"fetch",{configurable:true,value:async (_input:unknown,init?:RequestInit)=>{
+                if(init?.method==="PUT") {changed=true;return Response.json({ok:true,cliFirstParty:false,warnings:warned?["shared_proxy_retained"]:[]});}
+                return Response.json(state());
+              }});
+              const host=document.createElement("div");document.body.append(host);
+              const {createRoot}=await import("react-dom/client");
+              await act(async()=>{root=createRoot(host);root.render(<LanguageProvider><ClaudeCode apiBase="http://127.0.0.1:19100" /></LanguageProvider>);await Bun.sleep(25);});
+              const toggle=host.querySelectorAll<HTMLButtonElement>('button[role="switch"]')[1];
+              expect(toggle).toBeTruthy();
+              await act(async()=>{toggle!.click();await Bun.sleep(25);});
+              expect(changed).toBe(true);
+              expect(host.textContent!.includes(en["claude.firstParty.shared"])).toBe(warned);
+            });
+          }
+          ''')
+          p=pathlib.Path('docs-site/src/content/docs/guides/claude-code.md');s=p.read_text()
+          anchor='A CLI-only first-party env is not evidence that Desktop is in first-party mode.\n';assert s.count(anchor)==1
+          s=s.replace(anchor,anchor+'''For legacy installs with no explicit Desktop mode and no stronger gateway ownership evidence,
+          CLI opt-out can preserve an existing shared first-party proxy rather than disconnect Desktop.
+          The API reports `shared_proxy_retained`; the CLI prints a warning and the dashboard retains
+          its shared-proxy notice after refreshing status. Turning the CLI switch off therefore does
+          not, by itself, promise that CLI traffic no longer traverses that proxy. To leave Desktop
+          first-party mode too, explicitly run `ocx claude desktop apply --gateway` and inspect the result.
+          Successful removal of the shared settings does not report a retained-proxy warning.
+          ''');p.write_text(s)
+          git('add','src/server/management/agent-settings-routes.ts','src/cli/integrations.ts','tests/claude-integration/claude-management-api.test.ts',path,'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json','gui/src/pages/ClaudeCode.tsx','gui/tests/claude-code-retained-warning.test.tsx','docs-site/src/content/docs/guides/claude-code.md')
+          git('diff','--cached','--check');git('commit','-m','fix(claude): surface retained proxy warnings only after actual reconciliation')
+          rows=[{'pr':6046,'sha':git('rev-parse','HEAD')}]
+          git('fetch','--no-tags','origin','e408825159ae531030b7e8c2e3279e90bd5ed5cd');git('checkout','--detach','e408825159ae531030b7e8c2e3279e90bd5ed5cd')
+          p=pathlib.Path('structure/codex-home.md');s=p.read_text()
+          old='''home, and the unattended ownership preflight. A comparison that cannot be resolved — an access
+          error, a vanished directory, transient I/O — is indeterminate rather than foreign, so the preflight
+          does not block lifecycle operations on an I/O hiccup. An explicit `CODEX_HOME` remains
+          authoritative; nothing migrates implicitly.'''
+          new='''home, and the unattended ownership preflight. Access or transient I/O errors are unknown rather
+          than foreign in preflight; distinct spellings with missing/non-directory paths remain mismatches.
+          Lifecycle guards still fail closed on unknown and can throw `ServiceOwnershipError`.
+          An explicit `CODEX_HOME` remains authoritative; nothing migrates implicitly.'''
+          assert old in s;p.write_text(s.replace(old,new));git('add',str(p));git('commit','-m','docs(service): distinguish unknown preflight ownership from fail-closed lifecycle guards')
+          rows.append({'pr':6036,'sha':git('rev-parse','HEAD')})
+          pathlib.Path('/tmp/claude-author-candidates.json').write_text(json.dumps(rows))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(rows)+'\n')
+          print(json.dumps(rows))
+          PY
+      - name: Publish isolated candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/claude-author-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 6046
+        run: bun test tests/claude-integration/claude-management-api.test.ts tests/cli/cli-claude-retained-proxy-warning.test.ts
+      - if: matrix.pr == 6036
+        run: git diff --exit-code HEAD^ HEAD -- src tests package.json bun.lock
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Existing size and test-layout checks
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts' '*test-layout.test.ts' '*test-layout-tooling.test.ts')
+          test "${#guards[@]}" -gt 0
+          bun test "${guards[@]}"
+      - if: matrix.pr == 6046
+        name: Native GUI checks and build
+        working-directory: gui
+        run: |
+          bun install --frozen-lockfile
+          bun test tests/claude-code-retained-warning.test.tsx
+          bun run lint:i18n
+          bun run lint
+          bun run build
+      - if: matrix.pr == 6046
+        name: Documentation production build
+        working-directory: docs-site
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - run: git diff --exit-code
