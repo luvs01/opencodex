@@ -231,7 +231,11 @@ jobs:
           set -euo pipefail
           auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
           echo "::add-mask::$auth"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/automation/author-6037-20260927
+          ref=refs/heads/automation/author-6037-20260927
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            fetch origin "+$ref:refs/remotes/origin/automation/author-6037-20260927" || true
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --force-with-lease="$ref" origin "HEAD:$ref"
   verify:
     needs: prepare
     runs-on: ubuntu-latest
@@ -255,5 +259,5 @@ jobs:
       - run: bun run typecheck
       - run: bun run privacy:scan
       - run: bun run structure:check
-      - run: bun test tests/tooling/file-size.test.ts
+      - run: bun test tests/ci-workflows/file-size-ratchet.test.ts
       - run: git diff --exit-code
