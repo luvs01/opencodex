@@ -85,6 +85,8 @@ describe("GLM summary mitigation stays inside its boundary (#5953 review)", () =
     const short = [messages[0], { role: "user", content: "<conversation>User: hi.</conversation>" }];
     for (const body of bodies({ messages: short })) untouched(body);
   });
+  /** The only patterns detection may scan the transcript with: the two fixed tags. */
+  const FIXED_TAG_SCANS = ["<conversation>", "<\\/conversation>"];
   /** Runs detection while counting scans/copies targeted at the transcript — deterministic, unlike a wall-clock bound. */
   const detectWithProbe = (userContent: string) => {
     const scans: string[] = [];
@@ -106,6 +108,9 @@ describe("GLM summary mitigation stays inside its boundary (#5953 review)", () =
         model, max_tokens: 512,
         messages: [messages[0], { role: "user", content: userContent }],
       }, provider.baseUrl, "max");
+      // A call count cannot bound work inside one scan — pinning every transcript scan to a
+      // fixed tag is what fails the original greedy `[\s\S]*` pass, not the count alone.
+      for (const source of scans) expect(FIXED_TAG_SCANS).toContain(source);
       return { result, scans, copies };
     } finally {
       execProbe.mockRestore();
