@@ -701,6 +701,9 @@ describe("WP13 composed toggle acceptance", () => {
       models: [{ slug: "foreign-sentinel" }],
     }));
     writeFileSync(join(fx.codex, "models_cache.json"), "foreign-cache-sentinel\n");
+    // This case proves different physical homes, not an unresolved spelling.
+    mkdirSync(join(fx.root, "foreign-codex"));
+    mkdirSync(join(fx.root, "foreign-ocx"));
     writeFileSync(join(fx.ocx, "service-state.json"), JSON.stringify({
       version: 2,
       codexHome: join(fx.root, "foreign-codex"),
