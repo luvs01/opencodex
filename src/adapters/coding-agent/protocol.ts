@@ -1,4 +1,5 @@
 import type { AdapterEvent, OcxMessage, OcxParsedRequest, OcxUsage } from "../../types";
+import { TRANSLATOR_MAX_CALL_ARGUMENT_BYTES } from "../../lib/translator-budget";
 
 /**
  * Shared stream-json protocol for official coding-agent CLIs (CodeBuddy Code and Qoder CLI).
@@ -353,6 +354,8 @@ export interface OpenToolBlock {
   id: string;
   name: string;
   argParts: string[];
+  argumentBytes: number;
+  trailingHighSurrogate: boolean;
   indexed: boolean;
 }
 
@@ -454,7 +457,18 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
             "Coding-agent CLI sent a tool argument delta that cannot be attributed to an open tool block.",
           );
         }
-        if (block) block.argParts.push(partial);
+        if (block) {
+          let addedBytes = Buffer.byteLength(partial);
+          // Count the concatenated UTF-8 value exactly when a surrogate pair spans deltas.
+          if (block.trailingHighSurrogate && /^[\uDC00-\uDFFF]/.test(partial)) addedBytes -= 2;
+          const argumentBytes = block.argumentBytes + addedBytes;
+          if (state.strictToolBlockCapture && argumentBytes > TRANSLATOR_MAX_CALL_ARGUMENT_BYTES) {
+            throw new CodingAgentProtocolError("Coding-agent CLI tool arguments exceeded the per-call byte ceiling.");
+          }
+          block.argumentBytes = argumentBytes;
+          block.trailingHighSurrogate = /[\uD800-\uDBFF]$/.test(partial);
+          block.argParts.push(partial);
+        }
       }
     }
     return events;
@@ -479,6 +493,8 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
           id,
           name,
           argParts: [],
+          argumentBytes: 0,
+          trailingHighSurrogate: false,
           indexed: typeof event.index === "number" && Number.isInteger(event.index),
         });
         state.toolBlockStarts = (state.toolBlockStarts ?? 0) + 1;

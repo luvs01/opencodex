@@ -11,6 +11,7 @@ import {
   usageFromResult,
 } from "../../src/adapters/coding-agent/protocol";
 import type { OcxParsedRequest } from "../../src/types";
+import { TRANSLATOR_MAX_CALL_ARGUMENT_BYTES } from "../../src/lib/translator-budget";
 
 // The stream-json protocol for coding-agent CLIs
 // (src/adapters/coding-agent/protocol.ts); these fixtures exercise it via CodeBuddy frames.
@@ -344,6 +345,22 @@ describe("codebuddy stream-json event mapping", () => {
       .toThrow("non-object JSON arguments");
     expect(state.completedToolCalls ?? 0).toBe(0);
     expect(state.openToolBlocks?.get(2)?.id).toBe("tu_a");
+  });
+
+  test("capture rejects oversized tool arguments while collecting fragments", () => {
+    const state: StreamParseState = {
+      sawPartialText: false, sawPartialThinking: false, sawTerminalResult: false, strictToolBlockCapture: true,
+    };
+    const feed = (partial_json: string) => mapStreamMessageToEvents({
+      type: "stream_event", event: { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json } },
+    }, state);
+    mapStreamMessageToEvents({
+      type: "stream_event", event: { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "tu_a", name: "alpha" } },
+    }, state);
+    expect(feed("x".repeat(TRANSLATOR_MAX_CALL_ARGUMENT_BYTES))).toEqual([]);
+    expect(() => feed("x")).toThrow("per-call byte ceiling");
+    expect(state.openToolBlocks?.get(2)?.argumentBytes).toBe(TRANSLATOR_MAX_CALL_ARGUMENT_BYTES);
+    expect(state.openToolBlocks?.get(2)?.argParts).toHaveLength(1);
   });
 
   test("an unindexed argument delta cannot be dropped from the sole indexed CodeBuddy tool block", () => {
