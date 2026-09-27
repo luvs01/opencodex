@@ -43,10 +43,10 @@ describe("dashboard update worker launch", () => {
 // unconsulted, only the trusted absolute candidates may be probed, and a failed probe must
 // fall through rather than settle for the plain in-cgroup spawn.
 describe("trusted systemd-run discovery", () => {
-  test("walks only the trusted candidates and ignores PATH", () => {
+  test("walks only the trusted candidates and ignores PATH", async () => {
     resetSystemdRunProbeForTests();
     const seen: string[] = [];
-    const found = resolveSystemdRun({
+    const found = await resolveSystemdRun({
       isExecutableFile: path => { seen.push(path); return path === "/run/current-system/sw/bin/systemd-run"; },
       probeScope: () => true,
     });
@@ -58,24 +58,24 @@ describe("trusted systemd-run discovery", () => {
     expect(seen.every(path => path.startsWith("/"))).toBe(true);
   });
 
-  test("a failed scope probe falls through to the next candidate", () => {
+  test("a failed scope probe falls through to the next candidate", async () => {
     resetSystemdRunProbeForTests();
-    const found = resolveSystemdRun({
+    const found = await resolveSystemdRun({
       isExecutableFile: () => true,
       probeScope: path => path !== "/usr/bin/systemd-run",
     });
     expect(found).toBe("/bin/systemd-run");
   });
 
-  test("the probe is cached and reports undefined when nothing qualifies", () => {
+  test("the probe is cached and reports undefined when nothing qualifies", async () => {
     resetSystemdRunProbeForTests();
     let calls = 0;
     const hooks = {
       isExecutableFile: () => { calls++; return false; },
       probeScope: () => { throw new Error("must not run"); },
     };
-    expect(resolveSystemdRun(hooks)).toBeUndefined();
-    expect(resolveSystemdRun(hooks)).toBeUndefined();
+    expect(await resolveSystemdRun(hooks)).toBeUndefined();
+    expect(await resolveSystemdRun(hooks)).toBeUndefined();
     expect(calls).toBe(4);
     resetSystemdRunProbeForTests();
   });
@@ -126,11 +126,45 @@ describe("isTrustedSystemdRunFile (real filesystem)", () => {
     }
   });
 
-  itRoot("accepts a root-owned executable in a root-only-writable directory", () => {
+  itRoot("rejects a root-owned executable below the world-writable temp ancestor", () => {
     const { dir, file, cleanup } = fixture();
     try {
       chmodSync(dir, 0o755);
-      expect(isTrustedSystemdRunFile(file)).toBe(true);
+      expect(isTrustedSystemdRunFile(file)).toBe(false);
     } finally { cleanup(); }
   });
+});
+
+test("scope discovery yields to the event loop and shares an in-flight probe", async () => {
+  resetSystemdRunProbeForTests();
+  let release!: (ok: boolean) => void;
+  const held = new Promise<boolean>(resolve => { release = resolve; });
+  let calls = 0;
+  const hooks = { isExecutableFile: () => true, probeScope: () => { calls++; return held; } };
+  const first = resolveSystemdRun(hooks);
+  const second = resolveSystemdRun(hooks);
+  let ticked = false;
+  await new Promise<void>(resolve => setTimeout(() => { ticked = true; resolve(); }, 0));
+  expect(ticked).toBe(true);
+  expect(calls).toBe(1);
+  release(true);
+  expect(await first).toBe("/usr/bin/systemd-run");
+  expect(await second).toBe("/usr/bin/systemd-run");
+  resetSystemdRunProbeForTests();
+});
+
+test("both the complete lexical and resolved ancestor chains must remain root-owned", () => {
+  const file = "/usr/bin/systemd-run";
+  const target = "/opt/trusted/bin/systemd-run";
+  const io = (bad: string | undefined, badUid = 0, badMode = 0o777) => ({
+    access: () => {}, realpath: () => target,
+    stat: (path: string) => ({ uid: path === bad ? badUid : 0, mode: path === bad ? badMode : 0o755,
+      isFile: () => path === target, isDirectory: () => path !== target }),
+  });
+  expect(isTrustedSystemdRunFile(file, io(undefined))).toBe(true);
+  expect(isTrustedSystemdRunFile(file, io("/usr"))).toBe(false);
+  expect(isTrustedSystemdRunFile(file, io("/opt"))).toBe(false);
+  expect(isTrustedSystemdRunFile(file, io("/opt/trusted", 1000, 0o755))).toBe(false);
+  expect(isTrustedSystemdRunFile(file, io(target, 1000, 0o755))).toBe(false);
+  expect(isTrustedSystemdRunFile(file, { ...io(undefined), realpath: () => { throw new Error("unreadable"); } })).toBe(false);
 });

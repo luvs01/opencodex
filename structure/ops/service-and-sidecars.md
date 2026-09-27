@@ -73,6 +73,16 @@ install rather than re-walking PATH, so such a job is never misreported as an ol
 > Decision record: [ADR-0030](../decisions/ADR-0030-stable-service-launcher-launchd-and-systemd.md)
 > Decision record: [ADR-0100](../decisions/ADR-0100-stable-service-launcher-launchd-and-systemd.md)
 
+## Dashboard update worker scope
+
+`src/update/worker-launch.ts` accepts only executable root-owned systemd-run candidates whose
+named and resolved ancestor chains are not group/world writable. Management update requests
+await bounded asynchronous scope discovery before reserving/spawning a job; concurrent requests
+share the probe. Command rendering only reads that cache and rechecks path trust. The no-op
+scope invokes the same absolute binary with `--version`, not a PATH-selected payload, and
+receives only user-bus/home identification variables. Failure retains the detached fallback.
+These pathname checks are not an atomic guarantee against privileged namespace mutation.
+
 ## Sidecars
 
 Web search and vision sidecars run only when the main request needs that capability and a usable

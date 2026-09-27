@@ -774,6 +774,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       const channel = normalizeUpdateChannel(body.tag as string | undefined);
       const { packageRefresh } = await import("../../update/refresh-scheduler");
       const checked = await (deps.checkPackageUpdate ?? packageRefresh.check)(channel);
+      const { prepareGuiUpdateWorkerLaunch } = await import("../../update/worker-launch");
+      await prepareGuiUpdateWorkerLaunch();
       return jsonResponse({ ok: true, job: startUpdateJob(channel, body.restart !== false, {
         checkForUpdateFn: () => checked,
       }) });
