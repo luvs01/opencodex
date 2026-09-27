@@ -1,0 +1,36 @@
+name: Author PR closeout evidence
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-author-final-state.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query public PR state without checkout or repository execution
+        env:
+          API_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json,os,urllib.request
+          query='''{search(query:"repo:lidge-jun/opencodex is:pr is:open author:luvs01",type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{number title headRefOid baseRefOid mergeable isDraft reviewDecision reviews(last:1){nodes{state author{login} submittedAt body}} reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved path comments(last:1){nodes{databaseId author{login} body}}}} commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{name status conclusion detailsUrl} ... on StatusContext{context state targetUrl}}}}}}}}}}}'''
+          req=urllib.request.Request('https://api.github.com/graphql',data=json.dumps({'query':query}).encode(),headers={'Authorization':'Bearer '+os.environ['API_TOKEN'],'Content-Type':'application/json','User-Agent':'author-closeout-evidence'})
+          with urllib.request.urlopen(req,timeout=45) as r:data=json.load(r)
+          if data.get('errors'):raise RuntimeError(json.dumps(data['errors']))
+          result=data['data']['search'];assert not result['pageInfo']['hasNextPage']
+          print('OPEN_COUNT',result['issueCount'])
+          for p in result['nodes']:
+              threads=p.pop('reviewThreads');assert not threads['pageInfo']['hasNextPage']
+              p['unresolved']=[{'id':t['id'],'path':t['path'],'comments':[dict(c,body=c['body'][:1800]) for c in t['comments']['nodes']]} for t in threads['nodes'] if not t['isResolved']]
+              p['reviews']=[dict(r,body=r['body'][:2300]) for r in p['reviews']['nodes']]
+              roll=p.pop('commits')['nodes'][0]['commit']['statusCheckRollup']
+              if roll:
+                  assert not roll['contexts']['pageInfo']['hasNextPage']
+                  p['checkState']=roll['state'];contexts=roll['contexts']['nodes']
+                  p['nonpassing']=[c for c in contexts if c.get('conclusion') not in ['SUCCESS','SKIPPED','NEUTRAL'] and c.get('state')!='SUCCESS']
+                  p['totalChecks']=len(contexts)
+              print('PR_STATE',json.dumps(p,ensure_ascii=True))
+          PY
