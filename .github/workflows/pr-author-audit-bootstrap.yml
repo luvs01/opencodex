@@ -1,0 +1,64 @@
+name: Author follow-up audit bootstrap
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-audit-bootstrap.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 21ab49c3cf7b5607b85f8048da5912fab13bc530
+          fetch-depth: 500
+          persist-credentials: false
+          path: source
+      - name: Fetch exact reviewed source references without credentials
+        working-directory: source
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=500 origin \
+            83dc9d12769838b2f20a799ab34ef39460fa8f67:refs/heads/audit/5964 \
+            3f9ebcf79f44e22afe506e872f9b2e2ea465f8d7:refs/heads/audit/6035 \
+            79342728e08a5ca7d97851c15d225c8f75225f5e:refs/heads/audit/6036 \
+            4bceb80a9c9bda3b529356358e239a416ff39405:refs/heads/audit/6037 \
+            49e60302d7f820264c5a66a884d3783a0cf8679e:refs/heads/audit/6038 \
+            c5862e89206883a1744ac555ec43021c607036cc:refs/heads/audit/6042 \
+            c9c936c71d6d3191fec179b7f5fc1598eb816b93:refs/heads/audit/6043 \
+            b2a256f61661227878dd05abb70bdd65ebe84938:refs/heads/audit/6044 \
+            1788ae43208b2ed81e3ea7ad5779e9ef1d66a04c:refs/heads/audit/6046 \
+            b82bb02e1fa73ac38533b5eaf75fabe0136e0b04:refs/heads/audit/6047 \
+            a9daea4e5f538f53d1f7ab2c6df5f14e817cf16c:refs/heads/audit/6048 \
+            70b8a77cf0784d2bd0b793c25826c6f51072926c:refs/heads/audit/6049 \
+            ba479b4030c5ce1aaff0157423598c9d7c8b8181:refs/heads/audit/6050
+          git fetch --no-tags --depth=500 https://github.com/lidge-jun/opencodex dev:refs/heads/audit/upstream
+          git config --local core.hooksPath /dev/null
+          git rev-parse audit/upstream
+          git grep -n 'guiUpdateWorkerCommand\|startUpdateJob(' audit/6037 -- src tests || true
+      - id: version
+        working-directory: source
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'bun=' + require('./package.json').dependencies.bun + '\n')"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ steps.version.outputs.bun }}
+      - name: Install exact locked development dependencies without stored checkout credentials
+        working-directory: source
+        run: bun install --frozen-lockfile
+      - name: Prepare source/runtime transfer with no credential or runner-home files
+        run: |
+          set -euo pipefail
+          mkdir runtime
+          cp "$(command -v bun)" runtime/bun
+          git -C source diff --exit-code
+          if git -C source config --local --get-regexp 'http\..*\.extraheader'; then exit 1; fi
+          tar -czf author-audit-source-runtime.tgz source runtime
+          sha256sum author-audit-source-runtime.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: author-audit-source-runtime
+          path: author-audit-source-runtime.tgz
+          retention-days: 1
+          compression-level: 0
