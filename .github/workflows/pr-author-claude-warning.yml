@@ -129,7 +129,7 @@ jobs:
               const host=document.createElement("div");document.body.append(host);
               const {createRoot}=await import("react-dom/client");
               await act(async()=>{root=createRoot(host);root.render(<LanguageProvider><ClaudeCode apiBase="http://127.0.0.1:19100" /></LanguageProvider>);await Bun.sleep(25);});
-              const toggle=host.querySelectorAll<HTMLButtonElement>('button[role="switch"]')[1];
+              const toggle=host.querySelector<HTMLButtonElement>(`button.switch[aria-label="${en["claude.firstParty.aria"]}"]`);
               expect(toggle).toBeTruthy();
               await act(async()=>{toggle!.click();await Bun.sleep(25);});
               expect(changed).toBe(true);
@@ -173,7 +173,13 @@ jobs:
           set -euo pipefail
           auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
           echo "::add-mask::$auth"
-          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/claude-author-candidates.json"))]')
+          while read -r pr sha; do
+            ref="refs/heads/automation/author-$pr-20260927"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              fetch origin "+$ref:refs/remotes/origin/automation/author-$pr-20260927" || true
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              push --force-with-lease="$ref" origin "$sha:$ref"
+          done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/claude-author-candidates.json"))]')
   verify:
     needs: prepare
     runs-on: ubuntu-latest
