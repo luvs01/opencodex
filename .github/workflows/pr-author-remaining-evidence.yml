@@ -1,0 +1,70 @@
+name: Author remaining evidence
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-remaining-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      candidates: ${{ steps.metadata.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 1788ae43208b2ed81e3ea7ad5779e9ef1d66a04c
+          persist-credentials: false
+      - id: metadata
+        name: Read exact remaining heads, reviews and relevant UI/source callsites
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,os,subprocess,pathlib
+          def get(path):
+              with urllib.request.urlopen(urllib.request.Request('https://api.github.com'+path,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'User-Agent':'author-audit'}),timeout=30) as r:return json.load(r)
+          rows=[]
+          for pr in (6036,6038,6042,6043,6044,6046):
+              prefix='/repos/lidge-jun/opencodex/pulls/'+str(pr)
+              data=get(prefix);head=data['head']['sha']
+              print('CURRENT',pr,head,data['head']['ref'],'draft',data['draft'],'mergeable',data['mergeable'],flush=True)
+              for r in get(prefix+'/reviews?per_page=100'):
+                  if r['user']['type']!='Bot' or r['submitted_at']>'2026-09-27T04:30:00Z':
+                      print('REVIEW',pr,r['user']['login'],r['state'],r['commit_id'],r['body'][:12000],flush=True)
+              checks=get('/repos/lidge-jun/opencodex/commits/'+head+'/check-runs?per_page=100')
+              print('CHECKS',pr,json.dumps([{k:c[k] for k in ('name','status','conclusion','details_url')} for c in checks['check_runs']]),flush=True)
+              if pr in (6036,6042):rows.append({'pr':pr,'sha':head})
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(rows)+'\n')
+          for pattern,paths in [('reconcileClaudeFirstPartySettings',['src/claude','src/server/management/agent-settings-routes.ts']),('cliFirstParty',['gui/src']),('firstParty',['gui/src/api'])]:
+              out=subprocess.run(['git','grep','-n',pattern,'--',*paths],text=True,capture_output=True).stdout
+              print('SOURCE_LOCATIONS',pattern,out[:15000],flush=True)
+          for path in subprocess.run(['git','grep','-l','export function reconcileClaudeFirstPartySettings','--','src/claude'],text=True,capture_output=True).stdout.splitlines():
+              print('RECONCILER',path,pathlib.Path(path).read_text()[:25000],flush=True)
+          PY
+  verify:
+    needs: inspect
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.inspect.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 6036
+        run: bun test tests/codex-integration/codex-service-manager-probe.test.ts tests/codex-integration/codex-service-manager-probe-hardening.test.ts
+      - if: matrix.pr == 6042
+        run: bun test tests/server/link-join-route.test.ts tests/server/port-reclaim.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: git diff --exit-code
