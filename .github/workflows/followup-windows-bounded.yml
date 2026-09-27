@@ -1,0 +1,50 @@
+name: Bounded Windows relay diagnostics
+on:
+  push:
+    branches: [automation/followup-workspace-20260927]
+    paths: [.github/workflows/followup-windows-bounded.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 1b4615daa0da33e08f834f62e2bf2fb26be647c6
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Bound each diagnostic child and collect settled phases
+        shell: python
+        run: |
+          import os,pathlib,subprocess,json
+          path=pathlib.Path('tests/clients/link-relay-bound-transport.test.ts')
+          original=path.read_text()
+          text=original.replace('const response = await fetchBoundLinkRelay(target(port, credential),', 'console.error("PHASE begin-credential", credential === key ? "current" : "pending");\n      const response = await fetchBoundLinkRelay(target(port, credential),')
+          text=text.replace('      return response.text();','      console.error("PHASE headers", response.status);\n      const value = await response.text();\n      console.error("PHASE body-finished");\n      return value;')
+          text=text.replace('    } finally { await listeners.stop(); }','    } finally { console.error("PHASE stop-enter"); await listeners.stop(); console.error("PHASE stop-exit"); }')
+          rows=[]
+          cases=[('instrumented rotation', 'real optional-listener', text), ('abort', 'caller abort cancels a real', original), ('shutdown', 'process shutdown cancels', original), ('whole new file', 'connection-bound link relay', original)]
+          try:
+              for label,pattern,source in cases:
+                  path.write_text(source)
+                  print('BEGIN_CASE',label,flush=True)
+                  child=subprocess.Popen(['bun','test',str(path),'--test-name-pattern',pattern],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                  timed_out=False
+                  try:out,_=child.communicate(timeout=35)
+                  except subprocess.TimeoutExpired:
+                      timed_out=True
+                      subprocess.run(['taskkill','/PID',str(child.pid),'/T','/F'],capture_output=True,timeout=10)
+                      out,_=child.communicate(timeout=5)
+                  print(out.decode('utf-8','replace')[-14000:],flush=True)
+                  rows.append({'case':label,'exit':child.returncode,'timed_out':timed_out})
+                  print('END_CASE',json.dumps(rows[-1]),flush=True)
+          finally:path.write_text(original)
+          print('SUMMARY',json.dumps(rows),flush=True)
+          if any(r['exit'] or r['timed_out'] for r in rows):raise SystemExit(1)
+      - if: always()
+        run: bun run typecheck
