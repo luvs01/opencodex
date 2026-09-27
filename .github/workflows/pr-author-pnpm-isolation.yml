@@ -101,7 +101,13 @@ jobs:
           end=s.index('test("synchronous pnpm owner discovery',start)
           s=s[:start]+s[end:]
           # Both real version families must receive their own control on every observed spawn.
-          s=s.replace('.npm_config_ignore_pnpmfile).toBe("true");','.npm_config_ignore_pnpmfile).toBe("true");')
+          s=s.replace('toEqual({ npm_config_ignore_pnpmfile: "true", SECRET: "retained" })','toEqual({ npm_config_ignore_pnpmfile: "true", pnpm_config_ignore_pnpmfile: "true", SECRET: "retained" })')
+          old='expect((options?.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");'
+          assert s.count(old)==3
+          s=s.replace(old,old+'\n  expect((options?.env as Record<string, string>).pnpm_config_ignore_pnpmfile).toBe("true");')
+          old='expect((options.env as Record<string, string>).npm_config_ignore_pnpmfile).toBe("true");'
+          assert s.count(old)==1
+          s=s.replace(old,old+'\n    expect((options.env as Record<string, string>).pnpm_config_ignore_pnpmfile).toBe("true");')
           p.write_text(s)
           path='tests/update/pnpm-command-isolation.test.ts'
           pathlib.Path(path).write_text('''import { expect, test } from "bun:test";
