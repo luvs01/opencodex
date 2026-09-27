@@ -1,0 +1,89 @@
+name: Link cancellation final candidate
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-join-typed-validation.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: b38ea5a99e0989f2cc092dbccdc2ae9be2731818
+          persist-credentials: false
+      - name: Retain the typed fetch transport interface
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/client/connect.ts');s=p.read_text()
+          old='const fetchImpl: typeof fetch = deps.signal ? async (input, init = {}) => {'
+          new='const fetchImpl: typeof fetch = deps.signal ? Object.assign(async (...[input, init = {}]: Parameters<typeof fetch>) => {'
+          assert s.count(old)==1;s=s.replace(old,new)
+          old='  } : rawFetch;\n  const assertActiveConnectingState'
+          new='  }, { preconnect: rawFetch.preconnect }) : rawFetch;\n  const assertActiveConnectingState'
+          assert s.count(old)==1;s=s.replace(old,new);p.write_text(s)
+          PY
+          git diff --check
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/client/connect.ts
+          git commit -m 'fix(link): preserve Bun fetch interface on cancellation wrapper'
+      - name: Publish isolated candidate only
+        id: publish
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)";echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex HEAD:refs/heads/automation/resume-cancel-typed-pr6042-20260927
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/server/link-join-route.test.ts tests/server/port-reclaim.test.ts tests/clients/client-link-connect.test.ts
+      - run: bun run typecheck
+      - if: matrix.os == 'ubuntu-latest'
+        run: bun run privacy:scan
+      - if: matrix.os == 'ubuntu-latest'
+        run: bun run structure:check
+      - if: matrix.os == 'ubuntu-latest'
+        run: bun test tests/ci-workflows/file-size-ratchet.test.ts
+      - name: Verify that prior enrollment fails both cancellation regressions
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          old=651ead09253ecd86b6e1e793b891374767550e7b
+          git show "$old:src/client/link-join.ts" > src/client/link-join.ts
+          git show "$old:src/client/connect.ts" > src/client/connect.ts
+          set +e
+          bun test tests/server/link-join-route.test.ts tests/clients/client-link-connect.test.ts --test-name-pattern 'exits during connect|cancellation during catalog' > "$RUNNER_TEMP/negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/negative.log"
+          git restore src/client/link-join.ts src/client/connect.ts
+          test "$status" -ne 0
+          grep -q '2 fail' "$RUNNER_TEMP/negative.log"
+      - run: git diff --exit-code
