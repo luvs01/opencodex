@@ -1,0 +1,28 @@
+name: Author systemd remaining gate
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-systemd-size-check.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 8a2ad7b1370325a7722e0dc5ec8a4e7988d6c927
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Locate this branch's actual file-size tests without assuming the newer test layout
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts')
+          test "${#guards[@]}" -gt 0
+          printf 'SIZE_GUARD %s\n' "${guards[@]}"
+          bun test "${guards[@]}"
+      - run: git diff --exit-code
