@@ -1,0 +1,95 @@
+name: Author retained warning final validation
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-claude-ui-final.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ff6d51ce156b2a89b451ccd29727203366f8def1
+          persist-credentials: false
+      - id: prepare
+        name: Correct the regression's control selector and isolate its resource keys
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          import pathlib
+          p=pathlib.Path('gui/tests/claude-code-retained-warning.test.tsx');s=p.read_text()
+          old='const toggle=host.querySelectorAll<HTMLButtonElement>(\'button[role="switch"]\')[1];'
+          new='const toggle = [...host.querySelectorAll<HTMLButtonElement>("button[aria-pressed]")]\n      .find(button => button.getAttribute("aria-label") === en["claude.firstParty.aria"]);'
+          assert old in s;s=s.replace(old,new)
+          old='<ClaudeCode apiBase="http://127.0.0.1:19100" />';assert old in s
+          s=s.replace(old,'<ClaudeCode apiBase={`http://127.0.0.1:${warned ? 19101 : 19102}`} />')
+          old='    const toggle =';assert old in s
+          s=s.replace(old,'    await act(async () => { await Bun.sleep(25); });\n'+old)
+          p.write_text(s)
+          p=pathlib.Path('gui/src/pages/ClaudeCode.tsx');s=p.read_text()
+          s=s.replace('                    && selectFirstPartyNotice(state) !== "shared" && (\n                      <Notice tone="warn">{t("claude.firstParty.shared")}</Notice>\n                    )}', '            && selectFirstPartyNotice(state) !== "shared" && (\n              <Notice tone="warn">{t("claude.firstParty.shared")}</Notice>\n            )}')
+          p.write_text(s)
+          PY
+          git add gui/tests/claude-code-retained-warning.test.tsx gui/src/pages/ClaudeCode.tsx
+          git diff --cached --check
+          git commit -m 'test(claude): exercise the named first-party control with isolated resource state'
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Publish isolated candidate only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/automation/author-6046-20260927
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - name: Confirm the already-passing server implementation and tests remain unchanged
+        run: git diff --exit-code HEAD^ HEAD -- src tests structure package.json bun.lock
+      - run: bun install --frozen-lockfile
+      - name: GUI focused regression, full GUI tests, lint and production build
+        working-directory: gui
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          for command in 'bun test tests/claude-code-retained-warning.test.tsx' 'bun test tests' 'bun run lint:i18n' 'bun run lint' 'bun run build'; do
+            echo "CHECK: $command"
+            if bash -c "$command" > /tmp/author-gui.log 2>&1; then tail -n 12 /tmp/author-gui.log; else tail -n 180 /tmp/author-gui.log; exit 1; fi
+          done
+      - name: Documentation production build
+        working-directory: docs-site
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          if bun run build > /tmp/author-docs.log 2>&1; then tail -n 20 /tmp/author-docs.log; else tail -n 160 /tmp/author-docs.log; exit 1; fi
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Existing size and layout checks
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts' '*test-layout.test.ts' '*test-layout-tooling.test.ts')
+          test "${#guards[@]}" -gt 0
+          bun test "${guards[@]}"
+      - run: git diff --exit-code
