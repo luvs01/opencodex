@@ -1,0 +1,259 @@
+name: Author systemd launcher correction
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-systemd-launch.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 4bceb80a9c9bda3b529356358e239a416ff39405
+          persist-credentials: false
+      - name: Apply explicit launcher and regression source
+        id: prepare
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          import pathlib
+          pathlib.Path('src/update/worker-launch.ts').write_text('''import { spawn } from "node:child_process";
+          import { accessSync, constants, realpathSync, statSync, type Stats } from "node:fs";
+          import { dirname, isAbsolute } from "node:path";
+
+          /** A separate user scope survives stopping the proxy service's control-group. */
+          export const SYSTEMD_SCOPE_ARGS = ["--user", "--scope", "--quiet", "--collect", "--"] as const;
+          export interface WorkerLaunchContext {
+            platform?: NodeJS.Platform;
+            env?: NodeJS.ProcessEnv;
+            resolveSystemdRun?: () => string | undefined;
+          }
+          const TRUSTED_SYSTEMD_RUN_PATHS = [
+            "/usr/bin/systemd-run", "/bin/systemd-run", "/usr/local/bin/systemd-run",
+            "/run/current-system/sw/bin/systemd-run",
+          ] as const;
+          export interface SystemdRunHooks {
+            isExecutableFile: (path: string) => boolean;
+            probeScope: (path: string) => boolean | Promise<boolean>;
+          }
+          type TrustStat = Pick<Stats, "uid" | "mode" | "isFile" | "isDirectory">;
+          export interface SystemdRunFileIO {
+            access: (path: string) => void;
+            realpath: (path: string) => string;
+            stat: (path: string) => TrustStat;
+          }
+          const trustIO: SystemdRunFileIO = {
+            access: path => accessSync(path, constants.X_OK),
+            realpath: path => realpathSync(path),
+            stat: path => statSync(path),
+          };
+          const rootOnlyWritable = (st: TrustStat): boolean => st.uid === 0 && (st.mode & 0o022) === 0;
+
+          /** Validate both named and resolved namespaces, not just the leaf's immediate parent. */
+          export function isTrustedSystemdRunFile(path: string, io: SystemdRunFileIO = trustIO): boolean {
+            try {
+              if (!isAbsolute(path)) return false;
+              io.access(path);
+              const target = io.realpath(path);
+              if (!isAbsolute(target)) return false;
+              const file = io.stat(target);
+              if (!file.isFile() || !rootOnlyWritable(file)) return false;
+              for (const initial of [dirname(path), dirname(target)]) {
+                let current = initial;
+                while (true) {
+                  const directory = io.stat(current);
+                  if (!directory.isDirectory() || !rootOnlyWritable(directory)) return false;
+                  const parent = dirname(current);
+                  if (parent === current) break;
+                  current = parent;
+                }
+              }
+              return true;
+            } catch { return false; }
+          }
+
+          /** A bounded asynchronous scope probe; no shell, PATH-resolved payload or secret env. */
+          function probeScope(path: string): Promise<boolean> {
+            return new Promise(resolve => {
+              const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin" };
+              for (const name of ["HOME", "USER", "LOGNAME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
+                if (process.env[name] !== undefined) env[name] = process.env[name];
+              }
+              // Execute this same trusted binary's harmless version command inside the scope.
+              const child = spawn(path, [...SYSTEMD_SCOPE_ARGS, path, "--version"], { stdio: "ignore", env });
+              let settled = false;
+              const finish = (ok: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(ok);
+              };
+              const timer = setTimeout(() => {
+                try { child.kill("SIGKILL"); } catch { /* failed termination is not success */ }
+                child.unref();
+                finish(false);
+              }, 5_000);
+              child.once("error", () => finish(false));
+              child.once("exit", code => finish(code === 0));
+            });
+          }
+          const systemdRunHooks: SystemdRunHooks = { isExecutableFile: isTrustedSystemdRunFile, probeScope };
+          let cached: string | null | undefined;
+          let pending: Promise<string | undefined> | undefined;
+          let generation = 0;
+
+          /** Share in-flight discovery; each failed candidate yields to the event loop. */
+          export function resolveSystemdRun(hooks: SystemdRunHooks = systemdRunHooks): Promise<string | undefined> {
+            if (cached !== undefined) return Promise.resolve(cached ?? undefined);
+            if (pending) return pending;
+            const epoch = generation;
+            pending = (async () => {
+              for (const command of TRUSTED_SYSTEMD_RUN_PATHS) {
+                try {
+                  if (hooks.isExecutableFile(command) && await hooks.probeScope(command)) return command;
+                } catch { /* unavailable candidates never grant launch authority */ }
+              }
+              return undefined;
+            })().then(command => {
+              if (epoch === generation) { cached = command ?? null; pending = undefined; }
+              return command;
+            });
+            return pending;
+          }
+
+          /** The async management path prepares discovery before its synchronous job reservation. */
+          export async function prepareGuiUpdateWorkerLaunch(
+            context: Pick<WorkerLaunchContext, "platform" | "env"> = {},
+          ): Promise<void> {
+            if ((context.platform ?? process.platform) === "linux" && (context.env ?? process.env).INVOCATION_ID) {
+              await resolveSystemdRun();
+            }
+          }
+          export function resetSystemdRunProbeForTests(): void { generation++; cached = undefined; pending = undefined; }
+
+          /** Render only; never block a request by spawning a discovery subprocess here. */
+          export function guiUpdateWorkerCommand(
+            execPath: string,
+            args: readonly string[],
+            context: WorkerLaunchContext = {},
+          ): { command: string; argv: string[] } {
+            const underSystemd = (context.platform ?? process.platform) === "linux" && Boolean((context.env ?? process.env).INVOCATION_ID);
+            const resolveCached = () => cached && isTrustedSystemdRunFile(cached) ? cached : undefined;
+            const systemdRun = underSystemd ? (context.resolveSystemdRun ?? resolveCached)() : undefined;
+            return systemdRun ? { command: systemdRun, argv: [...SYSTEMD_SCOPE_ARGS, execPath, ...args] }
+              : { command: execPath, argv: [...args] };
+          }
+          ''')
+          p=pathlib.Path('src/server/management/config-routes.ts'); s=p.read_text()
+          anchor='      return jsonResponse({ ok: true, job: startUpdateJob(channel, body.restart !== false, {'
+          assert s.count(anchor)==1
+          s=s.replace(anchor,'      const { prepareGuiUpdateWorkerLaunch } = await import("../../update/worker-launch");\n      await prepareGuiUpdateWorkerLaunch();\n'+anchor)
+          p.write_text(s)
+          p=pathlib.Path('tests/update/update-worker-launch.test.ts'); s=p.read_text()
+          for name in ('walks only the trusted candidates and ignores PATH','a failed scope probe falls through to the next candidate','the probe is cached and reports undefined when nothing qualifies'):
+              old='test("'+name+'", () => {'; assert s.count(old)==1
+              s=s.replace(old,'test("'+name+'", async () => {')
+          s=s.replace('const found = resolveSystemdRun({','const found = await resolveSystemdRun({')
+          s=s.replace('expect(resolveSystemdRun(hooks))','expect(await resolveSystemdRun(hooks))')
+          s=s.replace('itRoot("accepts a root-owned executable in a root-only-writable directory"','itRoot("rejects a root-owned executable below the world-writable temp ancestor"')
+          # Only the old root-only positive fixture lived below /tmp; that namespace is now correctly refused.
+          old='      expect(isTrustedSystemdRunFile(file)).toBe(true);'; assert s.count(old)==1
+          s=s.replace(old,'      expect(isTrustedSystemdRunFile(file)).toBe(false);')
+          s+='''
+          test("scope discovery yields to the event loop and shares an in-flight probe", async () => {
+            resetSystemdRunProbeForTests();
+            let release!: (ok: boolean) => void;
+            const held = new Promise<boolean>(resolve => { release = resolve; });
+            let calls = 0;
+            const hooks = { isExecutableFile: () => true, probeScope: () => { calls++; return held; } };
+            const first = resolveSystemdRun(hooks);
+            const second = resolveSystemdRun(hooks);
+            let ticked = false;
+            await new Promise<void>(resolve => setTimeout(() => { ticked = true; resolve(); }, 0));
+            expect(ticked).toBe(true);
+            expect(calls).toBe(1);
+            release(true);
+            expect(await first).toBe("/usr/bin/systemd-run");
+            expect(await second).toBe("/usr/bin/systemd-run");
+            resetSystemdRunProbeForTests();
+          });
+
+          test("both the complete lexical and resolved ancestor chains must remain root-owned", () => {
+            const file = "/usr/bin/systemd-run";
+            const target = "/opt/trusted/bin/systemd-run";
+            const io = (bad: string | undefined, badUid = 0, badMode = 0o777) => ({
+              access: () => {}, realpath: () => target,
+              stat: (path: string) => ({ uid: path === bad ? badUid : 0, mode: path === bad ? badMode : 0o755,
+                isFile: () => path === target, isDirectory: () => path !== target }),
+            });
+            expect(isTrustedSystemdRunFile(file, io(undefined))).toBe(true);
+            expect(isTrustedSystemdRunFile(file, io("/usr"))).toBe(false);
+            expect(isTrustedSystemdRunFile(file, io("/opt"))).toBe(false);
+            expect(isTrustedSystemdRunFile(file, io("/opt/trusted", 1000, 0o755))).toBe(false);
+            expect(isTrustedSystemdRunFile(file, io(target, 1000, 0o755))).toBe(false);
+            expect(isTrustedSystemdRunFile(file, { ...io(undefined), realpath: () => { throw new Error("unreadable"); } })).toBe(false);
+          });
+          '''
+          p.write_text(s)
+          p=pathlib.Path('structure/ops/service-and-sidecars.md'); s=p.read_text()
+          anchor='## Sidecars\n'; assert s.count(anchor)==1
+          s=s.replace(anchor,'''## Dashboard update worker scope
+
+          `src/update/worker-launch.ts` accepts only executable root-owned systemd-run candidates whose
+          named and resolved ancestor chains are not group/world writable. Management update requests
+          await bounded asynchronous scope discovery before reserving/spawning a job; concurrent requests
+          share the probe. Command rendering only reads that cache and rechecks path trust. The no-op
+          scope invokes the same absolute binary with `--version`, not a PATH-selected payload, and
+          receives only user-bus/home identification variables. Failure retains the detached fallback.
+          These pathname checks are not an atomic guarantee against privileged namespace mutation.
+
+          '''+anchor)
+          p.write_text(s)
+          PY
+          git add src/update/worker-launch.ts src/server/management/config-routes.ts tests/update/update-worker-launch.test.ts structure/ops/service-and-sidecars.md
+          git diff --cached --check
+          git commit -m 'fix(update): validate launcher ancestors and probe user scopes asynchronously'
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Publish isolated candidate only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/automation/author-6037-20260927
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Native worker and update-job regressions
+        run: |
+          set -euo pipefail
+          for file in tests/update/update-worker-launch.test.ts tests/update/update-job-repair-flow.test.ts; do
+            echo "TEST: $file"
+            if bun test "$file" > /tmp/worker-test.log 2>&1; then tail -n 6 /tmp/worker-test.log; else tail -n 160 /tmp/worker-test.log; exit 1; fi
+          done
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - run: bun test tests/tooling/file-size.test.ts
+      - run: git diff --exit-code
