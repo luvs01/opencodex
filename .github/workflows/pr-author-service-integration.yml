@@ -1,0 +1,101 @@
+name: Author service current-base validation
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-service-integration.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 75f8497d83d2ca293ebbafc4ea26eca75b79f60d
+          fetch-depth: 500
+          persist-credentials: false
+      - id: prepare
+        name: Preserve the independent worker context and sibling-marker imports
+        run: |
+          python3 - <<'PY'
+          import subprocess,pathlib,json,os,re
+          def git(*args,check=True):
+              p=subprocess.run(['git',*args],text=True,capture_output=True)
+              if check and p.returncode:raise RuntimeError(p.stdout+p.stderr)
+              return p.stdout.strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          base='99d0a9400ebd8dedbefee9882698ecfb1f7bbaa7'
+          git('fetch','--no-tags','--depth=500','https://github.com/lidge-jun/opencodex',base)
+          rows=[]
+          for pr,head in [(6037,'75f8497d83d2ca293ebbafc4ea26eca75b79f60d'),(6036,'8cf6eaa18de0e41ccc5370d10b7d5d770c9d6853')]:
+              git('fetch','--no-tags','--depth=500','origin',head);git('checkout','--detach',head)
+              git('merge','--no-commit','--no-ff',base,check=False)
+              conflicts=git('diff','--name-only','--diff-filter=U').splitlines()
+              print('CONFLICTS',pr,conflicts,flush=True)
+              if pr==6037:
+                  assert conflicts==['src/update/job.ts'],conflicts
+                  p=pathlib.Path(conflicts[0]);s=p.read_text()
+                  pattern=re.compile(r'^<<<<<<< HEAD\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]+\n',re.M|re.S)
+                  matches=list(pattern.finditer(s));assert len(matches)==1
+                  ours,theirs=matches[0].groups()
+                  assert ours.strip()=='import type { WorkerLaunchContext } from "./worker-launch";'
+                  assert theirs.strip()=='import { withoutSiblingMarker } from "../codex/sibling-start";'
+                  p.write_text(pattern.sub(lambda m:m.group(1)+m.group(2),s))
+              elif conflicts:
+                  for file in conflicts:
+                      text=pathlib.Path(file).read_text(errors='replace')
+                      print('MANUAL',file,re.findall(r'^<<<<<<<.*?^>>>>>>>[^\n]*',text,re.M|re.S),flush=True)
+                  git('merge','--abort');continue
+              git('add','-u');assert not git('diff','--name-only','--diff-filter=U')
+              git('diff','--cached','--check',base);git('commit','-m',f'Merge reviewed dev into service PR {pr} without losing independent changes')
+              sha=git('rev-parse','HEAD');git('merge-base','--is-ancestor',head,sha);git('merge-base','--is-ancestor',base,sha)
+              rows.append({'pr':pr,'sha':sha})
+              print('DIFF',pr,git('diff','--stat',base,sha),flush=True)
+          pathlib.Path('/tmp/service-integration-candidates.json').write_text(json.dumps(rows))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(rows)+'\n')
+          print(json.dumps(rows))
+          PY
+      - name: Publish isolated candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-service-integrated-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/service-integration-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 6037
+        run: bun test tests/update/update-worker-launch.test.ts tests/update/update-job.test.ts tests/update/update-mise.test.ts
+      - if: matrix.pr == 6036
+        run: bun test tests/codex-integration/codex-service-manager-probe.test.ts tests/codex-integration/codex-service-manager-probe-hardening.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Existing size and layout gates
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts' '*test-layout.test.ts' '*test-layout-tooling.test.ts')
+          test "${#guards[@]}" -gt 0
+          bun test "${guards[@]}"
+      - run: git diff --exit-code
