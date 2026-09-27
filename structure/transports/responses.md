@@ -61,6 +61,10 @@ the code let a provider-scoped transport past it is what #4992 recorded, and it 
 regression for this policy has to enter through `handleResponses` rather than through a
 hand-written override that cooperates by calling the executor it was handed.
 
+### Sidecar probe lifetime
+
+`src/server/responses/sidecar-execution.ts` releases an acquired search probe immediately for local validation refusals. An upstream response with a body retains the probe through completion, error, or cancellation, regardless of HTTP status; the core dispatcher does not infer body settlement from a non-success status. Bodyless sidecar responses release before returning.
+
 ### Semantic progress ownership
 
 The Responses proxy does not treat transcript growth as repository progress. It can observe request
