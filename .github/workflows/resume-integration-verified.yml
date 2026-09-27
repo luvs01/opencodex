@@ -14,54 +14,97 @@ jobs:
     outputs:
       candidates: ${{ steps.publish.outputs.candidates }}
     steps:
-      - name: Apply the reviewed integration corrections to the pinned preparation
+      - name: Preserve both reviewed changes and current author history
         run: |
           python3 - <<'PY'
-          import urllib.request,subprocess,yaml
-          url='https://raw.githubusercontent.com/luvs01/opencodex/ef8f1f0a895a996ad735ac62f70ea91396b529b1/.github/workflows/resume-current-integration.yml'
-          with urllib.request.urlopen(url,timeout=30) as r: data=yaml.safe_load(r.read())
-          script=data['jobs']['prepare']['steps'][0]['run']
-          def change(old,new):
-              global script
-              assert script.count(old)==1,(old,script.count(old));script=script.replace(old,new)
-          change("import json,os,pathlib,subprocess,tempfile,urllib.request", "import json,os,pathlib,subprocess,tempfile,urllib.request,re")
-          change("    subprocess.run(['git','-C',str(cwd),'merge','--no-commit','--no-ff',base],capture_output=True,text=True)","    if n != 6043: subprocess.run(['git','-C',str(cwd),'merge','--no-commit','--no-ff',base],capture_output=True,text=True)")
-          change("    allowed={'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'}", "    allowed={'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'} | ({'src/update/job.ts'} if n==6037 else set())")
-          change("        for name in conflicts:\n            versions=",'''        for name in conflicts:
+          import json,os,pathlib,subprocess,re,urllib.request
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'integrate';root.mkdir()
+          base='06d7914e6a736b0ab5b112c1198efbfd683b9bc1'
+          cases={6037:'75f8497d83d2ca293ebbafc4ea26eca75b79f60d',6050:'ff1ad0b72e4b5dd669b3c68938d3261a9912fcd4',6049:'e598ebc56c4f041d0899d63e9531760284e5b69a',6043:'05548a4137808261eb3c7349212690d2f43e3434'}
+          rows=[];missing=object()
+          def git(cwd,*args):
+              p=subprocess.run(['git','-C',str(cwd),*args],capture_output=True,text=True)
+              if p.returncode:raise RuntimeError('git '+str(args)+': '+p.stdout[-6000:]+p.stderr[-6000:])
+              return p.stdout.strip()
+          def merge_value(b,o,t):
+              if o==b:return t
+              if t==b or o==t:return o
+              if all(isinstance(x,dict) for x in [b,o,t]):
+                  out={}
+                  for key in set(b)|set(o)|set(t):
+                      value=merge_value(b.get(key,missing),o.get(key,missing),t.get(key,missing))
+                      if value is not missing:out[key]=value
+                  return out
+              raise ValueError('Conflicting JSON value changes')
+          def unique(pairs):
+              out={}
+              for key,value in pairs:
+                  if key in out:raise ValueError('Duplicate JSON key')
+                  out[key]=value
+              return out
+          for n,sha in cases.items():
+              cwd=root/str(n);cwd.mkdir()
+              try:
+                  git(cwd,'init');git(cwd,'config','core.hooksPath','/dev/null')
+                  git(cwd,'config','user.name','github-actions[bot]');git(cwd,'config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+                  git(cwd,'fetch','--no-tags','--depth=800','https://github.com/lidge-jun/opencodex',sha,base)
+                  git(cwd,'checkout','--detach',sha)
+                  if n==6043:
+                      fix='ebdc73d54bfddb45b78dc8c0ff682142c2c4ce84'
+                      git(cwd,'fetch','--no-tags','--depth=2','https://github.com/luvs01/opencodex',fix)
+                      git(cwd,'cherry-pick',fix)
+                  else:
+                      subprocess.run(['git','-C',str(cwd),'merge','--no-commit','--no-ff',base],capture_output=True,text=True)
+                  conflicts=git(cwd,'diff','--name-only','--diff-filter=U').splitlines()
+                  allowed={'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'}
+                  if n==6037:allowed.add('src/update/job.ts')
+                  if set(conflicts)-allowed:raise ValueError('Unreviewed conflicts: '+str(conflicts))
+                  for name in conflicts:
+                      p=cwd/name
                       if name=='src/update/job.ts':
-                          p=cwd/name; text=p.read_text()
-                          pattern=r'<<<<<<< HEAD\nimport type \{ WorkerLaunchContext \} from "\./worker-launch";\n=======\nimport \{ withoutSiblingMarker \} from "\.\./codex/sibling-start";\n>>>>>>> [a-f0-9]+\n'
-                          replacement='import type { WorkerLaunchContext } from "./worker-launch";\\nimport { withoutSiblingMarker } from "../codex/sibling-start";\\n'
-                          text,count=re.subn(pattern,replacement,text)
-                          assert count==1 and '<<<<<<<' not in text
-                          p.write_text(text);git(cwd,'add',name);continue
-                      versions=''' )
-          old='''            with tempfile.TemporaryDirectory() as tmp:
-                          paths=[]
-                          for i,s in enumerate(versions):
-                              p=pathlib.Path(tmp)/str(i);p.write_text(s);paths.append(str(p))
-                          union=subprocess.check_output(['git','merge-file','--stdout','--union',paths[1],paths[0],paths[2]],text=True)
-                      assert json.loads(union,object_pairs_hook=unique)==expected
-                      (cwd/name).write_text(union);git(cwd,'add',name)'''
-          new='''            incoming=json.loads(versions[2]); nested=name.endswith('/layout.json')
-                      expected_table=expected['explicit'] if nested else expected
-                      incoming_table=incoming['explicit'] if nested else incoming
-                      additions={k:v for k,v in expected_table.items() if k not in incoming_table}
-                      assert 0 < len(additions) <= 10
-                      assert all(k.endswith('.test.ts') and isinstance(v,str) for k,v in additions.items())
-                      assert all(expected_table.get(k)==v for k,v in incoming_table.items())
-                      if nested:
-                          assert {k:v for k,v in expected.items() if k!='explicit'}=={k:v for k,v in incoming.items() if k!='explicit'}
-                      text=versions[2]; pattern=r'("explicit"\\s*:\\s*\\{\\n)' if nested else r'^(\\{\\n)'
-                      indent='    ' if nested else '  '
-                      inserted=''.join(indent+json.dumps(k)+': '+json.dumps(v)+',\\n' for k,v in sorted(additions.items()))
-                      text,count=re.subn(pattern,lambda match:match.group(1)+inserted,text,count=1)
-                      assert count==1 and json.loads(text,object_pairs_hook=unique)==expected
-                      (cwd/name).write_text(text);git(cwd,'add',name)'''
-          change(old,new)
-          change("        git(cwd,'diff','--cached','--check',base)","        git(cwd,'diff','--cached','--check',sha if n==6043 else base)")
-          change("        git(cwd,'merge-base','--is-ancestor',sha,'HEAD');git(cwd,'merge-base','--is-ancestor',base,'HEAD')", "        git(cwd,'merge-base','--is-ancestor',sha,'HEAD')\n        if n != 6043: git(cwd,'merge-base','--is-ancestor',base,'HEAD')")
-          subprocess.run(['bash','-euo','pipefail','-c',script],check=True)
+                          text=p.read_text()
+                          pattern=r'<<<<<<< HEAD\n(.*?)\n=======\n(.*?)\n>>>>>>> [^\n]+\n'
+                          matches=list(re.finditer(pattern,text,re.S));assert len(matches)==1
+                          a,b=matches[0].group(1,2)
+                          assert a=='import type { WorkerLaunchContext } from "./worker-launch";'
+                          assert b=='import { withoutSiblingMarker } from "../codex/sibling-start";'
+                          text=text[:matches[0].start()]+a+'\n'+b+'\n'+text[matches[0].end():]
+                      else:
+                          versions=[git(cwd,'show',f':{stage}:{name}')+'\n' for stage in [1,2,3]]
+                          expected=merge_value(*[json.loads(s,object_pairs_hook=unique) for s in versions])
+                          incoming=json.loads(versions[2]);nested=name.endswith('/layout.json')
+                          desired=expected['explicit'] if nested else expected
+                          existing=incoming['explicit'] if nested else incoming
+                          additions={k:v for k,v in desired.items() if k not in existing}
+                          assert 0<len(additions)<=10
+                          assert all(k.endswith('.test.ts') and isinstance(v,str) for k,v in additions.items())
+                          assert all(desired.get(k)==v for k,v in existing.items())
+                          if nested:assert {k:v for k,v in expected.items() if k!='explicit'}=={k:v for k,v in incoming.items() if k!='explicit'}
+                          text=versions[2];pattern=r'("explicit"\s*:\s*\{\n)' if nested else r'^(\{\n)'
+                          indent='    ' if nested else '  '
+                          inserted=''.join(indent+json.dumps(k)+': '+json.dumps(v)+',\n' for k,v in sorted(additions.items()))
+                          text,count=re.subn(pattern,lambda match:match.group(1)+inserted,text,count=1)
+                          assert count==1 and json.loads(text,object_pairs_hook=unique)==expected
+                      assert '<<<<<<<' not in text
+                      p.write_text(text);git(cwd,'add',name)
+                  assert not git(cwd,'diff','--name-only','--diff-filter=U')
+                  git(cwd,'diff','--cached','--check',sha if n==6043 else base)
+                  if (cwd/'.git/MERGE_HEAD').exists():git(cwd,'commit','-m',f'Merge observed dev into PR {n} preserving both sides')
+                  git(cwd,'merge-base','--is-ancestor',sha,'HEAD')
+                  if n!=6043:git(cwd,'merge-base','--is-ancestor',base,'HEAD')
+                  paths=git(cwd,'ls-files').splitlines()
+                  if n==6037:tests=[p for p in paths if p.startswith('tests/') and p.endswith('.test.ts') and any(s in p for s in ['worker-launch','update-job','update-mise'])]
+                  elif n==6043:tests=['tests/codex-integration/native-profile-startup-release.test.ts']
+                  elif n==6049:tests=['tests/codex-integration/project-config-warning-snapshot.test.ts','tests/codex-integration/project-config-warnings.test.ts','tests/config/settings-desktop-switch-apply.test.ts']
+                  else:
+                      with urllib.request.urlopen(f'https://api.github.com/repos/lidge-jun/opencodex/pulls/{n}/files?per_page=100',timeout=30) as r: files=json.load(r)
+                      tests=[f['filename'] for f in files if f['filename'].startswith('tests/') and f['filename'].endswith('.test.ts')]
+                  assert tests and len(tests)<15 and all((cwd/p).is_file() for p in tests)
+                  row={'pr':str(n),'sha':git(cwd,'rev-parse','HEAD'),'tests':tests};rows.append(row)
+                  print('CANDIDATE',json.dumps(row));print(git(cwd,'diff','--stat',sha if n==6043 else base,'HEAD'))
+              except Exception as error:print('BLOCKED',n,type(error).__name__,str(error))
+          assert rows,'No safe candidates prepared'
+          (root/'candidates.json').write_text(json.dumps({'include':rows}))
           PY
       - name: Publish isolated candidates only
         id: publish
@@ -89,6 +132,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ matrix.sha }}
+          fetch-depth: 2
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -102,4 +146,17 @@ jobs:
       - run: bun run privacy:scan
       - run: bun run structure:check
       - run: bun test tests/ci-workflows/file-size-ratchet.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - name: Confirm the prior startup implementation fails the new drain regression
+        if: matrix.pr == '6043'
+        run: |
+          set -euo pipefail
+          git show HEAD^:src/codex/native-profile-startup.ts > src/codex/native-profile-startup.ts
+          set +e
+          bun test tests/codex-integration/native-profile-startup-release.test.ts --test-name-pattern 'hard-lock-off recovery completion' > "$RUNNER_TEMP/negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/negative.log"
+          git restore src/codex/native-profile-startup.ts
+          test "$status" -ne 0
+          grep -q '(fail)' "$RUNNER_TEMP/negative.log"
       - run: git diff --exit-code
