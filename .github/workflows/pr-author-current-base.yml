@@ -1,0 +1,126 @@
+name: Author current base integration
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-current-base.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: cc8cfacf71a5131dd23f4a01294ab007847f3a2a
+          fetch-depth: 500
+          persist-credentials: false
+      - id: prepare
+        name: Merge reviewed base, preserving raw registration maps and stopping on runtime conflicts
+        run: |
+          python3 - <<'PY'
+          import subprocess,pathlib,json,os,re
+          def git(*args,check=True):
+              p=subprocess.run(['git',*args],capture_output=True,text=True)
+              if check and p.returncode: raise RuntimeError(p.stdout+p.stderr)
+              return p.stdout.strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          base='99d0a9400ebd8dedbefee9882698ecfb1f7bbaa7'
+          git('fetch','--no-tags','--depth=500','https://github.com/lidge-jun/opencodex',base)
+          candidates=[]
+          heads=[(6037,'75f8497d83d2ca293ebbafc4ea26eca75b79f60d'),(6048,'e2137f912a7b7d7b2c3707460447b8ced37a5bf7'),(6049,'cc8cfacf71a5131dd23f4a01294ab007847f3a2a'),(6050,'ff1ad0b72e4b5dd669b3c68938d3261a9912fcd4'),(6043,'c9c936c71d6d3191fec179b7f5fc1598eb816b93')]
+          allowed={'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'}
+          for pr,head in heads:
+              git('fetch','--no-tags','--depth=500','origin',head);git('checkout','--detach',head)
+              common=git('merge-base',head,base)
+              git('merge','--no-commit','--no-ff',base,check=False)
+              conflicts=git('diff','--name-only','--diff-filter=U').splitlines()
+              print('CONFLICTS',pr,conflicts,flush=True)
+              if set(conflicts)-allowed:
+                  for file in conflicts:
+                      if file in allowed:continue
+                      text=pathlib.Path(file).read_text(errors='replace')
+                      blocks=re.findall(r'^<<<<<<<.*?^>>>>>>>[^\n]*',text,re.M|re.S)
+                      print('MANUAL_CONFLICT',pr,file,'\n'+'\n'.join(b[:16000] for b in blocks),flush=True)
+                  git('merge','--abort');continue
+              for file in conflicts:
+                  text=subprocess.check_output(['git','show',base+':'+file],text=True)
+                  ours=json.loads(subprocess.check_output(['git','show',head+':'+file],text=True))
+                  ancestor=json.loads(subprocess.check_output(['git','show',common+':'+file],text=True))
+                  incoming=json.loads(text)
+                  table=lambda obj:obj['explicit'] if file.endswith('/layout.json') else obj
+                  additions={k:v for k,v in table(ours).items() if k not in table(ancestor)}
+                  changed={k for k,v in table(ours).items() if k in table(ancestor) and table(ancestor)[k]!=v}
+                  assert not changed,('unexpected existing registration changes',pr,changed)
+                  prefix='  "explicit": {\n' if file.endswith('/layout.json') else '{\n'
+                  indent='    ' if file.endswith('/layout.json') else '  '
+                  for key,value in sorted(additions.items()):
+                      if key in table(incoming):assert table(incoming)[key]==value;continue
+                      assert '"'+key+'"' not in text
+                      text=text.replace(prefix,prefix+indent+json.dumps(key)+': '+json.dumps(value)+',\n',1)
+                  assert all(table(json.loads(text)).get(k)==v for k,v in table(incoming).items())
+                  pathlib.Path(file).write_text(text)
+              if pr==6043:
+                  # Remove only the four unrelated GUI changes explicitly identified in review.
+                  unrelated=['gui/src/components/combo-workspace-controls.tsx','gui/tests/claude-code-sidecar-draft.test.tsx','gui/tests/jev-auto-combo.test.tsx','gui/tests/providers-deep-link.test.tsx']
+                  for file in unrelated:pathlib.Path(file).write_bytes(subprocess.check_output(['git','show',base+':'+file]))
+              git('add','-u');assert not git('diff','--name-only','--diff-filter=U')
+              git('diff','--cached','--check',base)
+              git('commit','-m',f'Merge reviewed dev into PR {pr} while preserving scoped author changes')
+              sha=git('rev-parse','HEAD');git('merge-base','--is-ancestor',head,sha);git('merge-base','--is-ancestor',base,sha)
+              print('DIFF_VS_DEV',pr,git('diff','--stat',base,sha),flush=True)
+              candidates.append({'pr':pr,'sha':sha,'previous':head})
+          assert candidates
+          pathlib.Path('/tmp/author-integrated-candidates.json').write_text(json.dumps(candidates))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(candidates)+'\n')
+          print(json.dumps(candidates))
+          PY
+      - name: Publish isolated integrated candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-integrated-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/author-integrated-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - if: matrix.pr == 6037
+        run: bun test tests/update/update-worker-launch.test.ts tests/update/update-job.test.ts tests/update/update-mise.test.ts
+      - if: matrix.pr == 6048
+        run: bun test tests/update/pnpm-command-isolation.test.ts tests/update/update-refresh.test.ts
+      - if: matrix.pr == 6049
+        run: bun test tests/codex-integration/project-config-warning-snapshot.test.ts tests/codex-integration/project-config-warnings.test.ts tests/config/settings-desktop-switch-apply.test.ts
+      - if: matrix.pr == 6050
+        run: bun test tests/codex-integration/codex-account-clear-paused.test.ts tests/cli/cli-account-alias-target.test.ts
+      - if: matrix.pr == 6043
+        run: bun test tests/codex-integration/native-profile-startup-release.test.ts
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Existing size and test-layout gates
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts' '*test-layout.test.ts' '*test-layout-tooling.test.ts')
+          test "${#guards[@]}" -gt 0
+          bun test "${guards[@]}"
+      - run: git diff --exit-code
