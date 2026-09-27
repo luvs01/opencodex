@@ -1,0 +1,233 @@
+name: Author pnpm isolation correction
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-pnpm-isolation.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: a9daea4e5f538f53d1f7ab2c6df5f14e817cf16c
+          persist-credentials: false
+      - name: Prepare reviewed isolation code and actual spawn-option regressions
+        id: prepare
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,json,os
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          pathlib.Path('src/update/pnpm-read-policy.mjs').write_text('''import { mkdtempSync, lstatSync, writeFileSync, unlinkSync, rmdirSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { dirname, join } from "node:path";
+          import { fileURLToPath } from "node:url";
+
+          /** Read probes never inherit the caller's project as their working directory. */
+          export const PNPM_READ_CWD = dirname(fileURLToPath(import.meta.url));
+          const MUTATIONS = new Set(["add", "install", "update", "remove", "uninstall"]);
+
+          /** Run a synchronous pnpm mutation outside the package, in a private workspace boundary. */
+          export function withPnpmCommandCwd(args, run) {
+            if (!MUTATIONS.has(args?.[0])) return run(PNPM_READ_CWD);
+            const cwd = mkdtempSync(join(tmpdir(), "ocx-pnpm-command-"));
+            const created = lstatSync(cwd);
+            const files = ["pnpm-workspace.yaml", ".npmrc"];
+            try {
+              // Stop discovery at our own workspace, rather than inheriting a shared /tmp workspace.
+              writeFileSync(join(cwd, files[0]), "packages: []\\nignorePnpmfile: true\\n", { flag: "wx", mode: 0o600 });
+              writeFileSync(join(cwd, files[1]), "ignore-pnpmfile=true\\n", { flag: "wx", mode: 0o600 });
+              return run(cwd);
+            } finally {
+              try {
+                const now = lstatSync(cwd);
+                if (!now.isDirectory() || now.isSymbolicLink() || now.dev !== created.dev || now.ino !== created.ino) {
+                  throw new Error("temporary directory identity changed");
+                }
+                // Never recursively remove pnpm-created or replacement contents.
+                for (const name of files) {
+                  try { unlinkSync(join(cwd, name)); }
+                  catch (error) { if (error?.code !== "ENOENT") throw error; }
+                }
+                rmdirSync(cwd);
+              } catch {
+                console.warn("[opencodex] Temporary pnpm workspace cleanup was incomplete; retained for inspection.");
+              }
+            }
+          }
+
+          /** pnpm 11 uses pnpm_config_ while earlier versions use npm_config_. */
+          export function pnpmReadEnvironment(env = process.env) {
+            const ignored = new Set(["npm_config_ignore_pnpmfile", "pnpm_config_ignore_pnpmfile"]);
+            const isolated = Object.fromEntries(Object.entries(env).filter(([key]) => !ignored.has(key.toLowerCase())));
+            return { ...isolated, npm_config_ignore_pnpmfile: "true", pnpm_config_ignore_pnpmfile: "true" };
+          }
+          ''')
+          pathlib.Path('src/update/pnpm-read-policy.d.mts').write_text('''export declare const PNPM_READ_CWD: string;
+          /** The callback must complete synchronously before its temporary workspace is cleaned. */
+          export declare function withPnpmCommandCwd<T>(args: readonly string[], run: (cwd: string) => T): T;
+          export declare function pnpmReadEnvironment(env?: Record<string, string | undefined>): Record<string, string | undefined>;
+          ''')
+          p=pathlib.Path('src/update/index.ts');s=p.read_text().replace('pnpmCommandCwd,','withPnpmCommandCwd,')
+          s=s.replace('function runOwnedPnpm(','export function runOwnedPnpm(',1)
+          anchor='  stdio: "inherit" | "pipe" | "ignore" = capture ? "pipe" : "inherit",\n'
+          assert s.count(anchor)==1;s=s.replace(anchor,anchor+'  spawn: typeof spawnSync = spawnSync,\n')
+          start=s.index('export function runOwnedPnpm(');end=s.index('\n/** Re-read the owning group',start)
+          block=s[start:end]
+          assert 'return spawnSync(target.bin, target.args, {' in block
+          block=block.replace('return spawnSync(target.bin, target.args, {','return withPnpmCommandCwd(args, cwd => spawn(target.bin, target.args, {')
+          block=block.replace('    cwd: pnpmCommandCwd(args),','    cwd,')
+          block=block.replace('  });\n}', '  }));\n}')
+          s=s[:start]+block+s[end:];p.write_text(s)
+          p=pathlib.Path('bin/ocx.mjs');s=p.read_text().replace('pnpmCommandCwd,','withPnpmCommandCwd,')
+          start=s.index('const update = runPnpmGlobalUpdate({');end=s.index('        if (update.ok)',start)
+          block=s[start:end]
+          assert 'return spawnSync(invocation.file, invocation.args, {' in block
+          block=block.replace('return spawnSync(invocation.file, invocation.args, {','return withPnpmCommandCwd(args, cwd => spawnSync(invocation.file, invocation.args, {')
+          block=block.replace('              cwd: pnpmCommandCwd(args),','              cwd,')
+          block=block.replace('            });\n          },','            }));\n          },')
+          s=s[:start]+block+s[end:];p.write_text(s)
+          p=pathlib.Path('tests/update/update-refresh.test.ts');s=p.read_text()
+          s=s.replace('PNPM_MUTATION_CWD, PNPM_READ_CWD, pnpmCommandCwd, pnpmReadEnvironment','PNPM_READ_CWD, pnpmReadEnvironment')
+          s=s.replace('import { runPnpmGlobalUpdate } from "../../src/update/pnpm-global-install.mjs";\n','')
+          start=s.index('test("pnpm mutations run outside the installed package')
+          end=s.index('test("synchronous pnpm owner discovery',start)
+          s=s[:start]+s[end:]
+          # Both real version families must receive their own control on every observed spawn.
+          s=s.replace('.npm_config_ignore_pnpmfile).toBe("true");','.npm_config_ignore_pnpmfile).toBe("true");')
+          p.write_text(s)
+          path='tests/update/pnpm-command-isolation.test.ts'
+          pathlib.Path(path).write_text('''import { expect, test } from "bun:test";
+          import { existsSync, readFileSync, lstatSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { runOwnedPnpm } from "../../src/update/index";
+          import { runPnpmGlobalUpdate } from "../../src/update/pnpm-global-install.mjs";
+          import { PNPM_READ_CWD, pnpmReadEnvironment, withPnpmCommandCwd } from "../../src/update/pnpm-read-policy.mjs";
+
+          test("both pnpm environment prefixes override every case variant without mutating the parent", () => {
+            const original = { npm_config_ignore_pnpmfile: "false", NPM_CONFIG_IGNORE_PNPMFILE: "false", PnPm_CoNfIg_IgNoRe_PnPmFiLe: "false", pnpm_config_ignore_pnpmfile: "false", KEEP: "retained" };
+            const result = pnpmReadEnvironment(original);
+            expect(result).toEqual({ npm_config_ignore_pnpmfile: "true", pnpm_config_ignore_pnpmfile: "true", KEEP: "retained" });
+            expect(original.npm_config_ignore_pnpmfile).toBe("false");
+          });
+
+          test("mutation workspaces are unique, bounded to known files, and cleaned after a thrown callback", () => {
+            const seen: string[] = [];
+            for (let i=0; i<2; i++) {
+              expect(() => withPnpmCommandCwd(["add", "-g", "fixture"], cwd => {
+                seen.push(cwd);
+                expect(cwd).not.toBe(tmpdir()); expect(cwd).not.toBe(PNPM_READ_CWD);
+                expect(readFileSync(cwd + "/pnpm-workspace.yaml", "utf8")).toContain("packages: []");
+                if (process.platform !== "win32") expect(lstatSync(cwd).mode & 0o077).toBe(0);
+                throw new Error("fixture failure");
+              })).toThrow("fixture failure");
+            }
+            expect(seen[0]).not.toBe(seen[1]);
+            for (const cwd of seen) expect(existsSync(cwd)).toBe(false);
+          });
+
+          const owner = { commandPath: "/trusted/pnpm", packagePath: "/pkg", globalDir: "/global", globalRoot: "/global", globalBinDir: "/bin" };
+          for (const fail of [false,true]) {
+            test(`actual pnpm spawn options isolate ${fail ? "rollback" : "install"} and registry reads`, () => {
+              const mutations: string[] = [];
+              let listCall=0, addCall=0, spawnCalls=0;
+              const versions = fail ? ["1.0.0","1.0.1","1.0.0"] : ["1.0.0","1.0.1"];
+              const result = runPnpmGlobalUpdate({ packageName:"ocx_test", currentVersion:"1.0.0", targetVersion:"1.0.1", tag:"latest", owner, runningPackagePath:"/pkg",
+                runPnpm:(args:string[],capture=false) => runOwnedPnpm(owner,args,capture,"ignore", ((_bin:unknown,_argv:unknown,options:{cwd:string;env:Record<string,string>}) => {
+                  spawnCalls++;
+                  expect(options.env.npm_config_ignore_pnpmfile).toBe("true");
+                  expect(options.env.pnpm_config_ignore_pnpmfile).toBe("true");
+                  let status=0,stdout="";
+                  if(args[0]==="add") {
+                    mutations.push(options.cwd);
+                    expect(options.cwd).not.toBe(tmpdir()); expect(options.cwd).not.toBe(PNPM_READ_CWD);
+                    expect(existsSync(options.cwd+"/pnpm-workspace.yaml")).toBe(true);
+                    status=fail && addCall++===0 ? 1 : 0;
+                  } else {
+                    expect(options.cwd).toBe(PNPM_READ_CWD);
+                    if(args[0]==="list") stdout=JSON.stringify([{path:"/global",dependencies:{ocx_test:{version:versions[Math.min(listCall++,versions.length-1)],path:"/pkg"}}}]);
+                  }
+                  return {status,stdout,stderr:"",pid:1,output:[],signal:null};
+                }) as never), verify:()=>({ok:true}),verifyShims:()=>({ok:true}) });
+              expect(result.ok).toBe(!fail); expect(spawnCalls).toBeGreaterThan(1);
+              expect(mutations).toHaveLength(fail ? 2 : 1);
+              for(const cwd of mutations) expect(existsSync(cwd)).toBe(false);
+            });
+          }
+          ''')
+          for file in ('scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'):
+              p=pathlib.Path(file);s=p.read_text();key='pnpm-command-isolation.test.ts';assert '"'+key+'"' not in s
+              marker='  "explicit": {\n' if file.endswith('/layout.json') else '{\n'
+              insert=marker+('    ' if file.endswith('/layout.json') else '  ')+json.dumps(key)+': "update",\n'
+              p.write_text(s.replace(marker,insert,1))
+          p=pathlib.Path('structure/ops/service-and-sidecars.md');s=p.read_text()
+          old='pnpm mutations (`add -g`, rollback) instead run from a neutral directory outside the package — on Windows a cwd inside the tree being replaced pins it open and blocks removal.'
+          new='pnpm mutations (`add -g`, rollback) instead run in unique private temporary workspaces outside the package, with an explicit empty workspace boundary to stop parent-project discovery. Both npm_config_ and pnpm_config_ ignore-pnpmfile controls are set case-insensitively for pnpm 10/11. Cleanup removes only known files and an empty unchanged directory; unexpected contents remain for inspection. On Windows, this also avoids pinning the replaced package as cwd.'
+          assert old in s;p.write_text(s.replace(old,new))
+          git('add','bin/ocx.mjs','src/update/index.ts','src/update/pnpm-read-policy.mjs','src/update/pnpm-read-policy.d.mts','tests/update/update-refresh.test.ts',path,'scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json','structure/ops/service-and-sidecars.md')
+          git('diff','--cached','--check');git('commit','-m','fix(update): isolate pnpm mutations and enforce hook controls on both env prefixes')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('sha='+git('rev-parse','HEAD')+'\n')
+          PY
+      - name: Publish isolated candidate only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/automation/author-6048-20260927
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun test tests/update/pnpm-command-isolation.test.ts tests/update/update-refresh.test.ts
+      - name: Check the two supported environment prefixes using real pnpm releases
+        run: |
+          set -euo pipefail
+          for version in 10.17.1 11.0.0; do
+            destination="$RUNNER_TEMP/ocx-pnpm-$version"
+            npm install --prefix "$destination" --ignore-scripts --no-audit --no-fund "pnpm@$version" > /tmp/pnpm-setup.log 2>&1 || { tail -n 30 /tmp/pnpm-setup.log; exit 1; }
+            PNPM_TEST_ROOT="$destination" node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { mkdtempSync, rmSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { pnpmReadEnvironment, withPnpmCommandCwd } from './src/update/pnpm-read-policy.mjs';
+          const home=mkdtempSync(join(tmpdir(),'ocx-pnpm-native-'));
+          try {
+            const cli=join(process.env.PNPM_TEST_ROOT,'node_modules/pnpm/bin/pnpm.cjs');
+            const env=pnpmReadEnvironment({PATH:process.env.PATH, HOME:home, USERPROFILE:home, XDG_CONFIG_HOME:home, npm_config_ignore_pnpmfile:'false', PNPM_CONFIG_IGNORE_PNPMFILE:'false'});
+            withPnpmCommandCwd(['add'],cwd=>{
+              const value=execFileSync(process.execPath,[cli,'config','get','ignore-pnpmfile'],{cwd,env,encoding:'utf8',timeout:10000}).trim();
+              if(value!=='true') throw new Error('pnpm did not honor ignore-pnpmfile: '+value);
+              console.log(process.env.PNPM_TEST_ROOT.split('/').pop()+': ignore-pnpmfile='+value);
+            });
+          } finally { rmSync(home,{recursive:true,force:true}); }
+          JS
+          done
+      - run: bun run typecheck
+      - run: bun run privacy:scan
+      - run: bun run structure:check
+      - name: Existing size and test-layout gates
+        run: |
+          set -euo pipefail
+          mapfile -t guards < <(git ls-files '*file-size*.test.ts')
+          test "${#guards[@]}" -gt 0
+          bun test "${guards[@]}" tests/test-layout.test.ts tests/test-layout-tooling.test.ts
+      - run: git diff --exit-code
