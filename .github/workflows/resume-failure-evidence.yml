@@ -1,0 +1,33 @@
+name: Current-head failure evidence
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-failure-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read public failure logs without checkout or repository execution
+        env:
+          API_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          jobs=[108559029939,108559029993,108559029925,108551489105,108551567206]
+          for job in jobs:
+              print('BEGIN_JOB',job,flush=True)
+              req=urllib.request.Request(f'https://api.github.com/repos/lidge-jun/opencodex/actions/jobs/{job}/logs',headers={'Authorization':'Bearer '+os.environ['API_TOKEN'],'User-Agent':'author-failure-evidence'})
+              try:
+                  with urllib.request.urlopen(req,timeout=45) as r: text=r.read(35_000_000).decode('utf-8','replace')
+                  lines=text.splitlines(); selected=set()
+                  for i,line in enumerate(lines):
+                      if re.search(r'\(fail\)|##\[error\]|error:|error TS|missing_coauthor|Error:|FAIL |AssertionError|Expected:|Received:',line):
+                          selected.update(range(max(0,i-8),min(len(lines),i+16)))
+                  selected.update(range(max(0,len(lines)-45),len(lines)))
+                  out='\n'.join(lines[i] for i in sorted(selected))
+                  print(out[:30000]); print('END_JOB',job,'selected_chars',len(out))
+              except Exception as e: print('READ_FAILED',type(e).__name__,str(e))
+          PY
