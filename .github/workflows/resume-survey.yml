@@ -1,0 +1,48 @@
+name: Author PR resume survey
+on:
+  push:
+    branches: [automation/pr-resume-20260927]
+    paths: [.github/workflows/resume-survey.yml]
+permissions:
+  contents: read
+jobs:
+  survey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read public PR evidence without checking out or executing repository code
+        env:
+          API_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          numbers = [6057,6056,6051,6050,6049,6048,6047,6046,6044,6043,6042,6038,6037,6036,6035,5964]
+          fields = '''number url title state isDraft headRefOid baseRefOid mergeable reviewDecision
+          reviews(last:4){nodes{author{login} state body submittedAt}}
+          reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved isOutdated path line comments(last:2){nodes{databaseId body url author{login}}}}}
+          comments(last:5){nodes{databaseId body url author{login}}}
+          commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{name conclusion status detailsUrl} ... on StatusContext{context state targetUrl}}}}}}}
+          files(first:100){pageInfo{hasNextPage} nodes{path}}'''
+          query = '{repository(owner:"lidge-jun",name:"opencodex"){' + ' '.join('p%d:pullRequest(number:%d){%s}'%(n,n,fields) for n in numbers) + '}}'
+          request = urllib.request.Request('https://api.github.com/graphql', data=json.dumps({'query':query}).encode(), headers={'Authorization':'Bearer '+os.environ['API_TOKEN'],'Content-Type':'application/json','User-Agent':'author-pr-evidence-read'})
+          with urllib.request.urlopen(request, timeout=60) as r: data=json.load(r)
+          if data.get('errors'): raise SystemExit(json.dumps(data['errors']))
+          def brief(body):
+              if 'Prompt to fix review comments' in body:
+                  body=body.split('Prompt to fix review comments',1)[1]
+                  if '```' in body: body=body.split('```',2)[1]
+              for stop in ['After applying the fix, consider', '<details>\n<summary>🧰 Tools', '<!-- fingerprinting']:
+                  body=body.split(stop,1)[0]
+              return body[:5000] + (' [TRUNCATED]' if len(body)>5000 else '')
+          for n in numbers:
+              p=data['data']['repository']['p'+str(n)]
+              if p is None: raise SystemExit('Missing PR '+str(n))
+              threads=p.pop('reviewThreads'); assert not threads['pageInfo']['hasNextPage']
+              p['threads']=[dict(t,comments=[dict(c,body=brief(c['body'])) for c in t['comments']['nodes']]) for t in threads['nodes'] if not t['isResolved']]
+              p['reviews']=[dict(r,body=brief(r['body'])) for r in p['reviews']['nodes']]
+              p['comments']=[dict(c,body=brief(c['body'])) for c in p['comments']['nodes'] if not c['author']['login'].endswith('[bot]') and c['author']['login'] not in ['coderabbitai','github-actions','chatgpt-codex-connector']]
+              roll=p.pop('commits')['nodes'][0]['commit']['statusCheckRollup']
+              p['checks']=roll
+              p['files']=[f['path'] for f in p['files']['nodes']]
+              print('PR_REPORT '+json.dumps(p, ensure_ascii=True))
+          PY
