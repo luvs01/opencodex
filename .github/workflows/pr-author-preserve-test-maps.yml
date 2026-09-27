@@ -1,0 +1,88 @@
+name: Author preserve existing test maps
+on:
+  push:
+    branches: [automation/pr-author-audit-20260927]
+    paths: [.github/workflows/pr-author-preserve-test-maps.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      candidates: ${{ steps.prepare.outputs.candidates }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: f5af81d66224558912d34466b950576e7dbf7874
+          persist-credentials: false
+          fetch-depth: 2
+      - id: prepare
+        name: Retain source text instead of reserializing unrelated JSON registrations
+        run: |
+          python3 - <<'PY'
+          import json,pathlib,subprocess,os
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          git('config','core.hooksPath','/dev/null');git('config','user.name','github-actions[bot]');git('config','user.email','41898282+github-actions[bot]@users.noreply.github.com')
+          rows=[]
+          for pr,head,base,key in [
+            (6049,'f5af81d66224558912d34466b950576e7dbf7874','70b8a77cf0784d2bd0b793c25826c6f51072926c','project-config-warning-snapshot.test.ts'),
+            (6050,'0ea2c92242571826a7e64b36457077557d86c8bc','ba479b4030c5ce1aaff0157423598c9d7c8b8181','codex-account-clear-paused.test.ts')]:
+              git('fetch','--no-tags','origin',head,base);git('checkout','--detach',head)
+              for file in ('scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json'):
+                  original=subprocess.check_output(['git','show',base+':'+file],text=True)
+                  current=json.loads(pathlib.Path(file).read_text())
+                  assert '"'+key+'"' not in original
+                  if file.endswith('/layout.json'):
+                      marker='  "explicit": {\n'; insert=marker+'    '+json.dumps(key)+': "codex-integration",\n'
+                  else:
+                      marker='{\n'; insert=marker+'  '+json.dumps(key)+': "codex-integration",\n'
+                  assert original.startswith(marker) if file.endswith('test-layout-expected.json') else original.count(marker)==1
+                  corrected=original.replace(marker,insert,1)
+                  # This is solely textual scope cleanup; effective registration content is unchanged.
+                  assert json.loads(corrected)==current,file
+                  pathlib.Path(file).write_text(corrected)
+              git('add','scripts/test-layout/layout.json','tests/fixtures/test-layout-expected.json')
+              git('diff','--cached','--check')
+              git('commit','-m','test: preserve existing registration text around the new regression')
+              rows.append({'pr':pr,'sha':git('rev-parse','HEAD'),'tested':head})
+          pathlib.Path('/tmp/author-map-candidates.json').write_text(json.dumps(rows))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidates='+json.dumps(rows)+'\n')
+          print(json.dumps(rows))
+          PY
+      - name: Publish isolated candidates only
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          while read -r pr sha; do git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/automation/author-$pr-20260927"; done < <(python3 -c 'import json; [print(r["pr"],r["sha"]) for r in json.load(open("/tmp/author-map-candidates.json"))]')
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.candidates) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Confirm focused-tested implementation remains identical
+        env:
+          TESTED_SHA: ${{ matrix.tested }}
+        run: git diff --exit-code "$TESTED_SHA" HEAD -- src tests/codex-integration structure package.json bun.lock
+      - run: bun test tests/test-layout.test.ts tests/test-layout-tooling.test.ts tests/tooling/file-size.test.ts
+      - run: bun run structure:check
+      - run: bun run privacy:scan
+      - run: git diff --exit-code
