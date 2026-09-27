@@ -123,7 +123,9 @@ jobs:
             });
           }
           ''')
-                  replace(cwd,'structure/transports/responses.md','### Semantic progress ownership\n','### Sidecar probe lifetime\n\n`src/server/responses/sidecar-execution.ts` releases an acquired search probe immediately for local validation refusals. An upstream response with a body retains the probe through completion, error, or cancellation, regardless of HTTP status; the core dispatcher does not infer body settlement from a non-success status. Bodyless sidecar responses release before returning.\n\n### Semantic progress ownership\n')
+                  # responses.md sits at the 600-line cap, so the lease contract rides the
+                  # existing sidecar-execution.ts owner row instead of a new section (+0 lines).
+                  replace(cwd,'structure/transports/responses.md','| `sidecar-execution.ts` | Image/video versus web-search execution and their shared rotation hook. |','| `sidecar-execution.ts` | Image/video versus web-search execution and their shared rotation hook. An acquired search probe releases immediately for local validation refusals; an upstream response with a body retains it through completion, error, or cancellation regardless of HTTP status — the core dispatcher does not infer body settlement from a non-success status — and bodyless sidecar responses release before returning. |')
               git(cwd,'diff','--check'); git(cwd,'add','-u')
               messages={6038:'test(search): assert Devin credential in its protobuf field',6047:'fix(search): retain probes for unsettled error response bodies',6049:'fix(codex): use neutral global ownership warning headings'}
               git(cwd,'commit','-m',messages[n]); print('CANDIDATE',n,git(cwd,'rev-parse','HEAD'))
@@ -137,7 +139,12 @@ jobs:
           auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
           echo "::add-mask::$auth"
           for n in 6038 6047 6049; do
-            git -C "$RUNNER_TEMP/resume-candidates/$n" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push https://github.com/luvs01/opencodex "HEAD:refs/heads/automation/resume-pr${n}-20260927"
+            repo="$RUNNER_TEMP/resume-candidates/$n"
+            ref="refs/heads/automation/resume-pr${n}-20260927"
+            old="$(git -C "$repo" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" ls-remote https://github.com/luvs01/opencodex "$ref" | cut -f1)"
+            lease="--force-with-lease=$ref:"
+            [ -n "$old" ] && lease="--force-with-lease=$ref:$old"
+            git -C "$repo" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push "$lease" https://github.com/luvs01/opencodex "HEAD:$ref"
           done
           python3 - <<'PY'
           import json,os,pathlib,subprocess
