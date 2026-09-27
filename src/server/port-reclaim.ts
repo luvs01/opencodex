@@ -163,7 +163,11 @@ export function parseListenEntriesFromSs(output: string, port: number): ListenEn
     // LISTEN <recv-q> <send-q> <local-addr:port> <peer-addr:port> users:(...)
     const localIdx = parts.findIndex(part => part.endsWith(portSuffix) || part.endsWith(`]:${port}`));
     if (localIdx < 0) continue;
-    const pidMatch = /pid=(\d+)/.exec(line);
+    const usersIdx = line.indexOf("users:(");
+    if (usersIdx < 0) continue;
+    // Process names are quoted and attacker-controlled; only inspect owner fields.
+    const ownerFields = line.slice(usersIdx).replace(/"(?:\\.|[^"\\])*"/g, "");
+    const pidMatch = /(?:^|[,(\s])pid=(\d+)(?=[,)\s]|$)/.exec(ownerFields);
     const pid = pidMatch ? Number(pidMatch[1]) : NaN;
     if (Number.isSafeInteger(pid) && pid > 0) {
       const address = normalizeListenAddress(parts[localIdx]);

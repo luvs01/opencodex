@@ -151,12 +151,14 @@ describe("listen-entry parsers keep the bound address", () => {
     const output = [
       "LISTEN 0      128        127.0.0.1:10100       0.0.0.0:*    users:((\"bun\",pid=4242,fd=20))",
       "LISTEN 0      128        127.0.0.2:10100       0.0.0.0:*    users:((\"foreign\",pid=7777,fd=6))",
+      "LISTEN 0      128        127.0.0.3:10100       0.0.0.0:*    users:((\"pid=4242\",pid=9999,fd=4))",
       "LISTEN 0      128        127.0.0.1:10100       0.0.0.0:*",
       "LISTEN 0      511                *:22              *:*    users:((\"sshd\",pid=1,fd=3))",
     ].join("\n");
     expect(parseListenEntriesFromSs(output, 10100)).toEqual([
       { pid: 4242, address: "127.0.0.1" },
       { pid: 7777, address: "127.0.0.2" },
+      { pid: 9999, address: "127.0.0.3" },
     ]);
   });
 
