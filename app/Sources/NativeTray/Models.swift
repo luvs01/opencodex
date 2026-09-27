@@ -123,7 +123,12 @@ public struct NativeTrayProvider: Decodable, Identifiable {
         public let label: String
         public let percent: Double?
         public let resetAt: Double?
-        public var value: Double? { NativeTrayFormat.number(percent) }
+        /// A percent at or beyond Int.max traps `Int(percent)`, so the whole surface —
+        /// bar, label, spoken value and severity — reads unavailable rather than crash.
+        public var value: Double? {
+            guard let value = NativeTrayFormat.number(percent), value < Double(Int.max) else { return nil }
+            return value
+        }
         public var fill: Double { min(100, value ?? 0) / 100 }
         public var resetDate: Date? { NativeTrayFormat.date(resetAt) }
     }

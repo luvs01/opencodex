@@ -102,6 +102,13 @@ check(NativeTrayFormat.percentText(nil) == "—", "Missing value renders a dash"
 check(NativeTrayFormat.percentText(1e20) == "—", "Oversized percent cannot trap visible formatting")
 check(NativeTrayFormat.percentDescription(1e20) == "Unavailable", "Oversized percent cannot trap spoken formatting")
 
+let oversizedWindow = try decode(["providers": [["id": "openai", "label": "OpenAI", "unavailable": false, "accounts": [
+    ["id": "main", "label": "Main", "active": true, "unavailable": false,
+     "windows": [["id": "w", "label": "Weekly", "percent": 1e20, "resetAt": 1_900_000_000_000]]],
+]]]])
+let trap = oversizedWindow.providers[0].accounts[0].windows[0]
+check(trap.value == nil && trap.fill == 0, "Oversized percent reads unavailable on every surface")
+
 // Account switching: only names cross to the host, and only for rows the runtime would accept.
 func switchRow(_ id: String, _ fields: [String: Any]) -> [String: Any] {
     var row: [String: Any] = ["id": "\(id):0", "label": id, "active": false, "unavailable": false, "windows": []]
