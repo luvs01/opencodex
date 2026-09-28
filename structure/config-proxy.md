@@ -5,7 +5,8 @@ configuration. An explicit SOCKS5 or SOCKS5h URL selects ALL_PROXY and removes
 stale scheme-proxy variables; HTTP(S) settings retain their existing environment
 precedence. Activation keeps the existing Windows auto-discovery path and adds opt-in
 macOS discovery for `proxy: "auto"`. It never consults macOS settings when any scheme
-proxy or `ALL_PROXY`/`all_proxy` is inherited. The shared path keeps loopback
+proxy or `ALL_PROXY`/`all_proxy` is inherited, but still installs the shared loopback
+bypasses before preserving that inherited route. The shared path keeps loopback
 NO_PROXY entries; the no-configured-proxy return merges all of them only when an inherited
 SOCKS proxy is the only inherited proxy; whenever Bun applies an inherited HTTP(S) scheme proxy
 or HTTP(S) `ALL_PROXY`/`all_proxy`, it matches by domain suffix, so activation adds only the

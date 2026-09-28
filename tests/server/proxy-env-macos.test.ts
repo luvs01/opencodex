@@ -209,15 +209,19 @@ describe('macOS proxy: "auto" (#5853)', () => {
     expect(snapshot()).toEqual(before);
   });
 
-  test.each(["HTTP_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])("inherited %s wins without system discovery", key => {
+  test.each(["HTTP_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])("inherited %s wins with loopback bypasses and without system discovery", key => {
     process.env[key] = key.toLowerCase().includes("all") ? "socks5h://socks.example:1080" : "http://inherited.example:8080";
     process.env.NO_PROXY = "upper.example";
     process.env.no_proxy = "lower.example";
-    const before = snapshot();
     let called = false;
     applyProxyEnvWith(config("auto"), { platform: "darwin", macOSReader: () => { called = true; return scutil(both); } });
     expect(called).toBe(false);
-    expect(snapshot()).toEqual(before);
+    expect(process.env.NO_PROXY?.split(",")).toEqual([
+      "upper.example",
+      ...(key.toLowerCase().includes("all") ? ["localhost"] : []),
+      "127.0.0.1", "::1", "[::1]",
+    ]);
+    expect(process.env.no_proxy?.split(",")).toEqual(["lower.example", "127.0.0.1", "::1", "[::1]"]);
     if (caseSensitiveEnv && key.toLowerCase().includes("all")) {
       // SOCKS wrapper reads uppercase; Bun's native HTTP transport reads lowercase.
       expect(resolveProxyRoute(new URL("http://upper.example"))).toEqual({ kind: "direct" });
@@ -230,9 +234,9 @@ describe('macOS proxy: "auto" (#5853)', () => {
     process.env.HTTP_PROXY = "http://http.example:8080";
     process.env.NO_PROXY = "upper.example";
     process.env.no_proxy = "lower.example";
-    const before = snapshot();
     applyProxyEnvWith(config("auto"), { platform: "darwin", macOSReader: () => { throw new Error("must not read"); } });
-    expect(snapshot()).toEqual(before);
+    expect(process.env.NO_PROXY).toBe("upper.example,127.0.0.1,::1,[::1]");
+    expect(process.env.no_proxy).toBe("lower.example,127.0.0.1,::1,[::1]");
     for (const [hostname, socksBypass, bunBypass] of [
       ["upper.example", true, false],
       ["lower.example", false, true],
@@ -247,9 +251,9 @@ describe('macOS proxy: "auto" (#5853)', () => {
     process.env.HTTP_PROXY = "http://http.example:8080";
     process.env.NO_PROXY = "upper.example.com";
     process.env.no_proxy = "lower.example.com";
-    const before = snapshot();
     applyProxyEnvWith(config("auto"), { platform: "darwin", macOSReader: () => { throw new Error("must not read"); } });
-    expect(snapshot()).toEqual(before);
+    expect(process.env.NO_PROXY).toBe("upper.example.com,127.0.0.1,::1,[::1]");
+    expect(process.env.no_proxy).toBe("lower.example.com,127.0.0.1,::1,[::1]");
     const upper = new URL("http://upper.example.com/");
     const lower = new URL("http://lower.example.com/");
     // Bun uses the non-empty lowercase value; resolveProxyRoute uses uppercase

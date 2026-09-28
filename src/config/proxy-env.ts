@@ -218,6 +218,7 @@ export function applyProxyEnvWith(
       if (["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
         .some(key => process.env[key]?.trim())) {
         console.log('[opencodex] proxy "auto": existing proxy environment wins; macOS system proxy not consulted');
+        mergeNoProxyEntries([], inheritedLoopbackBypass() ?? LOOPBACK_ADDRESS_NO_PROXY);
         configureSocks5Fetch();
         return;
       }
