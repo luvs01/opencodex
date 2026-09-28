@@ -96,10 +96,10 @@ async function post(server: ReturnType<typeof startServer>): Promise<Response> {
 
 function installOAuthFetch(
   chatStatuses: number[],
-  options: { tokenErrorDescription?: string } = {},
-): { chatAuth: string[]; counts: { refresh: number } } {
+  options: { tokenErrorDescription?: string; stalledFirst401?: boolean } = {},
+): { chatAuth: string[]; counts: { refresh: number; rejectedBodyCancel: number } } {
   const chatAuth: string[] = [];
-  const counts = { refresh: 0 };
+  const counts = { refresh: 0, rejectedBodyCancel: 0 };
   globalThis.fetch = (async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url === XAI_OAUTH_DISCOVERY_URL) {
@@ -133,6 +133,12 @@ function installOAuthFetch(
       chatAuth.push(new Headers(init?.headers).get("authorization") ?? "");
       const status = chatStatuses.shift() ?? 200;
       if (status === 401) {
+        if (options.stalledFirst401 && chatAuth.length === 1) {
+          return new Response(new ReadableStream({
+            start(controller) { controller.enqueue(new TextEncoder().encode('{"error":{"message":"rejected"}}')); },
+            cancel() { counts.rejectedBodyCancel += 1; },
+          }), { status: 401, headers: { "content-type": "application/json" } });
+        }
         return new Response(JSON.stringify({ error: { message: "rejected" } }), {
           status: 401,
           headers: { "content-type": "application/json" },
@@ -177,6 +183,7 @@ describe("xAI OAuth Responses opt-in upstream 401 replay", () => {
     saveConfig(xaiConfig());
     const observed = installOAuthFetch([401], {
       tokenErrorDescription: `EACCES writing ${WINDOWS_PATH_CANARY}, ${UNC_PATH_CANARY}, or ${POSIX_PATH_CANARY}`,
+      stalledFirst401: true,
     });
     const server = startServer(0);
     try {
@@ -192,6 +199,7 @@ describe("xAI OAuth Responses opt-in upstream 401 replay", () => {
       expect(message).not.toContain(POSIX_PATH_CANARY);
       expect(message).not.toContain("auth.json");
       expect(observed.counts.refresh).toBe(1);
+      expect(observed.counts.rejectedBodyCancel).toBe(1);
       expect(observed.chatAuth).toEqual(["Bearer rejected-access"]);
     } finally {
       await server.stop(true);
@@ -201,7 +209,7 @@ describe("xAI OAuth Responses opt-in upstream 401 replay", () => {
   test("401 then 200 performs one refresh and one replay", async () => {
     await seedOAuth();
     saveConfig(xaiConfig());
-    const observed = installOAuthFetch([401, 200]);
+    const observed = installOAuthFetch([401, 200], { stalledFirst401: true });
     const server = startServer(0);
     try {
       const response = await post(server);
@@ -209,6 +217,7 @@ describe("xAI OAuth Responses opt-in upstream 401 replay", () => {
       const json = await response.json() as { output?: { type: string; content?: { text?: string }[] }[] };
       expect(json.output?.find(item => item.type === "message")?.content?.[0]?.text).toBe("ok after refresh");
       expect(observed.counts.refresh).toBe(1);
+      expect(observed.counts.rejectedBodyCancel).toBe(1);
       expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
       const attempt = readUsageEntries().at(-1)?.attempts?.[0];
       expect(attempt?.credentialSource).toBe("grok-oauth");

@@ -669,6 +669,7 @@ export async function prepareAdapterExchange(
             const rotated = await rotateAntigravityAuth(upstreamResponse, "oauth-401");
             if (rotated) { upstreamResponse = rotated; continue recovery; }
           }
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
           if (route.providerName === "kiro" && err instanceof OAuthLoginRequiredError && failed
             && transportState.genericFailovers < transportState.genericFailoverLimit) {
             const alternate = await tryKiroAlternateAfterTerminalRefresh(config, failed.accountId, failed.generation);
@@ -714,6 +715,7 @@ export async function prepareAdapterExchange(
           }
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
         }
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
         if (route.provider.googleMode === "cloud-code-assist" && !refreshed.projectId) {
           cleanupUpstreamAbort();
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist project is required")));
