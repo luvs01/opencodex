@@ -29,6 +29,8 @@ import { durableBunRuntime } from "../lib/bun-runtime";
 import { selfLaunchArgv } from "../lib/self-launch-argv";
 import { compareStrictSemver, parseStrictSemver } from "../lib/strict-semver";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
+import { WINDOWS_WRAPPER_PROTOCOL_ENV } from "../service/windows-wrapper-exit";
+import { withOwnershipMutationLease } from "../service/ownership-mutation-lease.mjs";
 import { atomicWriteFile } from "./atomic-write";
 import { getConfigDir } from "./paths";
 
@@ -55,6 +57,15 @@ export interface ServedRuntimeRecord {
   readonly command: readonly string[];
   readonly version: string;
   readonly servedAt: string;
+  /**
+   * Delegation bookkeeping, present only after this install was handed a serve and
+   * exited nonzero without recording itself. Absent means "no known delegation failure";
+   * `failedCount` drives the cooldown, `lastFailedAt` its expiry.
+   */
+  readonly delegation?: {
+    readonly lastFailedAt?: string;
+    readonly failedCount?: number;
+  };
 }
 
 /** Bound on retained installs; the file is operator-facing state, not a log. */
@@ -73,6 +84,16 @@ const RUNTIME_VERSION_PROBE_TIMEOUT_MS = 3_000;
  * RECORDS × the probe timeout.
  */
 const MAX_VERSION_PROBE_ATTEMPTS = 4;
+
+/**
+ * Backoff for an install that kept exiting before it could serve. Without it the
+ * service manager restarts the wrapper, the wrapper re-defers to the same broken
+ * or declining runtime, and the machine loops a handoff that never logs a serve.
+ * Each recorded failure buys fifteen minutes; eight failures cap the wait at two
+ * hours.
+ */
+const DELEGATION_FAILURE_COOLDOWN_MS = 15 * 60 * 1000;
+const DELEGATION_FAILURE_COUNT_CAP = 8;
 
 function canonicalPath(path: string): string {
   let resolved = path;
@@ -94,7 +115,17 @@ function isValidRecord(value: unknown): value is ServedRuntimeRecord {
   if (!Array.isArray(record.command) || record.command.length === 0) return false;
   if (!record.command.every(part => typeof part === "string" && isAbsolute(part))) return false;
   if (typeof record.version !== "string" || parseStrictSemver(record.version) === null) return false;
-  return typeof record.servedAt === "string";
+  if (typeof record.servedAt !== "string") return false;
+  if (record.delegation !== undefined) {
+    const delegation = record.delegation as Record<string, unknown> | null;
+    if (delegation === null || typeof delegation !== "object") return false;
+    if (delegation.lastFailedAt !== undefined && typeof delegation.lastFailedAt !== "string") return false;
+    if (delegation.failedCount !== undefined
+      && (typeof delegation.failedCount !== "number" || !Number.isInteger(delegation.failedCount) || delegation.failedCount < 0)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** Read the census. Malformed entries are dropped; a malformed file reads as empty. */
@@ -115,6 +146,10 @@ export function readServingRuntimes(dir: string = getConfigDir()): ServedRuntime
  * never actually ran. Best-effort after the entry shape is validated — a census
  * write failure must never take down a healthy start.
  */
+function writeServingRuntimes(records: readonly ServedRuntimeRecord[], dir: string): void {
+  atomicWriteFile(servingRuntimesPath(dir), JSON.stringify({ runtimes: records.slice(0, MAX_SERVING_RUNTIME_RECORDS) }, null, 2) + "\n");
+}
+
 export function recordServingRuntime(
   record: ServedRuntimeRecord,
   dir: string = getConfigDir(),
@@ -124,8 +159,66 @@ export function recordServingRuntime(
     assertNotRealHomeUnderTest(dir);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const key = servingRuntimeCommandKey(record.command);
-    const merged = [record, ...readServingRuntimes(dir).filter(entry => servingRuntimeCommandKey(entry.command) !== key)];
-    atomicWriteFile(servingRuntimesPath(dir), JSON.stringify({ runtimes: merged.slice(0, MAX_SERVING_RUNTIME_RECORDS) }, null, 2) + "\n");
+    // The lease makes read-merge-write atomic across installs; without it two
+    // concurrent serves can each read, merge their own entry, and lose the other's.
+    withOwnershipMutationLease([servingRuntimesPath(dir)], () => {
+      const merged = [record, ...readServingRuntimes(dir).filter(entry => servingRuntimeCommandKey(entry.command) !== key)];
+      writeServingRuntimes(merged, dir);
+    });
+  } catch { /* census loss must never fail a start */ }
+}
+
+/**
+ * Mark that `record` was handed a serve but exited nonzero without recording
+ * itself (a crash, or a stay-out — both mean this serve never happened).
+ * The mark only lands when the on-disk entry still carries the `servedAt` the
+ * handoff saw: a fresher `servedAt` means the child did reach the bind boundary
+ * (a post-bind death is a runtime bug to fix, not a delegation failure to avoid).
+ * Best-effort like every census write; a lost mark degrades to the pre-fix loop,
+ * never to a worse failure.
+ */
+export function markServingRuntimeDelegationFailed(
+  record: ServedRuntimeRecord,
+  dir: string = getConfigDir(),
+  now: () => number = Date.now,
+): void {
+  try {
+    assertNotRealHomeUnderTest(dir);
+    const key = servingRuntimeCommandKey(record.command);
+    withOwnershipMutationLease([servingRuntimesPath(dir)], () => {
+      const entries = readServingRuntimes(dir);
+      const updated = entries.map(entry => {
+        if (servingRuntimeCommandKey(entry.command) !== key) return entry;
+        if (entry.servedAt !== record.servedAt) return entry;
+        const failedCount = Math.min((entry.delegation?.failedCount ?? 0) + 1, DELEGATION_FAILURE_COUNT_CAP);
+        return { ...entry, delegation: { lastFailedAt: new Date(now()).toISOString(), failedCount } };
+      });
+      if (updated.every((entry, index) => entry === entries[index])) return;
+      writeServingRuntimes(updated, dir);
+    });
+  } catch { /* census loss must never fail a start */ }
+}
+
+/**
+ * Drop a recorded install's delegation-failure marker. Called after a delegated
+ * child proves the handoff healthy (clean exit, or it recorded a fresh serve).
+ */
+export function clearServingRuntimeDelegation(
+  record: ServedRuntimeRecord,
+  dir: string = getConfigDir(),
+): void {
+  try {
+    assertNotRealHomeUnderTest(dir);
+    const key = servingRuntimeCommandKey(record.command);
+    withOwnershipMutationLease([servingRuntimesPath(dir)], () => {
+      const entries = readServingRuntimes(dir);
+      const updated = entries.map(entry =>
+        servingRuntimeCommandKey(entry.command) === key && entry.delegation !== undefined
+          ? { ...entry, delegation: undefined }
+          : entry);
+      if (updated.every((entry, index) => entry === entries[index])) return;
+      writeServingRuntimes(updated, dir);
+    });
   } catch { /* census loss must never fail a start */ }
 }
 
@@ -178,6 +271,8 @@ export interface NewerServingRuntimeDeps {
   readonly dir?: string;
   readonly exists?: (path: string) => boolean;
   readonly run?: SyncRunner;
+  readonly now?: () => number;
+  readonly log?: (line: string) => void;
 }
 
 /**
@@ -198,6 +293,7 @@ export function selectNewerServingRuntime(
   const self = parseStrictSemver(selfVersion);
   if (self === null) return null;
   const exists = deps.exists ?? existsSync;
+  const now = deps.now ?? Date.now;
   const selfKey = servingRuntimeCommandKey(selfCommand);
   const candidates = readServingRuntimes(deps.dir ?? getConfigDir())
     .filter(record => servingRuntimeCommandKey(record.command) !== selfKey)
@@ -206,6 +302,20 @@ export function selectNewerServingRuntime(
       return recorded !== null && compareStrictSemver(recorded, self) > 0;
     })
     .filter(record => record.command.every(part => exists(part)))
+    .filter(record => {
+      const failedCount = record.delegation?.failedCount ?? 0;
+      if (failedCount <= 0) return true;
+      const failedAt = Date.parse(record.delegation?.lastFailedAt ?? "");
+      // A marker without a usable timestamp cannot prove a live cooldown; the
+      // candidate gets one probe and a fresh mark on another failure.
+      if (!Number.isFinite(failedAt)) return true;
+      const cooldownMs = Math.min(failedCount, DELEGATION_FAILURE_COUNT_CAP) * DELEGATION_FAILURE_COOLDOWN_MS;
+      if (now() - failedAt >= cooldownMs) return true;
+      deps.log?.(
+        `⏭️  Skipping ${record.command.join(" ")} (${record.version}): its last ${failedCount} delegated start${failedCount === 1 ? "" : "s"} died before serving; retry after ${new Date(failedAt + cooldownMs).toISOString()}.`,
+      );
+      return false;
+    })
     .sort((left, right) => compareStrictSemver(parseStrictSemver(right.version)!, parseStrictSemver(left.version)!));
   let probes = 0;
   for (const record of candidates) {
@@ -221,7 +331,6 @@ export function selectNewerServingRuntime(
 
 export interface DeferToNewerRuntimeDeps extends NewerServingRuntimeDeps {
   readonly runInherited?: (command: readonly string[], args: readonly string[]) => Promise<number>;
-  readonly log?: (line: string) => void;
 }
 
 /**
@@ -284,7 +393,7 @@ async function inheritedRunner(command: readonly string[], args: readonly string
  * Resolves to the delegated child's exit code when a handoff happened, null when this
  * process should serve itself. The foreground wait keeps the service contract intact:
  * the wrapper sees the real child's exit (including the stay-out code) and restart
- * ownership stays exactly where the manager put it. Only called on the `OCX_SERVICE`
+ * ownership stays exactly where the manager put it. Only called on the managed-service
  * path — an interactive `ocx start` already picked its binary on PATH.
  */
 export async function deferToNewerServiceRuntime(
@@ -305,18 +414,40 @@ export async function deferToNewerServiceRuntime(
     `⚠️  This install (${selfVersion}) is older than the runtime that last served this home (${candidate.version}). `
     + `Deferring to ${candidate.command.join(" ")} so the service does not silently downgrade.`,
   );
+  const dir = deps.dir ?? getConfigDir();
+  let code: number;
   try {
-    return await run(candidate.command, startArgs);
+    code = await run(candidate.command, startArgs);
   } catch (error) {
+    markServingRuntimeDelegationFailed(candidate, dir, deps.now);
     log(`⚠️  Newer runtime failed to launch (${error instanceof Error ? error.message : String(error)}); serving this install instead.`);
     return null;
   }
+  if (code === 0) {
+    clearServingRuntimeDelegation(candidate, dir);
+    return code;
+  }
+  // A nonzero exit only counts as a delegation failure when the child never
+  // recorded itself: a refreshed servedAt means it did reach the bind boundary,
+  // and the death belongs to whatever killed a live server, not to the handoff.
+  const latest = readServingRuntimes(dir)
+    .find(entry => servingRuntimeCommandKey(entry.command) === servingRuntimeCommandKey(candidate.command));
+  if (latest !== undefined && latest.servedAt === candidate.servedAt) {
+    markServingRuntimeDelegationFailed(candidate, dir, deps.now);
+  } else {
+    clearServingRuntimeDelegation(candidate, dir);
+  }
+  return code;
 }
 
 /**
  * The `handleStart` gate: only a service child defers, and only before it binds.
- * A sibling owns nothing shared, and an interactive start picked its binary on PATH —
- * the manager's baked definition is the one place "which install serves" can drift.
+ * A sibling owns nothing shared, and an interactive start picked its binary on PATH.
+ * `OCX_SERVICE=1` alone is not the contract: the same flag reaches foreground
+ * claude/opencode children the proxy spawns, and those must never hand their
+ * process to another install. Managed children prove themselves with
+ * `OCX_SERVICE_MANAGED=1`; on Windows the wrapper proves it with the
+ * `OCX_WINDOWS_WRAPPER_PROTOCOL=1` marker on top of `OCX_SERVICE=1`.
  */
 export async function deferServiceChildToNewerRuntime(options: {
   readonly sibling: boolean;
@@ -326,6 +457,10 @@ export async function deferServiceChildToNewerRuntime(options: {
   readonly port?: number;
   readonly deps?: DeferToNewerRuntimeDeps;
 }): Promise<number | null> {
-  if (options.sibling || options.env.OCX_SERVICE !== "1") return null;
+  if (options.sibling
+    || (options.env.OCX_SERVICE_MANAGED !== "1"
+      && !(options.env.OCX_SERVICE === "1" && options.env[WINDOWS_WRAPPER_PROTOCOL_ENV] === "1"))) {
+    return null;
+  }
   return deferToNewerServiceRuntime(options.selfVersion, options.selfCommand, options.port, options.deps);
 }

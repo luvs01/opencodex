@@ -5,8 +5,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clearServingRuntimeDelegation,
   deferServiceChildToNewerRuntime,
   deferToNewerServiceRuntime,
+  markServingRuntimeDelegationFailed,
   probeServedRuntimeVersion,
   readServingRuntimes,
   recordServingRuntime,
@@ -242,6 +244,85 @@ describe("deferToNewerServiceRuntime", () => {
     expect(exit).toBeNull();
   });
 
+  test("a delegated child dying before it records itself marks the runtime for cooldown", async () => {
+    const dir = freshDir();
+    const { exe } = candidateSetup(dir);
+    let launches = 0;
+    const exit = await deferToNewerServiceRuntime("2.67.0", selfCommand, undefined, {
+      dir,
+      exists: () => true,
+      run: () => ({ status: 0, stdout: "opencodex 2.68.0", stderr: "" }),
+      runInherited: async () => { launches += 1; return 1; },
+      log: () => {},
+    });
+    expect(exit).toBe(1);
+    const marked = readServingRuntimes(dir).find(entry => entry.command[0] === exe);
+    expect(marked?.delegation?.failedCount).toBe(1);
+    const lines: string[] = [];
+    expect(await deferToNewerServiceRuntime("2.67.0", selfCommand, undefined, {
+      dir,
+      exists: () => true,
+      run: () => ({ status: 0, stdout: "opencodex 2.68.0", stderr: "" }),
+      runInherited: async () => { launches += 1; return 0; },
+      log: line => lines.push(line),
+    })).toBeNull();
+    expect(launches).toBe(1);
+    expect(lines.join("\n")).toContain("Skipping");
+  });
+
+  test("a delegated child that records itself is not marked after a nonzero exit", async () => {
+    const dir = freshDir();
+    const { exe } = candidateSetup(dir);
+    const exit = await deferToNewerServiceRuntime("2.67.0", selfCommand, undefined, {
+      dir,
+      exists: () => true,
+      run: () => ({ status: 0, stdout: "opencodex 2.68.0", stderr: "" }),
+      // The child reached the bind boundary, recorded a fresh serve, then died.
+      runInherited: async () => {
+        recordServingRuntime(record([exe], "2.68.0", "2026-09-28T01:00:00.000Z"), dir);
+        return 1;
+      },
+      log: () => {},
+    });
+    expect(exit).toBe(1);
+    const marked = readServingRuntimes(dir).find(entry => entry.command[0] === exe);
+    expect(marked?.delegation).toBeUndefined();
+  });
+
+  test("a clean delegated exit clears a stale delegation-failure mark", async () => {
+    const dir = freshDir();
+    const { exe } = candidateSetup(dir);
+    // The marker is aged past one cooldown so this attempt is allowed.
+    markServingRuntimeDelegationFailed(
+      readServingRuntimes(dir).find(entry => entry.command[0] === exe)!,
+      dir,
+      () => Date.now() - 16 * 60 * 1000,
+    );
+    const exit = await deferToNewerServiceRuntime("2.67.0", selfCommand, undefined, {
+      dir,
+      exists: () => true,
+      run: () => ({ status: 0, stdout: "opencodex 2.68.0", stderr: "" }),
+      runInherited: async () => 0,
+      log: () => {},
+    });
+    expect(exit).toBe(0);
+    const marked = readServingRuntimes(dir).find(entry => entry.command[0] === exe);
+    expect(marked?.delegation).toBeUndefined();
+  });
+
+  test("failure marks accumulate and refuse a mark whose servedAt is stale", () => {
+    const dir = freshDir();
+    const { exe } = candidateSetup(dir);
+    const entry = () => readServingRuntimes(dir).find(item => item.command[0] === exe)!;
+    markServingRuntimeDelegationFailed(entry(), dir);
+    markServingRuntimeDelegationFailed(entry(), dir);
+    expect(entry().delegation?.failedCount).toBe(2);
+    markServingRuntimeDelegationFailed({ ...entry(), servedAt: "1999-01-01T00:00:00.000Z" }, dir);
+    expect(entry().delegation?.failedCount).toBe(2);
+    clearServingRuntimeDelegation(entry(), dir);
+    expect(entry().delegation).toBeUndefined();
+  });
+
   test("command key canonicalizes Windows spellings of one binary", () => {
     const dir = freshDir();
     const exe = fakeBinary(dir, "OcX-Newer.EXE");
@@ -344,13 +425,26 @@ describe("deferServiceChildToNewerRuntime", () => {
       log: () => {},
     };
     const base = { selfVersion: "2.67.0", selfCommand, deps };
-    expect(await deferServiceChildToNewerRuntime({ ...base, sibling: true, env: { OCX_SERVICE: "1" } })).toBeNull();
+    expect(await deferServiceChildToNewerRuntime({ ...base, sibling: true, env: { OCX_SERVICE_MANAGED: "1" } })).toBeNull();
     expect(await deferServiceChildToNewerRuntime({ ...base, sibling: false, env: {} })).toBeNull();
+    // OCX_SERVICE=1 alone is a foreground marker (claude/opencode children carry it
+    // too), never the managed-service contract.
+    expect(await deferServiceChildToNewerRuntime({ ...base, sibling: false, env: { OCX_SERVICE: "1" } })).toBeNull();
     expect(await deferServiceChildToNewerRuntime({
       ...base,
       sibling: false,
-      env: { OCX_SERVICE: "1" },
+      env: { OCX_SERVICE_MANAGED: "1" },
       deps: { ...deps, runInherited: async () => 42 },
     })).toBe(42);
+    // Windows managed children use the wrapper protocol marker instead. A fresh dir
+    // keeps the previous case's delegation-failure mark from skipping the candidate.
+    const dir2 = freshDir();
+    recordServingRuntime(record([fakeBinary(dir2, "ocx-newer.exe")], "2.68.0"), dir2);
+    expect(await deferServiceChildToNewerRuntime({
+      ...base,
+      sibling: false,
+      env: { OCX_SERVICE: "1", OCX_WINDOWS_WRAPPER_PROTOCOL: "1" },
+      deps: { ...deps, dir: dir2, runInherited: async () => 43 },
+    })).toBe(43);
   });
 });
