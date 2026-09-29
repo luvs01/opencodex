@@ -314,14 +314,15 @@ describe("family-based wire model resolution", () => {
       modelUid: "axis-extra",
       displayName: "axis-extra",
       familyUid: "wide",
-      familyAxes: { A: { order: 1 }, B: { order: 2 }, C: { order: 1 } },
+      familyAxes: { A: { order: 1 }, B: { order: 2 }, C: { order: 1 }, D: { order: 3 } },
     };
     // The anchor itself always wins while listed: the ranking claim is about the
     // members it cannot see, so exclude it and pass it explicitly.
     const members = [missing, extra, exact];
     expect(selectDevinFamilyMember(members, {}, anchor)?.modelUid).toBe("axis-exact");
-    // Without the exact row, a member missing a target axis (mismatches = baseline)
-    // still beats one exposing an extra axis the anchor never declared (baseline + 1).
+    // Without the exact row, a member missing one target axis scores baseline - 1,
+    // while a member matching every target but exposing two extra axes scores
+    // 0 + 2 — unequal mismatch counts, so the ordering is proven rather than a tie.
     expect(selectDevinFamilyMember([missing, extra], {}, anchor)?.modelUid).toBe("axis-missing");
   });
 });
