@@ -10,7 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { resolveWireModelUidForTests } from "../../src/adapters/devin";
-import { fetchDevinUsableModels } from "../../src/adapters/devin/live-models";
+import { fetchDevinUsableModels, selectDevinFamilyMember } from "../../src/adapters/devin/live-models";
 import { parseCatalogBuffer, setCachedCatalogForTests, type CacheEntry } from "../../src/adapters/devin/cloud-direct/catalog";
 import { encodeMessage, encodeString, encodeVarintField } from "../../src/adapters/devin/cloud-direct/wire";
 
@@ -258,6 +258,19 @@ describe("family-based wire model resolution", () => {
     ];
     expect(await resolve(catalogOf(rows), "devin-test-think", "none")).toBe("think-off");
     expect(await resolve(catalogOf(rows), "devin-test-think", "high")).toBe("think-high");
+  });
+
+  test("scores distinct family axes without a members-by-axes cross-product", () => {
+    const members = Array.from({ length: 12_000 }, (_, index) => ({
+      modelUid: `wide-${index}`,
+      displayName: `wide-${index}`,
+      familyUid: "wide",
+      familyAxes: { [`Axis ${index}`]: { order: 1 } },
+      isFamilyDefault: index === 0,
+    }));
+    const started = performance.now();
+    expect(selectDevinFamilyMember(members, {})?.modelUid).toBe("wide-0");
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });
 
