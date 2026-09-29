@@ -75,7 +75,9 @@ export function realCursorLocalHintDeps(): CursorLocalHintDeps {
         if (done) break;
         size += value.byteLength;
         if (size > UPDATE_MANIFEST_MAX_BYTES) {
-          await reader.cancel();
+          // Best-effort discard: awaiting cancel() could hang on a stalled source
+          // even though AbortSignal.timeout already bounds the request itself.
+          void reader.cancel().catch(() => {});
           throw new Error("Update manifest exceeds byte limit");
         }
         chunks.push(value);
