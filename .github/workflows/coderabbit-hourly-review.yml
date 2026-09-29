@@ -45,10 +45,10 @@ jobs:
             }
             function classify(pr, comments, reviews, now) {
               if (pr.state !== 'open' || pr.draft || pr.user?.login !== 'luvs01') return 'excluded';
-              if (now - Date.parse(pr.updated_at) < 15 * 60000) return 'recent-activity';
               if (/@coderabbitai\s+(?:ignore|pause)\b/i.test(pr.body ?? '')) return 'paused';
               const bot = comments.filter(c => c.user?.login === BOT);
               if (bot.some(c => /review in progress by coderabbit\.ai/i.test(c.body))) return 'review-running';
+              if (now - Date.parse(pr.updated_at) < 15 * 60000) return 'recent-activity';
               if (reviews.some(r => r.user?.login === BOT && r.commit_id === pr.head.sha && r.submitted_at)) return 'head-reviewed';
               if (bot.some(c => c.body?.includes(`change_assessment_commit:"${pr.head.sha}"`) && /recent_review_start/.test(c.body))) return 'head-reviewed';
               if (bot.some(c => rateLimitUntil(c) > now)) return 'provider-cooldown';
