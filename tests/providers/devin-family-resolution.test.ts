@@ -289,6 +289,41 @@ describe("family-based wire model resolution", () => {
     // bound only has to distinguish those two orders, not measure fast hardware.
     expect(performance.now() - started).toBeLessThan(5_000);
   });
+
+  test("ranks an exact axis match ahead of missing and extra axes", () => {
+    const anchor = {
+      modelUid: "axis-anchor",
+      displayName: "axis-anchor",
+      familyUid: "wide",
+      familyAxes: { A: { order: 1 }, B: { order: 2 } },
+      isFamilyDefault: true,
+    };
+    const exact = {
+      modelUid: "axis-exact",
+      displayName: "axis-exact",
+      familyUid: "wide",
+      familyAxes: { A: { order: 1 }, B: { order: 2 } },
+    };
+    const missing = {
+      modelUid: "axis-missing",
+      displayName: "axis-missing",
+      familyUid: "wide",
+      familyAxes: { A: { order: 1 } },
+    };
+    const extra = {
+      modelUid: "axis-extra",
+      displayName: "axis-extra",
+      familyUid: "wide",
+      familyAxes: { A: { order: 1 }, B: { order: 2 }, C: { order: 1 } },
+    };
+    // The anchor itself always wins while listed: the ranking claim is about the
+    // members it cannot see, so exclude it and pass it explicitly.
+    const members = [missing, extra, exact];
+    expect(selectDevinFamilyMember(members, {}, anchor)?.modelUid).toBe("axis-exact");
+    // Without the exact row, a member missing a target axis (mismatches = baseline)
+    // still beats one exposing an extra axis the anchor never declared (baseline + 1).
+    expect(selectDevinFamilyMember([missing, extra], {}, anchor)?.modelUid).toBe("axis-missing");
+  });
 });
 
 describe("suffix fallback without family metadata never crosses families", () => {
