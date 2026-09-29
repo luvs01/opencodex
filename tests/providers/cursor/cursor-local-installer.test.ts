@@ -59,6 +59,37 @@ describe("buildCursorLocalInstallerHint", () => {
     expect(hint).toEqual({ available: false, url: null, version: null, reason: "unusable-response" });
   });
 
+  test("oversized manifest fields are rejected before they can be cached", async () => {
+    for (const manifest of [
+      { version: "v".repeat(257), url: REPORTED_INSTALLER },
+      { version: "3.21.18", url: `https://downloads.cursor.com/local-mode/${"x".repeat(4096)}` },
+    ]) {
+      resetCursorLocalInstallerCacheForTests();
+      const hint = await buildCursorLocalInstallerHint(
+        { regularInstalled: true, privateInferenceInstalled: false },
+        depsWith(manifest),
+      );
+      expect(hint).toEqual({ available: false, url: null, version: null, reason: "unusable-response" });
+    }
+  });
+
+  test("real deps stop reading a decoded response above the manifest byte limit", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => Promise.resolve(new Response(JSON.stringify({
+      version: "v".repeat(70 * 1024),
+      url: REPORTED_INSTALLER,
+    })))) as typeof fetch;
+    try {
+      const hint = await buildCursorLocalInstallerHint(
+        { regularInstalled: true, privateInferenceInstalled: false },
+        { ...realCursorLocalHintDeps(), platform: "win32", arch: "x64" },
+      );
+      expect(hint).toEqual({ available: false, url: null, version: null, reason: "unreachable" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("no regular install resolves nothing without any network call", async () => {
     const hint = await buildCursorLocalInstallerHint(
       { regularInstalled: false, privateInferenceInstalled: false },
