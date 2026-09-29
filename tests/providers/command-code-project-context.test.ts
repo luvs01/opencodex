@@ -85,12 +85,17 @@ describe("loadCommandCodeProjectContext", () => {
     expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
   });
 
-  test("relative containment includes descendants of a filesystem root", () => {
+  test("canonical containment includes descendants of a filesystem root", () => {
     const fsRoot = parse(tmpdir()).root;
     expect(isContainedCanonicalPath(fsRoot, join(fsRoot, "AGENTS.md"))).toBe(true);
     const nested = join(fsRoot, "project");
     expect(isContainedCanonicalPath(nested, join(nested, "..hidden"))).toBe(true);
     expect(isContainedCanonicalPath(nested, join(fsRoot, "project-sibling", "SKILL.md"))).toBe(false);
+  });
+
+  test("Windows containment preserves case-sensitive directory identities", () => {
+    expect(isContainedCanonicalPath("C:\\work\\project", "C:\\work\\project\\AGENTS.md", "\\")).toBe(true);
+    expect(isContainedCanonicalPath("C:\\work\\project", "C:\\work\\PROJECT\\secret.txt", "\\")).toBe(false);
   });
 
   test("stalled asynchronous path metadata obeys the overall deadline", async () => {
