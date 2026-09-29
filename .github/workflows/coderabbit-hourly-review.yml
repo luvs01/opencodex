@@ -1,0 +1,117 @@
+name: CodeRabbit hourly review queue
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Inspect eligibility without posting a review request
+        type: boolean
+        default: true
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: coderabbit-hourly-review-queue
+  cancel-in-progress: false
+jobs:
+  request-review:
+    if: github.repository == 'luvs01/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Request at most one eligible incremental review
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          retries: 0
+          script: |
+            const HOUR = 3600000;
+            const BOT = 'coderabbitai[bot]';
+            const MARKER = 'ocx-coderabbit-hourly';
+            function isRequest(c) {
+              return /^\s*@coderabbitai\s+(?:full\s+)?review\b/i.test(c.body ?? '')
+                && (c.user?.login === 'luvs01' || (c.user?.login === 'github-actions[bot]' && c.body.includes(MARKER)));
+            }
+            function rateLimitUntil(c) {
+              const body = c.body ?? '';
+              if (c.user?.login !== BOT || !/rate limited by coderabbit\.ai|review limit reached|rate limit exceeded/i.test(body)) return 0;
+              const wait = /please wait([^\n]{0,220})/i.exec(body.replace(/\*/g, ''))?.[1];
+              if (!wait) return Date.parse(c.updated_at) + HOUR;
+              let ms = 0;
+              for (const m of wait.matchAll(/(\d+(?:\.\d+)?)\s*(hours?|minutes?|seconds?)/gi)) {
+                ms += Number(m[1]) * (/hour/i.test(m[2]) ? HOUR : /minute/i.test(m[2]) ? 60000 : 1000);
+              }
+              return Date.parse(c.updated_at) + Math.max(HOUR, ms);
+            }
+            function classify(pr, comments, reviews, now) {
+              if (pr.state !== 'open' || pr.draft || pr.user?.login !== 'luvs01') return 'excluded';
+              if (now - Date.parse(pr.updated_at) < 15 * 60000) return 'recent-activity';
+              if (/@coderabbitai\s+(?:ignore|pause)\b/i.test(pr.body ?? '')) return 'paused';
+              const bot = comments.filter(c => c.user?.login === BOT);
+              if (bot.some(c => /review in progress by coderabbit\.ai/i.test(c.body))) return 'review-running';
+              if (reviews.some(r => r.user?.login === BOT && r.commit_id === pr.head.sha && r.submitted_at)) return 'head-reviewed';
+              if (bot.some(c => c.body?.includes(`change_assessment_commit:"${pr.head.sha}"`) && /recent_review_start/.test(c.body))) return 'head-reviewed';
+              if (bot.some(c => rateLimitUntil(c) > now)) return 'provider-cooldown';
+              const requests = comments.filter(c => isRequest(c));
+              const ours = requests.filter(c => c.body.includes(`head=${pr.head.sha}`)).sort((a,b) => Date.parse(b.created_at)-Date.parse(a.created_at))[0];
+              if (ours) {
+                const refusal = bot.some(c => Date.parse(c.updated_at) >= Date.parse(ours.created_at) && rateLimitUntil(c) > 0);
+                if (!refusal) return 'request-already-posted';
+              }
+              const manual = requests.filter(c => !c.body.includes(MARKER)).at(-1);
+              if (manual && !bot.some(c => Date.parse(c.updated_at) >= Date.parse(manual.created_at))) return 'manual-request-pending';
+              const lastControl = comments.filter(c => c.user?.type !== 'Bot' && /^\s*@coderabbitai\s+(pause|resume)\b/i.test(c.body ?? '')).at(-1);
+              if (lastControl && /@coderabbitai\s+pause\b/i.test(lastControl.body)) return 'paused';
+              return 'eligible';
+            }
+            async function run({github, context, core, dryRun = true, now = Date.now()}) {
+              const {owner, repo} = context.repo;
+              if (owner !== 'luvs01' || repo !== 'opencodex') throw new Error('Fork-only workflow');
+              async function pages(method, params, cap = 10) {
+                const result = [];
+                for (let page=1; page<=cap; page++) {
+                  const {data} = await method({...params, per_page:100, page});
+                  if (!Array.isArray(data)) throw new Error('Unexpected paginated response');
+                  result.push(...data);
+                  if (data.length < 100) return result;
+                }
+                throw new Error('Pagination cap reached; no review requested');
+              }
+              const recent = await pages(github.rest.issues.listCommentsForRepo, {owner,repo,since:new Date(now-HOUR).toISOString(),sort:'created',direction:'desc'});
+              const latest = recent.filter(isRequest).reduce((n,c) => Math.max(n, Date.parse(c.created_at)),0);
+              if (now-latest < HOUR) { core.info('Repository-wide one-hour cooldown; no request.'); return {requested:0,reason:'hourly-cooldown'}; }
+              const pulls = await pages(github.rest.pulls.list, {owner,repo,state:'open',sort:'updated',direction:'asc'});
+              const examined = [];
+              let next;
+              for (const pr of pulls) {
+                if (pr.draft || pr.user?.login !== owner) continue;
+                const comments = await pages(github.rest.issues.listComments, {owner,repo,issue_number:pr.number});
+                const reviews = await pages(github.rest.pulls.listReviews, {owner,repo,pull_number:pr.number});
+                const reason = classify(pr,comments,reviews,now);
+                examined.push({number:pr.number,reason});
+                if (reason === 'review-running' || reason === 'provider-cooldown') {
+                  core.info(JSON.stringify({requested:0,reason:'existing-review-running',number:pr.number}));
+                  return {requested:0,reason:'existing-review-running'};
+                }
+                if (reason === 'eligible' && !next) next=pr;
+              }
+              core.info(JSON.stringify({dryRun,examined,selected:next?.number ?? null}));
+              if (!next || dryRun) return {requested:0,selected:next?.number ?? null,reason:dryRun?'dry-run':'no-eligible-head'};
+              // Re-read just before writing. Never execute or check out PR code.
+              const {data:current} = await github.rest.pulls.get({owner,repo,pull_number:next.number});
+              const comments = await pages(github.rest.issues.listComments, {owner,repo,issue_number:next.number});
+              const reviews = await pages(github.rest.pulls.listReviews, {owner,repo,pull_number:next.number});
+              if (current.head.sha !== next.head.sha || classify(current,comments,reviews,Date.now()) !== 'eligible') return {requested:0,reason:'candidate-changed'};
+              const fresh = await pages(github.rest.issues.listCommentsForRepo, {owner,repo,since:new Date(Date.now()-HOUR).toISOString(),sort:'created',direction:'desc'});
+              if (fresh.some(c => isRequest(c) && Date.now()-Date.parse(c.created_at)<HOUR)) return {requested:0,reason:'concurrent-request'};
+              const body=`@coderabbitai review\n\n<!-- ${MARKER} head=${current.head.sha} -->`;
+              // One POST only. A failed/ambiguous response is not retried; next run reads the marker.
+              const {data:posted} = await github.rest.issues.createComment({owner,repo,issue_number:current.number,body});
+              const {data:verified} = await github.rest.issues.getComment({owner,repo,comment_id:posted.id});
+              if (verified.body !== body) throw new Error('Review request readback mismatch');
+              await core.summary.addHeading('CodeRabbit review requested').addRaw(`PR #${current.number}, head ${current.head.sha}. One incremental request; no code, label, draft or approval changes.`).write();
+              return {requested:1,number:current.number,commentId:posted.id};
+            }
+            
+            const result = await run({github, context, core, dryRun: context.eventName === "workflow_dispatch" && context.payload.inputs?.dry_run !== "false"});
+            core.info(JSON.stringify(result));
