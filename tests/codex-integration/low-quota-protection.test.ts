@@ -9,7 +9,7 @@ import { createLowQuotaEventLedger } from "../../src/codex/low-quota-events";
 import { registerCodexLowQuotaProtection, type LowQuotaRegistration } from "../../src/codex/low-quota-protection";
 import { setCodexAccountPaused } from "../../src/codex/account-pause";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/account-id";
-import { saveCodexAccountCredential } from "../../src/codex/account-store";
+import { capturePoolQuotaWriter, removeCodexAccountCredential, saveCodexAccountCredential } from "../../src/codex/account-store";
 import { commitPoolQuotaResponse } from "../../src/codex/auth-api/pool-quota-probe";
 import { captureConfigGeneration } from "../../src/lib/state-store-sweeper";
 import { applyAccountQuotaFromUpstreamHeaders, clearAccountQuota, getAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
@@ -307,6 +307,26 @@ describe("low quota protection", () => {
     applyAccountQuotaFromUpstreamHeaders(ACCOUNT_A, headers(90));
     expect(config.pausedCodexAccountIds).toContain(ACCOUNT_A);
     await registration.flush();
+  });
+
+  test("a stale pool credential response cannot pause its replacement", () => {
+    const config = configWith(protection({ actions: { pause: true, notify: false } }));
+    const registration = register(config, { persist: () => {} });
+    const first = { accessToken: "first-access", refreshToken: "first-refresh",
+      expiresAt: Date.now() + 60_000, chatgptAccountId: "first-chatgpt" };
+    const generation = saveCodexAccountCredential(ACCOUNT_A, first);
+    const writer = capturePoolQuotaWriter(ACCOUNT_A, { ...first, generation });
+    expect(writer).toBeDefined();
+    removeCodexAccountCredential(ACCOUNT_A);
+    saveCodexAccountCredential(ACCOUNT_A, { ...first, accessToken: "replacement-access" });
+
+    applyAccountQuotaFromUpstreamHeaders(ACCOUNT_A, new Headers({
+      "x-codex-primary-used-percent": "90", "x-codex-primary-window-minutes": "10080",
+    }), captureConfigGeneration(), undefined, { poolWriter: writer });
+
+    expect(getAccountQuota(ACCOUNT_A)?.weeklyPercent).toBe(90);
+    expect(config.pausedCodexAccountIds).toBeUndefined();
+    expect(registration.hasPendingSave()).toBe(false);
   });
 
   test("invalid raw legacy weekly usage stays display-only while valid usage pauses", async () => {

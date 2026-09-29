@@ -298,7 +298,9 @@ export function setAccountQuotaFromParsed(
   hydrateAccountQuotasFromDisk();
   const legacyExisting = accountQuota.get(accountId);
   const updatedAt = Date.now();
-  if (historyEvidence && historyEvidence.writer.accountId === accountId && isPoolQuotaWriterLive(historyEvidence.writer)) {
+  const livePoolEvidence = !historyEvidence || (historyEvidence.writer.accountId === accountId
+    && isPoolQuotaWriterLive(historyEvidence.writer));
+  if (historyEvidence && livePoolEvidence) {
     quotaHistory.append(historyEvidence.writer, { observedAt: historyEvidence.observedAt, source: historyEvidence.source,
       credentialGeneration: historyEvidence.writer.credentialGeneration, windows: historyWindows(historyEvidence.raw),
     }, updatedAt);
@@ -323,7 +325,7 @@ export function setAccountQuotaFromParsed(
   schedulePersistAccountQuotas();
   // Credits carry the previous usage tuple; they must not refresh its observation clock.
   if (!(quota.resetCredits !== undefined && !snapshotHasUsage(quota))) {
-    if (!isMain && policyQuota) observeCodexLowQuota(accountId, policyQuota);
+    if (!isMain && policyQuota && livePoolEvidence) observeCodexLowQuota(accountId, policyQuota);
     notifyCodexQuotaSnapshot(accountId, next);
   }
 }
