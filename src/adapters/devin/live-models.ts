@@ -202,8 +202,12 @@ function effortIndex(rung: string | undefined): number {
   return rung === undefined ? -1 : FAMILY_EFFORT_LADDER.indexOf(rung);
 }
 
-function axisMismatchCount(axes: ModelCatalogEntry["familyAxes"], targets: Record<string, number>): number {
-  let mismatches = Object.values(targets).filter((order) => order !== 0).length;
+function axisMismatchCount(
+  axes: ModelCatalogEntry["familyAxes"],
+  targets: Record<string, number>,
+  baseline: number,
+): number {
+  let mismatches = baseline;
   for (const [axis, value] of Object.entries(axes ?? {})) {
     if (isEffortAxis(axis)) continue;
     const target = targets[axis] ?? 0;
@@ -234,11 +238,15 @@ function closestMember(
   effort: string | undefined,
 ): ModelCatalogEntry | undefined {
   const want = effortIndex(effort);
+  // The baseline counts only `targets`, so scan it once: recomputing it per member
+  // made a wide anchor (many exposed axes) quadratic in members x axes.
+  let mismatchBaseline = 0;
+  for (const order of Object.values(targets)) if (order !== 0) mismatchBaseline++;
   let best: ModelCatalogEntry | undefined;
   let bestScore: number[] | undefined;
   for (const member of members) {
     const axes = member.familyAxes ?? {};
-    const mismatches = axisMismatchCount(axes, targets);
+    const mismatches = axisMismatchCount(axes, targets, mismatchBaseline);
     const have = effortIndex(devinFamilyEffortOf(member));
     const lowered = want > 0 && have < want ? 1 : 0;
     const distance = want < 0 ? 0

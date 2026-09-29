@@ -261,16 +261,33 @@ describe("family-based wire model resolution", () => {
   });
 
   test("scores distinct family axes without a members-by-axes cross-product", () => {
-    const members = Array.from({ length: 12_000 }, (_, index) => ({
-      modelUid: `wide-${index}`,
-      displayName: `wide-${index}`,
-      familyUid: "wide",
-      familyAxes: { [`Axis ${index}`]: { order: 1 } },
-      isFamilyDefault: index === 0,
-    }));
+    // The anchor row carries the wide axis set: the mismatch baseline scans `targets`,
+    // which the anchor fills. With per-member baseline recomputation this case is
+    // members x axes (~144M iterations); hoisted, it is anchor axes + member axes.
+    const wideAxes = Object.fromEntries(
+      Array.from({ length: 12_000 }, (_, index) => [`Anchor ${index}`, { order: 1 }]),
+    );
+    const members = [
+      {
+        modelUid: "wide-anchor",
+        displayName: "wide-anchor",
+        familyUid: "wide",
+        familyAxes: wideAxes,
+        isFamilyDefault: true,
+      },
+      ...Array.from({ length: 12_000 }, (_, index) => ({
+        modelUid: `wide-${index}`,
+        displayName: `wide-${index}`,
+        familyUid: "wide",
+        familyAxes: { [`Axis ${index}`]: { order: 1 } },
+      })),
+    ];
     const started = performance.now();
-    expect(selectDevinFamilyMember(members, {})?.modelUid).toBe("wide-0");
-    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(selectDevinFamilyMember(members, {})?.modelUid).toBe("wide-anchor");
+    // Wall-clock bound, generous on purpose: the hoist makes this ~36k axis touches
+    // (ms even on a contended runner), while the per-member rescan needs ~144M — the
+    // bound only has to distinguish those two orders, not measure fast hardware.
+    expect(performance.now() - started).toBeLessThan(5_000);
   });
 });
 
