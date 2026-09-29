@@ -704,6 +704,35 @@ describe("loadCommandCodeProjectContext", () => {
     }
   });
 
+  test("rejects a file whose post-open canonical path changes case", async () => {
+    // Windows-only delta: the post-open check compares the resolved path to the
+    // pre-open canonical path byte-for-byte now. Containment alone cannot catch a
+    // case-only rename because the parent prefix stays identical, so a filename
+    // whose realpath changes case between canonicalization and open is refused.
+    if (process.platform !== "win32") return;
+    const root = makeTempDir("ocx-cc-ctx-case-swap-");
+    const skillFile = join(root, ".commandcode", "skills", "case-skill", "SKILL.md");
+    try {
+      writeSkill(root, ".commandcode/skills", "case-skill", "case body");
+      setCommandCodeBeforeOpenForTests(path => {
+        if (path !== skillFile) return;
+        realpathMock.mockImplementation(async (p, opts) => {
+          const resolved = await realRealpath(p, opts);
+          return typeof resolved === "string" && resolved === skillFile
+            ? resolved.replace(/SKILL\.md$/, "skill.md")
+            : resolved;
+        });
+      });
+      const result = await loadCommandCodeProjectContext(root);
+      expect(result.skills).toBeNull();
+      expect(JSON.stringify(result)).not.toContain("case body");
+    } finally {
+      setCommandCodeBeforeOpenForTests(undefined);
+      realpathMock.mockImplementation(realRealpath);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("omits unreadable AGENTS.md when chmod is enforced", async () => {
     if (process.platform === "win32") return;
     const root = makeTempDir("ocx-cc-ctx-unreadable-");
