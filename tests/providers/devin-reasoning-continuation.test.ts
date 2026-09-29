@@ -26,6 +26,8 @@ describe("Devin reasoning continuation across turns", () => {
     const frame = Buffer.concat([encodeString(10, SEALED), encodeString(21, "sealed")]);
     expect([...decodeChatFrame(frame)]).toContainEqual({ kind: "reasoning_signature", signature: SEALED, signatureType: "sealed" });
     expect([...decodeChatFrame(encodeString(10, SEALED))]).toContainEqual({ kind: "reasoning_signature", signature: SEALED });
+    expect([...decodeChatFrame(Buffer.concat([encodeString(10, SEALED), encodeString(21, "x".repeat(4_097))]))])
+      .toContainEqual({ kind: "reasoning_signature", signature: SEALED });
   });
 
   test("the stored signature carries its type and an older stored signature still replays", () => {
