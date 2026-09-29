@@ -275,16 +275,19 @@ describe("low quota protection", () => {
   test("invalid raw WHAM usage stays display-only while valid usage pauses", async () => {
     const config = configWith(protection({ actions: { pause: true, notify: false } }));
     const registration = register(config, { persist: () => {} });
-    const generation = saveCodexAccountCredential(ACCOUNT_A, {
+    const credential = {
       accessToken: "fixture-access", refreshToken: "fixture-refresh",
       expiresAt: Date.now() + 60_000, chatgptAccountId: "fixture-chatgpt-account",
-    });
+    };
+    const generation = saveCodexAccountCredential(ACCOUNT_A, credential);
+    const poolWriter = capturePoolQuotaWriter(ACCOUNT_A, { ...credential, generation });
+    expect(poolWriter).toBeDefined();
     const publish = (usedPercent: number) => commitPoolQuotaResponse(
       new Response(JSON.stringify({ rate_limit: { primary_window: {
         used_percent: usedPercent, limit_window_seconds: 604_800,
       } } }), { status: 200 }),
       { accountId: ACCOUNT_A, existing: null, configuredPlan: "plus", generation,
-        writerGeneration: captureConfigGeneration() },
+        writerGeneration: captureConfigGeneration(), poolWriter },
     );
     await publish(150);
     expect(getAccountQuota(ACCOUNT_A)?.weeklyPercent).toBe(100);
@@ -324,6 +327,27 @@ describe("low quota protection", () => {
       "x-codex-primary-used-percent": "90", "x-codex-primary-window-minutes": "10080",
     }), captureConfigGeneration(), undefined, { poolWriter: writer });
 
+    expect(getAccountQuota(ACCOUNT_A)?.weeklyPercent).toBe(90);
+    expect(config.pausedCodexAccountIds).toBeUndefined();
+    expect(registration.hasPendingSave()).toBe(false);
+  });
+
+  test("a pool response whose writer capture failed cannot pause its replacement", () => {
+    const config = configWith(protection({ actions: { pause: true, notify: false } }));
+    const registration = register(config, { persist: () => {} });
+    const first = { accessToken: "first-access", refreshToken: "first-refresh",
+      expiresAt: Date.now() + 60_000, chatgptAccountId: "first-chatgpt" };
+    saveCodexAccountCredential(ACCOUNT_A, first);
+    // The credential is replaced before the delayed response lands, exactly when a
+    // dispatch-time capture could no longer produce a writer for the retired credential.
+    removeCodexAccountCredential(ACCOUNT_A);
+    saveCodexAccountCredential(ACCOUNT_A, { ...first, accessToken: "replacement-access" });
+
+    applyAccountQuotaFromUpstreamHeaders(ACCOUNT_A, new Headers({
+      "x-codex-primary-used-percent": "90", "x-codex-primary-window-minutes": "10080",
+    }), captureConfigGeneration(), undefined, { poolResponse: true });
+
+    // The display snapshot still commits; only the policy observation fails closed.
     expect(getAccountQuota(ACCOUNT_A)?.weeklyPercent).toBe(90);
     expect(config.pausedCodexAccountIds).toBeUndefined();
     expect(registration.hasPendingSave()).toBe(false);
