@@ -335,6 +335,13 @@ describe("redactSecretString", () => {
       .toBe('<field data-name="authorization">public-status</field>');
   });
 
+  test("many unterminated non-credential tags are scanned in bounded time", () => {
+    const input = "<a ".repeat(8_000);
+    const started = performance.now();
+    expect(redactSecretString(input)).toBe(input);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   test("a multipart credential part is masked through the rest of the body", () => {
     // Line-based masking left a multi-line body and the no-blank-line shape
     // partly intact, and stopping at the first `--` trusted an attacker-chosen
