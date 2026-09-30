@@ -1,5 +1,14 @@
 # GUI And Management API
 
+The optional Windows compatibility runtime uses confirmed local GUI-session commands;
+raw admin-token and remote ingress mutations are refused. Its start/stop/launch and
+three-minute account-UI trial follow the [native compatibility contract](clients/codex-desktop.md#optional-compatibility-runtime).
+The lazy Codex Set desktop tab uses the machine API target and follows the
+[dashboard consent and stale-response contract](clients/codex-desktop.md#dashboard-controls).
+Runtime management and proxy startup share a single owner and register awaited shutdown.
+The desktop compatibility settings endpoint binds each local GUI write to the displayed
+field revision; no runtime action is triggered by saving the next-start preference.
+
 `src/server/management/oauth-account-routes.ts` exposes Anthropic `routes` through both unified `/api/pool/settings` and legacy `/api/oauth/accounts/pool`. Omitted rules survive other setting writes, `null` clears them, and other pool kinds reject supplied rules. The unified DTO declares `routes` supported only for Anthropic and reports null otherwise. Both Anthropic settings GETs validate saved rules before projection: malformed hand edits yield `routes: null` plus `routesError` without changing the stored value; valid and absent rules omit that diagnostic. Config and management responses retain route names; request logs use only the rule’s 1-based `route:#<n>` position. `src/cli/account-extended.ts` reads, replaces and clears these rules with `ocx account routes anthropic`; the server validates content.
 
 The provider management API validates `modelContextTiers` as a strict per-model map,
@@ -68,6 +77,8 @@ dashboard or management responses. Embedding the dashboard in an iframe is inten
 unsupported; deployments that previously relied on such embedding must open it as a top-level page.
 
 ## Authentication boundaries
+
+Codex compatibility certificate setup follows the [certificate setup API](clients/codex-desktop.md#certificate-setup-api): status is read-only; key/trust mutations require the actual local GUI-session principal, explicit confirmation and an exact fingerprint for trust changes. The endpoint does not enable a relay, change Codex login or restart the app.
 
 Kiro management login starts the native device flow only when `POST /api/oauth/login`
 supplies `method: "builder-id"`, `"google"`, or `"github"`. A method-less request retains
