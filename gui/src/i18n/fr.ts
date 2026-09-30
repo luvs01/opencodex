@@ -6,6 +6,7 @@ import type { TKey } from "./en";
  */
 export const fr: Record<TKey, string> = {
   ...desktopCompatibilityCopy("fr"),
+  "pws.anthropicAccountThresholdHint": "Remplace le seuil par défaut du pool Claude. 0 désactive le basculement selon l’utilisation uniquement pour ce compte ; la pause et la reprise après limitation restent actives.",
   "kiroLogin.title": "Se connecter à Kiro",
   "kiroLogin.chooseMethod": "Choisir une méthode de connexion",
   "kiroLogin.cli": "Importer avec Kiro CLI",

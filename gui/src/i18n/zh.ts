@@ -6,6 +6,7 @@ import type { TKey } from "./en";
  */
 export const zh: Record<TKey, string> = {
   ...desktopCompatibilityCopy("zh"),
+  "pws.anthropicAccountThresholdHint": "覆盖 Claude 池默认阈值。0 仅禁用此账户的按用量切换；暂停和速率限制恢复仍然生效。",
   "kiroLogin.title": "登录 Kiro",
   "kiroLogin.chooseMethod": "选择登录方式",
   "kiroLogin.cli": "从 Kiro CLI 导入",

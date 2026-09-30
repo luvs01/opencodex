@@ -7,6 +7,7 @@ import type { TKey } from "./en";
  */
 export const de: Record<TKey, string> = {
   ...desktopCompatibilityCopy("de"),
+  "pws.anthropicAccountThresholdHint": "Überschreibt den Standard des Claude-Pools. 0 deaktiviert den nutzungsbasierten Wechsel nur für dieses Konto; Pause und Wiederherstellung bei Ratenlimits gelten weiterhin.",
   "kiroLogin.title": "Bei Kiro anmelden",
   "kiroLogin.chooseMethod": "Anmeldemethode wählen",
   "kiroLogin.cli": "Mit Kiro CLI anmelden",

@@ -55,6 +55,12 @@ transport; it does not infer subscription attribution from the inbound protocol.
   tool message as the anchor.
 - **Rewrites Codex's GPT-5 identity prompt** to a model-agnostic intro so routed models don't claim to
   be OpenAI.
+- For translated `Qwen3.8-27B` requests, a text-only developer reminder after the leading system
+  message stays in its conversation slot but is sent as `user`. The model's
+  [chat template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja)
+  rejects later `system` messages and does not accept `developer`, while later `user` messages
+  are valid. This preserves order but cannot preserve developer-role precedence. Other models
+  keep their configured developer-role behavior; native Chat passthrough is unchanged.
 - **Clamps `reasoning_effort`** to the model's advertised subset when an exact tier is unavailable;
   `xhigh` and `max` remain distinct labels unless a provider explicitly configures an alias. The
   adapter **omits it entirely** for ids in `provider.noReasoningModels`.
@@ -214,7 +220,9 @@ a fresh session ID. Recovery and cached-history replay preserve this classificat
 The API-key `commandcode` provider uses Chat Completions for most model ids and the
 Anthropic Messages adapter (`x-api-key`) for `claude-*` ids, which Command Code serves
 only on `/provider/v1/messages`; the pin applies only while the provider points at that
-endpoint. It supports forwarding `prompt_cache_key`; this is separate
+endpoint. The `tokenlab` provider uses the same endpoint-bound pin for `claude-*` ids, which
+TokenLab declares for Chat and Messages only, on `https://api.tokenlab.sh/v1/messages`.
+Command Code supports forwarding `prompt_cache_key`; this is separate
 from the OAuth adapter's session header and does not guarantee a provider cache hit.
 The OAuth `command-code` preset streams `/alpha/generate` as NDJSON. MiMo tool-call
 markup echoed by the gateway as text is removed when it duplicates a real call. Markup
@@ -526,11 +534,14 @@ compatibility pair: `agent.v1.AgentService/RunSSE` for server output and
   Foreground `shellArgs` and `shellStreamArgs` are an exception: both are rejected before spawn
   on every platform until kernel-backed descendant ownership is available. Use client shell tools;
   background-shell execution and other native operations retain their existing policy.
-- The denial reply is a silent redirect whose wording follows the request catalog. A catalog that
-  carries `shell_command`/`exec_command` or a unified `exec` keeps the bridge wording; a catalog
-  that carries neither — an orchestrator client exposing only its own Responses tools, for example —
-  is redirected to the request's actual wire names, so the model is pointed at a tool that exists
-  rather than at an alias it cannot see.
+- The denial reply is a silent redirect whose wording follows the request catalog.
+  In code mode — a freeform unified `exec` and no bare shell bridge — the redirect points inside `exec`, where
+  shell, file, search, and fetch are nested `tools.<name>(...)` helpers of the JavaScript cell,
+  and never recommends the top-level shell bridge code mode does not expose. A flat catalog that
+  carries `shell_command`/`exec_command` or a non-freeform unified `exec` keeps the bridge wording;
+  a catalog that carries neither — an orchestrator client exposing only its own Responses tools,
+  for example — is redirected to the request's actual wire names, so the model is pointed at a
+  tool that exists rather than at an alias it cannot see.
 - A recognized Cursor data-policy gate is reported with its title, the action it requires, and the
   Cursor Dashboard review URL instead of a bare `failed_precondition: Error`. Recognition is limited
   to the known structured detail: unknown or malformed details keep the generic Connect error, no
