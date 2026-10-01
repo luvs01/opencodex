@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { omoJsoncPath, readOmoRoleModels, writeOmoRoleModel } from "../../src/clients/omo-role-models";
@@ -53,6 +53,26 @@ describe("omo role models", () => {
     expect(writeOmoRoleModel("explorer", "m", path)).toBe("absent");
     expect(readOmoRoleModels(path)).toEqual({ state: "absent" });
     expect(() => readFileSync(path)).toThrow();
+  });
+
+  test("refuses a symlink substituted before the integration file is opened", () => {
+    const path = file("{}");
+    const secret = join(dir!, "secret.json");
+    writeFileSync(secret, '{ "tokens": { "access_token": "secret" } }');
+    const realOpen = fs.openSync;
+    const spy = spyOn(fs, "openSync").mockImplementation(((target, flags, mode) => {
+      if (target === path) {
+        rmSync(path);
+        symlinkSync(secret, path);
+      }
+      return realOpen(target, flags, mode);
+    }) as typeof fs.openSync);
+    try {
+      expect(writeOmoRoleModel("explorer", "m", path)).toBe("invalid");
+      expect(readFileSync(secret, "utf8")).toBe('{ "tokens": { "access_token": "secret" } }');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test("a codex value of the wrong shape is invalid rather than overwritten", () => {

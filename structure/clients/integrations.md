@@ -453,6 +453,8 @@ not an object reports `invalid`, and a file containing any `//` or block comment
 `skipped_comments`, because re-serializing JSONC would drop those comments. The management
 response carries that status and the dashboard shows it; the role TOML write described in
 [subagents](../subagents.md#per-role-model-pins) is not rolled back by a skipped mirror.
+The loader binds validation and reading to one no-follow file descriptor and rejects a path
+whose directory entry no longer identifies that opened regular file.
 An explicit `null` in any of those three places counts as not an object. A file that exists but
 cannot be read lists as `unreadable`, so the role table still loads, and a save reports
 `write_failed` for the mirror.

@@ -6,7 +6,7 @@
  * dashboard or CLI pick, never creates the file, and refuses a file with comments: the write
  * re-serializes JSON, and a comment the user wrote would be lost without a word.
  */
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { atomicWriteFileNoFollowUnclaimed } from "../config/atomic-write";
@@ -40,12 +40,21 @@ type Loaded =
 
 function load(path: string): Loaded {
   let text: string;
+  let fd: number | undefined;
   try {
-    if (!lstatSync(path).isFile()) return { kind: "invalid" };
-    text = readFileSync(path, "utf8");
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    const current = lstatSync(path);
+    if (!opened.isFile() || !current.isFile() || opened.dev !== current.dev || opened.ino !== current.ino) {
+      return { kind: "invalid" };
+    }
+    text = readFileSync(fd, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") return { kind: "invalid" };
     throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   if (hasJsoncComments(text)) return { kind: "comments" };
   try {
