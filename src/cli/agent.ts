@@ -11,6 +11,7 @@ import {
   takeFlag,
   takeIntegerOption,
   takeOption,
+  terminalSafeText,
   type RuntimeApiDeps,
 } from "./runtime-api";
 
@@ -104,7 +105,7 @@ async function suggestInjection(args: string[], wantsJson: boolean, deps: Runtim
           ? `Already set to ${p!.proposedModel}${p!.proposedEffort ? ` (${p!.proposedEffort})` : ""}; nothing applied.`
           : "Nothing to apply.")
       : "Nothing was written; rerun with --apply to set the delegation model.",
-  ]);
+  ].map(terminalSafeText));
 }
 
 async function injection(argv: string[], deps: RuntimeApiDeps): Promise<void> {

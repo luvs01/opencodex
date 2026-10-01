@@ -1068,17 +1068,23 @@ describe("headless GUI parity CLI", () => {
   test("agent injection suggest prints the proposal, and --apply writes it through PUT /api/injection-model", async () => {
     const suggestion = {
       sizingModel: "gpt-5.5",
-      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded edits.", moveUpIf: "It crosses modules.", moveDownIf: "Never.", proposedModel: "a/small", proposedEffort: "low", reason: null },
+      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded\x1b]52;c;payload\x07 edits.", moveUpIf: "It crosses modules.", moveDownIf: "Never.", proposedModel: "a/small", proposedEffort: "low", reason: null },
     };
     const runtime = fakeRuntime(req => req.method === "POST" ? suggestion : { ok: true });
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    let output = "";
     try {
       expect(await handleAgentCommand(["injection", "suggest", "rename", "symbols", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
       expect(await handleAgentCommand(["injection", "suggest", "rename symbols", "--apply"], runtime.deps)).toBe(0);
       expect(await handleAgentCommand(["injection", "suggest"], runtime.deps)).not.toBe(0);
+      output = logSpy.mock.calls.flat().join("\n");
     } finally {
       logSpy.mockRestore();
     }
+    expect(output).not.toContain("\x1b");
+    expect(output).not.toContain("\x07");
+    expect(output).toContain("\\x1b]52;c;payload\\x07");
+    expect(output).toContain("\\u001b]52;c;payload\\u0007");
     expect(runtime.requests).toEqual([
       { path: "/api/injection-model/suggest", method: "POST", body: { work: "rename symbols", model: "a/sizer" } },
       { path: "/api/injection-model/suggest", method: "POST", body: { work: "rename symbols" } },
