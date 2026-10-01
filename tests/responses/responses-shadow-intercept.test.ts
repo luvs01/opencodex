@@ -406,7 +406,7 @@ describe("a combo shadow-call target enters the failover loop (#4129)", () => {
   test("carries helper conversation isolation into concrete combo children", () => {
     const prepare = readFileSync(repoPath("src/server/responses/request-prepare.ts"), "utf8");
     const comboDispatch = prepare.slice(
-      prepare.indexOf("const comboId = !options.comboAttempt"),
+      prepare.indexOf("const comboId = !concreteSelection"),
       prepare.indexOf("let unreadableEncryptedAgentTask"),
     );
     const parsedHandoff = prepare.slice(
