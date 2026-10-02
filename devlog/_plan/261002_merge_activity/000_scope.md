@@ -1,8 +1,10 @@
 # Merge activity record — scope
 
 Post-hoc record of what landed on `dev` between the last recorded units and 2026-10-02
-(~2026-09-30 13:14 UTC through 2026-10-02 13:14 UTC, plus the 2.73.0 and 2.74.0 releases that
-shipped just before the window and were never written up). Baseline tip: `21aed9fee`.
+(~2026-09-30 13:14 UTC through 2026-10-02 16:55 UTC — the 2.77.0 dev-open — with the 2.76.0
+release evidence that followed through 18:42 UTC, plus the 2.73.0 and 2.74.0 releases that
+shipped just before the window and were never written up). Baseline tip: `21aed9fee`;
+upstream `dev` now ends at `b4616be1e4`, two merges ahead of the fork.
 
 ## Tracked by its own unit — not duplicated here
 
@@ -22,4 +24,4 @@ Per PR: number, author, carry source where the commit title names one, head SHA,
 Lane review verdicts (Kimi/Sol/Codex) are not re-derived here — the table records the published
 merge and CI evidence only. Runs are cited by run id; links point at lidge-jun/opencodex.
 
-Files: 010–030 the three release rounds, 040–080 the merge waves in landing order, 090 totals.
+Files: 010–035 the four release rounds, 040–080 the merge waves in landing order, 090 totals.
