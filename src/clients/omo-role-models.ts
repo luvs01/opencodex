@@ -42,7 +42,12 @@ function load(path: string): Loaded {
   let text: string;
   let fd: number | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // POSIX FIFOs must not block before fstat can reject them. Windows omits
+    // these flags and retains the descriptor/path identity checks below.
+    const flags = process.platform === "win32"
+      ? constants.O_RDONLY
+      : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+    fd = openSync(path, flags);
     const opened = fstatSync(fd);
     const current = lstatSync(path);
     if (!opened.isFile() || !current.isFile() || opened.dev !== current.dev || opened.ino !== current.ino) {

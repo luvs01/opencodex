@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,6 +75,30 @@ describe("omo role models", () => {
       spy.mockRestore();
     }
   });
+
+  test.skipIf(process.platform === "win32").each(["read", "write"])(
+    "%s refuses a FIFO without waiting for a writer",
+    operation => {
+      const path = file();
+      expect(spawnSync("mkfifo", [path], { timeout: 3000 }).status).toBe(0);
+      const moduleUrl = new URL("../../src/clients/omo-role-models.ts", import.meta.url).href;
+      const script = `
+        const { readOmoRoleModels, writeOmoRoleModel } = await import(${JSON.stringify(moduleUrl)});
+        const result = process.argv[2] === "read"
+          ? readOmoRoleModels(process.argv[1])
+          : writeOmoRoleModel("explorer", "m", process.argv[1]);
+        console.log(JSON.stringify(result));
+      `;
+      // A subprocess deadline bounds the test even if synchronous open regresses.
+      const child = spawnSync(process.execPath, ["--eval", script, path, operation], {
+        timeout: 3000, killSignal: "SIGKILL", encoding: "utf8",
+      });
+      expect(child.error).toBeUndefined();
+      expect(child.status).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual(operation === "read" ? { state: "invalid" } : "invalid");
+      expect(fs.lstatSync(path).isFIFO()).toBe(true);
+    },
+  );
 
   test("a codex value of the wrong shape is invalid rather than overwritten", () => {
     const text = '{ "codex": { "agents": ["explorer"] } }';
