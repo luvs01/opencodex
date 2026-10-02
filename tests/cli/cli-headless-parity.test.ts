@@ -975,6 +975,8 @@ describe("headless GUI parity CLI", () => {
     let output = "";
     try {
       expect(await handleAgentCommand(["roles", "suggest", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls.flat().join("\n"))).toEqual(proposals);
+      logSpy.mockClear();
       expect(await handleAgentCommand(["roles", "suggest", "--apply"], runtime.deps)).toBe(0);
       output = logSpy.mock.calls.flat().join("\n");
     } finally {
@@ -1072,13 +1074,20 @@ describe("headless GUI parity CLI", () => {
   test("agent injection suggest prints the proposal, and --apply writes it through PUT /api/injection-model", async () => {
     const suggestion = {
       sizingModel: "gpt-5.5",
-      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded edits.", moveUpIf: "It crosses modules.", moveDownIf: "Never.", proposedModel: "a/small", proposedEffort: "low", reason: null },
+      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded\x1b]52;c;payload\x07 edits.", moveUpIf: "It crosses\rmodules.", moveDownIf: "Never\u009b31m.", proposedModel: "a/small", proposedEffort: "low", reason: null },
     };
     const runtime = fakeRuntime(req => req.method === "POST" ? suggestion : { ok: true });
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
     try {
       expect(await handleAgentCommand(["injection", "suggest", "rename", "symbols", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls.flat().join("\n"))).toEqual(suggestion);
+      logSpy.mockClear();
       expect(await handleAgentCommand(["injection", "suggest", "rename symbols", "--apply"], runtime.deps)).toBe(0);
+      const output = logSpy.mock.calls.flat().join("\n");
+      expect(output).not.toMatch(/[\x07\x1b\r\u009b]/);
+      expect(output).toContain("Bounded\\x1b]52;c;payload\\x07 edits.");
+      expect(output).toContain("It crosses\\x0dmodules.");
+      expect(output).toContain("Never\\u009b31m.");
       expect(await handleAgentCommand(["injection", "suggest"], runtime.deps)).not.toBe(0);
     } finally {
       logSpy.mockRestore();
