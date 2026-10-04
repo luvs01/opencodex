@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { clearAccountNeedsReauth, isAccountNeedsReauth } from "../../src/codex/auth-api";
+import { clearAccountNeedsReauth, clearAccountQuota, isAccountNeedsReauth, updateAccountQuota } from "../../src/codex/auth-api";
 import { codexPoolAffinityKey } from "../../src/codex/auth-context";
 import {
   clearCodexUpstreamHealth,
@@ -314,6 +314,7 @@ beforeEach(() => {
   releaseSpendHome = acquireOwnedSpendHome();
   clearAccountNeedsReauth(ACCOUNT_ID);
   clearAccountNeedsReauth(OTHER_ACCOUNT_ID);
+  clearAccountQuota();
   clearCodexUpstreamHealth();
   clearThreadAccountMap();
   clearResponseStateMemoryForTests();
@@ -329,6 +330,7 @@ afterEach(() => {
   clearCompactHandoffRoutesForTests();
   clearAccountNeedsReauth(ACCOUNT_ID);
   clearAccountNeedsReauth(OTHER_ACCOUNT_ID);
+  clearAccountQuota();
   clearCodexUpstreamHealth();
   clearThreadAccountMap();
   resetAgentTaskRecoveryState();
@@ -457,6 +459,38 @@ describe("ordinary pool 401 refresh and replay (#2887)", () => {
     expect(harness.sends).toEqual(["Bearer rejected-access", "Bearer refreshed-access"]);
     expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(false);
   });
+
+  test.each(["/v1/responses", "/v1/responses/compact"] as const)(
+    "a credit hold landing during the forced refresh answers the credit policy, not a refresh failure (%s)",
+    async path => {
+      const harness = installHarness({
+        refresh() {
+          // The account crosses the limit while the token endpoint is in flight: the
+          // replay's materialization must read the live hold, not the admission-time one.
+          updateAccountQuota(ACCOUNT_ID, 100, Date.now() + 3_600_000);
+          return Response.json({
+            access_token: "refreshed-access",
+            refresh_token: "rotated-refresh",
+            expires_in: 3600,
+          });
+        },
+      });
+      const response = path === "/v1/responses/compact"
+        ? await handleResponsesCompact(request(path), config(), { model: "", provider: "" } as RequestLogContext)
+        : await handleResponses(request(path), config(), { model: "", provider: "" } as RequestLogContext);
+      const body = await response.text();
+
+      // A policy refusal is not an incomplete refresh: the client gets the actionable 429,
+      // the rotated grant stays stored, and nothing replays on the refreshed bearer.
+      expect(response.status).toBe(429);
+      expect(body).toContain("spending credits");
+      expect(body).not.toContain("credential refresh did not complete");
+      expect(harness.sends).toEqual(["Bearer rejected-access"]);
+      expect(harness.refreshes).toEqual(["refresh-grant"]);
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(false);
+      expect(readStoredGeneration()).toBe(4);
+    },
+  );
 
   test("Responses does not compose a stored-account replay 429 with another Pool account", async () => {
     writeStoredAccount({

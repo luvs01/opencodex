@@ -39,6 +39,18 @@ export function bindPoolCreditPolicy<T extends PoolContext>(
   return context;
 }
 
+/**
+ * Carry the resolver's live policy onto a context rebuilt by spread copy. The WeakMap keys on
+ * object identity, so `{ ...ctx }` alone loses the binding and every caller that omits an
+ * explicit override would skip credit-hold enforcement on the copy. A source with no binding
+ * leaves the target unbound rather than inventing a policy.
+ */
+export function rebindPoolCreditPolicy<S extends PoolContext, T extends object>(source: S, target: T): T {
+  const bound = policies.get(source);
+  if (bound) policies.set(target, bound);
+  return target;
+}
+
 /** Explicit policy wins; omitted materialization options retain the resolver's policy. */
 export function poolContextCreditHoldResetAt(
   context: PoolContext,

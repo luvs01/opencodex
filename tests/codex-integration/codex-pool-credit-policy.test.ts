@@ -6,12 +6,14 @@ import type { OcxConfig } from "../../src/types";
 import {
   resolveCodexAuthContext, materializeCodexUpstreamAuth, applyCodexAuthContextToProvider,
   assertCodexAuthContextNotCooled, CodexPoolAccountCreditsOffError,
-  cooldownErrorMessage, shouldMarkAccountNeedsReauthForCodexAuthFailure,
+  cooldownErrorMessage, cooldownErrorResponse, shouldMarkAccountNeedsReauthForCodexAuthFailure,
 } from "../../src/codex/auth-context";
+import { rebindPoolCreditPolicy } from "../../src/codex/pool-credit-policy";
+import { TERMINAL_SHORT_WINDOW_FRESHNESS_MS } from "../../src/codex/quota-types";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { isAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearAccountNeedsReauth, clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
-import { setAccountQuotaFromParsed } from "../../src/codex/quota";
+import { getAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/quota";
 import {
   CODEX_QUOTA_PROBE_INTERVAL_MS, clearCodexUpstreamHealth, clearThreadAccountMap,
   recordCodexUpstreamOutcome, tryAcquireCodexQuotaProbeLease,
@@ -110,6 +112,38 @@ describe("stored-account credit policy at authentication", () => {
   test("an elapsed full window does not hold the account indefinitely", async () => {
     quota(100, Date.now() - 1_000);
     expect((await resolve(config())).kind).toBe("pool");
+  });
+  test("a reset-less full short window holds until the observation goes stale", async () => {
+    setAccountQuotaFromParsed(ID, { shortPercent: 100 });
+    const observedAt = getAccountQuota(ID)?.shortObservedAt;
+    expect(observedAt).toBeDefined();
+    const error = await resolve(config()).catch(cause => cause);
+    expect(error).toBeInstanceOf(CodexPoolAccountCreditsOffError);
+    // The refusal must tell the client when the hold ends — the freshness horizon — instead
+    // of reporting `now` and inviting an immediate retry against a still-blocked account.
+    expect(error.resetAt).toBe(observedAt! + TERMINAL_SHORT_WINDOW_FRESHNESS_MS);
+    const retryAfter = Number(cooldownErrorResponse(error).headers.get("Retry-After"));
+    expect(retryAfter).toBeGreaterThan(1);
+    expect(retryAfter).toBeLessThanOrEqual(Math.ceil(TERMINAL_SHORT_WINDOW_FRESHNESS_MS / 1_000));
+  });
+  test("a supplied short reset is the hold deadline", async () => {
+    const resetAt = Date.now() + 120_000;
+    setAccountQuotaFromParsed(ID, { shortPercent: 100, shortObservedAt: Date.now(), shortResetAt: resetAt });
+    const error = await resolve(config()).catch(cause => cause);
+    expect(error).toBeInstanceOf(CodexPoolAccountCreditsOffError);
+    expect(error.resetAt).toBe(resetAt);
+  });
+  test("a pool context rebuilt by copy keeps the resolver's live credit policy", async () => {
+    quota(99);
+    const ctx = await resolve(config());
+    if (ctx.kind !== "pool") throw new Error("expected pool fixture");
+    // The 401-refresh replay rebuilds the context by spread; the rebind carries the WeakMap
+    // entry so a hold landing during the refresh await is enforced on the copy too.
+    const copy = rebindPoolCreditPolicy(ctx, { ...ctx, accessToken: "rotated-access" });
+    quota();
+    expect(() => applyCodexAuthContextToProvider({ adapter: "openai-responses", baseUrl: "https://example.test", authMode: "forward" }, copy, "pool"))
+      .toThrow(CodexPoolAccountCreditsOffError);
+    expect(() => materializeCodexUpstreamAuth(new Headers(), copy)).toThrow(CodexPoolAccountCreditsOffError);
   });
   test("a mid-acquisition credit hold releases the due cooldown probe lease", async () => {
     const cfg = config();
