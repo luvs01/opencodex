@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
@@ -92,6 +92,47 @@ describe("one-use local CLI pairing intent", () => {
       const wildcard = config(); wildcard.hostname = "0.0.0.0";
       for (const cfg of [client, wildcard]) expect(() => deliverGuiPairingGrant(request(intent.proof), cfg, state())).toThrow();
       expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(true);
+    } finally { intent.dispose(); }
+  });
+  test("a later command removes records abandoned by interrupted runs", () => {
+    const dir = join(root, "gui-pair-intents");
+    const abandoned = createGuiPairIntent(CAP), abandonedPath = recordPath();
+    utimesSync(abandonedPath, new Date(0), new Date(0));
+    const intent = createGuiPairIntent("C".repeat(43));
+    try {
+      expect(existsSync(abandonedPath)).toBe(false);
+      expect(readdirSync(dir)).toHaveLength(1);
+      expect(consumeGuiPairIntent("C".repeat(43), intent.proof)).toBe(true);
+    } finally { intent.dispose(); abandoned.dispose(); }
+  });
+  test("sweeping never removes a fresh record an active command still holds", () => {
+    const first = createGuiPairIntent(CAP);
+    const second = createGuiPairIntent("C".repeat(43));
+    try {
+      expect(readdirSync(join(root, "gui-pair-intents"))).toHaveLength(2);
+      expect(consumeGuiPairIntent(CAP, first.proof)).toBe(true);
+      expect(consumeGuiPairIntent("C".repeat(43), second.proof)).toBe(true);
+    } finally { first.dispose(); second.dispose(); }
+  });
+  test("sweeping leaves foreign and unsafe entries alone", () => {
+    const dir = join(root, "gui-pair-intents");
+    const intent = createGuiPairIntent(CAP);
+    try {
+      const foreign = join(dir, "not-an-intent");
+      writeFileSync(foreign, "x".repeat(65), { mode: 0o600 });
+      utimesSync(foreign, new Date(0), new Date(0));
+      const staleShape = join(dir, "f".repeat(64));
+      writeFileSync(staleShape, "x".repeat(65), { mode: 0o600 });
+      utimesSync(staleShape, new Date(0), new Date(0));
+      const replacement = join(dir, "e".repeat(64));
+      writeFileSync(replacement, "x".repeat(65), { mode: 0o600 });
+      utimesSync(replacement, new Date(0), new Date(0));
+      linkSync(replacement, join(root, "extra-link"));
+      createGuiPairIntent("C".repeat(43)).dispose();
+      expect(existsSync(foreign)).toBe(true);
+      expect(existsSync(staleShape)).toBe(false);
+      expect(existsSync(replacement)).toBe(true); // hard-linked records are never unlinked
+      unlinkSync(join(root, "extra-link"));
     } finally { intent.dispose(); }
   });
   test("dispose removes an unused commitment and is idempotent", () => {

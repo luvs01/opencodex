@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, unlinkSync, writeFileSync, type BigIntStats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, unlinkSync, writeFileSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config/paths";
 import { assertNotRealHomeUnderTest } from "./test-home-guard";
@@ -7,6 +7,10 @@ import { forgetEphemeralSecretPath, hardenSecretDir, hardenSecretPath } from "./
 
 export const GUI_PAIR_INTENT_HEADER = "x-opencodex-gui-pair-intent";
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const INTENT_NAME = /^[0-9a-f]{64}$/;
+// Records outlive their ~10s capability only when the publishing CLI died; a wide
+// margin keeps an active command's fresh record from ever looking stale.
+const STALE_INTENT_MS = 60_000;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
 function owned(stat: BigIntStats): boolean {
@@ -32,6 +36,23 @@ function removeOwned(path: string, identity: BigIntStats): void {
   forgetEphemeralSecretPath(path);
 }
 
+/** Drop records abandoned by interrupted commands; fresh and foreign entries are left alone. */
+function sweepStaleIntents(dir: string): void {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return; }
+  const now = Date.now();
+  for (const name of names) {
+    if (!INTENT_NAME.test(name)) continue;
+    const path = join(dir, name);
+    try {
+      const stat = lstatSync(path, { bigint: true });
+      if (!stat.isFile() || stat.isSymbolicLink() || !owned(stat) || stat.nlink !== 1n) continue;
+      if (now - Number(stat.mtimeMs) < STALE_INTENT_MS) continue;
+      removeOwned(path, stat);
+    } catch { /* leave unreadable entries alone */ }
+  }
+}
+
 export interface GuiPairIntent {
   proof: string;
   dispose(): void;
@@ -51,6 +72,7 @@ export function createGuiPairIntent(capability: string, configDir = getConfigDir
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   directory(dir);
   if (!hardenSecretDir(dir, { required: true, deadlineMs: 2_000 }).ok) throw new Error("GUI pairing intent ACL refused");
+  sweepStaleIntents(dir);
   const parent = directory(dir);
   const proof = randomBytes(32).toString("base64url");
   const fd = openSync(path, "wx", 0o600);
@@ -70,7 +92,10 @@ export function createGuiPairIntent(capability: string, configDir = getConfigDir
     throw error;
   }
   closeSync(fd);
-  return { proof, dispose: () => removeOwned(path, identity) };
+  // Disposal consumes the record: the same directory, identity and content checks as
+  // redemption, so a corrupted or replaced commitment is retained on every platform.
+  const dispose = (): void => { consumeGuiPairIntent(capability, proof, configDir); };
+  return { proof, dispose };
 }
 
 /** Called only after the existing process-bound, expiring capability passed authorization. */
