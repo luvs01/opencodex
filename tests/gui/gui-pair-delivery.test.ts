@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
@@ -134,6 +135,40 @@ describe("one-use local CLI pairing intent", () => {
       expect(existsSync(replacement)).toBe(true); // hard-linked records are never unlinked
       unlinkSync(join(root, "extra-link"));
     } finally { intent.dispose(); }
+  });
+  test("stale cleanup limits metadata and deletion work before publishing a new intent", () => {
+    createGuiPairIntent(CAP).dispose();
+    const dir = join(root, "gui-pair-intents");
+    // More stale entries than one sweep may inspect; avoid timing-based assertions.
+    const abandoned = Array.from({ length: 300 }, (_, index) => join(dir, index.toString(16).padStart(64, "0")));
+    for (const path of abandoned) {
+      writeFileSync(path, "0".repeat(64) + "\n", { mode: 0o600 });
+      utimesSync(path, new Date(0), new Date(0));
+    }
+    const intent = createGuiPairIntent("C".repeat(43));
+    try {
+      const remaining = abandoned.filter(path => existsSync(path)).length;
+      expect(remaining).toBeGreaterThanOrEqual(300 - 256);
+      expect(remaining).toBeLessThan(300);
+      expect(consumeGuiPairIntent("C".repeat(43), intent.proof)).toBe(true);
+    } finally { intent.dispose(); }
+  });
+  test("foreign entries count toward the stale cleanup work limit", () => {
+    const abandoned = createGuiPairIntent(CAP), path = recordPath();
+    utimesSync(path, new Date(0), new Date(0));
+    const name = readdirSync(join(root, "gui-pair-intents"))[0]!;
+    // Fix enumeration order without depending on a platform's directory ordering.
+    const names = [...Array.from({ length: 256 }, (_, index) => `foreign-${index}`), name];
+    const scan = spyOn(fs, "readdirSync").mockImplementation((() => names) as typeof fs.readdirSync);
+    let intent: ReturnType<typeof createGuiPairIntent> | undefined;
+    try {
+      intent = createGuiPairIntent("C".repeat(43));
+      expect(existsSync(path)).toBe(true);
+      expect(consumeGuiPairIntent("C".repeat(43), intent.proof)).toBe(true);
+    } finally {
+      scan.mockRestore();
+      intent?.dispose(); abandoned.dispose();
+    }
   });
   test("dispose removes an unused commitment and is idempotent", () => {
     const intent = createGuiPairIntent(CAP), path = recordPath();

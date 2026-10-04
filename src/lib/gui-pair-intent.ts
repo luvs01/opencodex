@@ -11,6 +11,7 @@ const INTENT_NAME = /^[0-9a-f]{64}$/;
 // Records outlive their ~10s capability only when the publishing CLI died; a wide
 // margin keeps an active command's fresh record from ever looking stale.
 const STALE_INTENT_MS = 60_000;
+const STALE_INTENT_SWEEP_LIMIT = 256;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
 function owned(stat: BigIntStats): boolean {
@@ -36,12 +37,17 @@ function removeOwned(path: string, identity: BigIntStats): void {
   forgetEphemeralSecretPath(path);
 }
 
-/** Drop records abandoned by interrupted commands; fresh and foreign entries are left alone. */
+/** Best-effort stale cleanup; bound per-entry work before creating the next expiring intent. */
 function sweepStaleIntents(dir: string): void {
   let names: string[];
   try { names = readdirSync(dir); } catch { return; }
   const now = Date.now();
-  for (const name of names) {
+  // Count every entry, including foreign and fresh ones, rather than only successful deletes.
+  // This caps metadata/deletion work, not readdirSync's array allocation or syscall duration.
+  // Bun 1.4.0 also snapshots names behind opendirSync, so an iterator alone is not a memory cap.
+  const limit = Math.min(names.length, STALE_INTENT_SWEEP_LIMIT);
+  for (let index = 0; index < limit; index++) {
+    const name = names[index]!;
     if (!INTENT_NAME.test(name)) continue;
     const path = join(dir, name);
     try {
