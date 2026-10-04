@@ -1,0 +1,31 @@
+name: Prepare requested fork fixes
+
+on:
+  push:
+    branches: [codex/fork-fix-preparation-20261004]
+    paths:
+      - scripts/fork-fix-prepare/**
+      - .github/workflows/fork-fix-prepare-20261004.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-fix-preparation-20261004
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/fork-fix-preparation-20261004'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout preparation branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Apply exact-source candidates to two new branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/fork-fix-prepare/prepare.py
