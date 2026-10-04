@@ -2,6 +2,7 @@
   "version": 1,
   "root": "tests",
   "explicit": {
+    "codex-pool-credit-policy.test.ts": "codex-integration",
     "usage-antigravity-55.test.ts": "usage",
     "provider-antigravity-wire-snapshot.test.ts": "providers",
     "antigravity-discovered-families.test.ts": "adapters/google",
