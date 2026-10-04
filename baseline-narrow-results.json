@@ -1,0 +1,22 @@
+{
+  "base": "33185c2cc",
+  "scope": "Unchanged manager toggle/save controls in base component with final production CSS; no live API",
+  "boxes": [
+    {
+      "key": "nativeMain.close",
+      "left": 182.8125,
+      "right": 422.078125,
+      "width": 239.265625,
+      "viewport": 320,
+      "overflow": true
+    },
+    {
+      "key": "nativeMain.save",
+      "left": 36.1875,
+      "right": 310.984375,
+      "width": 274.796875,
+      "viewport": 320,
+      "overflow": false
+    }
+  ]
+}
