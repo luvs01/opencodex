@@ -2,8 +2,10 @@
 
 Status: DONE — historical record of published work.
 
-This continues [261002_release_merge_record](../261002_release_merge_record/000_scope.md)
-(`carry/pr699-release-merge-record`, recorded but not yet landed upstream) with the
+This continues [261002_release_merge_record](https://github.com/luvs01/opencodex/blob/567d414ddf1601bf3db175f1c34b4ddffd9cfb84/devlog/_fin/261002_release_merge_record/000_scope.md)
+(`carry/pr699-release-merge-record` on luvs01/opencodex at
+[`567d414ddf`](https://github.com/luvs01/opencodex/commit/567d414ddf1601bf3db175f1c34b4ddffd9cfb84),
+recorded but not yet landed upstream) with the
 same method and the same limits, checked against canonical upstream git history,
 GitHub pull requests, release objects, tags and Actions runs.
 
