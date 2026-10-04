@@ -328,9 +328,10 @@ async function runInvite(args: string[], deps: HubCommandDeps): Promise<number> 
   const dataUrl = resolved.dataUrl;
   const result = await (deps.requestPairingGrant ?? requestBoundGuiPairingGrant)(target, browserOrigin, {
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+    requireLocalIntent: false,
   });
   if (result.kind !== "created") {
-    console.error(`Minting a pairing code failed (${result.kind === "unavailable" ? result.reason : "runtime-role-changed"}).`);
+    console.error(`Minting a pairing code failed (${result.reason}).`);
     return 1;
   }
   const payload: HubInvitePayload = {

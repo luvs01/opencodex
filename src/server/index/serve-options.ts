@@ -174,7 +174,6 @@ import { LOCAL_MANAGEMENT_NONCE_HEADER } from "../../lib/local-management-capabi
 import { LOCAL_PROVIDER_RELOAD_CAPABILITY_VERSION } from "../../lib/local-provider-reload-contract";
 import { LOCAL_ASIDE_SYNC_CAPABILITY_VERSION } from "../../lib/local-aside-sync-contract";
 import {
-  GUI_PAIR_BROWSER_ORIGIN_HEADER,
   GUI_PAIR_CAPABILITY_VERSION,
   GUI_PAIR_PATH,
 } from "../../lib/gui-pair-capability";
@@ -182,7 +181,7 @@ import {
   GuiPairingGrantRateLimitError,
   consumeGuiPairingGrant,
 } from "../gui-session";
-import { deliverGuiPairingGrant, GuiPairingTerminalRequiredError } from "../gui-pair-delivery";
+import { deliverGuiPairingGrant, GuiPairingIntentRequiredError } from "../gui-pair-delivery";
 import { recordCursorSeen } from "../../integrations/cursor-seen";
 import { detectCursorInstalls } from "../../integrations/cursor-detect";
 import { loadCursorEffortTable } from "../../integrations/cursor-effort-table";
@@ -679,11 +678,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             return withManagementCors(Response.json({ error: "GUI pairing capability required" }, { status: 403 }), req, config);
           }
           try {
-            const grant = deliverGuiPairingGrant(
-              req.headers.get(GUI_PAIR_BROWSER_ORIGIN_HEADER) ?? "",
-              config,
-              managementAuth,
-            );
+            const grant = deliverGuiPairingGrant(req, config, managementAuth);
             return withManagementCors(Response.json(grant, {
               status: 201,
               headers: { "Cache-Control": "no-store" },
@@ -691,7 +686,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           } catch (error) {
             const status = error instanceof GuiPairingGrantRateLimitError ? 429 : 403;
             return withManagementCors(Response.json({ error: "GUI pairing grant refused",
-              ...(error instanceof GuiPairingTerminalRequiredError ? { code: "operator_terminal_required" } : {}),
+              ...(error instanceof GuiPairingIntentRequiredError ? { code: "local_pairing_intent_required" } : {}),
             }, {
               status,
               ...(status === 429 ? { headers: { "Retry-After": "60" } } : {}),

@@ -109,6 +109,8 @@ Update both the Home and Child when upgrading to connection-bound relay authenti
 Removing the final Home link drains pending authenticated relay requests before releasing its listener. Stopping the process still cancels active connections. This does not change which caller credentials are stripped or which routes can be relayed, and it does not replace SSH's host-key verification.
 
 
-### Standalone pairing code delivery
+### Standalone pairing authorization
 
-For a standalone Child setup, `ocx gui pair --origin <local-origin>` now requests delivery to the **foreground OpenCodex server terminal**, not the terminal running the pairing command. Read the one-use code there and enter it in the local dashboard only when you requested pairing. JSON output contains delivery metadata, not the code. A background service without an attached terminal refuses this operation; this branch does not yet provide a headless operator-approval alternative. Existing Hub invitations are unchanged. This delivery rule supersedes earlier standalone examples that expect the pairing command to print the code.
+The existing `ocx gui pair --origin <local-origin>` command works while OpenCodex runs as a background service. Run it under the account that owns the service's private OpenCodex home, then enter the returned one-use code in the local dashboard. No server terminal, additional password, Windows Hello or hardware key is required. The CLI and server must use the same current version and configuration home; restart an older server after updating.
+
+Internally, the CLI creates a short-lived authorization commitment and removes it after use or failure. Reading runtime information alone does not authorize pairing, and the verifier is not stored on disk. This is a private-home write-access boundary, not biometric or human-presence authentication: a program with full access to that user's files is still trusted. Existing Hub invitations are unchanged. This does not add Windows SSH Remote Link support.

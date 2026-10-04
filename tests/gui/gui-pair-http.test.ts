@@ -1,11 +1,15 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findAvailablePort } from "../../src/server/ports";
 import { watchdogMs } from "../helpers/ci-watchdog";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
+import { randomBytes } from "node:crypto";
+import { createGuiPairCapability, GUI_PAIR_BROWSER_ORIGIN_HEADER, GUI_PAIR_CAPABILITY_HEADER,
+  GUI_PAIR_EXPECTED_PID_HEADER, GUI_PAIR_EXPIRES_AT_HEADER, GUI_PAIR_NONCE_HEADER, GUI_PAIR_PATH } from "../../src/lib/gui-pair-capability";
+import { GUI_PAIR_INTENT_HEADER } from "../../src/lib/gui-pair-intent";
 
 const DEADLINE = watchdogMs(30_000);
 
@@ -48,14 +52,6 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
   if (process.platform === "win32" && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
   const children = new Set<Bun.Subprocess>();
   const controller = new AbortController();
-  // Standalone delivery targets the server's foreground terminal. A pty supplies one on
-  // POSIX; on Windows there is none and the mint must refuse before issuing a code.
-  const decoder = new TextDecoder();
-  let transcript = "";
-  const terminal = process.platform === "win32" ? null : new Bun.Terminal({
-    cols: 120, rows: 24,
-    data: (_term, data) => { transcript += decoder.decode(data); },
-  });
   const deadline = setTimeout(() => {
     controller.abort();
     for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
@@ -74,7 +70,7 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
     }));
     const server = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(port)], {
       cwd: root, env,
-      ...(terminal ? { terminal } : { stdin: "ignore" as const, stdout: "ignore" as const, stderr: "ignore" as const }),
+      stdin: "ignore", stdout: "ignore", stderr: "ignore",
     });
     children.add(server);
     const request = (path: string, init: RequestInit = {}) => fetch(`${origin}${path}`, {
@@ -124,36 +120,37 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
     await expectStatus(ordinary, false);
     await expectError(await joinRequest(headers(ordinary)), 403, "forbidden");
 
+    // A process which reads runtime-state and reproduces its HMAC still lacks CLI write intent.
+    // No approved record is published here; no real user credential or external server is used.
+    const runtime = parseObject(readFileSync(join(ocxHome, "runtime-port.json"), "utf8"));
+    for (const fakeIntent of [undefined, "B".repeat(43)]) {
+      const nonce = randomBytes(32).toString("base64url"), expiresAt = Date.now() + 10_000;
+      const capability = createGuiPairCapability(String(runtime.attestationSecret), nonce, "POST", GUI_PAIR_PATH,
+        origin, server.pid, port, expiresAt)!;
+      const refused = await request(GUI_PAIR_PATH, { method: "POST", headers: {
+        "Content-Length": "0", [GUI_PAIR_EXPECTED_PID_HEADER]: String(server.pid),
+        [GUI_PAIR_NONCE_HEADER]: nonce, [GUI_PAIR_EXPIRES_AT_HEADER]: String(expiresAt),
+        [GUI_PAIR_BROWSER_ORIGIN_HEADER]: origin, [GUI_PAIR_CAPABILITY_HEADER]: capability,
+        ...(fakeIntent ? { [GUI_PAIR_INTENT_HEADER]: fakeIntent } : {}),
+      } });
+      expect(refused.status, "runtime-only pairing refuses without minting").toBe(403);
+      const denied = parseObject(await refused.text());
+      expect(denied.code).toBe("local_pairing_intent_required");
+    }
+    await expectStatus(ordinary, false);
+
     const mint = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "gui", "pair", "--origin", origin, "--json"], {
       cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "ignore",
     });
     children.add(mint);
     const [mintExit, output] = await Promise.all([mint.exited, new Response(mint.stdout).text()]);
-    if (!terminal) {
-      // No foreground terminal: the endpoint refuses before minting and nothing may
-      // cross the HTTP boundary, so the session stays unpaired and join stays denied.
-      expect(mintExit, "gui pair fails closed without a server terminal").toBe(1);
-      await expectStatus(ordinary, false);
-      await expectError(await joinRequest(headers(ordinary)), 403, "forbidden");
-      for (const file of ["links.json", "client-link.json", "child-initiated.json", "known_hosts"]) {
-        expect(existsSync(join(ocxHome, "link", file)), `no durable ${file} after refused pairing`).toBe(false);
-      }
-      expect(server.exitCode, "refused pairing must not restart the server").toBeNull();
-      return;
-    }
-    expect(mintExit, "actual gui pair CLI exit status (output withheld)").toBe(0);
+    expect(mintExit, "headless gui pair CLI succeeds (output withheld)").toBe(0);
     const minted = parseObject(output);
-    expect(minted.kind === "delivered" && minted.delivery === "server-terminal",
-      "CLI reports terminal delivery").toBe(true);
-    expect("grant" in minted, "no pairing code crosses the HTTP boundary").toBe(false);
+    expect(minted.kind === "created", "CLI retains its original grant response").toBe(true);
     expect(minted.browserOrigin === origin && minted.serverOrigin === origin, "CLI exact origin binding").toBe(true);
-    let grant = "";
-    while (!controller.signal.aborted && server.exitCode === null) {
-      grant = transcript.match(/ocx_pair_[A-Za-z0-9_-]{43}/)?.[0] ?? "";
-      if (grant) break;
-      await Bun.sleep(25);
-    }
-    expect(/^ocx_pair_[A-Za-z0-9_-]{43}$/.test(grant), "one-use code delivered to the server terminal").toBe(true);
+    const grant = String(minted.grant);
+    expect(/^ocx_pair_[A-Za-z0-9_-]{43}$/.test(grant), "one-use code returned only to the CLI with write intent").toBe(true);
+    expect(readdirSync(join(ocxHome, "gui-pair-intents")).length, "one-use commitment removed").toBe(0);
     const redeem = (extraHeaders: Record<string, string> = {}) => request("/opencodex-session", {
       method: "POST", headers: { Origin: origin, "content-type": "application/json", ...extraHeaders },
       body: JSON.stringify({ grant }),
@@ -195,7 +192,6 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
       for (const child of children) if (child.exitCode === null) child.kill();
       await Promise.all([...children].map(child => child.exited));
     } finally { clearTimeout(force); }
-    terminal?.close();
     removeTreeWithRetry(root);
   }
 }, DEADLINE + 10_000);

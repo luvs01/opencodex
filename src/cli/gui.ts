@@ -77,18 +77,13 @@ export async function runGuiCommand(args: string[], deps: GuiCommandDeps): Promi
   }
   const result = await (deps.requestPairingGrant ?? requestBoundGuiPairingGrant)(target, canonicalOrigin, {
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+    requireLocalIntent: config.runtimeRole !== "hub",
   });
-  if (result.kind === "unavailable") {
-    console.error(result.reason === "operator-terminal-required"
-      ? "Standalone pairing needs the foreground OpenCodex server terminal; a background service cannot return this code over HTTP."
+  if (result.kind !== "created") {
+    console.error(result.reason === "local-intent"
+      ? "GUI pairing requires write access to the private OpenCodex home; no code was issued."
       : `GUI pairing failed (${result.reason}).`);
     return 1;
-  }
-  if (result.kind === "delivered") {
-    const message = "Read the one-use pairing code in the foreground OpenCodex server terminal, then enter it in the local dashboard. Pairing and Child join are not automatic.";
-    if (parsed.json) console.log(JSON.stringify({ ...result, message }));
-    else console.error(message);
-    return 0;
   }
   if (parsed.json) {
     console.log(JSON.stringify({ ...result, warning: PAIRING_WARNING }));

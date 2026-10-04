@@ -1,80 +1,156 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OcxConfig } from "../../src/types";
 import type { GuiSessionState } from "../../src/server/gui-session";
-import { deliverGuiPairingGrant, GuiPairingTerminalRequiredError } from "../../src/server/gui-pair-delivery";
+import { GUI_PAIR_BROWSER_ORIGIN_HEADER, GUI_PAIR_CAPABILITY_HEADER } from "../../src/lib/gui-pair-capability";
+import { consumeGuiPairIntent, createGuiPairIntent, GUI_PAIR_INTENT_HEADER } from "../../src/lib/gui-pair-intent";
+import { deliverGuiPairingGrant, GuiPairingIntentRequiredError } from "../../src/server/gui-pair-delivery";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const ORIGIN = "http://127.0.0.1:10100";
+const CAP = "A".repeat(43);
 const config = (): OcxConfig => ({ providers: {}, runtimeRole: "standalone", hostname: "127.0.0.1", port: 10100 } as OcxConfig);
 const state = (): GuiSessionState => ({ sessions: new Map(), pairingGrants: new Map() });
-function terminal(maxWrite = Number.MAX_SAFE_INTEGER) {
-  let text = "";
-  return {
-    read: () => text,
-    deps: {
-      terminalAvailable: () => true,
-      writeTerminal: (data: Buffer, offset: number, length: number) => {
-        const n = Math.min(maxWrite, length);
-        text += data.subarray(offset, offset + n).toString("utf8");
-        return n;
-      },
-    },
-  };
-}
-describe("standalone GUI pairing delivery", () => {
-  test("returns only delivery metadata while the terminal receives the one-use code", () => {
-    const tty = terminal(); const s = state();
-    const result = deliverGuiPairingGrant(ORIGIN, config(), s, tty.deps);
-    expect(result).toHaveProperty("delivery", "server-terminal");
-    expect(result).not.toHaveProperty("grant");
-    const code = tty.read().match(/ocx_pair_[A-Za-z0-9_-]{43}/)?.[0];
-    expect(code).toBeDefined();
-    expect(JSON.stringify(result)).not.toContain(code!);
-    expect(s.pairingGrants.size).toBe(1);
-    expect(s.sessions.size).toBe(0);
+const request = (proof?: string, origin = ORIGIN, capability = CAP) => new Request(`${ORIGIN}/api/gui/pairing-grants`, {
+  method: "POST", headers: {
+    [GUI_PAIR_BROWSER_ORIGIN_HEADER]: origin, [GUI_PAIR_CAPABILITY_HEADER]: capability,
+    ...(proof ? { [GUI_PAIR_INTENT_HEADER]: proof } : {}),
+  },
+});
+let root: string;
+let previous: string | undefined;
+const recordPath = () => join(root, "gui-pair-intents", readdirSync(join(root, "gui-pair-intents"))[0]!);
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+beforeEach(() => {
+  previous = process.env.OPENCODEX_HOME;
+  root = mkdtempSync(join(tmpdir(), "ocx-pair-intent-"));
+  process.env.OPENCODEX_HOME = root;
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+});
+afterEach(() => {
+  setIcaclsRunnerForTests(null); setAsyncIcaclsRunnerForTests(null);
+  if (previous === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previous;
+  removeTreeWithRetry(root);
+});
+
+describe("one-use local CLI pairing intent", () => {
+  test("a headless CLI intent permits one grant without creating a session", () => {
+    const intent = createGuiPairIntent(CAP), s = state();
+    try {
+      const result = deliverGuiPairingGrant(request(intent.proof), config(), s);
+      expect(typeof result.grant === "string" && result.grant.startsWith("ocx_pair_")).toBe(true);
+      expect(result.browserOrigin).toBe(ORIGIN);
+      expect(s.pairingGrants.size).toBe(1); expect(s.sessions.size).toBe(0);
+      expect(() => deliverGuiPairingGrant(request(intent.proof), config(), s)).toThrow(GuiPairingIntentRequiredError);
+      expect(s.pairingGrants.size).toBe(1);
+    } finally { intent.dispose(); }
   });
-  test("a service without a terminal refuses before minting", () => {
+  test("runtime capability alone never grants standalone pairing", () => {
     const s = state();
-    expect(() => deliverGuiPairingGrant(ORIGIN, config(), s, { terminalAvailable: () => false }))
-      .toThrow(GuiPairingTerminalRequiredError);
+    expect(() => deliverGuiPairingGrant(request(), config(), s)).toThrow(GuiPairingIntentRequiredError);
+    expect(() => deliverGuiPairingGrant(request("B".repeat(43)), config(), s)).toThrow(GuiPairingIntentRequiredError);
     expect(s.pairingGrants.size).toBe(0);
+    expect(existsSync(join(root, "gui-pair-intents"))).toBe(false);
   });
-  test("wrong origins are rejected without touching the terminal", () => {
-    const tty = terminal(); const s = state();
-    expect(() => deliverGuiPairingGrant("http://127.0.0.1:10200", config(), s, tty.deps)).toThrow();
-    expect(tty.read()).toBe(""); expect(s.pairingGrants.size).toBe(0);
+  test("disk readers obtain only a hash, not a usable verifier", () => {
+    const intent = createGuiPairIntent(CAP);
+    try {
+      const disk = readFileSync(recordPath(), "utf8");
+      expect(/^[a-f0-9]{64}\n$/.test(disk)).toBe(true);
+      expect(disk.includes(intent.proof)).toBe(false);
+      expect(consumeGuiPairIntent(CAP, disk.trim())).toBe(false);
+      expect(consumeGuiPairIntent(CAP, disk.slice(0, 43))).toBe(false);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(true);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(false);
+    } finally { intent.dispose(); }
   });
-  test("client and wildcard-bound runtimes are not standalone pairing targets", () => {
-    const tty = terminal(); const client = config(); client.runtimeRole = "client";
-    const wildcard = config(); wildcard.hostname = "0.0.0.0";
-    expect(() => deliverGuiPairingGrant(ORIGIN, client, state(), tty.deps)).toThrow();
-    expect(() => deliverGuiPairingGrant(ORIGIN, wildcard, state(), tty.deps)).toThrow();
-    expect(tty.read()).toBe("");
+  test("a guessed proof or different signed capability cannot consume the record", () => {
+    const intent = createGuiPairIntent(CAP);
+    try {
+      expect(consumeGuiPairIntent(CAP, "B".repeat(43))).toBe(false);
+      expect(consumeGuiPairIntent("C".repeat(43), intent.proof)).toBe(false);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(true);
+    } finally { intent.dispose(); }
   });
-  test("literal IPv6 origins are preserved", () => {
-    const cfg = config(); cfg.hostname = "::1"; const tty = terminal();
-    expect(deliverGuiPairingGrant("http://[::1]:10100", cfg, state(), tty.deps).serverOrigin).toBe("http://[::1]:10100");
+  test("a mismatched origin refuses before consuming local intent", () => {
+    const intent = createGuiPairIntent(CAP), s = state();
+    try {
+      expect(() => deliverGuiPairingGrant(request(intent.proof, "http://127.0.0.1:10200"), config(), s)).toThrow();
+      expect(s.pairingGrants.size).toBe(0);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(true);
+    } finally { intent.dispose(); }
   });
-  test("partial terminal writes finish without duplicating the code", () => {
-    const tty = terminal(7);
-    deliverGuiPairingGrant(ORIGIN, config(), state(), tty.deps);
-    expect(tty.read().match(/ocx_pair_[A-Za-z0-9_-]{43}/g)?.length).toBe(1);
+  test("client roles and wildcard binds do not become pairing targets", () => {
+    const intent = createGuiPairIntent(CAP);
+    try {
+      const client = config(); client.runtimeRole = "client";
+      const wildcard = config(); wildcard.hostname = "0.0.0.0";
+      for (const cfg of [client, wildcard]) expect(() => deliverGuiPairingGrant(request(intent.proof), cfg, state())).toThrow();
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(true);
+    } finally { intent.dispose(); }
   });
-  test("failed or non-progressing terminal writes cannot return a successful result", () => {
-    for (const count of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => deliverGuiPairingGrant(ORIGIN, config(), state(), {
-        terminalAvailable: () => true, writeTerminal: () => count,
-      })).toThrow();
+  test("dispose removes an unused commitment and is idempotent", () => {
+    const intent = createGuiPairIntent(CAP), path = recordPath();
+    intent.dispose(); intent.dispose();
+    expect(existsSync(path)).toBe(false);
+    expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(false);
+  });
+  test("publication never overwrites an existing commitment", () => {
+    const intent = createGuiPairIntent(CAP), path = recordPath();
+    try {
+      const original = readFileSync(path, "utf8");
+      expect(() => createGuiPairIntent(CAP)).toThrow();
+      expect(readFileSync(path, "utf8") === original).toBe(true);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(true);
+    } finally { intent.dispose(); }
+  });
+  test("rejects oversized and corrupted records", () => {
+    for (const data of ["x".repeat(4096), "x".repeat(65)]) {
+      const intent = createGuiPairIntent(CAP), path = recordPath();
+      writeFileSync(path, data);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(false);
+      intent.dispose(); // a replacement must be retained, not deleted by stale ownership
+      expect(existsSync(path)).toBe(true);
+      unlinkSync(path);
     }
-    expect(() => deliverGuiPairingGrant(ORIGIN, config(), state(), {
-      terminalAvailable: () => true, writeTerminal: () => { throw new Error("fixture write failure"); },
-    })).toThrow("fixture write failure");
   });
-  test("the existing hub grant response is unchanged and does not require a terminal", () => {
-    const cfg = config(); cfg.runtimeRole = "hub"; cfg.hub = { managementPublicOrigin: "https://hub.example" } as OcxConfig["hub"];
-    const result = deliverGuiPairingGrant("https://hub.example", cfg, state(), {
-      terminalAvailable: () => false, writeTerminal: () => { throw new Error("must not write"); },
-    });
+  test("rejects linked records without deleting the target", () => {
+    const intent = createGuiPairIntent(CAP), path = recordPath(), other = join(root, "hard-link");
+    try {
+      linkSync(path, other);
+      expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(false);
+      expect(existsSync(other)).toBe(true);
+    } finally { intent.dispose(); }
+  });
+  test.skipIf(process.platform === "win32")("rejects symlinked records and directories", () => {
+    const intent = createGuiPairIntent(CAP), path = recordPath(), target = join(root, "target");
+    writeFileSync(target, readFileSync(path)); unlinkSync(path); symlinkSync(target, path);
+    expect(consumeGuiPairIntent(CAP, intent.proof)).toBe(false);
+    intent.dispose(); expect(existsSync(target)).toBe(true); unlinkSync(path);
+    const second = mkdtempSync(join(root, "second-")); symlinkSync(join(root, "gui-pair-intents"), join(second, "gui-pair-intents"));
+    expect(() => createGuiPairIntent(CAP, second)).toThrow();
+  });
+  test.skipIf(process.platform === "win32")("rejects group-writable intent directories", () => {
+    mkdirSync(join(root, "gui-pair-intents")); chmodSync(join(root, "gui-pair-intents"), 0o770);
+    expect(() => createGuiPairIntent(CAP)).toThrow();
+    expect(consumeGuiPairIntent(CAP, "B".repeat(43))).toBe(false);
+  });
+  test("invalid capability values never select a filesystem path", () => {
+    for (const value of ["", "../outside", "x".repeat(1024)]) {
+      expect(() => createGuiPairIntent(value)).toThrow();
+      expect(consumeGuiPairIntent(value, "B".repeat(43))).toBe(false);
+    }
+  });
+  test("hub invitations retain their existing policy and response", () => {
+    const cfg = config(); cfg.runtimeRole = "hub";
+    cfg.hub = { managementPublicOrigin: "https://hub.example" } as OcxConfig["hub"];
+    const result = deliverGuiPairingGrant(request(undefined, "https://hub.example"), cfg, state());
     expect(result).toHaveProperty("grant");
-    expect(result).not.toHaveProperty("delivery");
+    expect(existsSync(join(root, "gui-pair-intents"))).toBe(false);
   });
 });
