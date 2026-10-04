@@ -12,7 +12,10 @@ import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { isAccountNeedsReauth } from "../../src/codex/account-runtime-state";
 import { clearAccountNeedsReauth, clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
 import { setAccountQuotaFromParsed } from "../../src/codex/quota";
-import { clearCodexUpstreamHealth, clearThreadAccountMap } from "../../src/codex/routing";
+import {
+  CODEX_QUOTA_PROBE_INTERVAL_MS, clearCodexUpstreamHealth, clearThreadAccountMap,
+  recordCodexUpstreamOutcome, tryAcquireCodexQuotaProbeLease,
+} from "../../src/codex/routing";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
@@ -107,6 +110,24 @@ describe("stored-account credit policy at authentication", () => {
   test("an elapsed full window does not hold the account indefinitely", async () => {
     quota(100, Date.now() - 1_000);
     expect((await resolve(config())).kind).toBe("pool");
+  });
+  test("a mid-acquisition credit hold releases the due cooldown probe lease", async () => {
+    const cfg = config();
+    quota(99);
+    const recordedAt = Date.now() - CODEX_QUOTA_PROBE_INTERVAL_MS - 1_000;
+    recordCodexUpstreamOutcome(cfg, ID, 429, {
+      resetAt: Math.floor((recordedAt + 4 * 24 * 60 * 60_000) / 1_000),
+      now: recordedAt,
+      fixedAccount: true,
+    });
+    // The resolver stays synchronous until the credential await, so this lands between the
+    // two stored-account credit checks exactly as a limit observed mid-flight would.
+    const pending = resolveCodexAuthContext(new Headers(), cfg, "pool", { modelId: "gpt-5.5" });
+    quota();
+    await expect(pending).rejects.toBeInstanceOf(CodexPoolAccountCreditsOffError);
+    // The catch must hand the probe lease back: an unreleased lease would keep
+    // `probeLeaseId` set and block every subsequent probe regardless of the interval.
+    expect(tryAcquireCodexQuotaProbeLease(ID, Date.now() + CODEX_QUOTA_PROBE_INTERVAL_MS)).toBeTruthy();
   });
   test("policy refusal retains actionable wording and is not a reauthentication failure", () => {
     const error = new CodexPoolAccountCreditsOffError(ID, Date.now() + 3_600_000);

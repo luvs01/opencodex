@@ -47,7 +47,9 @@ export function poolContextCreditHoldResetAt(
 ): number | undefined {
   const bound = policies.get(context);
   const policy = override ?? bound?.policy;
-  if (!policy) return undefined; // Existing trusted direct helper callers may omit policy entirely.
+  // Unbound contexts skip credit-hold enforcement entirely: callers that require
+  // enforcement must supply `override` (or resolve through bindPoolCreditPolicy).
+  if (!policy) return undefined;
   const catalog = override?.codexAccounts ? override : bound?.config ?? policy;
   return poolCreditHoldResetAt(policy, context.accountId, catalog, now);
 }
