@@ -30,7 +30,8 @@ import {
 
 export type GuiPairRequestResult =
   | { kind: "created"; grant: string; browserOrigin: string; serverOrigin: string; expiresAt: number }
-  | { kind: "unavailable"; reason: "unattested-target" | "runtime-mismatch" | "attestation" | "capability" | "transport" | "rejected" };
+  | { kind: "delivered"; delivery: "server-terminal"; browserOrigin: string; serverOrigin: string; expiresAt: number }
+  | { kind: "unavailable"; reason: "unattested-target" | "runtime-mismatch" | "attestation" | "capability" | "transport" | "rejected" | "operator-terminal-required" };
 
 export interface GuiPairClientDeps {
   fetchImpl?: typeof fetch;
@@ -56,22 +57,20 @@ function sameRuntime(left: RuntimePortState, right: RuntimePortState | null): bo
 function parseCreatedResult(value: unknown, browserOrigin: string): GuiPairRequestResult | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (
-    typeof record.grant !== "string"
-    || !/^ocx_pair_[A-Za-z0-9_-]{43}$/.test(record.grant)
-    || canonicalGuiBrowserOrigin(record.browserOrigin) !== browserOrigin
-    || typeof record.expiresAt !== "number"
-    || !Number.isSafeInteger(record.expiresAt)
-  ) return null;
+  if (canonicalGuiBrowserOrigin(record.browserOrigin) !== browserOrigin
+    || typeof record.expiresAt !== "number" || !Number.isSafeInteger(record.expiresAt)) return null;
   const serverOrigin = canonicalHttpOrigin(record.serverOrigin);
   if (!serverOrigin) return null;
-  return {
-    kind: "created",
-    grant: record.grant,
-    browserOrigin,
-    serverOrigin,
-    expiresAt: record.expiresAt,
-  };
+  if (record.delivery !== undefined) {
+    const destination = new URL(serverOrigin);
+    if (record.delivery !== "server-terminal" || Object.hasOwn(record, "grant")
+      || record.browserOrigin !== browserOrigin || record.serverOrigin !== browserOrigin
+      || destination.protocol !== "http:"
+      || !["127.0.0.1", "[::1]"].includes(destination.hostname)) return null;
+    return { kind: "delivered", delivery: "server-terminal", browserOrigin, serverOrigin, expiresAt: record.expiresAt };
+  }
+  if (typeof record.grant !== "string" || !/^ocx_pair_[A-Za-z0-9_-]{43}$/.test(record.grant)) return null;
+  return { kind: "created", grant: record.grant, browserOrigin, serverOrigin, expiresAt: record.expiresAt };
 }
 
 export async function requestBoundGuiPairingGrant(
@@ -153,7 +152,11 @@ export async function requestBoundGuiPairingGrant(
   } catch {
     return { kind: "unavailable", reason: "transport" };
   }
-  if (!response.ok) return { kind: "unavailable", reason: "rejected" };
+  if (!response.ok) {
+    const refusal = await response.json().catch(() => null) as { code?: unknown } | null;
+    return { kind: "unavailable", reason: refusal?.code === "operator_terminal_required"
+      ? "operator-terminal-required" : "rejected" };
+  }
   const result = parseCreatedResult(await response.json().catch(() => null), browserOrigin);
   return result ?? { kind: "unavailable", reason: "rejected" };
 }

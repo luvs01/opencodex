@@ -88,3 +88,8 @@ ocx link revoke --link-id <id> [--json]
 
 - [Remote Hub 배포](/ko/guides/remote-hub/)
 - [Remote Workspace](/ko/guides/remote-workspace/)
+
+
+### 단독 실행 환경의 페어링 코드 표시
+
+단독 실행 중인 컴퓨터를 Child로 연결할 때 `ocx gui pair --origin <로컬 주소>`는 페어링 명령 창이 아니라 **OpenCodex 서버가 전경에서 실행 중인 터미널**에 일회용 코드를 표시하도록 요청합니다. 직접 요청한 경우에만 해당 코드를 로컬 대시보드에 입력하세요. JSON 출력에는 전달 정보만 있고 코드는 없습니다. 터미널이 없는 백그라운드 서비스는 이 요청을 거부하며, 이 브랜치에는 별도의 무인 서비스용 사용자 승인 방식이 아직 없습니다. 기존 Hub 초대는 변경하지 않습니다. 이 동작은 페어링 명령이 코드를 직접 출력한다고 설명한 앞의 단독 실행 예시보다 우선합니다.

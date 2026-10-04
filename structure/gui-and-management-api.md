@@ -588,3 +588,8 @@ keep their existing no-catalog-refresh behavior. The regression suite is
 Automatic account exhaustion and recovery use the [spendable Codex credit evidence contract](providers/openai-tiers.md#spendable-codex-credits), including independent freshness, upstream refusal, and reset-ticket separation.
 
 `src/server/management/subagent-model-routes.ts` owns roster/picker and optional Claude force updates. The route registry declares its GET/PUT ownership; `agent-settings-routes.ts` only lazy-loads and delegates the matching path. GET includes `force`, exposed-only `forceAvailable`, and bounded `forceStatus`; PUT accepts force alone, null clears, and omission preserves it. Force-only updates do not regenerate the roster or converge Codex catalogs. The Subagents page keeps save failures visible and disables overlapping force writes.
+
+
+### Standalone pairing delivery
+
+`gui-pair-delivery.ts` sends standalone grants only to the serving process’s terminal. The HTTP mint response contains delivery/origin/expiry metadata but no grant. Non-terminal service launches refuse before minting; hub delivery is unchanged. CLI `gui pair` reports where to read the code rather than claiming pairing completed. Existing redemption, CSRF and paired-join checks remain. Coverage: `tests/gui/gui-pair-delivery.test.ts`.

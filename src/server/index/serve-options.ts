@@ -181,8 +181,8 @@ import {
 import {
   GuiPairingGrantRateLimitError,
   consumeGuiPairingGrant,
-  createGuiPairingGrant,
 } from "../gui-session";
+import { deliverGuiPairingGrant, GuiPairingTerminalRequiredError } from "../gui-pair-delivery";
 import { recordCursorSeen } from "../../integrations/cursor-seen";
 import { detectCursorInstalls } from "../../integrations/cursor-detect";
 import { loadCursorEffortTable } from "../../integrations/cursor-effort-table";
@@ -679,7 +679,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             return withManagementCors(Response.json({ error: "GUI pairing capability required" }, { status: 403 }), req, config);
           }
           try {
-            const grant = createGuiPairingGrant(
+            const grant = deliverGuiPairingGrant(
               req.headers.get(GUI_PAIR_BROWSER_ORIGIN_HEADER) ?? "",
               config,
               managementAuth,
@@ -690,7 +690,9 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             }), req, config);
           } catch (error) {
             const status = error instanceof GuiPairingGrantRateLimitError ? 429 : 403;
-            return withManagementCors(Response.json({ error: "GUI pairing grant refused" }, {
+            return withManagementCors(Response.json({ error: "GUI pairing grant refused",
+              ...(error instanceof GuiPairingTerminalRequiredError ? { code: "operator_terminal_required" } : {}),
+            }, {
               status,
               ...(status === 429 ? { headers: { "Retry-After": "60" } } : {}),
             }), req, config);
