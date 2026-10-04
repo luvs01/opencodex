@@ -50,7 +50,7 @@ describe("stored-account credit policy at authentication", () => {
     clearAccountQuota(); clearCodexUpstreamHealth(); clearThreadAccountMap(); clearPoolRotationState();
     clearAccountNeedsReauth(ID);
     saveCodexAccountCredential(ID, {
-      accessToken: "fixture-access-credit-policy", refreshToken: "fixture-refresh-credit-policy",
+      accessToken: "access-token-value-credit-policy", refreshToken: "fixture-refresh-credit-policy",
       expiresAt: Date.now() + 3_600_000, chatgptAccountId: "fixture-workspace-credit-policy",
     });
   });
@@ -76,7 +76,7 @@ describe("stored-account credit policy at authentication", () => {
     const cfg = config(); cfg.creditCodexAccountIds = [ID]; quota();
     const ctx = await resolve(cfg);
     expect(ctx.kind).toBe("pool");
-    expect(materializeCodexUpstreamAuth(new Headers(), ctx).get("authorization")).toBe("Bearer fixture-access-credit-policy");
+    expect(materializeCodexUpstreamAuth(new Headers(), ctx).get("authorization")).toBe("Bearer access-token-value-credit-policy");
   });
   test("a below-limit exact account remains usable", async () => {
     quota(99);
