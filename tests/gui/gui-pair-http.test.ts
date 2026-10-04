@@ -48,6 +48,14 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
   if (process.platform === "win32" && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
   const children = new Set<Bun.Subprocess>();
   const controller = new AbortController();
+  // Standalone delivery targets the server's foreground terminal. A pty supplies one on
+  // POSIX; on Windows there is none and the mint must refuse before issuing a code.
+  const decoder = new TextDecoder();
+  let transcript = "";
+  const terminal = process.platform === "win32" ? null : new Bun.Terminal({
+    cols: 120, rows: 24,
+    data: (_term, data) => { transcript += decoder.decode(data); },
+  });
   const deadline = setTimeout(() => {
     controller.abort();
     for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
@@ -65,7 +73,8 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
       claudeCode: { enabled: false, systemEnv: false },
     }));
     const server = Bun.spawn([process.execPath, repoPath("src/cli/index.ts"), "start", "--port", String(port)], {
-      cwd: root, env, stdin: "ignore", stdout: "ignore", stderr: "ignore",
+      cwd: root, env,
+      ...(terminal ? { terminal } : { stdin: "ignore" as const, stdout: "ignore" as const, stderr: "ignore" as const }),
     });
     children.add(server);
     const request = (path: string, init: RequestInit = {}) => fetch(`${origin}${path}`, {
@@ -120,14 +129,34 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
     });
     children.add(mint);
     const [mintExit, output] = await Promise.all([mint.exited, new Response(mint.stdout).text()]);
+    if (!terminal) {
+      // No foreground terminal: the endpoint refuses before minting and nothing may
+      // cross the HTTP boundary, so the session stays unpaired and join stays denied.
+      expect(mintExit, "gui pair fails closed without a server terminal").toBe(1);
+      await expectStatus(ordinary, false);
+      await expectError(await joinRequest(headers(ordinary)), 403, "forbidden");
+      for (const file of ["links.json", "client-link.json", "child-initiated.json", "known_hosts"]) {
+        expect(existsSync(join(ocxHome, "link", file)), `no durable ${file} after refused pairing`).toBe(false);
+      }
+      expect(server.exitCode, "refused pairing must not restart the server").toBeNull();
+      return;
+    }
     expect(mintExit, "actual gui pair CLI exit status (output withheld)").toBe(0);
     const minted = parseObject(output);
-    expect(minted.kind === "created", "CLI created a grant").toBe(true);
-    expect(typeof minted.grant === "string" && minted.grant.startsWith("ocx_pair_"), "CLI grant present").toBe(true);
+    expect(minted.kind === "delivered" && minted.delivery === "server-terminal",
+      "CLI reports terminal delivery").toBe(true);
+    expect("grant" in minted, "no pairing code crosses the HTTP boundary").toBe(false);
     expect(minted.browserOrigin === origin && minted.serverOrigin === origin, "CLI exact origin binding").toBe(true);
+    let grant = "";
+    while (!controller.signal.aborted && server.exitCode === null) {
+      grant = transcript.match(/ocx_pair_[A-Za-z0-9_-]{43}/)?.[0] ?? "";
+      if (grant) break;
+      await Bun.sleep(25);
+    }
+    expect(/^ocx_pair_[A-Za-z0-9_-]{43}$/.test(grant), "one-use code delivered to the server terminal").toBe(true);
     const redeem = (extraHeaders: Record<string, string> = {}) => request("/opencodex-session", {
       method: "POST", headers: { Origin: origin, "content-type": "application/json", ...extraHeaders },
-      body: JSON.stringify({ grant: minted.grant }),
+      body: JSON.stringify({ grant }),
     });
     // Refused attempts must not consume the valid grant.
     for (const extra of [{ Origin: "https://foreign.example.test" }, { Authorization: "Bearer invalid-test-credential" }]) {
@@ -166,6 +195,7 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
       for (const child of children) if (child.exitCode === null) child.kill();
       await Promise.all([...children].map(child => child.exited));
     } finally { clearTimeout(force); }
+    terminal?.close();
     removeTreeWithRetry(root);
   }
 }, DEADLINE + 10_000);
