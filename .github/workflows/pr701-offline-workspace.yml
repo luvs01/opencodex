@@ -1,0 +1,38 @@
+name: PR701 pinned offline workspace
+on:
+  push:
+    branches: [codex/pr701-offline-workspace-20261004]
+    paths: [.github/workflows/pr701-offline-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/pr701-offline-workspace-20261004'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: b53208945af7e21ec5627ef8b99e8eb9d8eb4309
+          persist-credentials: false
+      - name: Prepare source and pinned root dependencies, without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr701-offline/source"
+          git archive b53208945af7e21ec5627ef8b99e8eb9d8eb4309 | tar -x -C "$RUNNER_TEMP/pr701-offline/source"
+          npm install --prefix "$RUNNER_TEMP/pr701-bun" --no-audit --no-fund bun@1.4.0
+          export PATH="$RUNNER_TEMP/pr701-bun/node_modules/.bin:$PATH"
+          cd "$RUNNER_TEMP/pr701-offline/source"
+          bun --version
+          bun install --frozen-lockfile
+          printf '%s\n' b53208945af7e21ec5627ef8b99e8eb9d8eb4309 > ../SOURCE_SHA
+          tar -czf "$RUNNER_TEMP/pr701-offline.tar.gz" -C "$RUNNER_TEMP/pr701-offline" .
+          sha256sum "$RUNNER_TEMP/pr701-offline.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr701-offline-b5320894
+          path: ${{ runner.temp }}/pr701-offline.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
