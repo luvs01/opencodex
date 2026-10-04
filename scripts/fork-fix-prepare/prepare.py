@@ -8,7 +8,6 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tempfile
-import zlib
 
 BASE = "8aff79ed2942be778e6cdba8237f902122cb37e1"
 REPO = "luvs01/opencodex"
@@ -92,11 +91,8 @@ def main() -> None:
     token = os.environ.get("GH_TOKEN")
     if not token:
         raise RuntimeError("Missing temporary workflow token")
-    decoded = zlib.decompress(base64.b64decode(Path(__file__).with_name("payload.b64").read_text().strip(), validate=True))
-    if hashlib.sha256(decoded).hexdigest() != "7655c6c675afc2754463a58681f8678789e85206be808b35b023d274a1debe56":
-        raise ValueError("Preparation payload checksum mismatch")
-    payload = json.loads(decoded)
-    if payload["base"] != BASE or payload["repo"] != REPO or {p["branch"] for p in payload["plans"]} != BRANCHES or len(payload["plans"]) != 2:
+    plans = [json.loads(Path(__file__).with_name(name).read_text()) for name in ("plan-credit.json", "plan-pairing.json")]
+    if {p["branch"] for p in plans} != BRANCHES or len(plans) != 2:
         raise ValueError("Unexpected preparation target")
     env = dict(os.environ)
     env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
@@ -112,7 +108,7 @@ def main() -> None:
     def exists(name: str) -> bool:
         return subprocess.run(["git", "cat-file", "-e", f"{BASE}:{name}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     # Preflight both candidates before creating or publishing either branch.
-    rendered = [(plan, render(plan, read, exists)) for plan in payload["plans"]]
+    rendered = [(plan, render(plan, read, exists)) for plan in plans]
     for plan, _ in rendered:
         if git("ls-remote", "--heads", "origin", "refs/heads/" + plan["branch"], env=env).strip():
             raise RuntimeError("Target branch already exists; refusing overwrite: " + plan["branch"])
