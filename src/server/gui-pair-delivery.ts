@@ -39,15 +39,10 @@ export function deliverGuiPairingGrant(
   if (!(deps.terminalAvailable ?? (() => isatty(2)))()) throw new GuiPairingTerminalRequiredError();
   const created = createGuiPairingGrant(browserOrigin, config, state);
   const text = Buffer.from(
-    `
-OpenCodex local dashboard pairing for ${origin}
-`
-      + "Only enter this code into that dashboard if you requested pairing.
-"
-      + `${created.grant}
-`
-      + "This one-use code expires shortly. Do not save or share it.
-",
+    `\nOpenCodex local dashboard pairing for ${origin}\n`
+      + "Only enter this code into that dashboard if you requested pairing.\n"
+      + `${created.grant}\n`
+      + "This one-use code expires shortly. Do not save or share it.\n",
     "utf8",
   );
   let written = 0;
