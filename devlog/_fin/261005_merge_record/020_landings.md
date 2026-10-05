@@ -5,8 +5,8 @@ The [fixed scope](000_scope.md) contains 60 first-parent landings:
 The 45-entry inventory fills the coverage gap; "covered" refers to the
 documentation units listed below, not an assertion that no other document
 anywhere mentions these changes. The last 29 rows were read from canonical
-upstream `dev` (tip `6774f0f6f26c` at write time), which the fork mirror had
-not yet reached.
+upstream `dev` (tip `6774f0f6f26c`, which the fork mirror has since caught up
+to).
 
 ## 45 landings recorded here
 
@@ -113,8 +113,8 @@ Batch context for these rows:
 | #6593 | [sidebar seven groups](../../_plan/261004_sidebar_seven_groups/030_refine_and_land_outcome.md) |
 | #6526, #6528, #6535, #6539, #6542, #6545 | [CLI–GUI parity](../261003_cli_gui_parity/090_acceptance_closure.md) — the six-layer stack |
 | #6596 | [Claude settings UX](../261005_claude_settings_ux/000_plan.md) |
-| #6610 | [Claude picker HTTP/2](https://github.com/lidge-jun/opencodex/blob/6774f0f6f26c103da144a630971091a52ada80a5/devlog/_plan/261005_claude_picker_h2/010_plan.md) (carries #6511; unit landed upstream after the fork's dev tip, linked pinned) |
-| #6612, #6613 | [R4 GUI audit](https://github.com/lidge-jun/opencodex/blob/6774f0f6f26c103da144a630971091a52ada80a5/devlog/_plan/261005_r4_gui_audit/030_fix_plan.md) — its wp2 PRs A and B (unit landed upstream after the fork's dev tip, linked pinned) |
+| #6610 | [Claude picker HTTP/2](../../_plan/261005_claude_picker_h2/010_plan.md) (carries #6511) |
+| #6612, #6613 | [R4 GUI audit](../../_plan/261005_r4_gui_audit/030_fix_plan.md) — its wp2 PRs A and B |
 
 The cli-parity stack (#6526 → #6545) landed as one squash plus five merge
 commits, preserving the layer chain the unit describes; the merge commits
