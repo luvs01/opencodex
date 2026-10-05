@@ -9,6 +9,13 @@ recorded but not yet landed upstream) with the
 same method and the same limits, checked against canonical upstream git history,
 GitHub pull requests, release objects, tags and Actions runs.
 
+The window boundaries below are defined by canonical upstream first-parent
+history alone, so they stand whether or not the predecessor record ever merges;
+the link exists only so a reader can chain the coverage narrative. If the
+predecessor lands after this one, upstream history will contain this record
+referencing an unlanded ancestor — the same state the 261004 record documented
+for 261002.
+
 ## Fixed boundaries
 
 - Landing window: first-parent range
