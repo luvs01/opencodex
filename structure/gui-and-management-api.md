@@ -74,6 +74,10 @@ the web route. The native panel introduces no management endpoint or credential 
 
 ## Dashboard serving
 
+Management exports, integration write/preview/refresh inputs and Claude port projections use `managementInferencePort` in `src/server/management/context.ts` for the PUBLIC bound port, never the request URL port. `src/server/index/serve-options.ts` supplies `liveListenPort`; direct fixtures fall back to config. Cursor status in `src/server/management/cursor-integration-routes.ts` uses live -> PID-matched runtime -> config. Destination resolution and explicit loopback companion precedence stay in `standaloneCodexRoutingTarget` (`src/codex/inject/routing-target.ts`), `effectiveLoopbackListenerPort` (`src/codex/loopback-target.ts`) and `localInferenceDestination` (`src/lib/local-destinations.ts`).
+
+> Decision record: [ADR-6598](decisions/ADR-6598-management-inference-port.md)
+
 The Factory Droid integration page edits the
 [owned model defaults](clients/integrations.md#droid-reasoning-defaults). Its draft
 is included in the existing preview and confirmation request, with editing
@@ -214,6 +218,12 @@ be treated as implemented:
 - reauthenticate subsequent frames after the handshake.
 
 ## API ownership
+
+`PUT /api/codex-auth/accounts/pause` manually pauses or resumes all existing entries whose account
+and workspace identity is confirmed to match, including native main and a pool duplicate. Its
+`affectedAccountIds` response contains only the existing opaque entry handles; emails and physical
+account ids are not serialized. Absent homes and API-key-only main logins allow Pool-only grouping;
+busy/unreadable main identity returns 503. See [OpenAI account operations](providers/openai-accounts.md#manual-account-pause-and-resume).
 
 Model rows keep stored custom overrides separate from their effective `exportMetadata` projection.
 `src/server/management/model-row-export-metadata.ts` resolves inherited limits and capabilities;
@@ -558,7 +568,7 @@ retry, last trusted device details, and the existing poll cadence. Outside same-
 ownership, a GET HTTP failure stops polling without starting a second login POST.
 
 Pairing-grant source limiting applies only to invalid guesses from an allowed browser origin; disallowed
-origins record no limiter state, and a valid grant redeems even from a throttled source.
+origins record no limiter state, and a valid grant redeems even from a throttled source. Standalone grant delivery also requires a one-use configuration-write intent; see [Standalone pairing delivery](remote-link.md#standalone-pairing-delivery).
 
 ## Durable provider PATCH
 
