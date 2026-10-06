@@ -1,0 +1,86 @@
+name: Publish tested stored-key authorization
+on:
+  push:
+    branches: [codex/key-reveal-workspace-20261006]
+    paths: [.github/workflows/key-reveal-publish-20261006.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/key-reveal-workspace-20261006'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      # Transport only. No dependency install or patched application code executes with this token.
+      - name: Verify the complete tested tree and create only a new candidate ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, os, subprocess
+          from pathlib import Path
+          repo = 'luvs01/opencodex'
+          base = '5d69e5cdc58441ac5c1735ea2f81f1bc46eff0ac'
+          expected_tree = 'd5bcc961d2f7395fd624e140d68e096cea847ef0'
+          branch = 'codex/fix-key-reveal-session-authority-20261006'
+          expected_paths = {
+              'docs-site/src/content/docs/guides/web-dashboard.md',
+              'docs-site/src/content/docs/ko/guides/web-dashboard.md',
+              'src/server/management-auth.ts',
+              'src/server/management/oauth-account-routes.ts',
+              'src/server/management/route-registry.ts',
+              'structure/dashboard-and-usage.md',
+              'structure/gui-and-management-api.md',
+              'tests/gui/gui-pair-http.test.ts',
+              'tests/server/api-keys-routes.test.ts',
+          }
+          if os.environ['GITHUB_REPOSITORY'] != repo or os.environ['GITHUB_REF'] != 'refs/heads/codex/key-reveal-workspace-20261006':
+              raise RuntimeError('wrong publication target')
+          folder = Path('scripts/key-reveal-transport-20261006')
+          patch = b''.join((folder / ('part' + str(i) + '.patch')).read_bytes() for i in (0, 1))
+          if len(patch) != 22365 or hashlib.sha256(patch).hexdigest() != 'efe5f58883a0f9565683c9c2b44ca1b42ae4d361992b5701b732dc32bfa5d1e9':
+              raise RuntimeError('patch checksum mismatch; no publication')
+          env = dict(os.environ)
+          env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+              GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + env['GH_TOKEN']).encode()).decode(),
+              GIT_AUTHOR_NAME='github-actions[bot]', GIT_COMMITTER_NAME='github-actions[bot]',
+              GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
+              GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com')
+          def git(*args, data=None):
+              result = subprocess.run(['git', *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=True)
+              return result.stdout.decode().strip()
+          if git('remote', 'get-url', 'origin') not in ('https://github.com/' + repo, 'https://github.com/' + repo + '.git'):
+              raise RuntimeError('unexpected remote')
+          if git('ls-remote', '--heads', 'origin', 'refs/heads/' + branch):
+              raise RuntimeError('candidate already exists; refusing overwrite')
+          git('fetch', '--no-tags', '--depth=1', 'origin', base)
+          git('checkout', '--detach', base)
+          if git('rev-parse', 'HEAD^{tree}') != 'db8ef0b3026075f92e5e97efcd4290765cb4db4e':
+              raise RuntimeError('unexpected base tree')
+          git('apply', '--index', '--check', '--whitespace=error-all', '-', data=patch)
+          git('apply', '--index', '--whitespace=error-all', '-', data=patch)
+          git('diff', '--cached', '--check')
+          if set(git('diff', '--cached', '--name-only').splitlines()) != expected_paths:
+              raise RuntimeError('unexpected changed files')
+          tree = git('write-tree')
+          if tree != expected_tree:
+              raise RuntimeError('tree differs from locally tested source')
+          message = ('fix(auth): require independent session authority for stored-key reads\n\n'
+              'Revalidate pairing or trusted identity before and after body reception.\n'
+              'Keep automatic dashboard access and masked listing unchanged.\n\n'
+              'Linux/Bun 1.4.0: 249 focused tests passed, 1 native-Windows skip.\n'
+              'Typecheck, privacy, structure and whitespace checks passed.\n'
+              'No native-platform, live-provider or full-suite acceptance is claimed.\n\n'
+              'Fork-only draft candidate; no merge, deployment or finding closure.\n')
+          commit = git('commit-tree', tree, '-p', base, data=message.encode())
+          git('push', 'origin', commit + ':refs/heads/' + branch)
+          print('CANDIDATE_COMMIT=' + commit)
+          print('TESTED_TREE=' + tree)
+          PY
