@@ -1,0 +1,456 @@
+diff --git a/docs-site/src/content/docs/guides/claude-code.md b/docs-site/src/content/docs/guides/claude-code.md
+index 5b688af5fbf2aa63e72e59406f5af29b1d54c0af..4fa06efa41fd96c7c900709f195ba4988f634289 100644
+--- a/docs-site/src/content/docs/guides/claude-code.md
++++ b/docs-site/src/content/docs/guides/claude-code.md
+@@ -316,6 +316,11 @@ applies to it as well. Desktop and CLI catalog rewrites share bounded row and me
+ if adding routed models would exceed a limit, OpenCodex returns the original Anthropic catalog
+ unchanged rather than publishing a partial list.
+ 
++The picker relay limits unfinished uploads separately from its overall request capacity. An upload
++closes after 30 seconds without body progress or five minutes total; finish or retry the upload
++rather than keeping it open. These deadlines stop when the request body completes and do not
++limit a long-lived response or SSE subscription. Excess uploads receive an empty 503 response.
++
+ ### Use opencodex models from the Desktop Code tab (first-party bindings)
+ 
+ In first-party mode the Code tab's model picker belongs to claude.ai: its rows (Opus 5.5,
+diff --git a/docs-site/src/content/docs/ko/guides/claude-code.md b/docs-site/src/content/docs/ko/guides/claude-code.md
+index 378e672bd992dfbb5a77b7f79ee0be987a10ab9f..3d0838ceb96ab4771f51aa72541df59e58b17966 100644
+--- a/docs-site/src/content/docs/ko/guides/claude-code.md
++++ b/docs-site/src/content/docs/ko/guides/claude-code.md
+@@ -193,6 +193,11 @@ Picker 모드를 끄거나 Desktop을 완전히 다시 시작할 때까지 Deskt
+ 
+ Picker 모드는 1P의 일부이므로 [1P 계정 위험](#1p직접-선택)도 그대로 적용돼요.
+ 
++피커 중계는 미완료 업로드 수를 전체 요청 수와 별도로 제한합니다. 본문 전송이 30초간
++진행되지 않거나 총 5분이 지나면 해당 업로드가 종료됩니다. 전송을 완료하거나 다시
++시도하세요. 본문 전송이 끝나면 제한 타이머가 해제되므로 긴 응답이나 SSE 구독의
++유지시간에는 적용되지 않습니다. 업로드 상한을 넘는 요청에는 본문 없는 503이 반환됩니다.
++
+ ### Code 탭에서 opencodex 모델 쓰기 (1P 바인딩)
+ 
+ 1P 모드에서 Code 탭의 모델 선택기는 claude.ai가 채워요. Opus 5.5, Sonnet 5, Haiku 4.5와
+diff --git a/scripts/test-layout/layout.json b/scripts/test-layout/layout.json
+index cb8d63e4681d71778379248e8e3c1492d1bc6a73..477009925acaebd49f8c964dc235624378fe674c 100644
+--- a/scripts/test-layout/layout.json
++++ b/scripts/test-layout/layout.json
+@@ -2,6 +2,7 @@
+   "version": 1,
+   "root": "tests",
+   "explicit": {
++    "claude-picker-upload.test.ts": "claude-integration",
+     "messages-native-scope.test.ts": "claude-integration",
+     "cli-log-view-filter.test.ts": "cli", "cli-usage-model-search.test.ts": "cli", "cli-companion-usage.test.ts": "cli", "cli-account-key-quota.test.ts": "cli",
+     "cli-observe-snapshot.test.ts": "cli", "cli-access-data-plane.test.ts": "cli", "cli-access-key-guard.test.ts": "cli", "cli-access-rename.test.ts": "cli",
+diff --git a/src/claude/intercept/picker-listener.ts b/src/claude/intercept/picker-listener.ts
+index d4dad33ffb910f584d977524eaeeb16733bfb502..53453f3e6c27853b5a16a3eeb7f60fc2e32b017e 100644
+--- a/src/claude/intercept/picker-listener.ts
++++ b/src/claude/intercept/picker-listener.ts
+@@ -11,7 +11,7 @@
+  * HTTP/1.1 server, unchanged. Upstream is one HTTP/1.1 request per client request on both paths.
+  * Only the bounded bootstrap response is held; other bodies and upgraded sockets relay as streams.
+  */
+-import { createSecureServer } from "node:http2";
++import { constants as h2Constants, createSecureServer } from "node:http2";
+ import type { Http2ServerRequest, Http2ServerResponse, ServerHttp2Session } from "node:http2";
+ import { createServer, request as httpsRequest } from "node:https";
+ import type { IncomingMessage, ServerResponse } from "node:http";
+@@ -34,6 +34,10 @@ export interface PickerListenerOptions {
+   maxEncodedBytes?: number;
+   /** Test seam: concurrent upstream requests; production uses PICKER_MAX_ACTIVE_UPSTREAMS. */
+   maxActiveUpstreams?: number;
++  /** Test seams: production uses the fixed upload concurrency and deadline limits below. */
++  maxActiveUploads?: number;
++  uploadIdleTimeoutMs?: number;
++  uploadTimeoutMs?: number;
+   log?: (line: string) => void;
+ }
+ export interface PickerListenerHandle { port: number; close(): Promise<void> }
+@@ -47,6 +51,10 @@ export const PICKER_MAX_HEADER_BYTES = 64 * 1024;
+  * Desktop uses (a handful of SSE subscriptions plus bursts of ordinary calls).
+  */
+ export const PICKER_MAX_ACTIVE_UPSTREAMS = 256;
++/** Reserve half the aggregate capacity for requests whose upload is already complete. */
++export const PICKER_MAX_ACTIVE_UPLOADS = 128;
++export const PICKER_UPLOAD_IDLE_TIMEOUT_MS = 30_000;
++export const PICKER_UPLOAD_TIMEOUT_MS = 300_000;
+ /** Advertised per HTTP/2 connection; Chromium queues further requests rather than failing them. */
+ export const PICKER_MAX_CONCURRENT_STREAMS = 100;
+ /** A connection that has not sent a complete ClientHello by then is dropped. */
+@@ -152,7 +160,11 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
+   const upstream = options.upstream ?? { host: "claude.ai", port: 443, servername: "claude.ai" };
+   const cap = options.maxEncodedBytes ?? BOOTSTRAP_MAX_ENCODED_BYTES;
+   const maxActiveUpstreams = options.maxActiveUpstreams ?? PICKER_MAX_ACTIVE_UPSTREAMS;
++  const maxActiveUploads = options.maxActiveUploads ?? PICKER_MAX_ACTIVE_UPLOADS;
++  const uploadIdleMs = options.uploadIdleTimeoutMs ?? PICKER_UPLOAD_IDLE_TIMEOUT_MS;
++  const uploadMs = options.uploadTimeoutMs ?? PICKER_UPLOAD_TIMEOUT_MS;
+   let activeUpstreams = 0;
++  let activeUploads = 0;
+   const upgrades = new Set<Duplex>();
+   const spliced = new Set<Socket>();
+   const h2Sockets = new Set<Duplex>();
+@@ -184,14 +196,31 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
+     // reason phrase differs, and sendHead branches on it.
+     const res = relayRes as ServerResponse;
+     const h2 = req.httpVersionMajor === 2;
++    // Framing, not method, determines whether a peer can keep sending a body. A bodyless h2
++    // request carries END_STREAM on its headers; HTTP/1.1 needs length or chunked framing.
++    const uploading = h2 ? !(req as Http2ServerRequest).stream.endAfterHeaders
++      : req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] ?? 0) > 0;
++    const closeInput = () => {
++      if (h2) {
++        const stream = (req as Http2ServerRequest).stream;
++        if (!stream.closed && !stream.destroyed) stream.close(h2Constants.NGHTTP2_CANCEL);
++      } else if (!req.destroyed) req.destroy();
++    };
+     // Refusals answer with an empty response and a fixed log line that carries no request data.
+     const refuse = (status: 400 | 503) => {
+-      res.writeHead(status, { "Content-Length": "0" });
++      // Do not leave a refused, still-uploading stream behind after delivering its empty reply.
++      if (uploading) {
++        req.once("error", () => res.destroy());
++        res.once("finish", closeInput);
++      }
++      res.writeHead(status, { "Content-Length": "0", ...(!h2 && uploading ? { Connection: "close" } : {}) });
+       res.end();
+       options.log?.(`picker request refused ${status}`);
+     };
+     if (h2 && !isRelayableH2Target(req.method, req.url)) { refuse(400); return; }
+-    if (activeUpstreams >= maxActiveUpstreams) { refuse(503); return; }
++    if (activeUpstreams >= maxActiveUpstreams || (uploading && activeUploads >= maxActiveUploads)) {
++      refuse(503); return;
++    }
+     const method = req.method ?? "GET";
+     let pathname: string;
+     // A target like "//[" reads as an authority and throws; refuse it like any unrelayable target.
+@@ -293,6 +322,41 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
+     // Bun's compat response skips its close event for a HEAD reset before end(); the stream's own
+     // close always fires. Destroying an upstream request that already completed is a no-op.
+     if (h2) (req as Http2ServerRequest).stream.once("close", onClientClose);
++    if (uploading) {
++      activeUploads++;
++      let uploadFinished = false;
++      const finishUpload = () => {
++        if (uploadFinished) return;
++        uploadFinished = true;
++        activeUploads--;
++        clearTimeout(idleTimer);
++        clearTimeout(totalTimer);
++        req.off("data", progress);
++      };
++      const expireUpload = (kind: "idle" | "deadline") => {
++        if (uploadFinished) return;
++        // Cancellation is stream-scoped on h2. Never impose a response/SSE lifetime limit.
++        clientGone = true;
++        req.unpipe(upReq);
++        upReq.destroy();
++        closeInput();
++        finishUpload();
++        options.log?.(`picker upload expired ${kind}`);
++      };
++      const idleTimer = setTimeout(() => expireUpload("idle"), uploadIdleMs);
++      const totalTimer = setTimeout(() => expireUpload("deadline"), uploadMs);
++      idleTimer.unref(); totalTimer.unref();
++      const progress = (chunk: Buffer) => { if (chunk.length > 0) idleTimer.refresh(); };
++      req.on("data", progress);
++      req.once("end", finishUpload);
++      req.once("close", finishUpload);
++      // Early responses and failures must not strand the unread side of a request.
++      const stopUnfinishedUpload = () => { if (!uploadFinished) { closeInput(); finishUpload(); } };
++      upReq.once("close", stopUnfinishedUpload);
++      res.once("finish", stopUnfinishedUpload);
++      res.once("close", stopUnfinishedUpload);
++      if (h2) (req as Http2ServerRequest).stream.once("close", finishUpload);
++    }
+     req.pipe(upReq);
+   };
+   server.on("request", relay);
+diff --git a/structure/clients/claude-desktop.md b/structure/clients/claude-desktop.md
+index 6f4d595720035635fbb490c77d3cc20e40f62e75..49f4fd8826a44463375379ab09592686263be2a4 100644
+--- a/structure/clients/claude-desktop.md
++++ b/structure/clients/claude-desktop.md
+@@ -194,10 +194,9 @@ Production always uses the configured adjacent ports. Lifecycle tests inject onl
+ factory and bind the real handlers on kernel-assigned ports; this preserves request handling while
+ avoiding the false reservation created by probing and closing a port pair before the ephemeral TLS
+ listener starts. The injected factory does not change production port selection.
+-The User-Agent is a routing hint, not a trust boundary: a client that fakes it reaches only what
+-any local process already reaches (the `api.anthropic.com` intercept is on the Claude Code proxy
+-too; the `claude.ai` relay verifies upstream and adds no credential) and breaks only its own TLS,
+-because each terminator presents a certificate only its intended client trusts. `claude.ai:443` is
++The User-Agent is a routing hint, not client authentication. Each terminator presents the
++certificate intended for that client; the `claude.ai` relay verifies upstream and adds no credential.
++Listener-wide concurrency and upload-lifetime bounds protect the shared relay capacity separately. `claude.ai:443` is
+ intercepted only while the runtime's cached
+ decision is armed: macOS, persisted resolved Desktop mode first-party, Desktop intent on,
+ `claudeCode.intercept.picker !== false`, no disarm latch, listener up, and the current picker CA
+@@ -213,6 +212,16 @@ HTTP/1.1 request per client request. Incoming requests and ordinary upstream res
+ a 64 KiB header allowance for browser session cookies; Bun enforces the HTTP/2 inbound bound
+ natively, counting name + value + 32 bytes per field and rejecting an oversized stream with
+ `RST_STREAM ENHANCE_YOUR_CALM` before the request handler runs.
++The relay retains a 256-request aggregate ceiling and allows at most 128 unfinished uploads
++across both HTTP versions and all sessions, leaving headroom for bodyless requests under the aggregate ceiling.
++Upload framing, not the method, selects that sub-budget. Each unfinished upload has a 30-second
++idle deadline and a five-minute absolute deadline; progress refreshes only the former. Expiry
++cancels its upstream and only its h2 stream (or its HTTP/1.1 connection). Completion clears
++upload timers without timing out a long response/SSE stream. Early responses, cancellation
++and shutdown release upload capacity once. Rejected uploads are closed after their empty reply.
++These bounds do not authenticate clients or guarantee availability under sustained churn or
++exhaustion by completed requests. `tests/claude-integration/claude-picker-upload.test.ts` covers
++cross-session admission, both protocol deadlines, progress, early replies and response lifetime.
+ The picker CA (`picker-ca.ts`) carries critical
+ name constraints permitting only `claude.ai` and excluding every IPv4 and IPv6 address. Its exportable
+ signing identity is protected by the OS credential store and scoped to the canonical config directory;
+diff --git a/tests/claude-integration/claude-picker-upload.test.ts b/tests/claude-integration/claude-picker-upload.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..69bc9f859b859da3aeb1b7c4cc9fc808dfbf426b
+--- /dev/null
++++ b/tests/claude-integration/claude-picker-upload.test.ts
+@@ -0,0 +1,238 @@
++import { expect, test } from "bun:test";
++import { createServer, request } from "node:https";
++import { connect, constants, type ClientHttp2Session, type ClientHttp2Stream } from "node:http2";
++import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
++import type { Duplex } from "node:stream";
++import { createLocalInterceptCa, issueLocalInterceptLeaf } from "../../src/claude/intercept/local-ca";
++import { startPickerListener, type PickerListenerOptions } from "../../src/claude/intercept/picker-listener";
++
++async function fixture(handler: (req: IncomingMessage, res: ServerResponse) => void,
++  limits: Partial<PickerListenerOptions> = {}) {
++  const ca = createLocalInterceptCa();
++  const leaf = issueLocalInterceptLeaf(ca, ["claude.ai"]);
++  const upstream = createServer({ cert: leaf.certPem, key: leaf.keyPem }, handler);
++  const sockets = new Set<Duplex>();
++  for (const event of ["connection", "secureConnection"] as const) upstream.on(event, socket => {
++    sockets.add(socket); socket.once("close", () => sockets.delete(socket));
++  });
++  await new Promise<void>(resolve => upstream.listen(0, "127.0.0.1", resolve));
++  const address = upstream.address();
++  if (!address || typeof address === "string") throw new Error("missing fixture port");
++  const logs: string[] = [];
++  const relay = await startPickerListener({ leaf, models: () => [], ...limits,
++    upstream: { host: "127.0.0.1", port: address.port, servername: "claude.ai", ca: ca.certPem },
++    log: line => logs.push(line),
++  });
++  const clients: Array<ClientHttp2Session | ClientRequest> = [];
++  const h2 = () => {
++    const session = connect(`https://127.0.0.1:${relay.port}`, { ca: ca.certPem, servername: "claude.ai" });
++    session.on("error", () => session.destroy()); clients.push(session); return session;
++  };
++  const h1 = (path: string, method = "GET", headers: Record<string, string> = {}) => {
++    const req = request({ host: "127.0.0.1", port: relay.port, servername: "claude.ai", ca: ca.certPem,
++      rejectUnauthorized: true, agent: false, path, method, headers: { Host: "claude.ai", ...headers } });
++    clients.push(req); return req;
++  };
++  return { logs, h2, h1, relay,
++    async close() {
++      for (const client of clients) client.destroy();
++      await relay.close();
++      for (const socket of sockets) socket.destroy();
++      await new Promise<void>(resolve => upstream.close(() => resolve()));
++    },
++  };
++}
++
++function bounded(name: string, run: (wait: <T>(p: PromiseLike<T>) => Promise<T>) => Promise<void>) {
++  test(name, async () => {
++    const deadline = Promise.withResolvers<never>();
++    const timer = setTimeout(() => deadline.reject(new Error("picker upload test deadline")), 4_000);
++    void deadline.promise.catch(() => {});
++    const wait = <T>(p: PromiseLike<T>) => Promise.race([p, deadline.promise]);
++    try { await wait(run(wait)); } finally { clearTimeout(timer); }
++  }, 5_000);
++}
++
++function h2Result(stream: ClientHttp2Stream) {
++  const result = Promise.withResolvers<{ status: number; text: string }>();
++  let status = 0;
++  const chunks: Buffer[] = [];
++  stream.on("response", headers => { status = Number(headers[":status"]); });
++  stream.on("data", chunk => chunks.push(Buffer.from(chunk)));
++  stream.once("end", () => result.resolve({ status, text: Buffer.concat(chunks).toString() }));
++  stream.once("error", result.reject);
++  void result.promise.catch(() => {});
++  return result.promise;
++}
++function h1Result(req: ClientRequest) {
++  const result = Promise.withResolvers<{ status: number; text: string }>();
++  req.once("response", res => {
++    const chunks: Buffer[] = [];
++    res.on("data", chunk => chunks.push(Buffer.from(chunk)));
++    res.once("end", () => result.resolve({ status: res.statusCode!, text: Buffer.concat(chunks).toString() }));
++    res.once("error", result.reject);
++  });
++  req.once("error", result.reject);
++  void result.promise.catch(() => {});
++  return result.promise;
++}
++function observeClose(stream: ClientRequest | ClientHttp2Stream) {
++  const closed = Promise.withResolvers<void>();
++  stream.once("close", () => closed.resolve());
++  stream.on("error", () => stream.destroy());
++  return closed.promise;
++}
++function normalH2(session: ClientHttp2Session, path = "/ok") {
++  const req = session.request({ ":method": "GET", ":path": path, ":authority": "claude.ai" });
++  const result = h2Result(req); req.end(); return result;
++}
++
++bounded("unfinished uploads across h2 sessions leave capacity for ordinary h1 and h2 requests", async wait => {
++  let uploads = 0;
++  const ready = Promise.withResolvers<void>();
++  const f = await fixture((req, res) => {
++    if (req.method === "POST") { req.resume(); if (++uploads === 2) ready.resolve(); }
++    else res.end("ordinary");
++  }, { maxActiveUpstreams: 4, maxActiveUploads: 2 });
++  try {
++    const sessions = [f.h2(), f.h2(), f.h2()];
++    for (const session of sessions.slice(0, 2)) {
++      const stream = session.request({ ":method": "POST", ":path": "/upload", ":authority": "claude.ai" });
++      observeClose(stream); stream.write("x");
++    }
++    await wait(ready.promise);
++    const excess = sessions[2]!.request({ ":method": "POST", ":path": "/excess", ":authority": "claude.ai" });
++    const refusal = h2Result(excess);
++    const closed = observeClose(excess);
++    excess.write("x");
++    expect((await wait(refusal)).status).toBe(503);
++    await wait(closed);
++    const excessH1 = f.h1("/excess", "POST", { "Content-Length": "100" });
++    const h1Refusal = h1Result(excessH1); excessH1.write("x");
++    expect((await wait(h1Refusal)).status).toBe(503);
++    const get = f.h1("/ordinary"); const result = h1Result(get); get.end();
++    expect(await wait(result)).toEqual({ status: 200, text: "ordinary" });
++    expect(await wait(normalH2(sessions[0]!))).toEqual({ status: 200, text: "ordinary" });
++    expect(uploads).toBe(2);
++  } finally { await wait(f.close()); }
++});
++
++for (const protocol of ["h1", "h2"] as const) {
++  bounded(`${protocol} idle upload expires, closes upstream, and restores capacity`, async wait => {
++    const ready = Promise.withResolvers<void>();
++    const upstreamClosed = Promise.withResolvers<void>();
++    const f = await fixture((req, res) => {
++      if (req.url === "/upload") {
++        req.on("error", () => res.destroy()); req.resume();
++        req.once("close", () => upstreamClosed.resolve()); ready.resolve();
++      } else res.end("ordinary");
++    }, { maxActiveUpstreams: 2, maxActiveUploads: 1, uploadIdleTimeoutMs: 100, uploadTimeoutMs: 2_000 });
++    try {
++      const session = f.h2();
++      const upload = protocol === "h2"
++        ? session.request({ ":method": "POST", ":path": "/upload", ":authority": "claude.ai" })
++        : f.h1("/upload", "POST", { "Content-Length": "100" });
++      const closed = observeClose(upload); upload.write("x");
++      await wait(ready.promise); await wait(closed); await wait(upstreamClosed.promise);
++      expect(f.logs).toContain("picker upload expired idle");
++      expect(await wait(normalH2(session))).toEqual({ status: 200, text: "ordinary" });
++    } finally { await wait(f.close()); }
++  });
++
++  bounded(`${protocol} completed upload does not time out a long-lived response`, async wait => {
++    let finishTimer: ReturnType<typeof setTimeout> | undefined;
++    const f = await fixture((req, res) => {
++      req.resume(); req.once("end", () => {
++        res.writeHead(200, { "Content-Type": "text/event-stream" }); res.write("data: first\n\n");
++        finishTimer = setTimeout(() => res.end("data: last\n\n"), 300);
++      });
++    }, { uploadIdleTimeoutMs: 80, uploadTimeoutMs: 160 });
++    try {
++      if (protocol === "h2") {
++        const stream = f.h2().request({ ":method": "POST", ":path": "/events", ":authority": "claude.ai" });
++        const result = h2Result(stream); stream.end("complete");
++        expect(await wait(result)).toEqual({ status: 200, text: "data: first\n\ndata: last\n\n" });
++      } else {
++        const req = f.h1("/events", "POST", { "Content-Length": "8" });
++        const result = h1Result(req); req.end("complete");
++        expect(await wait(result)).toEqual({ status: 200, text: "data: first\n\ndata: last\n\n" });
++      }
++      expect(f.logs.some(line => line.startsWith("picker upload expired"))).toBe(false);
++    } finally { clearTimeout(finishTimer); await wait(f.close()); }
++  });
++}
++
++bounded("h2 trickle progress cannot extend the absolute upload deadline", async wait => {
++  const ready = Promise.withResolvers<void>();
++  let chunks = 0;
++  const f = await fixture((req, res) => {
++    req.on("error", () => res.destroy());
++    req.on("data", () => { chunks++; ready.resolve(); });
++  }, { uploadIdleTimeoutMs: 200, uploadTimeoutMs: 450 });
++  let tick: ReturnType<typeof setInterval> | undefined;
++  try {
++    const stream = f.h2().request({ ":method": "POST", ":path": "/upload", ":authority": "claude.ai" });
++    const closed = observeClose(stream); stream.write("x");
++    await wait(ready.promise);
++    tick = setInterval(() => { if (!stream.closed && !stream.destroyed) stream.write("x"); }, 25);
++    await wait(closed);
++    expect(chunks).toBeGreaterThan(2);
++    expect(f.logs).toContain("picker upload expired deadline");
++    expect(f.logs).not.toContain("picker upload expired idle");
++  } finally { clearInterval(tick); await wait(f.close()); }
++});
++
++bounded("h2 cancellation frees the upload slot once without weakening the next admission", async wait => {
++  const arrived = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
++  const left = Promise.withResolvers<void>();
++  let count = 0;
++  const f = await fixture((req, res) => {
++    req.on("error", () => res.destroy()); req.resume();
++    if (req.url === "/first") req.once("close", () => left.resolve());
++    arrived[count++]?.resolve();
++  }, { maxActiveUpstreams: 4, maxActiveUploads: 1 });
++  try {
++    const session = f.h2();
++    const first = session.request({ ":method": "POST", ":path": "/first", ":authority": "claude.ai" });
++    const firstClosed = observeClose(first); first.write("x"); await wait(arrived[0]!.promise);
++    first.close(constants.NGHTTP2_CANCEL); await wait(firstClosed); await wait(left.promise);
++    const second = session.request({ ":method": "POST", ":path": "/second", ":authority": "claude.ai" });
++    observeClose(second); second.write("x"); await wait(arrived[1]!.promise);
++    const third = session.request({ ":method": "POST", ":path": "/third", ":authority": "claude.ai" });
++    const result = h2Result(third); third.write("x");
++    expect((await wait(result)).status).toBe(503);
++    expect(count).toBe(2);
++  } finally { await wait(f.close()); }
++});
++
++bounded("an h2 body-bearing GET with no DATA still has an upload deadline", async wait => {
++  const f = await fixture((req, res) => { req.on("error", () => res.destroy()); req.resume(); },
++    { uploadIdleTimeoutMs: 100, uploadTimeoutMs: 2_000 });
++  try {
++    const stream = f.h2().request({ ":method": "GET", ":path": "/held", ":authority": "claude.ai" }, { endStream: false });
++    await wait(observeClose(stream));
++    expect(f.logs).toContain("picker upload expired idle");
++  } finally { await wait(f.close()); }
++});
++
++for (const protocol of ["h1", "h2"] as const) {
++  bounded(`${protocol} early upstream response closes an unfinished upload without losing the reply`, async wait => {
++    const f = await fixture((req, res) => {
++      req.on("error", () => res.destroy());
++      if (req.url === "/early") { res.writeHead(413, { "Content-Length": "5" }); res.end("early"); }
++      else res.end("ordinary");
++    }, { maxActiveUploads: 1, uploadIdleTimeoutMs: 2_000 });
++    try {
++      const session = f.h2();
++      const upload = protocol === "h2"
++        ? session.request({ ":method": "POST", ":path": "/early", ":authority": "claude.ai" })
++        : f.h1("/early", "POST", { "Content-Length": "100" });
++      const result = protocol === "h2" ? h2Result(upload as ClientHttp2Stream) : h1Result(upload as ClientRequest);
++      const closed = observeClose(upload); upload.write("x");
++      expect(await wait(result)).toEqual({ status: 413, text: "early" });
++      await wait(closed);
++      expect(await wait(normalH2(session))).toEqual({ status: 200, text: "ordinary" });
++      expect(f.logs.some(line => line.startsWith("picker upload expired"))).toBe(false);
++    } finally { await wait(f.close()); }
++  });
++}
+diff --git a/tests/fixtures/test-layout-expected.json b/tests/fixtures/test-layout-expected.json
+index d993598182c6393dd4fc4b4aeea72ccf10492110..d826c0b195723b5e4203cee43122d2e5fc07328a 100644
+--- a/tests/fixtures/test-layout-expected.json
++++ b/tests/fixtures/test-layout-expected.json
+@@ -1,4 +1,5 @@
+ {
++  "claude-picker-upload.test.ts": "claude-integration",
+   "messages-native-scope.test.ts": "claude-integration",
+   "cli-log-view-filter.test.ts": "cli",
+   "cli-usage-model-search.test.ts": "cli",
