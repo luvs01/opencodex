@@ -1,0 +1,76 @@
+name: Publish tested linear-processing candidates
+on:
+  push:
+    branches: [codex/security-linear-transport-20261006]
+    paths: [.github/workflows/security-linear-candidates.yml]
+permissions:
+  contents: read
+jobs:
+  transport:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/security-linear-transport-20261006'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      # Pure Git transport: no dependency install, repository script or patched code runs here.
+      - name: Verify both tested trees before publishing new refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, os, subprocess
+          from pathlib import Path
+          base = '6774f0f6f26c103da144a630971091a52ada80a5'
+          plans = [
+              ('scope', 7104, '265b2e05719434070d9f03f3adb04d6fc050dddd179f5da8949281846449d72b', '812ed04cdd03eb374cd703a46aa07d977dc8dde1', 'codex/fix-native-scope-linear-20261006',
+               {'src/server/messages-native-scope.ts', 'tests/claude-integration/messages-native-scope.test.ts', 'structure/data-planes/protocol-paths.md'},
+               'fix(messages): accumulate temporary tool declarations linearly', '164 pass, 0 fail, 1486 assertions across 11 files'),
+              ('devin', 11421, '3ec4f4b9e97546ed64119021b30406b1227ed72d0279660a6a5b198b0bb7f0d0', 'c02143f1627af0a50c1e4c5490c1faeafa8b512a', 'codex/fix-devin-result-merge-linear-20261006',
+               {'src/adapters/devin.ts', 'tests/providers/devin-chat-wire-fixes.test.ts', 'structure/adapters/registry.md', 'structure/providers-and-adapters.md'},
+               'fix(devin): accumulate consecutive tool results without prefix copies', '228 pass, 0 fail, 1360 assertions across 11 files'),
+          ]
+          if os.environ['GITHUB_REPOSITORY'] != 'luvs01/opencodex' or os.environ['GITHUB_REF'] != 'refs/heads/codex/security-linear-transport-20261006':
+              raise RuntimeError('wrong repository or ref')
+          patches = []
+          for name, size, digest, *_ in plans:
+              with Path('scripts/security-linear-transport/' + name + '.patch').open('rb') as stream:
+                  patch = stream.read(size + 1)
+              if len(patch) != size or hashlib.sha256(patch).hexdigest() != digest:
+                  raise RuntimeError('patch checksum mismatch: ' + name)
+              patches.append(patch)
+          env = dict(os.environ)
+          env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+              GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + env['GH_TOKEN']).encode()).decode(),
+              GIT_AUTHOR_NAME='github-actions[bot]', GIT_COMMITTER_NAME='github-actions[bot]',
+              GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
+              GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com')
+          def git(*args, data=None):
+              result = subprocess.run(['git', *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+              if result.returncode: raise RuntimeError('git operation failed: ' + args[0])
+              return result.stdout.decode().strip()
+          if git('remote', 'get-url', 'origin') not in ('https://github.com/luvs01/opencodex', 'https://github.com/luvs01/opencodex.git'):
+              raise RuntimeError('unexpected remote')
+          git('fetch', '--no-tags', '--depth=1', 'origin', base)
+          commits = []
+          for plan, patch in zip(plans, patches):
+              name, size, digest, expected_tree, branch, paths, title, receipt = plan
+              if git('ls-remote', '--heads', 'origin', 'refs/heads/' + branch): raise RuntimeError('candidate ref exists')
+              git('read-tree', base)
+              git('apply', '--cached', '--check', '--whitespace=error-all', '-', data=patch)
+              git('apply', '--cached', '--whitespace=error-all', '-', data=patch)
+              tree = git('write-tree')
+              if tree != expected_tree: raise RuntimeError('tree mismatch: ' + name)
+              if set(git('diff', '--name-only', base, tree).splitlines()) != paths: raise RuntimeError('scope mismatch')
+              git('diff', '--check', base, tree)
+              message = title + '\n\nLinux/Bun 1.4.0 focused tests: ' + receipt + '.\nTypecheck, privacy, structure and whitespace checks passed locally on this exact tree.\nThe added repeated-prefix work-count regression fails on original source.\nNo live-provider, full-suite or native-platform claim. Fork-only draft; no merge or release.\n'
+              commit = git('commit-tree', tree, '-p', base, data=message.encode())
+              commits.append((branch, commit, tree))
+          git('push', '--atomic', 'origin', *(commit + ':refs/heads/' + branch for branch, commit, _ in commits))
+          for branch, commit, tree in commits: print(branch, commit, tree)
+          PY
