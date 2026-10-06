@@ -1,0 +1,28 @@
+name: Key table pinned source workspace
+on:
+  push:
+    branches: [codex/key-reveal-workspace-20261006]
+    paths: [.github/workflows/key-reveal-workspace-20261006.yml]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/key-reveal-workspace-20261006'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 5d69e5cdc58441ac5c1735ea2f81f1bc46eff0ac
+          persist-credentials: false
+      - name: Archive source without running repository code
+        run: |
+          git archive --format=tar.gz -o "$RUNNER_TEMP/key-table-source.tar.gz" 5d69e5cdc58441ac5c1735ea2f81f1bc46eff0ac
+          sha256sum "$RUNNER_TEMP/key-table-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: key-table-source-5d69e5cd
+          path: ${{ runner.temp }}/key-table-source.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
