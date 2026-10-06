@@ -29,6 +29,7 @@ import {
   type ApiKeyEntry,
   type ModelTestResult,
   type ModelTests,
+  type RevealKeyResult,
 } from "./api-keys-utils";
 
 interface KeysResponse extends UsageReadMetadata {
@@ -322,8 +323,10 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
   };
 
   /** The full key for one row. Read-only, but bounded like the mutations so a
-   *  stalled connection releases the cell's pending state. */
-  const handleReveal = async (id: string): Promise<string | null> => {
+   *  stalled connection releases the cell's pending state. The 403 standing
+   *  refusal is reported apart from transient failures so the list can offer
+   *  the remedy — pairing — instead of a bare "try again". */
+  const handleReveal = async (id: string): Promise<RevealKeyResult> => {
     const bounded = createBoundedFetch(MUTATION_TIMEOUT_MS);
     try {
       const res = await fetch(`${apiBase}/api/keys/reveal`, {
@@ -333,11 +336,14 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
         signal: bounded.signal,
         cache: "no-store",
       });
-      if (!res.ok) return null;
+      if (res.status === 403) return { ok: false, reason: "denied" };
+      if (!res.ok) return { ok: false, reason: "failed" };
       const body = await res.json() as { key?: unknown };
-      return typeof body.key === "string" && body.key ? body.key : null;
+      return typeof body.key === "string" && body.key
+        ? { ok: true, key: body.key }
+        : { ok: false, reason: "failed" };
     } catch {
-      return null;
+      return { ok: false, reason: "failed" };
     } finally {
       bounded.clear();
     }

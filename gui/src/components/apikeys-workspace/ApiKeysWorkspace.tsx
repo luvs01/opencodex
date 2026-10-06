@@ -16,6 +16,7 @@ import {
   type ApiKeyEntry,
   type ApiSurfacesInfo,
   type ModelTests,
+  type RevealKeyResult,
 } from "../../pages/api-keys-utils";
 import {
   ApiKeysEndpointsPanel,
@@ -74,8 +75,10 @@ export interface ApiKeysWorkspaceProps {
   onDismissNewKey: () => void;
   onCopyKey: () => void;
   onDelete: (id: string) => Promise<boolean>;
-  /** Full key for a click-to-reveal in the key table; absent hides the control. */
-  onRevealKey?: (id: string) => Promise<string | null>;
+  /** Full key for a click-to-reveal in the key table; absent hides the control.
+   *  The result discriminates a standing 403 refusal — the list answers it with
+   *  the pairing surface, not a retry hint — from a transient failure. */
+  onRevealKey?: (id: string) => Promise<RevealKeyResult>;
   onRename: (id: string, name: string) => Promise<boolean>;
   onRotationStart?: (id: string) => Promise<boolean>;
   onRotationCommit?: (id: string, rotationId: string) => Promise<boolean>;
@@ -533,6 +536,7 @@ export default function ApiKeysWorkspace({
                     attributionSince={attributionSince}
                     usageMetadata={usageMetadata}
                     localeTag={localeTag}
+                    apiBase={apiBase}
                     busy={mutationPending}
                     onDelete={onDelete}
                     onReveal={onRevealKey}

@@ -16,9 +16,12 @@
 import { useEffect, useRef, useState } from "react";
 import { IconTrash } from "../../icons";
 import { useT } from "../../i18n/shared";
-import { formatCreatedDate, type ApiKeyEntry } from "../../pages/api-keys-utils";
+import { formatCreatedDate, type ApiKeyEntry, type RevealKeyResult } from "../../pages/api-keys-utils";
 import type { UsageReadMetadata } from "../../usage-summary-resource";
 import { UsageIncompleteNotice } from "../usage-incomplete-notice";
+import { Notice } from "../../ui";
+import { isStandaloneRuntime, standaloneApiTargets } from "../../api-targets";
+import { ConnectPairingForm } from "../../connect-pairing";
 
 export default function ApiKeysListPanel({
   keys,
@@ -27,6 +30,7 @@ export default function ApiKeysListPanel({
   attributionSince,
   usageMetadata,
   localeTag,
+  apiBase,
   busy,
   onSelect,
   onDelete,
@@ -39,18 +43,22 @@ export default function ApiKeysListPanel({
   attributionSince?: string;
   usageMetadata?: UsageReadMetadata;
   localeTag?: string;
+  /** Management API origin a reveal denial pairs this dashboard against. */
+  apiBase: string;
   /** A mutation is in flight; its result is bound to one key, so navigation waits. */
   busy: boolean;
   onSelect: (id: string) => void;
   /** Resolves true only when the key is really gone. */
   onDelete?: (id: string) => Promise<boolean>;
-  /** The full key, or null when the server would not hand it over. */
-  onReveal?: (id: string) => Promise<string | null>;
+  /** The reveal outcome: the full key, a standing refusal, or a transient failure. */
+  onReveal?: (id: string) => Promise<RevealKeyResult>;
 }) {
   const t = useT();
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [revealPendingId, setRevealPendingId] = useState<string | null>(null);
   const [revealFailedId, setRevealFailedId] = useState<string | null>(null);
+  /** The row whose reveal the server refused — kept so pairing can retry it. */
+  const [revealDeniedId, setRevealDeniedId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyFailedId, setCopyFailedId] = useState<string | null>(null);
   const copiedTimer = useRef<number | null>(null);
@@ -79,9 +87,20 @@ export default function ApiKeysListPanel({
 
   const rowLocked = busy || deletingId !== null;
 
+  // The same gate RemoteLink applies to its local-pairing offer: only the
+  // literal same-origin loopback transport the standalone grant mint accepts.
+  // Anywhere else the refusal gets the explanation alone — a form here would
+  // mint a session for an origin the server did not bind.
+  const localPairingTarget = standaloneApiTargets(apiBase).shared;
+  const canPairLocally = isStandaloneRuntime()
+    && window.location.protocol === "http:"
+    && ["127.0.0.1", "[::1]"].includes(window.location.hostname)
+    && localPairingTarget.serverOrigin === window.location.origin;
+
   const toggleReveal = async (k: ApiKeyEntry) => {
     const id = k.id;
     setRevealFailedId(null);
+    setRevealDeniedId(null);
     if (currentReveal(k) !== undefined) {
       setRevealed(({ [id]: _hidden, ...rest }) => rest);
       return;
@@ -89,9 +108,10 @@ export default function ApiKeysListPanel({
     if (!onReveal || revealPendingId) return;
     setRevealPendingId(id);
     try {
-      const full = await onReveal(id);
+      const result = await onReveal(id);
       if (deletedIds.current.has(id)) return;
-      if (full) setRevealed(prev => ({ ...prev, [id]: full }));
+      if (result.ok) setRevealed(prev => ({ ...prev, [id]: result.key }));
+      else if (result.reason === "denied") setRevealDeniedId(id);
       else setRevealFailedId(id);
     } finally {
       setRevealPendingId(null);
@@ -156,6 +176,24 @@ export default function ApiKeysListPanel({
       </div>
 
       <UsageIncompleteNotice data={usageMetadata} />
+      {revealDeniedId !== null && (
+        <>
+          <Notice tone="warn">{t("api.key.revealDenied")}</Notice>
+          {/* Pairing upgrades this exact session; onConnected retries the
+              refused reveal so the click that surfaced the form completes. */}
+          {canPairLocally && (
+            <ConnectPairingForm
+              local
+              target={localPairingTarget}
+              onConnected={() => {
+                setRevealDeniedId(null);
+                const denied = keys.find(k => k.id === revealDeniedId);
+                if (denied) void toggleReveal(denied);
+              }}
+            />
+          )}
+        </>
+      )}
       {keysLoading ? (
         <div className="api-active-keys-skeleton" role="status" aria-label={t("common.loading")} />
       ) : keys.length === 0 ? (
