@@ -336,14 +336,14 @@ export default function ApiKeys({ apiBase, active = true }: { apiBase: string; a
         signal: bounded.signal,
         cache: "no-store",
       });
-      if (res.status === 403) return { ok: false, reason: "denied" };
-      if (!res.ok) return { ok: false, reason: "failed" };
+      if (res.status === 403) return { ok: false, kind: "denied" };
+      if (!res.ok) return { ok: false, kind: "failed" };
       const body = await res.json() as { key?: unknown };
       return typeof body.key === "string" && body.key
         ? { ok: true, key: body.key }
-        : { ok: false, reason: "failed" };
+        : { ok: false, kind: "failed" };
     } catch {
-      return { ok: false, reason: "failed" };
+      return { ok: false, kind: "failed" };
     } finally {
       bounded.clear();
     }

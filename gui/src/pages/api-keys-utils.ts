@@ -29,7 +29,7 @@ export interface ApiKeyEntry {
  */
 export type RevealKeyResult =
   | { ok: true; key: string }
-  | { ok: false; reason: "denied" | "failed" };
+  | { ok: false; kind: "denied" | "failed" };
 
 /**
  * A usage object the GUI can actually render. Coercing a malformed one to zeroes

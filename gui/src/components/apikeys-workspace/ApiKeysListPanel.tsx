@@ -111,7 +111,7 @@ export default function ApiKeysListPanel({
       const result = await onReveal(id);
       if (deletedIds.current.has(id)) return;
       if (result.ok) setRevealed(prev => ({ ...prev, [id]: result.key }));
-      else if (result.reason === "denied") setRevealDeniedId(id);
+      else if (result.kind === "denied") setRevealDeniedId(id);
       else setRevealFailedId(id);
     } finally {
       setRevealPendingId(null);
