@@ -276,8 +276,10 @@ Showing a stored key's full value requires a dashboard session established by ex
 trusted Tailscale identity. An automatic local dashboard session can still show the masked key list,
 but cannot reveal existing values; a raw admin token cannot call this session-only action either.
 Use the existing [dashboard pairing flow](/guides/remote-hub/#pairing-this-browser-with-a-hub) to establish an
-operator-authorized session before requesting a stored value. Pair again if that session expires or
-is revoked. Ordinary dashboard sign-in, key creation, rotation, and deletion are unchanged.
+operator-authorized session before requesting a stored value; a refused reveal states the requirement
+on the page and, on the same-origin standalone transport, offers the local pairing form in place. Pair
+again if that session expires or is revoked. Ordinary dashboard sign-in, key creation, rotation, and
+deletion are unchanged.
 
 The dashboard's management plane is separate from direct client→hub model traffic. **Connect → API Keys** shows pending rotations, displays a replacement secret only once, and requires explicit commit or abort. Browser logout invalidates only the current remote session. Connected usage is the hub store filtered by the client's `apiKeyId`; disconnected usage is local, with no mirroring.
 

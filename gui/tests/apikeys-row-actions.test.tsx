@@ -188,6 +188,16 @@ test("a refused reveal keeps the prefix and reports the failure", async () => {
   expect(container.querySelector(".awi-keylist-keycell [role=\"alert\"]")?.textContent).toBe("Could not load the full key.");
 });
 
+test("a denied reveal leaves the prefix masked and lets the panel offer pairing", async () => {
+  const container = await mount({ onRevealKey: async () => ({ ok: false, kind: "denied" }) });
+  await act(async () => { keyButton(container).click(); });
+  expect(keyButton(container).textContent).toBe("ocx_data_aaaaaaaa...");
+  // The generic load-failure alert would be a lie — the denial is answered by
+  // the panel's pairing notice, not by this row.
+  expect(container.querySelector(".awi-keylist-keycell [role=\"alert\"]")?.textContent).not.toBe("Could not load the full key.");
+  expect(container.textContent).toContain("Pair this browser to continue");
+});
+
 test("without a reveal handler the key stays plain text", async () => {
   const container = await mount({});
   expect(container.querySelector(".awi-keylist-key")).toBeNull();
