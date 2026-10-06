@@ -127,7 +127,7 @@ with no new tool calls is also deferred while results remain outstanding. Deferr
 A new tool-call batch settles its predecessor. Additional results in an open batch join in arrival
 order, preserving images and error markers; known late output uses an attributed user-text carrier
 after any pending batch. Unknown IDs and mismatched names/namespaces still throw; missing results
-retain the unknown-status marker; the replay and tool-continuation tests under `tests/providers/ollama/` cover both paths. See the decision record below.
+retain the unknown-status marker. Late-output attribution shares a 256 KiB generated JSON-byte budget per request, reserved before concatenation; overflow refuses the request instead of truncating identities or output. The replay and tool-continuation tests under `tests/providers/ollama/` cover these paths. See the decision record below.
 
 Forward-mode OpenAI passthrough also repairs replayed `call_id` values longer than the Responses
 API's 64-character limit. Sidechat/fork replay can namespace routed-provider ids beyond that limit,
