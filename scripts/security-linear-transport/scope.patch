@@ -1,0 +1,117 @@
+diff --git a/src/server/messages-native-scope.ts b/src/server/messages-native-scope.ts
+index fcc660013fe646795b9abad21626d0339c7934cb..ba18004ef160dd1f692c4aeedf96f7ce291092a0 100644
+--- a/src/server/messages-native-scope.ts
++++ b/src/server/messages-native-scope.ts
+@@ -36,7 +36,10 @@ export function nativeMessagesToolScopeDenial(
+         const definition = tool.definition;
+         if (typeof definition.name !== "string") { anonymous.push(definition); continue; }
+         // A temporary replacement keeps the declaration it shadows in scope as well.
+-        definitions.set(definition.name, permanent ? [definition] : [...definitions.get(definition.name) ?? [], definition]);
++        // These arrays belong to this check, not to the caller's declarations.
++        const declarations = permanent ? [] : definitions.get(definition.name) ?? [];
++        declarations.push(definition);
++        definitions.set(definition.name, declarations);
+         withdrawn.delete(definition.name);
+       } else if (tool.type === "tool_reference" && typeof tool.name === "string") {
+         if (block.type === "tool_removal" && permanent) withdrawn.add(tool.name);
+diff --git a/structure/data-planes/protocol-paths.md b/structure/data-planes/protocol-paths.md
+index 124c872b3ca359bc584de0171bfc4fca2f3c46bc..6c6b247606a95369de9e2106a817ca3b0003b4a9 100644
+--- a/structure/data-planes/protocol-paths.md
++++ b/structure/data-planes/protocol-paths.md
+@@ -297,7 +297,10 @@ in such a message are always checked, and only a permanent removal withdraws a d
+ Ordinary custom schemas, arguments and historical tool
+ results remain opaque. Provider-only and unrestricted admissions retain their existing scope.
+ `tests/claude-integration/messages-native-scope.test.ts` covers refusal with zero upstream sends
+-and byte-preserving allowed tool definitions through both credential lanes.
++and byte-preserving allowed tool definitions through both credential lanes. Temporary declarations append to checker-owned lists instead of copying
++the accumulated prefix, so collection work is linear in the declarations visited. Permanent
++replacement, withdrawal and denied-shadow checks remain unchanged; this is not a request-size
++or wall-time guarantee.
+ 
+ `buildAnthropicMessagesPassthroughRequest` in `src/adapters/anthropic/passthrough.ts` builds the
+ request from that body: the top-level allowlist (`model, messages, system, max_tokens, metadata,
+diff --git a/tests/claude-integration/messages-native-scope.test.ts b/tests/claude-integration/messages-native-scope.test.ts
+index 729ad69990dc10ad8fc0a407950d4740c749b0ec..1d64aca4c0682292029e4c1dea51f74b3389bcb5 100644
+--- a/tests/claude-integration/messages-native-scope.test.ts
++++ b/tests/claude-integration/messages-native-scope.test.ts
+@@ -6,6 +6,7 @@ import { saveConfig } from "../../src/config";
+ import { saveCredential } from "../../src/oauth/store";
+ import { clearAnthropicAccountPoolState, forgetAnthropicFailoverQuorum } from "../../src/oauth/anthropic-routing";
+ import { handleClaudeMessages } from "../../src/server/claude-messages";
++import { nativeMessagesToolScopeDenial } from "../../src/server/messages-native-scope";
+ import type { OcxConfig, OcxProviderConfig } from "../../src/types";
+ import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+ import { removeTreeWithRetry } from "../helpers/remove-tree";
+@@ -168,3 +169,72 @@ describe("managed native Messages billed tool scope", () => {
+     expect(sent).toHaveLength(0);
+   });
+ });
++
++
++// Count prefix traversal instead of timing a busy shared CI runner.
++describe("temporary native tool declaration accumulation", () => {
++  const scope = { providers: [], models: [EXECUTOR] };
++  const blocks = (name: string, count: number) => Array.from({ length: count }, () => ({
++    type: "tool_addition", tool: { type: "tool_definition", definition: { name } },
++  }));
++
++  test("same-name temporary additions do not rewalk the accumulated prefix", () => {
++    const seed = Object.freeze({ name: "lookup" });
++    const additions = blocks(seed.name, 1_024);
++    const body = { tools: Object.freeze([seed]), messages: [{
++      role: "system", clear_at: "next_user_message", content: additions,
++    }] };
++    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, Symbol.iterator)!;
++    let visits = 0;
++    let denial: ReturnType<typeof nativeMessagesToolScopeDenial>;
++    try {
++      Object.defineProperty(Array.prototype, Symbol.iterator, { ...descriptor,
++        value: function(this: unknown[]) {
++          const iterator = descriptor.value.call(this) as IterableIterator<unknown>;
++          if (this[0] === seed) {
++            const next = iterator.next.bind(iterator);
++            iterator.next = () => {
++              const item = next();
++              if (!item.done) visits += 1;
++              return item;
++            };
++          }
++          return iterator;
++        },
++      });
++      denial = nativeMessagesToolScopeDenial(scope, "operator-anth", EXECUTOR, body);
++    } finally { Object.defineProperty(Array.prototype, Symbol.iterator, descriptor); }
++    expect(denial).toBeUndefined();
++    expect(visits).toBeLessThanOrEqual(3 * (additions.length + 1));
++    expect(body.tools).toEqual([seed]);
++  });
++
++  test("large temporary chains retain a denied shadow without changing frozen inputs", () => {
++    const denied = Object.freeze(advisor());
++    const content = blocks("advisor", 2_048);
++    for (const block of content) {
++      Object.freeze(block.tool.definition); Object.freeze(block.tool); Object.freeze(block);
++    }
++    const temporary = Object.freeze({ role: "system", clear_at: "next_user_message", content: Object.freeze(content) });
++    const body = Object.freeze({ tools: Object.freeze([denied]), messages: Object.freeze([temporary]) });
++    const snapshot = JSON.stringify(body);
++    expect(nativeMessagesToolScopeDenial(scope, "operator-anth", EXECUTOR, body)?.deniedModel).toBe(ADVISOR);
++    expect(JSON.stringify(body)).toBe(snapshot);
++    // A permanent replacement may remove that shadow; a temporary one may not.
++    const permanent = { ...body, messages: [...body.messages, addition({ ...custom, name: "advisor" })] };
++    expect(nativeMessagesToolScopeDenial(scope, "operator-anth", EXECUTOR, permanent)).toBeUndefined();
++  });
++
++  test("the production native handler preserves dense additions and rejects a denied tail", async () => {
++    const content: Rec[] = blocks("lookup", 2_048);
++    const message = { role: "system", clear_at: "next_user_message", content };
++    const allowed = await send({ tools: [custom], messages: [user, message] });
++    expect(allowed.response.status, allowed.text).toBe(200);
++    expect(sent).toHaveLength(1);
++    expect(sent[0]!.messages).toEqual([user, message]);
++    content.push({ type: "tool_addition", tool: { type: "tool_definition", definition: advisor() } });
++    const denied = await send({ tools: [custom], messages: [user, message] });
++    expect(denied.response.status, denied.text).toBe(403);
++    expect(sent).toHaveLength(1);
++  });
++});
