@@ -1,0 +1,115 @@
+diff --git a/docs-site/src/content/docs/guides/web-dashboard.md b/docs-site/src/content/docs/guides/web-dashboard.md
+index 9d137750c3f2253fca0f02b3d57dd51eaec8bb43..503deb81624e4738808102d08436d75f0bff5245 100644
+--- a/docs-site/src/content/docs/guides/web-dashboard.md
++++ b/docs-site/src/content/docs/guides/web-dashboard.md
+@@ -270,3 +270,12 @@ they have been synchronized. See
+ 
+-In **Connect → API Keys**, every row of the key table has its own delete button, which asks for confirmation in place, and clicking a key shows its full value with a **Copy** button. Revealing a key needs a signed-in dashboard session; the admin token cannot read key values.
++In **Connect → API Keys**, every row of the key table has its own delete button, which asks for confirmation in place. Clicking a key can show its full value with a **Copy** button only from an independently authorized session.
++
++### Reading an existing API key
++
++Showing a stored key's full value requires a dashboard session established by explicit pairing or
++trusted Tailscale identity. An automatic local dashboard session can still show the masked key list,
++but cannot reveal existing values; a raw admin token cannot call this session-only action either.
++Use the existing [dashboard pairing flow](/guides/remote-hub/#pairing-this-browser-with-a-hub) to establish an
++operator-authorized session before requesting a stored value. Pair again if that session expires or
++is revoked. Ordinary dashboard sign-in, key creation, rotation, and deletion are unchanged.
+ 
+diff --git a/docs-site/src/content/docs/ko/guides/web-dashboard.md b/docs-site/src/content/docs/ko/guides/web-dashboard.md
+index f6e78c66223f6222f6564fc70579611939c5ab3a..b121e82d4146ace0f335638d747520426def41e8 100644
+--- a/docs-site/src/content/docs/ko/guides/web-dashboard.md
++++ b/docs-site/src/content/docs/ko/guides/web-dashboard.md
+@@ -141,2 +141,10 @@ Dashboard의 **Sub-agent delegation** 선택기는 `injectionModel`과 선택적
+ 
++### 기존 API 키의 전체 값 조회
++
++저장된 키의 전체 값을 보려면 명시적인 페어링이나 신뢰된 Tailscale 인증으로 발급된
++대시보드 세션이 필요합니다. 자동 발급된 로컬 세션은 마스킹된 목록을 계속 볼 수 있지만,
++기존 키의 전체 값은 조회할 수 없습니다. 관리자 토큰도 이 세션 전용 동작을 호출하지 못합니다.
++기존 대시보드 페어링 절차로 세션을 승인한 뒤 조회하세요. 세션이 만료되거나 해제되면 다시
++페어링해야 합니다. 일반 대시보드 접속과 키 생성·교체·삭제는 변경하지 않습니다.
++
+ 선택기에는 활성화된 네이티브 및 라우팅 모델과 Codex 전역 reasoning 단계가 표시됩니다. API는
+diff --git a/src/server/management-auth.ts b/src/server/management-auth.ts
+index 9b1de78dc23dcbe7de48a8737b11636c9b20aec9..19104ef1bf841cf18cb1e2ea91246c7c98cee48c 100644
+--- a/src/server/management-auth.ts
++++ b/src/server/management-auth.ts
+@@ -281,2 +281,4 @@ export interface ManagementSessionControl {
+   isPaired(req: Request, config: OcxConfig): boolean;
++  /** Revalidate independent session authority before disclosing stored data keys. */
++  canRevealDataKeys?(req: Request, config: OcxConfig): boolean;
+ }
+@@ -309,2 +311,6 @@ export function createManagementSessionControl(state: ManagementAuthState): Mana
+     },
++    canRevealDataKeys(req: Request, config: OcxConfig): boolean {
++      const issuance = currentSession(req, config)?.issuance;
++      return issuance === "pairing" || issuance === "tailscale-identity";
++    },
+     revokeCurrent(req: Request): boolean {
+diff --git a/src/server/management/oauth-account-routes.ts b/src/server/management/oauth-account-routes.ts
+index be9054c7748466cb431844f874c36e2727ddbdb5..37f79d816714ad271cfeededdc8b236772dd1433 100644
+--- a/src/server/management/oauth-account-routes.ts
++++ b/src/server/management/oauth-account-routes.ts
+@@ -1170,3 +1170,9 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
+     }
++    // Local page bootstrap is sufficient for the dashboard, not stored-secret disclosure.
++    const authorized = () => ctx.sessionControl?.canRevealDataKeys?.(req, config) === true;
++    const denied = () => jsonResponse({ error: "operator-authorized dashboard session required" }, 403, req, config);
++    if (!authorized()) return denied();
+     const body = await readJsonBody(req);
++    // Body reception can outlive the session or its revocation; do not trust cached admission.
++    if (!authorized()) return denied();
+     if (!body || Object.keys(body).length !== 1 || typeof body.id !== "string" || !body.id) {
+diff --git a/src/server/management/route-registry.ts b/src/server/management/route-registry.ts
+index c2ad97ec03e784481e5ccef8c47c9706a884ae34..5853ef893851dc51457a6d52b00f47d5866fa3a2 100644
+--- a/src/server/management/route-registry.ts
++++ b/src/server/management/route-registry.ts
+@@ -326,3 +326,3 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
+   { method: "POST", path: "/api/keys", module: "server/management/oauth-account-routes", mutates: true },
+-  { method: "POST", path: "/api/keys/reveal", module: "server/management/oauth-account-routes", mutates: false, exempt: { reason: "session-only", why: "Revealing a data key requires the gui-session principal; the admin token is refused." } },
++  { method: "POST", path: "/api/keys/reveal", module: "server/management/oauth-account-routes", mutates: false, exempt: { reason: "session-only", why: "Stored-key reads require a current pairing or trusted Tailscale-identity session; automatic loopback sessions and admin tokens are refused." } },
+   { method: "POST", path: "/api/keys/rotate", module: "server/management/oauth-account-routes", mutates: true },
+diff --git a/structure/dashboard-and-usage.md b/structure/dashboard-and-usage.md
+index 5936987fa9c97f82f7b32342325fa6a7b958a6db..87f3fdfab6e59d0617a30622a7788f3a19ab81b7 100644
+--- a/structure/dashboard-and-usage.md
++++ b/structure/dashboard-and-usage.md
+@@ -125,3 +125,3 @@ The sidebar exposes eight rows (`gui/src/nav-groups.ts` `NAV_GROUPS`), in order:
+ | Providers | Rail of configured providers plus a detail pane whose tabs are Overview, Models, Usage, then Accounts or API Keys when the provider has an auth surface, then Settings (`gui/src/components/provider-workspace/ProviderDetails.tsx`). |
+-| API keys | Key table plus per-key detail (`gui/src/components/apikeys-workspace/`). The list payload carries masked prefixes only; each row deletes in place behind a two-step confirm, and clicking a key fetches the full value from `POST /api/keys/reveal`, which refuses every principal but a dashboard session and answers `no-store`. |
++| API keys | Key table plus per-key detail (`gui/src/components/apikeys-workspace/`). The list payload carries masked prefixes only; each row deletes in place behind a two-step confirm, and clicking a key fetches the full value from `POST /api/keys/reveal`, which requires a current pairing or trusted Tailscale-identity session and answers `no-store`; automatic loopback sessions and raw admin tokens cannot reveal stored values. |
+ | Storage | Rail plus cleanup and trash detail (`gui/src/components/storage-workspace/`). |
+diff --git a/structure/gui-and-management-api.md b/structure/gui-and-management-api.md
+index bdbd0bfa79391ac4d96c0fa7565a88eb8b048a58..71bc6d958768abeb94ad32ec3172f5e80e7fb9fa 100644
+--- a/structure/gui-and-management-api.md
++++ b/structure/gui-and-management-api.md
+@@ -190,3 +190,3 @@ full origin predicate succeeds.
+ The server issues a local in-memory session for five minutes or a remote session for twelve hours,
+-with 128 live sessions maximum. Every session is bound to the exact server and browser origins;
++with 128 live sessions maximum. Stored-key reads require a current pairing or trusted Tailscale-identity session, not automatic loopback issuance or admin tokens. `POST /api/keys/reveal` uses `createManagementSessionControl().canRevealDataKeys` before and after body reception; absent controls deny. Every session is bound to the exact server and browser origins;
+ state-changing requests additionally require the session CSRF token. A raw admin token remains
+diff --git a/tests/gui/gui-pair-http.test.ts b/tests/gui/gui-pair-http.test.ts
+index 4144894ed7a412c888cb83242cb38dc55e33848d..0af7c46d7a3f0a01d34ca3fba8a7134b21d8fef6 100644
+--- a/tests/gui/gui-pair-http.test.ts
++++ b/tests/gui/gui-pair-http.test.ts
+@@ -66,2 +66,4 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
+       port, hostname: "127.0.0.1", runtimeRole: "standalone", providers: {}, defaultProvider: "openai",
++      apiKeys: [{ id: "paired-read-fixture", name: "Fixture", key: "ocx_data_paired_read_fixture",
++        createdAt: "2026-10-06T00:00:00.000Z" }],
+       codexAutoStart: false, syncResumeHistory: false,
+@@ -121,2 +123,8 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
+     await expectError(await joinRequest(headers(ordinary)), 403, "forbidden");
++    const reveal = (session: typeof ordinary) => request("/api/keys/reveal", {
++      method: "POST", headers: headers(session), body: JSON.stringify({ id: "paired-read-fixture" }),
++    });
++    const ordinaryReveal = await reveal(ordinary);
++    expect(ordinaryReveal.status, "automatic session cannot read a stored key").toBe(403);
++    await ordinaryReveal.body?.cancel();
+ 
+@@ -164,2 +172,6 @@ test("standalone CLI pairing crosses real HTTP admission once and stops before S
+     const paired = await bootstrap(await redeem(), origin);
++    const pairedReveal = await reveal(paired);
++    expect(pairedReveal.status, "config-write-authorized session may read a stored key").toBe(200);
++    expect(pairedReveal.headers.get("cache-control")).toBe("no-store");
++    expect(parseObject(await pairedReveal.text()).key === "ocx_data_paired_read_fixture", "exact fixture key returned").toBe(true);
+     const replay = await redeem();
