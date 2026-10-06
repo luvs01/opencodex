@@ -13,20 +13,20 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: 6774f0f6f26c103da144a630971091a52ada80a5
+          ref: 5d69e5cdc58441ac5c1735ea2f81f1bc46eff0ac
           persist-credentials: false
       - name: Export pinned source without executing repository code
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/security-offline/source"
-          git archive 6774f0f6f26c103da144a630971091a52ada80a5 | tar -x -C "$RUNNER_TEMP/security-offline/source"
-          printf '%s\n' 6774f0f6f26c103da144a630971091a52ada80a5 > "$RUNNER_TEMP/security-offline/SOURCE_SHA"
+          git archive 5d69e5cdc58441ac5c1735ea2f81f1bc46eff0ac | tar -x -C "$RUNNER_TEMP/security-offline/source"
+          printf '%s\n' 5d69e5cdc58441ac5c1735ea2f81f1bc46eff0ac > "$RUNNER_TEMP/security-offline/SOURCE_SHA"
           tar -czf "$RUNNER_TEMP/security-offline.tar.gz" -C "$RUNNER_TEMP/security-offline" .
           sha256sum "$RUNNER_TEMP/security-offline.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: security-source-6774f0f6
+          name: security-source-5d69e5cd
           path: ${{ runner.temp }}/security-offline.tar.gz
           compression-level: 0
           retention-days: 1
