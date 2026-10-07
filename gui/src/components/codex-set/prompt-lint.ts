@@ -31,6 +31,12 @@ interface Rule {
   level: LintLevel;
   messageKey: TKey;
   pattern: RegExp;
+  /**
+   * Never echo the matched text back: for credential-shaped matches the span
+   * IS the sensitive value, and rendering it beside the warning would copy the
+   * secret out of the editor and onto screenshots and shoulders.
+   */
+  redactSpan?: boolean;
 }
 
 const RULES: readonly Rule[] = [
@@ -79,10 +85,11 @@ const RULES: readonly Rule[] = [
     // A credential pasted into a layer lands in config.toml in plain text and
     // ships to the model on every request. The shapes here cover the common
     // token prefixes; false positives are acceptable for a warning that never
-    // blocks a save.
+    // blocks a save. The match itself is never rendered - see redactSpan.
     rule: "secret",
     level: "warn",
     messageKey: "codexSet.lint.secret",
+    redactSpan: true,
     pattern: /(sk-[a-zA-Z0-9_-]{20,}|ghp_[0-9a-zA-Z]{36}|github_pat_[0-9a-zA-Z_]{22,}|glpat-[0-9a-zA-Z_-]{20,}|xox[baprs]-[0-9a-zA-Z-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/g,
   },
   {
@@ -128,7 +135,7 @@ export function lintPromptLayer(body: string): LintFinding[] {
         level: rule.level,
         rule: rule.rule,
         messageKey: rule.messageKey,
-        span: [match.index, match.index + match[0].length],
+        span: rule.redactSpan ? undefined : [match.index, match.index + match[0].length],
       });
       // A zero-length match would spin forever.
       if (match[0].length === 0) pattern.lastIndex += 1;

@@ -12,8 +12,10 @@ describe("lintPromptLayer secret and injection rules", () => {
     const findings = lintPromptLayer("token sk-test-0123456789abcdefghij\n-----BEGIN RSA PRIVATE KEY-----");
     const secret = findings.filter(f => f.rule === "secret");
     expect(secret.length).toBe(2);
-    // The span must not include the credential itself beyond the match.
-    expect(secret[0]!.span).toBeDefined();
+    // The match IS the credential: the span is withheld so a rendered warning
+    // cannot copy the secret out of the editor and onto a screenshot.
+    expect(secret[0]!.span).toBeUndefined();
+    expect(secret[1]!.span).toBeUndefined();
   });
 
   test("flags common token prefixes", () => {

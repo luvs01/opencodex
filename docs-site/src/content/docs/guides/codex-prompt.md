@@ -72,6 +72,14 @@ section in that order — they do not interleave with the built-in layers.
 Reorder with the arrows on the row, or with `Alt` + `Up` / `Alt` + `Down` from
 anywhere in the row. Order is composition order.
 
+The panel shows the combined size of the enabled layers against the 128 KiB
+limit for `developer_instructions`, and a collapsible preview of the joined
+text — a layer that would push the section over the limit is visible before you
+save, not after.
+
+Deleting a layer asks first, then offers **Undo** for a few seconds. The layer
+comes back at its old position, so an order-sensitive list survives the slip.
+
 ### Presets
 
 **+ Add layer** offers five starting points: concise output, plan before editing,
@@ -95,6 +103,9 @@ discarding edits parked on other layers; the confirmation's **Save** button save
 The editor warns when a layer says something that will not work as written —
 claiming a different identity, naming a tool the registry defines, using template
 placeholders nothing expands, or stating environment facts Codex generates later.
+It also flags pasted credentials (an API key in a layer ships to the model in
+plain text on every request), phrasing that tells the model to drop its earlier
+instructions, and a non-Codex identity claimed in Korean.
 
 These are warnings and never block a save. If you mean to override Codex, you can;
 the warning only makes it a decision rather than an accident.
@@ -140,6 +151,12 @@ discipline, no verification habits, none of what Codex normally brings. If you w
 to *add* guidance, use a [custom layer](#custom-layers) instead — those are additive.
 :::
 
+The variant editor has the same guardrails as the custom-layer editor: unsaved
+edits are kept while you move between options, closing with edits asks before
+discarding them, and the body is counted against the 64 KiB per-variant limit
+while you type.
+:::
+
 ### If something else already replaced your base prompt
 
 If `model_instructions_file` points at a file opencodex did not write, the picker
@@ -161,8 +178,10 @@ you see the existing value first, and nothing is written until you confirm.
 
 If the saved layers and the value in `config.toml` disagree, the panel says so and
 offers **Repair** rather than fixing it silently. Two of the repair paths rewrite
-text you wrote, so they stay deliberate. Where a layer file has gone missing, the
-repair writes a backup before it touches anything.
+text you wrote, so they stay deliberate. An interrupted write ("journal present")
+is the one repair that cannot change your text: it re-saves the current list
+unchanged so the store's own recovery can finish the transaction. Where a layer
+file has gone missing, the repair writes a backup before it touches anything.
 
 ## When changes take effect
 

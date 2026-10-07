@@ -103,22 +103,66 @@ export default function BaseVariantDialog({
    */
   const draftsRef = useRef(new Map<string, { title: string; body: string }>());
   const lastKeyRef = useRef(editingKey);
+  /**
+   * The slot the outgoing draft belongs to, kept because by the time a
+   * transition runs its variant may already be gone from `variants` (a save
+   * landing, or a delete), and the park check still needs its stored values.
+   */
+  const lastSlotRef = useRef(slot);
+  /**
+   * A variant deleted here must not be re-parked as unsaved work. The draft is
+   * captured at click time so a FAILED delete (the variant still exists, the
+   * user kept typing) still parks its real edits on the next transition.
+   */
+  const justDeletedRef = useRef<{ id: string; title: string; body: string } | null>(null);
   const liveRef = useRef({ title, body });
   useEffect(() => { liveRef.current = { title, body }; }, [title, body]);
 
   useEffect(() => {
-    if (lastKeyRef.current === editingKey) return;
-    // Park the outgoing draft before adopting the incoming slot's values.
-    if (lastKeyRef.current !== null) {
-      draftsRef.current.set(lastKeyRef.current, liveRef.current);
+    if (lastKeyRef.current === editingKey) {
+      lastSlotRef.current = slot;
+      return;
     }
+    /**
+     * Park the outgoing draft only when it is real unsaved work. Three texts
+     * carry none: one identical to what its own slot already stores (unedited
+     * - includes a variant deleted while untouched), one identical to the slot
+     * being navigated TO (its save just landed and the ring absorbed the "new"
+     * slot - parking it again would report stored work as unsaved), and one
+     * whose variant was deleted from this dialog.
+     */
+    const outgoing = liveRef.current;
+    const saved = lastSlotRef.current.variant;
+    const unedited = saved === undefined
+      ? outgoing.title === "" && outgoing.body === ""
+      : outgoing.title === saved.title && outgoing.body === saved.body;
+    const landed = slot.variant !== undefined
+      && outgoing.title === slot.variant.title && outgoing.body === slot.variant.body;
+    const deleted = justDeletedRef.current;
+    const deletedUnchanged = deleted !== null
+      && lastKeyRef.current === deleted.id
+      && outgoing.title === deleted.title && outgoing.body === deleted.body;
+    if (lastKeyRef.current !== null) {
+      if (unedited || landed || deletedUnchanged) {
+        draftsRef.current.delete(lastKeyRef.current);
+      } else {
+        draftsRef.current.set(lastKeyRef.current, outgoing);
+      }
+    }
+    justDeletedRef.current = null;
     lastKeyRef.current = editingKey;
+    lastSlotRef.current = slot;
     const parked = editingKey === null ? undefined : draftsRef.current.get(editingKey);
     setTitle(parked?.title ?? slot.variant?.title ?? "");
     setBody(parked?.body ?? slot.variant?.body ?? "");
   }, [editingKey, slot]);
 
-  const [discardAction, setDiscardAction] = useState<{ kind: "close" } | { kind: "save" } | null>(null);
+  /**
+   * A pending save-confirm pins the slot it was opened for (`targetKey`) and
+   * freezes navigation until answered - otherwise the user could swipe before
+   * confirming and the save would land on the wrong variant.
+   */
+  const [discardAction, setDiscardAction] = useState<{ kind: "close" } | { kind: "save"; targetKey: string | null } | null>(null);
 
   /**
    * A parked draft that differs from its slot's stored value still counts as
@@ -170,7 +214,7 @@ export default function BaseVariantDialog({
   const onPointerUp = (event: React.PointerEvent) => {
     const start = dragStart.current;
     dragStart.current = null;
-    if (!start || busy) return;
+    if (!start || busy || discardAction !== null) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
     if (Math.abs(dx) < SWIPE_THRESHOLD) return;
@@ -179,7 +223,7 @@ export default function BaseVariantDialog({
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
-    if (busy) return;
+    if (busy || discardAction !== null) return;
     // Only when focus is NOT in a text field, or typing in the body would navigate.
     const tag = (event.target as HTMLElement).tagName;
     if (tag === "TEXTAREA" || tag === "INPUT") return;
@@ -231,16 +275,17 @@ export default function BaseVariantDialog({
     : problem.kind === "body-too-large" ? t("codexSet.custom.bodyTooLarge", { bytes: problem.bytes, max: MAX_BODY_BYTES })
     : t("codexSet.custom.invalidCharacter", { position: problem.position });
 
-  const saveNow = () => {
-    if (busy || problem !== null || body.trim().length === 0) return;
+  const saveNow = (targetKey: string | null) => {
+    if (busy || problem !== null || body.trim().length === 0 || targetKey !== editingKey) return;
     // A successful save replaces the parked copy of this slot, and a saved "new"
     // draft is not unsaved work anymore - it is a variant now.
-    draftsRef.current.delete(editingKey ?? NEW_SLOT_KEY);
+    draftsRef.current.delete(targetKey ?? NEW_SLOT_KEY);
     onSave({ id: slot.variant?.id ?? null, title, body: normalized });
   };
   const requestSave = () => {
-    if (parkedDirty) { setDiscardAction({ kind: "save" }); return; }
-    saveNow();
+    if (busy || problem !== null) return;
+    if (parkedDirty) { setDiscardAction({ kind: "save", targetKey: editingKey }); return; }
+    saveNow(editingKey);
   };
 
   return (
@@ -262,7 +307,7 @@ export default function BaseVariantDialog({
               type="button"
               className="btn btn-ghost btn-sm"
               aria-label={t("codexSet.base.prev")}
-              disabled={busy || slots.length < 2}
+              disabled={busy || slots.length < 2 || discardAction !== null}
               onClick={() => step(-1)}
             >
               &larr;
@@ -274,7 +319,7 @@ export default function BaseVariantDialog({
               type="button"
               className="btn btn-ghost btn-sm"
               aria-label={t("codexSet.base.next")}
-              disabled={busy || slots.length < 2}
+              disabled={busy || slots.length < 2 || discardAction !== null}
               onClick={() => step(1)}
             >
               &rarr;
@@ -380,8 +425,8 @@ export default function BaseVariantDialog({
             <button
               type="button"
               className="btn btn-danger btn-sm"
-              disabled={discardAction.kind === "save" && (problem !== null || busy || body.trim().length === 0)}
-              onClick={() => discardAction.kind === "save" ? saveNow() : onClose()}
+              disabled={discardAction.kind === "save" && (problem !== null || busy || body.trim().length === 0 || discardAction.targetKey !== editingKey)}
+              onClick={() => discardAction.kind === "save" ? saveNow(discardAction.targetKey) : onClose()}
             >
               {t(discardAction.kind === "save" ? "common.save" : "common.discard")}
             </button>
@@ -416,7 +461,13 @@ export default function BaseVariantDialog({
                 type="button"
                 className="btn btn-danger btn-sm"
                 disabled={busy || external}
-                onClick={() => onDelete(slot.variant!.id)}
+                onClick={() => {
+                  // The deleted variant's slot is about to disappear; without this
+                  // marker the transition would park its contents and the close
+                  // would ask to discard edits nobody is keeping anyway.
+                  justDeletedRef.current = { id: slot.variant!.id, title, body };
+                  onDelete(slot.variant!.id);
+                }}
               >
                 {t("common.delete")}
               </button>

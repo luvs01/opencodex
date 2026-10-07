@@ -70,6 +70,14 @@ section dans cet ordre ; elles ne s’intercalent pas avec les couches intégré
 Réorganisez-les avec les flèches de la ligne, ou avec `Alt` + `Up` / `Alt` + `Down` depuis
 n’importe quel emplacement de la ligne. L’ordre correspond à l’ordre de composition.
 
+Le panneau affiche la taille combinée des couches actives par rapport à la limite de 128 Kio
+pour `developer_instructions`, ainsi qu’un aperçu repliable du texte assemblé : une couche
+qui ferait dépasser la limite à la section est visible avant l’enregistrement, pas après.
+
+La suppression d’une couche demande d’abord confirmation, puis propose **Annuler** pendant
+quelques secondes : la couche revient à son ancienne position, donc une liste dont l’ordre
+compte survit à un faux pas.
+
 ### Préréglages
 
 **+ Add layer** propose cinq points de départ : sortie concise, planification avant modification,
@@ -91,7 +99,9 @@ en cours de modification, puis revenir sans perdre ce que vous avez saisi.
 L’éditeur avertit lorsqu’une couche contient une instruction qui ne fonctionnera pas telle quelle :
 revendiquer une autre identité, nommer un outil défini par le registre, utiliser des espaces réservés
 de modèle que rien ne développe ou énoncer des informations sur l’environnement que Codex génère
-ultérieurement.
+ultérieurement. Il signale aussi les identifiants collés (une clé API dans une couche part en clair
+au modèle à chaque requête), les formulations qui ordonnent au modèle d’abandonner ses instructions
+précédentes et une identité non-Codex revendiquée en coréen.
 
 Ces avertissements ne bloquent jamais l’enregistrement. Si vous souhaitez remplacer le comportement
 de Codex, vous le pouvez ; l’avertissement permet simplement d’en faire une décision plutôt qu’un accident.
@@ -106,8 +116,10 @@ valeur existante, et rien n’est écrit avant votre confirmation.
 
 Si les couches enregistrées et la valeur de `config.toml` divergent, le panneau le signale et
 propose **Repair** au lieu de corriger le problème silencieusement. Deux des méthodes de réparation
-réécrivent votre texte et restent donc intentionnelles. Lorsqu’un fichier de couche a disparu, la
-réparation crée une sauvegarde avant toute modification.
+réécrivent votre texte et restent donc intentionnelles. Une écriture interrompue (« journal present »)
+est la seule réparation qui ne peut pas modifier votre texte : elle réenregistre la liste actuelle
+sans changement, afin que la récupération propre au magasin achève la transaction. Lorsqu’un fichier
+de couche a disparu, la réparation crée une sauvegarde avant toute modification.
 
 ## Quand les modifications prennent effet
 

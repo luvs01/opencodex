@@ -802,12 +802,18 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
                 className="btn btn-sm"
                 disabled={busyId !== null}
                 onClick={() => {
-                  if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
                   const { layer, index } = deletedLayer;
-                  setDeletedLayer(null);
                   const next = [...snapshot.custom];
                   next.splice(Math.min(index, next.length), 0, layer);
-                  void writeCustom(next, layer.id);
+                  void (async () => {
+                    const done = await writeCustom(next, layer.id);
+                    // The notice survives a failed write: clearing it first would
+                    // hide the only way to restore a layer that is still gone.
+                    if (!done) return;
+                    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+                    undoTimerRef.current = null;
+                    setDeletedLayer(null);
+                  })();
                 }}
               >
                 {t("common.undo")}
