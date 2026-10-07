@@ -69,12 +69,12 @@ export type ConfigWriteLockOutcome<T> =
  */
 export function withConfigWriteLock<T>(
   configPath: string,
-  run: () => T,
+  run: (handle: LockHandle) => T,
 ): ConfigWriteLockOutcome<T> {
   const acquired = tryAcquire(configWriteLockPath(configPath));
   if (!acquired.ok) return { ok: false, error: "locked" };
   try {
-    return { ok: true, value: run() };
+    return { ok: true, value: run(acquired.handle) };
   } finally {
     release(acquired.handle);
   }
@@ -99,16 +99,19 @@ export type { LockHandle };
 /**
  * Run `run` under the lock the caller already holds, or take the lock itself.
  * The explicit-held contract above applies: `held` must be a live handle on
- * this process's own acquire, verified before the section runs.
+ * THIS config's lock file — a handle minted on another path is refused rather
+ * than trusted, since it would let the section run unprotected.
  */
 export function withConfigWriteLockHeld<T>(
   configPath: string,
   held: LockHandle | undefined,
-  run: () => T,
+  run: (handle: LockHandle) => T,
 ): ConfigWriteLockOutcome<T> {
   if (held !== undefined) {
-    if (!stillHeld(held)) return { ok: false, error: "locked" };
-    return { ok: true, value: run() };
+    if (held.path !== configWriteLockPath(configPath) || !stillHeld(held)) {
+      return { ok: false, error: "locked" };
+    }
+    return { ok: true, value: run(held) };
   }
   return withConfigWriteLock(configPath, run);
 }

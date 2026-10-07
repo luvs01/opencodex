@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { atomicWriteFile } from "../config";
 import { assertCodexHomeOwner, CODEX_HOME_JOURNAL_FILE, CodexHomeOwnerRefusal, opencodexHomeForInjection, readCodexHomeJournal, type CodexHomeOwnerRefusalReason } from "./codex-home-owner";
 import { hasInjectedCodexRouting } from "./injected-marker";
-import { withConfigWriteLock } from "./config-write-lock";
+import { withConfigWriteLockHeld } from "./config-write-lock";
+import type { LockHandle } from "./config-write-lock";
 import { CODEX_HOME, CODEX_CONFIG_PATH, CODEX_PROFILE_PATH } from "./paths";
 
 /**
@@ -301,7 +302,9 @@ export function journalOwner(options: { readOnly?: boolean } = {}): JournalOwner
     : null;
 }
 
-export function restoreJournalState(): RestoreJournalResult {
+export function restoreJournalState(
+  options: { heldConfigWriteLock?: LockHandle } = {},
+): RestoreJournalResult {
   try { assertCodexHomeOwner(CODEX_HOME); }
   catch (error) {
     if (!(error instanceof CodexHomeOwnerRefusal)) throw error;
@@ -319,7 +322,7 @@ export function restoreJournalState(): RestoreJournalResult {
   // bytes OUTSIDE it would compare against pre-foreign-write state and the
   // replay could then rename a journaled original over a write that already
   // landed, silently discarding it.
-  const locked = withConfigWriteLock(CODEX_CONFIG_PATH, () => {
+  const locked = withConfigWriteLockHeld(CODEX_CONFIG_PATH, options.heldConfigWriteLock, () => {
   const currentConfig = existsSync(CODEX_CONFIG_PATH) ? readFileSync(CODEX_CONFIG_PATH, "utf-8") : null;
   const currentProfile = existsSync(CODEX_PROFILE_PATH) ? readFileSync(CODEX_PROFILE_PATH, "utf-8") : null;
   const comparison = compareJournalState(journal, currentConfig, currentProfile);

@@ -113,8 +113,9 @@ type TomlEditOutcome = { next: string } | { error: string };
 function editCodexConfigToml(
   path: string,
   edit: (content: string) => TomlEditOutcome,
+  heldConfigWriteLock?: LockHandle,
 ): ConfigEditResult {
-  const locked = withConfigWriteLock(path, (): ConfigEditResult => {
+  const locked = withConfigWriteLockHeld(path, heldConfigWriteLock, (): ConfigEditResult => {
     const content = readConfigText(path);
     if (content === null) return { ok: false, error: `config.toml not readable at ${path}` };
     const outcome = edit(content);
@@ -853,11 +854,11 @@ function editScalarInTable(content: string, table: string, key: string, encoded:
 }
 
 /** Persist `[agents] enabled = value`, or remove the key when `value` is null. */
-export function setAgentsEnabled(value: boolean | null, configPath?: string): ConfigEditResult {
+export function setAgentsEnabled(value: boolean | null, configPath?: string, heldConfigWriteLock?: LockHandle): ConfigEditResult {
   const path = configPath ?? activeCodexConfigPath();
   return editCodexConfigToml(path, content => ({
     next: editScalarInTable(content, "agents", "enabled", value === null ? null : String(value)),
-  }));
+  }), heldConfigWriteLock);
 }
 
 /**
@@ -867,14 +868,14 @@ export function setAgentsEnabled(value: boolean | null, configPath?: string): Co
  * produce a config upstream cannot deserialize, a hard parse failure for the
  * user's Codex.
  */
-export function setAgentsMaxDepth(value: number | null, configPath?: string): ConfigEditResult {
+export function setAgentsMaxDepth(value: number | null, configPath?: string, heldConfigWriteLock?: LockHandle): ConfigEditResult {
   if (value !== null && (!Number.isInteger(value) || value < -2_147_483_648 || value > 2_147_483_647)) {
     return { ok: false, error: "max_depth must be an integer within signed i32 range" };
   }
   const path = configPath ?? activeCodexConfigPath();
   return editCodexConfigToml(path, content => ({
     next: editScalarInTable(content, "agents", "max_depth", value === null ? null : String(value)),
-  }));
+  }), heldConfigWriteLock);
 }
 
 /**
@@ -990,7 +991,7 @@ export function getMultiAgentModeHintText(configPath?: string): string | null {
  * carries `#[serde(deny_unknown_fields)]`, so a misspelling is not ignored — it is
  * a hard config-parse failure for the user's Codex.
  */
-function setV2StringField(key: string, value: string | null, configPath?: string): ConfigEditResult {
+function setV2StringField(key: string, value: string | null, configPath?: string, heldConfigWriteLock?: LockHandle): ConfigEditResult {
   const path = configPath ?? activeCodexConfigPath();
   const encoded = value === null ? null : encodeTomlBasicString(value);
   return editCodexConfigToml(path, (content): TomlEditOutcome => {
@@ -1093,11 +1094,11 @@ function setV2StringField(key: string, value: string | null, configPath?: string
   const separator = content.length > 0 && !content.endsWith(`${eol}${eol}`) ? eol : "";
   const tableText = `[features.multi_agent_v2]${eol}${key} = ${encoded}${eol}`;
   return { next: `${content}${suffix}${separator}${tableText}` };
-  });
+  }, heldConfigWriteLock);
 }
 
-export function setSubagentDeveloperInstructions(value: string | null, configPath?: string): ConfigEditResult {
-  return setV2StringField("subagent_developer_instructions", value, configPath);
+export function setSubagentDeveloperInstructions(value: string | null, configPath?: string, heldConfigWriteLock?: LockHandle): ConfigEditResult {
+  return setV2StringField("subagent_developer_instructions", value, configPath, heldConfigWriteLock);
 }
 
 export const MODE_HINT_UNSUPPORTED_ERROR =
@@ -1109,7 +1110,7 @@ export const MODE_HINT_UNSUPPORTED_ERROR =
  * `setSubagentDeveloperInstructions`; the upstream struct rejects unknown fields,
  * so the key spelling must match codex-rs exactly.
  */
-export function setMultiAgentModeHintText(value: string | null, configPath?: string): ConfigEditResult {
+export function setMultiAgentModeHintText(value: string | null, configPath?: string, heldConfigWriteLock?: LockHandle): ConfigEditResult {
   // The upstream `multi_agent_mode_hint_text` key is newer than the v2 config
   // surface opencodex already manages; an older Codex build rejects the unknown
   // member (`#[serde(deny_unknown_fields)]`) and fails to start. Probe the
@@ -1127,7 +1128,7 @@ export function setMultiAgentModeHintText(value: string | null, configPath?: str
     }
   }
   const canonicalValue = value === null ? null : canonicalizeOpenCodexModeHint(value);
-  return setV2StringField("multi_agent_mode_hint_text", canonicalValue, configPath);
+  return setV2StringField("multi_agent_mode_hint_text", canonicalValue, configPath, heldConfigWriteLock);
 }
 
 export const MODE_HINT_CAPABILITY_CACHE_MAX_ENTRIES = 8;
