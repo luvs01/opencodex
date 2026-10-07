@@ -146,11 +146,16 @@ If `model_instructions_file` points at a file opencodex did not write, the picke
 refuses to act and says where the key points. It will not silently retarget a key
 you or another tool set.
 
-You do not have to clear it by hand, though. **Import it as a variant** previews
-the file's text — before anything is written — and on confirm copies it into the
-variant directory, then points the key at the copy. The prompt in force does not
-change; it simply becomes one of your managed variants. Clear the key yourself
-instead if you would rather start from the default.
+You do not have to clear it by hand, though. **Import it as a variant** converts
+the file: the preview shows the *exact* text that will be installed — a `# `
+heading line holding the variant title, then the file's body with line endings
+and tabs normalized — and you can edit the title before confirming. The body
+may use at most 64 KiB after normalization (`bodyBytes` in the preview); the
+complete file on disk, heading included, is a little larger (`serializedBytes`).
+The confirm is bound to the previewed text by a hash, so if the file — or your
+chosen title — changed in between, the import refuses rather than install text
+you never saw. Clear the key yourself instead if you would rather start from
+the default.
 
 This is the same principle as importing `developer_instructions`: the panel reports
 what it finds, and you decide.

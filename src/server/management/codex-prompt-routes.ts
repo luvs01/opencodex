@@ -86,6 +86,7 @@ const WRITE_ERROR_STATUS: Record<WriteError, number> = {
   recovery_required: 409,
   locked: 409,
   import_body_changed: 409,
+  unsupported_form: 409,
 };
 
 /** Read-only view for the route test that asserts every mapping is a client error. */
@@ -400,12 +401,33 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
     // confirmation. The verb exists because /base/select refuses the `external`
     // state by design — that refusal is about SILENT retargeting, and an
     // explicit, previewed import is precisely the opt-in it protects.
+    //
+    // The preview carries the SERIALIZED variant file — `# {title}\n{body}` —
+    // not just the body: the heading is part of what Codex will read, so the
+    // thing confirmed must be the whole stored text, title included. Both byte
+    // counts are reported and separately named: `bodyBytes` is the budget the
+    // 64 KiB cap applies to, `serializedBytes` is the complete file.
     const body = await readBody(ctx);
     if (!body) return fail(ctx, "invalid_body", 400, "expected a JSON object");
-    const preview = previewBaseImport(paths(ctx));
+    // The title is validated before anything is previewed or written: a caller
+    // that supplies one gets the same contract as a custom-layer title —
+    // 1-80 characters on a single line.
+    if (body.title !== undefined) {
+      const t = body.title;
+      if (typeof t !== "string" || t.trim().length === 0
+        || t.length > MAX_TITLE_CHARS || /[\r\n]/.test(t)) {
+        return fail(ctx, "invalid_title", 400, "title must be 1-80 characters on a single line");
+      }
+    }
+    const preview = previewBaseImport(paths(ctx), typeof body.title === "string" ? body.title : undefined);
     if (preview.reason === "nothing_to_import") {
       return fail(ctx, "nothing_to_import", 409,
         "model_instructions_file is absent or already points at a managed variant");
+    }
+    if (preview.reason === "unsupported_form") {
+      return fail(ctx, "import_unsupported_form", 409, preview.detail, {
+        path: preview.rawPath,
+      });
     }
     if (preview.reason === "file_unreadable") {
       return fail(ctx, "import_file_unreadable", 409, preview.detail, {
@@ -415,10 +437,11 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
     if (preview.reason === "invalid_characters") {
       return fail(ctx, "invalid_characters", 400, preview.detail, { path: preview.resolvedPath });
     }
-    // Same boundary as every other write to this key: the 64 KB cap applies to
-    // what would actually be stored.
+    // Same boundary as every other write to this key: the 64 KiB cap applies to
+    // the BODY alone — the title heading lives outside that budget, unchanged
+    // from the managed-variant contract.
     if (utf8Bytes(preview.body!) > MAX_BODY_BYTES) {
-      return fail(ctx, "body_too_large", 400, `the file exceeds ${MAX_BODY_BYTES} bytes`, {
+      return fail(ctx, "body_too_large", 400, `the file body exceeds ${MAX_BODY_BYTES} bytes`, {
         path: preview.resolvedPath,
       });
     }
@@ -426,7 +449,7 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
       return fail(ctx, "variant_slots_full", 409,
         `at most ${MAX_BASE_VARIANTS} base variants; delete one first`, {
           maxBaseVariants: MAX_BASE_VARIANTS,
-          body: preview.body,
+          serialized: preview.serialized,
           resolvedPath: preview.resolvedPath,
         });
     }
@@ -438,28 +461,38 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
         preview: {
           rawPath: preview.rawPath,
           resolvedPath: preview.resolvedPath,
-          body: preview.body,
-          bytes: utf8Bytes(preview.body!),
+          serialized: preview.serialized,
+          serializedBytes: utf8Bytes(preview.serialized!),
+          bodyBytes: utf8Bytes(preview.body!),
           suggestedTitle: preview.suggestedTitle,
-          bodySha256: preview.bodySha256,
+          effectiveTitle: preview.effectiveTitle,
+          previewSha256: preview.previewSha256,
         },
       }, 200, req, ctx.config);
     }
     const revision = revisionOf(body);
     if (!revision) return fail(ctx, "stale_revision", 409, "revision required");
-    const title = typeof body.title === "string" && body.title.trim().length > 0
-      ? body.title
-      : preview.suggestedTitle ?? "Imported base prompt";
-    const bodySha256 = typeof body.bodySha256 === "string" ? body.bodySha256 : undefined;
-    if (bodySha256 !== undefined && bodySha256 !== preview.bodySha256) {
-      // The file the caller confirmed is not the file on disk any more. Refuse
-      // rather than import instructions nobody previewed.
+    // The preview hash is REQUIRED — a confirm that does not name exactly what
+    // was previewed (serialized text, title included) cannot be checked against
+    // it and is refused without writing.
+    const previewSha256 = body.previewSha256;
+    if (typeof previewSha256 !== "string" || !/^[0-9a-f]{64}$/.test(previewSha256)) {
+      return fail(ctx, "import_preview_required", 400,
+        "confirm requires the previewSha256 returned by a preview of the same title");
+    }
+    if (previewSha256 !== preview.previewSha256) {
+      // The file or the selected title moved between preview and confirm. Refuse
+      // rather than import a serialization nobody previewed.
       return fail(ctx, "import_body_changed", 409,
-        "the file changed since it was previewed; preview it again", {
+        "the preview no longer matches; preview it again", {
           resolvedPath: preview.resolvedPath,
         });
     }
-    return settle(ctx, importBaseVariant({ title, bodySha256 }, revision, paths(ctx)));
+    return settle(ctx, importBaseVariant(
+      { title: typeof body.title === "string" ? body.title : undefined, previewSha256 },
+      revision,
+      paths(ctx),
+    ));
   }
 
   if (url.pathname === "/api/codex-prompt/base" && req.method === "PUT") {

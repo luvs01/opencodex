@@ -46,6 +46,7 @@ export default function BaseVariantDialog({
   onSave,
   onDelete,
   onImport,
+  onImportTitle,
   onClose,
 }: {
   variants: readonly BaseVariantDto[];
@@ -53,22 +54,29 @@ export default function BaseVariantDialog({
   maxVariants: number;
   busy: boolean;
   /**
-   * The external file's body once a preview landed. `null` while the import
-   * offer is just a button; the confirm below it writes nothing until pressed.
+   * The serialized variant once a preview landed — the exact text a confirm
+   * installs, `# {title}` heading and normalized body included. `null` while
+   * the import offer is just a button; the confirm below it writes nothing
+   * until pressed.
    */
   importPreview: {
     rawPath: string | null;
     resolvedPath: string | null;
-    body: string;
-    bytes: number;
+    serialized: string;
+    serializedBytes: number;
+    bodyBytes: number;
     suggestedTitle: string | null;
+    /** The title the previewed text (and the hash bound to it) was built with. */
+    effectiveTitle: string | null;
   } | null;
   /** Why an import was refused, when it was — shown beside the offer. */
   importRefusal: string | null;
   onSelect: (selection: BaseSelectionDto) => void;
   onSave: (input: { id: string | null; title: string; body: string }) => void;
   onDelete: (id: string) => void;
-  onImport: (confirm: boolean) => void;
+  onImport: (confirm: boolean, title?: string) => void;
+  /** A title edit re-previews (debounced upstream) so the hash rebinds to it. */
+  onImportTitle: (title: string) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -101,6 +109,20 @@ export default function BaseVariantDialog({
     setEditingId(slot.variant?.id ?? null);
     setTitle(slot.variant?.title ?? "");
     setBody(slot.variant?.body ?? "");
+  }
+
+  /**
+   * The title the user picked for the import, seeded from each preview's
+   * effectiveTitle. Editing it re-previews (the confirmation hash binds the
+   * title as well as the body), so the confirm stays locked until the rebind
+   * lands and `effectiveTitle` catches up with the field.
+   */
+  const [importTitle, setImportTitle] = useState(importPreview?.effectiveTitle ?? "");
+  const previewedTitle = importPreview?.effectiveTitle ?? null;
+  const lastSeededTitle = useRef(previewedTitle);
+  if (previewedTitle !== lastSeededTitle.current) {
+    lastSeededTitle.current = previewedTitle;
+    setImportTitle(previewedTitle ?? "");
   }
 
   const step = useCallback((delta: number) => {
@@ -224,13 +246,43 @@ export default function BaseVariantDialog({
               <p className="muted small">
                 {t("codexSet.base.importPreview", { path: importPreview.resolvedPath ?? importPreview.rawPath ?? "" })}
               </p>
-              <pre className="api-code codex-set-custom__adopt-preview">{importPreview.body}</pre>
+              {/*
+                The exact serialized file is shown, not just the body: the title
+                becomes the `# ` heading Codex will read, and CRLF/tab
+                normalization is already applied — what is previewed is what is
+                installed.
+              */}
+              <pre className="api-code codex-set-custom__adopt-preview">{importPreview.serialized}</pre>
+              <p className="muted small">
+                {t("codexSet.base.importFormat", {
+                  bodyBytes: importPreview.bodyBytes,
+                  serializedBytes: importPreview.serializedBytes,
+                })}
+              </p>
+              <label className="field">
+                <span>{t("codexSet.base.importTitle")}</span>
+                <input
+                  type="text"
+                  value={importTitle}
+                  disabled={busy}
+                  maxLength={80}
+                  onChange={event => {
+                    setImportTitle(event.target.value);
+                    onImportTitle(event.target.value);
+                  }}
+                />
+              </label>
+              {importTitle.trim() !== importPreview.effectiveTitle && (
+                // The confirm hash binds the previewed title; an edited title
+                // re-previews first, so until that lands there is nothing to bind.
+                <p className="muted small">{t("codexSet.base.importTitlePending")}</p>
+              )}
               <div className="modal-actions">
                 <button
                   type="button"
                   className="btn btn-primary btn-sm"
-                  disabled={busy}
-                  onClick={() => onImport(true)}
+                  disabled={busy || importTitle.trim() !== importPreview.effectiveTitle}
+                  onClick={() => onImport(true, importTitle.trim() || undefined)}
                 >
                   {t("codexSet.base.importConfirm")}
                 </button>

@@ -646,6 +646,7 @@ describe("020 coverage completions", () => {
       write_failed: 500,
       recovery_required: 409,
       locked: 409,
+      unsupported_form: 409,
       import_body_changed: 409,
     });
   });
@@ -1662,38 +1663,133 @@ describe("toggle restore-default (enabled: null)", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("true");
   });
+
+  test("an adjacent comment survives a root toggle write AND a restore-default removal", async () => {
+    // `false# note` — no space before `#` — is still a comment. A matcher that
+    // required whitespace used to drop it on write and on removal.
+    const fx = fixture("include_apps_instructions = false# keep me\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: true, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    expect(read(fx.configPath)).toBe("include_apps_instructions = true# keep me\n");
+
+    const res2 = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: null, revision: await revision(fx),
+    });
+    expect(res2.status).toBe(200);
+    // The assignment is gone; the comment the user wrote beside it is not.
+    expect(read(fx.configPath)).toBe("# keep me\n");
+    expect(() => Bun.TOML.parse(read(fx.configPath)!)).not.toThrow();
+  });
+
+  test("a # inside a quoted value is never mistaken for a comment", async () => {
+    const fx = fixture('include_apps_instructions = "a#b" # real comment\n');
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: false, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    // The quoted value is replaced whole; the real comment is preserved.
+    expect(read(fx.configPath)).toBe('include_apps_instructions = false # real comment\n');
+    expect(() => Bun.TOML.parse(read(fx.configPath)!)).not.toThrow();
+  });
+
+  test("an adjacent comment inside a [skills] table survives the same way", async () => {
+    const fx = fixture("[skills]\ninclude_instructions = false# stay\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "skills", enabled: true, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    expect(read(fx.configPath)).toBe("[skills]\ninclude_instructions = true# stay\n");
+    expect(() => Bun.TOML.parse(read(fx.configPath)!)).not.toThrow();
+  });
+
+  test("a multi-line toggle value is refused before any write", async () => {
+    const configBytes = 'include_apps_instructions = """\ntrue\n"""\n';
+    const fx = fixture(configBytes);
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: true, revision: await revision(fx),
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("unsupported_form");
+    // Refused BEFORE writing: the file is byte-identical, no journal left.
+    expect(read(fx.configPath)).toBe(configBytes);
+    expect(existsSync(fx.storePath.replace(/\.json$/, ".journal"))).toBe(false);
+  });
 });
 
 describe("POST /api/codex-prompt/base/import", () => {
   /** An external pointer plus the file it names, inside the fixture's own dir. */
-  function externalFixture(body: string): { fx: Fixture; externalPath: string } {
+  function externalFixture(body: string, name = "somebody-elses.md"): { fx: Fixture; externalPath: string } {
     const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
     roots.push(root);
-    const externalPath = join(root, "somebody-elses.md");
+    const externalPath = join(root, name);
     writeFileSync(externalPath, body, "utf8");
     // The value is a JSON-encoded TOML basic string, so a Windows path's
     // backslashes land escaped exactly as a user would write them.
     return { fx: fixture(`model_instructions_file = ${JSON.stringify(externalPath)}\n`), externalPath };
   }
 
-  test("preview returns the file body and writes nothing", async () => {
+  /** A preview request; `title` previews that spelling so its hash binds it. */
+  async function previewImport(fx: Fixture, title?: string) {
+    return call("POST", "/api/codex-prompt/base/import", fx,
+      title === undefined ? { confirm: false } : { confirm: false, title });
+  }
+
+  /** Preview (with `title` when given), then confirm bound to exactly that preview. */
+  async function importConfirmed(fx: Fixture, title?: string) {
+    const preview = await previewImport(fx, title);
+    expect(preview.status).toBe(200);
+    return call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true,
+      revision: await revision(fx),
+      ...(title === undefined ? {} : { title }),
+      previewSha256: preview.body.preview.previewSha256,
+    });
+  }
+
+  test("preview returns the serialized file — heading plus normalized body — and writes nothing", async () => {
     const { fx, externalPath } = externalFixture("Ship the external base.");
     const before = read(fx.configPath);
-    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    const res = await previewImport(fx);
     expect(res.status).toBe(200);
     expect(res.body.changed).toBe(false);
-    expect(res.body.preview.body).toBe("Ship the external base.");
-    expect(res.body.preview.resolvedPath).toBe(externalPath);
-    expect(res.body.preview.suggestedTitle).toBe("somebody-elses");
+    const p = res.body.preview;
+    // The serialized text is what Codex will read: `# {title}` + the body.
+    expect(p.serialized).toBe("# somebody-elses\nShip the external base.");
+    expect(p.suggestedTitle).toBe("somebody-elses");
+    expect(p.effectiveTitle).toBe("somebody-elses");
+    // The two byte counts are separately named: the body carries the 64 KiB
+    // budget, the serialized figure is the complete file.
+    expect(p.bodyBytes).toBe(Buffer.byteLength("Ship the external base.", "utf8"));
+    expect(p.serializedBytes).toBe(Buffer.byteLength(p.serialized, "utf8"));
+    expect(p.previewSha256).toMatch(/^[0-9a-f]{64}$/);
     expect(read(fx.configPath)).toBe(before);
     expect(existsSync(fx.baseVariantDir)).toBe(false);
   });
 
+  for (const [label, source] of [
+    ["plain text", "Ship the external base."],
+    ["an existing heading", "# Existing Heading\n\nBody text."],
+    ["tabs", "Indent\ta level\tdeep"],
+    ["CRLF", "line one\r\nline two\r\n"],
+  ] as const) {
+    test(`the previewed serialization is the stored file, byte for byte (${label})`, async () => {
+      const { fx } = externalFixture(source);
+      const preview = await previewImport(fx);
+      expect(preview.status).toBe(200);
+      const res = await importConfirmed(fx);
+      expect(res.status).toBe(200);
+      const variant = res.body.snapshot.baseVariants[0];
+      // The file on disk is the previewed serialization, not a re-derivation:
+      // the heading Codex reads is the one the preview showed.
+      expect(read(join(fx.baseVariantDir, `${variant.id}.md`))).toBe(preview.body.preview.serialized);
+    });
+  }
+
   test("confirm copies the file into the variant directory and repoints the key", async () => {
     const { fx, externalPath } = externalFixture("Ship the external base.");
-    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
-      confirm: true, revision: await revision(fx),
-    });
+    const res = await importConfirmed(fx);
     expect(res.status).toBe(200);
     const snapshot = res.body.snapshot;
     expect(snapshot.baseVariants).toHaveLength(1);
@@ -1751,21 +1847,139 @@ describe("POST /api/codex-prompt/base/import", () => {
     expect(existsSync(fx.baseVariantDir)).toBe(false);
   });
 
-  test("an oversized file is refused under the same cap as a variant body", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
-    roots.push(root);
-    const externalPath = join(root, "big.md");
-    // Real bytes: a truncated file is all NULs, and NUL is a control character
-    // the extractor refuses before size is ever measured.
-    writeFileSync(externalPath, "x".repeat(64 * 1024 + 10), "utf8");
-    const fx = fixture(`model_instructions_file = ${JSON.stringify(externalPath)}\n`);
-    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+  test("a 65536-byte body with a valid title imports; one byte more is refused", async () => {
+    // The cap is on the BODY alone — the `# {title}\n` heading lives outside
+    // the budget, so the stored file is larger than the budget by the heading.
+    const fits = externalFixture("x".repeat(64 * 1024));
+    const ok = await importConfirmed(fits.fx, "Full");
+    expect(ok.status).toBe(200);
+    const variant = ok.body.snapshot.baseVariants[0];
+    const stored = read(join(fits.fx.baseVariantDir, `${variant.id}.md`))!;
+    expect(Buffer.byteLength(stored, "utf8")).toBe(64 * 1024 + "# Full\n".length);
+    expect(ok.body.snapshot.baseVariants[0].title).toBe("Full");
+
+    const over = externalFixture("x".repeat(64 * 1024 + 1));
+    const res = await previewImport(over.fx);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("body_too_large");
-    expect(existsSync(fx.baseVariantDir)).toBe(false);
+    expect(existsSync(over.fx.baseVariantDir)).toBe(false);
   });
 
-  test("slots_full still returns the preview body, so the cap does not look like a read failure", async () => {
+  test("body bytes are measured in UTF-8, not characters", async () => {
+    // 30 000 hangul syllables are 90 000 bytes: under a character cap, over a
+    // byte cap — the byte cap is the one that exists.
+    const { fx } = externalFixture("가".repeat(30_000));
+    const res = await previewImport(fx);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("body_too_large");
+
+    const fitting = externalFixture("가".repeat(20_000));
+    const res2 = await previewImport(fitting.fx);
+    expect(res2.status).toBe(200);
+    expect(res2.body.preview.bodyBytes).toBe(60_000);
+    // Multibyte text serializes and stores intact.
+    const done = await importConfirmed(fitting.fx);
+    expect(done.status).toBe(200);
+    expect(done.body.snapshot.baseVariants[0].body).toBe("가".repeat(20_000));
+  });
+
+  test("a caller title of 80 characters is accepted, 81 refused — before any write", async () => {
+    const { fx } = externalFixture("b");
+    const revisionNow = await revision(fx);
+    for (const [label, payload] of [
+      ["81 chars on preview", { confirm: false, title: "x".repeat(81) }],
+      ["81 chars on confirm", { confirm: true, revision: revisionNow, title: "x".repeat(81), previewSha256: "0".repeat(64) }],
+      ["a newline", { confirm: false, title: "a\nb" }],
+      ["a non-string", { confirm: false, title: 42 }],
+      ["empty", { confirm: false, title: "   " }],
+    ] as const) {
+      const res = await call("POST", "/api/codex-prompt/base/import", fx, payload);
+      expect(res.status, label).toBe(400);
+      expect(res.body.code, label).toBe("invalid_title");
+    }
+    // 80 chars is inside the limit and previews cleanly.
+    const title = "y".repeat(80);
+    const ok = await previewImport(fx, title);
+    expect(ok.status).toBe(200);
+    expect(ok.body.preview.effectiveTitle).toBe(title);
+    expect(ok.body.preview.serialized.startsWith(`# ${title}\n`)).toBe(true);
+  });
+
+  test("a long filename-derived suggestion is bounded to the title limit", async () => {
+    const name = `${"v".repeat(120)}.md`;
+    const { fx } = externalFixture("body", name);
+    const res = await previewImport(fx);
+    expect(res.status).toBe(200);
+    const p = res.body.preview;
+    expect(p.suggestedTitle!.length).toBeLessThanOrEqual(80);
+    // The bounded suggestion is what the heading shows — not the full basename.
+    expect(p.serialized.startsWith(`# ${p.suggestedTitle}\n`)).toBe(true);
+  });
+
+  test("confirm requires a preview hash and refuses a stale or mismatched one", async () => {
+    const { fx, externalPath } = externalFixture("Ship the external base.");
+    const revisionNow = await revision(fx);
+    for (const [label, hash] of [
+      ["missing", undefined],
+      ["non-string", 42],
+      ["malformed", "not-a-sha"],
+      ["well-formed but not the preview's", "0".repeat(64)],
+    ] as const) {
+      const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+        confirm: true, revision: revisionNow, ...(hash === undefined ? {} : { previewSha256: hash }),
+      });
+      expect(res.status === 400 || res.status === 409, label).toBe(true);
+      expect(
+        res.body.code === "import_preview_required" || res.body.code === "import_body_changed",
+        label,
+      ).toBe(true);
+    }
+    // Missing specifically reports the missing-hash contract.
+    const missing = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: revisionNow,
+    });
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe("import_preview_required");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+
+    // The file moved between preview and confirm: nobody previewed THIS body,
+    // so the route refuses rather than install a surprise.
+    const preview = await previewImport(fx);
+    writeFileSync(externalPath, "Ship the external base — revised after preview.", "utf8");
+    const stale = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx), previewSha256: preview.body.preview.previewSha256,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.code).toBe("import_body_changed");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+
+    // Re-preview picks up the new bytes and their hash; that confirm lands.
+    const res = await importConfirmed(fx);
+    expect(res.status).toBe(200);
+    expect(res.body.snapshot.baseVariants[0].body).toBe("Ship the external base — revised after preview.");
+  });
+
+  test("the hash binds the title: confirming a different spelling is refused", async () => {
+    const { fx } = externalFixture("Ship the external base.");
+    const preview = await previewImport(fx); // previews the suggested title
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx),
+      title: "Renamed", previewSha256: preview.body.preview.previewSha256,
+    });
+    // The hash was computed over the suggested title — "Renamed" was never previewed.
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("import_body_changed");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+
+    // Re-preview WITH the title binds the hash to it; that confirm lands.
+    const done = await importConfirmed(fx, "Renamed");
+    expect(done.status).toBe(200);
+    const variant = done.body.snapshot.baseVariants[0];
+    expect(variant.title).toBe("Renamed");
+    expect(read(join(fx.baseVariantDir, `${variant.id}.md`))).toBe("# Renamed\nShip the external base.");
+  });
+
+  test("slots_full still returns the preview serialization, so the cap does not look like a read failure", async () => {
     const { fx } = externalFixture("Third base.");
     for (const title of ["One", "Two"]) {
       const created = await call("PUT", "/api/codex-prompt/base", fx, {
@@ -1773,20 +1987,25 @@ describe("POST /api/codex-prompt/base/import", () => {
       });
       expect(created.status).toBe(200);
     }
-    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    const res = await previewImport(fx);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("variant_slots_full");
-    expect(res.body.body).toBe("Third base.");
+    expect(res.body.serialized).toBe("# somebody-elses\nThird base.");
+    // A confirm under slots_full is refused before the hash is even consulted —
+    // the cap check precedes the confirmation contract.
     const res2 = await call("POST", "/api/codex-prompt/base/import", fx, {
-      confirm: true, revision: await revision(fx),
+      confirm: true, revision: await revision(fx), previewSha256: "0".repeat(64),
     });
     expect(res2.status).toBe(409);
+    expect(res2.body.code).toBe("variant_slots_full");
   });
 
   test("a stale revision on confirm refuses and leaves no file behind", async () => {
     const { fx } = externalFixture("Ship the external base.");
+    const preview = await previewImport(fx);
     const res = await call("POST", "/api/codex-prompt/base/import", fx, {
       confirm: true, revision: "sha256:stale",
+      previewSha256: preview.body.preview.previewSha256,
     });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("stale_revision");
@@ -1813,39 +2032,53 @@ describe("POST /api/codex-prompt/base/import", () => {
     const externalPath = join(root, "quoted.md");
     writeFileSync(externalPath, "Quoted prompt.", "utf8");
     const fx = fixture(`model_instructions_file = '${externalPath}'\n`);
-    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
-      confirm: true, revision: await revision(fx),
-    });
+    const res = await importConfirmed(fx);
     expect(res.status).toBe(200);
     const config = read(fx.configPath)!;
     const keyLines = config.split("\n").filter(l => /^\s*model_instructions_file\s*=/.test(l));
     expect(keyLines).toHaveLength(1);
     expect(keyLines[0]).toContain(".md");
+    expect(() => Bun.TOML.parse(config)).not.toThrow();
   });
 
-  test("the preview carries bodySha256 and a mismatched confirm is refused", async () => {
-    const { fx, externalPath } = externalFixture("Ship the external base.");
-    const preview = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
-    expect(preview.status).toBe(200);
-    const sha = preview.body.preview.bodySha256 as string;
-    expect(sha).toMatch(/^[0-9a-f]{64}$/);
-
-    // The file moved between preview and confirm: nobody previewed THIS body,
-    // so the route refuses rather than install a surprise.
-    writeFileSync(externalPath, "Ship the external base — revised after preview.", "utf8");
-    const stale = await call("POST", "/api/codex-prompt/base/import", fx, {
-      confirm: true, revision: await revision(fx), bodySha256: sha,
-    });
-    expect(stale.status).toBe(409);
-    expect(stale.body.code).toBe("import_body_changed");
-    expect(existsSync(fx.baseVariantDir)).toBe(false);
-
-    // Re-preview picks up the new bytes and their hash; that confirm lands.
-    const preview2 = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
-    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
-      confirm: true, revision: await revision(fx), bodySha256: preview2.body.preview.bodySha256,
-    });
+  test("a double-quoted key is replaced too, and an adjacent comment survives", async () => {
+    // "key" assigns the same key as bare `key` — skipping it used to append a
+    // duplicate; and `# note` glued to the value is a comment, not value text.
+    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
+    roots.push(root);
+    const externalPath = join(root, "dq.md");
+    writeFileSync(externalPath, "DQ prompt.", "utf8");
+    const fx = fixture(`"model_instructions_file" = ${JSON.stringify(externalPath)}# keep this\n`);
+    const res = await importConfirmed(fx);
     expect(res.status).toBe(200);
-    expect(res.body.snapshot.baseVariants[0].body).toBe("Ship the external base — revised after preview.");
+    const config = read(fx.configPath)!;
+    expect(config).toContain("# keep this");
+    // Exactly one assignment of the key, however spelled.
+    const keyLines = config.split("\n").filter(l => /^\s*["']?model_instructions_file["']?\s*=/.test(l));
+    expect(keyLines).toHaveLength(1);
+    expect(() => Bun.TOML.parse(config)).not.toThrow();
+    expect(readPromptLayers({ configPath: fx.configPath, storePath: fx.storePath, baseVariantDir: fx.baseVariantDir })
+      .baseSelection.kind).toBe("variant");
+  });
+
+  test("a multi-line string value refuses before any write and leaves the config byte-identical", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
+    roots.push(root);
+    const externalPath = join(root, "ml.md");
+    writeFileSync(externalPath, "x", "utf8");
+    // The key is set, but its value is a form a line editor cannot see the end
+    // of — the honest answer is a refusal, not a spliced edit.
+    const configBytes = `model_instructions_file = """${externalPath}"""\n`;
+    const fx = fixture(configBytes);
+    const preview = await previewImport(fx);
+    expect(preview.status).toBe(409);
+    expect(preview.body.code).toBe("import_unsupported_form");
+    const confirm = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx), previewSha256: "0".repeat(64),
+    });
+    expect(confirm.status).toBe(409);
+    expect(confirm.body.code).toBe("import_unsupported_form");
+    expect(read(fx.configPath)).toBe(configBytes);
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
   });
 });

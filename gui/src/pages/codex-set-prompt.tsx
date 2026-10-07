@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "../i18n/shared";
 import { useDataSurface } from "../data-surface";
 import { setClientResourceData } from "../client-resource";
@@ -132,12 +132,25 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
   const [baseImportPreview, setBaseImportPreview] = useState<{
     rawPath: string | null;
     resolvedPath: string | null;
-    body: string;
-    bytes: number;
+    /** The exact file text a confirm would install, `# {title}\n{body}`. */
+    serialized: string;
+    serializedBytes: number;
+    bodyBytes: number;
     suggestedTitle: string | null;
-    bodySha256: string;
+    /** The title the serialized text (and its hash) was built with. */
+    effectiveTitle: string | null;
+    previewSha256: string;
   } | null>(null);
   const [baseImportRefusal, setBaseImportRefusal] = useState<string | null>(null);
+  /**
+   * Stale-response guard for the import flow. Every request bumps the counter;
+   * a response that arrives carrying an older number is dropped, so a preview
+   * that resolves after the dialog closed — or after a newer preview — cannot
+   * resurrect itself.
+   */
+  const baseImportSeq = useRef(0);
+  /** Debounce handle for title edits, which re-preview so the hash rebinds. */
+  const baseImportTitleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
    * Rendered layer text, fetched lazily on first dialog open. It shells out to
    * `codex debug prompt-input`, so it is not part of the panel load - a user who
@@ -252,30 +265,48 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
    * retarget a key somebody else set, and this is the explicit opt-in — preview
    * the file body, confirm, and it becomes a managed variant the key is
    * repointed at.
+   *
+   * `previewSha256` binds the confirmation to the exact SERIALIZED text —
+   * heading line included — the preview displayed, and the route requires it.
+   * A `title` re-previews with that spelling so the hash rebinds to the user's
+   * choice rather than the filename-derived suggestion.
    */
-  const importBase = async (confirm: boolean) => {
+  const importBase = async (confirm: boolean, title?: string) => {
     if (!snapshot) return;
+    const seq = ++baseImportSeq.current;
     setBusyId("base-import");
     setError("");
     try {
       const res = await fetch(apiBase + "/api/codex-prompt/base/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // bodySha256 binds the confirmation to the previewed bytes: if the file
-        // moved since preview the route refuses instead of importing a body
-        // nobody saw.
         body: JSON.stringify(confirm
-          ? { confirm: true, revision: snapshot.revision, bodySha256: baseImportPreview?.bodySha256 }
-          : { confirm: false }),
+          ? {
+            confirm: true,
+            revision: snapshot.revision,
+            ...(title !== undefined ? { title } : {}),
+            previewSha256: baseImportPreview?.previewSha256,
+          }
+          : { confirm: false, ...(title !== undefined ? { title } : {}) }),
       });
       const body = await res.json() as {
         ok?: boolean; code?: string; message?: string;
         snapshot?: PromptSnapshotDto;
-        preview?: { rawPath: string | null; resolvedPath: string | null; body: string; bytes: number; suggestedTitle: string | null; bodySha256: string };
+        preview?: {
+          rawPath: string | null; resolvedPath: string | null;
+          serialized: string; serializedBytes: number; bodyBytes: number;
+          suggestedTitle: string | null; effectiveTitle: string | null; previewSha256: string;
+        };
       };
+      // A response that lost its place — the dialog closed or a newer request
+      // superseded it — touches nothing: newer state is authoritative.
+      if (seq !== baseImportSeq.current) return;
       if (!res.ok || !body.ok) {
+        // A refusal can describe a state the snapshot no longer matches — the
+        // file moved, the key was adopted elsewhere, a journal appeared.
+        // Re-read so the panel shows the truth it was refused on.
+        resource.refresh();
         if (body.code === "stale_revision") {
-          resource.refresh();
           setError(t("codexSet.prompt.staleRevision"));
           return;
         }
@@ -299,10 +330,42 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
       setBaseImportRefusal(null);
       setBaseImportPreview(body.preview ?? null);
     } catch {
+      // The response is lost and the outcome is UNCERTAIN — the confirm may
+      // have landed anyway. Reconcile against the file rather than trusting
+      // the stale preview the dialog still holds.
+      if (seq !== baseImportSeq.current) return;
       setError(t("codexSet.prompt.writeFailed"));
+      resource.refresh();
     } finally {
-      setBusyId(null);
+      if (seq === baseImportSeq.current) setBusyId(null);
     }
+  };
+
+  /** A title edit re-previews (debounced): the hash must bind that spelling. */
+  const importTitleChange = (title: string) => {
+    if (baseImportTitleTimer.current) clearTimeout(baseImportTitleTimer.current);
+    baseImportTitleTimer.current = setTimeout(() => {
+      baseImportTitleTimer.current = null;
+      void importBase(false, title);
+    }, 350);
+  };
+
+  const closeBaseDialog = () => {
+    // Invalidate anything still in flight: a preview that lands after close
+    // must not resurrect the offer inside the next dialog. The request may
+    // have been a CONFIRM, though, so re-read — a dropped success response is
+    // the lost-write case, and the snapshot is the only honest answer to it.
+    baseImportSeq.current += 1;
+    if (baseImportTitleTimer.current) {
+      clearTimeout(baseImportTitleTimer.current);
+      baseImportTitleTimer.current = null;
+    }
+    setOpenLayerId(null);
+    setBaseImportPreview(null);
+    setBaseImportRefusal(null);
+    // Only release the import's own busy marker — an unrelated write must keep its guard.
+    setBusyId(current => current === "base-import" ? null : current);
+    resource.refresh();
   };
 
   /**
@@ -671,8 +734,9 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
             onSelect={sel => { void writeBase("/api/codex-prompt/base/select", sel); }}
             onSave={input => { void writeBase("/api/codex-prompt/base", input); }}
             onDelete={id => { void writeBase("/api/codex-prompt/base", { id, delete: true }); }}
-            onImport={confirm => { void importBase(confirm); }}
-            onClose={() => { setOpenLayerId(null); setBaseImportPreview(null); setBaseImportRefusal(null); }}
+            onImport={(confirm, title) => { void importBase(confirm, title); }}
+            onImportTitle={importTitleChange}
+            onClose={closeBaseDialog}
           />
         ) : (
         <PromptLayerDialog

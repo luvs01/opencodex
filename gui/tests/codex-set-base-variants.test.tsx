@@ -311,7 +311,19 @@ test("the dot indicator renders one dot per slot and marks the active one", asyn
  * shape the developer_instructions adopt flow uses, so the refusal in the
  * picker stays a refusal to act SILENTLY - not a refusal to adopt.
  */
-test("an external selection offers an import preview before anything is written", async () => {
+const SHA = "a".repeat(64);
+const PREVIEW = {
+  rawPath: "/etc/somebody-elses.md",
+  resolvedPath: "/etc/somebody-elses.md",
+  serialized: "# somebody-elses\nImported base.",
+  serializedBytes: 36,
+  bodyBytes: 14,
+  suggestedTitle: "somebody-elses",
+  effectiveTitle: "somebody-elses",
+  previewSha256: SHA,
+};
+
+test("an external selection offers a serialized preview before anything is written", async () => {
   const calls = stubRoutes(call => {
     if (call.url.includes("/api/codex-prompt/base/import")) {
       if (call.body?.confirm === true) {
@@ -324,18 +336,7 @@ test("an external selection offers an import preview before anything is written"
           }),
         });
       }
-      return json({
-        ok: true,
-        changed: false,
-        preview: {
-          rawPath: "/etc/somebody-elses.md",
-          resolvedPath: "/etc/somebody-elses.md",
-          body: "Imported base.",
-          bytes: 14,
-          suggestedTitle: "somebody-elses",
-          bodySha256: "abc123",
-        },
-      });
+      return json({ ok: true, changed: false, preview: PREVIEW });
     }
     return json(snapshot({
       baseVariants: VARIANTS,
@@ -351,19 +352,88 @@ test("an external selection offers an import preview before anything is written"
   expect(offer).not.toBeUndefined();
   await act(async () => { offer.click(); });
 
-  // The preview shows the body that would be stored - before any write.
-  expect(dlg.textContent ?? "").toContain("Imported base.");
+  // The preview shows the SERIALIZED file — heading line included — before any write.
+  const pre = dlg.querySelector("pre")!;
+  expect(pre.textContent).toBe("# somebody-elses\nImported base.");
   expect(calls.filter(c => c.url.includes("/import")).every(c => c.body?.confirm !== true)).toBe(true);
 
   const confirm = [...dlg.querySelectorAll(".modal-actions button")]
     .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  expect(confirm.disabled).toBe(false);
   await act(async () => { confirm.click(); });
 
   const written = calls.filter(c => c.url.includes("/import"));
   expect(written).toHaveLength(2);
-  // The confirmation echoes the previewed hash so the route can refuse a file
-  // that moved between preview and confirm.
-  expect(written[1]!.body).toMatchObject({ confirm: true, revision: "sha256:one", bodySha256: "abc123" });
+  // The confirmation echoes the preview hash AND the title it was bound to,
+  // so the route can refuse a file — or a title — that moved between them.
+  expect(written[1]!.body).toMatchObject({
+    confirm: true, revision: "sha256:one", title: "somebody-elses", previewSha256: SHA,
+  });
+  await act(async () => { root.unmount(); });
+});
+
+test("a preview that lands after the dialog closed cannot resurrect itself", async () => {
+  let release: ((r: Response) => void) | null = null;
+  stubRoutes(call => {
+    if (call.url.includes("/api/codex-prompt/base/import")) {
+      return new Promise<Response>(resolve => { release = resolve; });
+    }
+    return json(snapshot({ baseSelection: { kind: "external", path: "/etc/somebody-elses.md" } }));
+  });
+  const { container, root } = await mount();
+  let dlg = await openBaseDialog(container);
+  const offer = [...dlg.querySelectorAll("button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  await act(async () => { offer.click(); });
+
+  // Close while the preview is still in flight, then let it land.
+  const close = [...dlg.querySelectorAll(".modal-actions button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("close")) as HTMLButtonElement;
+  await act(async () => { close.click(); });
+  await act(async () => {
+    release!(json({ ok: true, changed: false, preview: PREVIEW }));
+    await Bun.sleep(0);
+  });
+
+  // Reopen: the stale preview must not reappear — only a fresh offer.
+  dlg = await openBaseDialog(container);
+  expect(dlg.querySelector("pre")).toBeNull();
+  const offer2 = [...dlg.querySelectorAll("button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  expect(offer2).not.toBeUndefined();
+  await act(async () => { root.unmount(); });
+});
+
+test("a lost confirm response reconciles against the file, not the stale preview", async () => {
+  let imported = false;
+  const calls = stubRoutes(call => {
+    if (call.url.includes("/api/codex-prompt/base/import")) {
+      if (call.body?.confirm === true) {
+        // The write landed server-side but the success never reaches the page.
+        imported = true;
+        return Promise.reject(new Error("network dropped"));
+      }
+      return json({ ok: true, changed: false, preview: PREVIEW });
+    }
+    return json(snapshot(imported
+      ? {
+          baseSelection: { kind: "variant", id: "ccc333" },
+          baseVariants: [{ id: "ccc333", title: "somebody-elses", body: "Imported base.", bytes: 14 }],
+        }
+      : { baseSelection: { kind: "external", path: "/etc/somebody-elses.md" } }));
+  });
+  const { container, root } = await mount();
+  const dlg = await openBaseDialog(container);
+  const offer = [...dlg.querySelectorAll("button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  await act(async () => { offer.click(); });
+  const confirm = [...dlg.querySelectorAll(".modal-actions button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  const getsBefore = calls.filter(c => c.method === "GET").length;
+  await act(async () => { confirm.click(); });
+  // Uncertain outcome → the panel re-reads the snapshot rather than trusting
+  // the preview it still holds.
+  expect(calls.filter(c => c.method === "GET").length).toBeGreaterThan(getsBefore);
   await act(async () => { root.unmount(); });
 });
 
