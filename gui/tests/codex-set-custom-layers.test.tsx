@@ -609,9 +609,15 @@ test("20. every drift state renders a Repair action instead of self-healing", as
   // repaired silently: the state is named and the action is explicit.
   for (const drift of ["journal-present", "projection-stale", "store-missing", "owned-malformed"] as const) {
     clearClientResourceStoresForTests();
+    // The journal case keeps one live layer so the write below provably replays
+    // the stored list byte-for-byte rather than sending an empty body.
+    const custom = drift === "journal-present" ? [layer()] : [];
     const calls = stubRoutes(call => {
       if (call.url.includes("/repair")) return json({ ok: true, changed: true, snapshot: snapshot({ drift: null }) });
-      return json(snapshot({ drift }));
+      if (call.method === "PUT" && call.url.endsWith("/api/codex-prompt/custom")) {
+        return json({ ok: true, snapshot: snapshot({ drift: null }) });
+      }
+      return json(snapshot({ drift, custom }));
     });
     const { container, root } = await mount();
     const banner = container.querySelector("[data-drift]");
@@ -621,9 +627,21 @@ test("20. every drift state renders a Repair action instead of self-healing", as
     expect((banner!.textContent ?? "").length, drift).toBeGreaterThan(30);
 
     await act(async () => { (banner!.querySelector("button") as HTMLButtonElement).click(); });
-    const repair = calls.find(c => c.url.includes("/repair"))!;
-    expect(repair.body.confirm, drift).toBe(true);
-    expect(repair.body.revision, drift).toBe("sha256:one");
+    if (drift === "journal-present") {
+      // /repair refuses this drift by name (repair_unsupported): recovery lives
+      // inside commit(), which runs it before comparing bytes. The panel's
+      // repair is therefore a byte-identical PUT of the stored list, never a
+      // /repair POST that could only come back refused.
+      const write = calls.find(c => c.method === "PUT" && c.url.endsWith("/api/codex-prompt/custom"));
+      expect(write, drift).toBeDefined();
+      expect(write!.body.layers, drift).toEqual(custom);
+      expect(write!.body.revision, drift).toBe("sha256:one");
+      expect(calls.some(c => c.url.includes("/repair")), drift).toBe(false);
+    } else {
+      const repair = calls.find(c => c.url.includes("/repair"))!;
+      expect(repair.body.confirm, drift).toBe(true);
+      expect(repair.body.revision, drift).toBe("sha256:one");
+    }
     await act(async () => { root.unmount(); });
   }
 });
