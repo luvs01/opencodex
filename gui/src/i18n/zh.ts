@@ -1499,6 +1499,7 @@ export const zh: Record<TKey, string> = {
   "codexSet.base.importPreview": "{path} 的文件将被复制到变体目录，model_instructions_file 将指向该副本。提示词本身不变——只是可以在这里管理它。",
   "codexSet.base.importConfirm": "导入并管理",
   "codexSet.base.importFailed": "无法导入该文件。",
+  "codexSet.base.importChanged": "文件在预览后已被更改。请重新预览。",
   "nav.openMenu": "打开菜单",
   "nav.closeMenu": "关闭菜单",
   "nav.goHome": "前往仪表板",

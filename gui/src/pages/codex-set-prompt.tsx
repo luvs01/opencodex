@@ -135,6 +135,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
     body: string;
     bytes: number;
     suggestedTitle: string | null;
+    bodySha256: string;
   } | null>(null);
   const [baseImportRefusal, setBaseImportRefusal] = useState<string | null>(null);
   /**
@@ -260,12 +261,17 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
       const res = await fetch(apiBase + "/api/codex-prompt/base/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(confirm ? { confirm: true, revision: snapshot.revision } : { confirm: false }),
+        // bodySha256 binds the confirmation to the previewed bytes: if the file
+        // moved since preview the route refuses instead of importing a body
+        // nobody saw.
+        body: JSON.stringify(confirm
+          ? { confirm: true, revision: snapshot.revision, bodySha256: baseImportPreview?.bodySha256 }
+          : { confirm: false }),
       });
       const body = await res.json() as {
         ok?: boolean; code?: string; message?: string;
         snapshot?: PromptSnapshotDto;
-        preview?: { rawPath: string | null; resolvedPath: string | null; body: string; bytes: number; suggestedTitle: string | null };
+        preview?: { rawPath: string | null; resolvedPath: string | null; body: string; bytes: number; suggestedTitle: string | null; bodySha256: string };
       };
       if (!res.ok || !body.ok) {
         if (body.code === "stale_revision") {
@@ -276,7 +282,9 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
         // A refusal lands beside the affordance, not in the page-level error
         // notice: the user is deciding about THIS file, so the reason belongs
         // where the file is described.
-        setBaseImportRefusal(body.message ?? t("codexSet.base.importFailed"));
+        setBaseImportRefusal(body.code === "import_body_changed"
+          ? t("codexSet.base.importChanged")
+          : (body.message ?? t("codexSet.base.importFailed")));
         setBaseImportPreview(null);
         return;
       }

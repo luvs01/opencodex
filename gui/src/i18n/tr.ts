@@ -2032,6 +2032,7 @@ export const tr: Record<TKey, string> = {
   "codexSet.base.importPreview": "{path} konumundaki dosya varyant dizinine kopyalanır ve model_instructions_file kopyayı işaret eder. İstem kendisi değişmez — sadece buradan yönetilebilir hale gelir.",
   "codexSet.base.importConfirm": "İçe aktar ve yönet",
   "codexSet.base.importFailed": "Dosya içe aktarılamadı.",
+  "codexSet.base.importChanged": "Dosya önizlemeden sonra değişti. Yeniden önizleyin.",
   "nav.api": "API",
   "nav.openMenu": "Menüyü aç",
   "nav.closeMenu": "Menüyü kapat",

@@ -2046,6 +2046,7 @@ export const en = {
   "codexSet.base.importPreview": "The file at {path} is copied into the variants directory and model_instructions_file is pointed at the copy. The prompt itself is unchanged — it just becomes manageable here.",
   "codexSet.base.importConfirm": "Import and manage",
   "codexSet.base.importFailed": "The file could not be imported.",
+  "codexSet.base.importChanged": "The file changed since it was previewed. Preview it again.",
   "nav.api": "API",
   "nav.openMenu": "Open menu",
   "nav.closeMenu": "Close menu",

@@ -2005,6 +2005,7 @@ export const ru: Record<TKey, string> = {
   "codexSet.base.importPreview": "Файл {path} будет скопирован в каталог вариантов, и model_instructions_file будет указывать на копию. Сам промпт не изменится — он просто станет управляемым отсюда.",
   "codexSet.base.importConfirm": "Импортировать и управлять",
   "codexSet.base.importFailed": "Не удалось импортировать файл.",
+  "codexSet.base.importChanged": "Файл изменился после предпросмотра. Повторите предпросмотр.",
   "nav.api": "API",
   "nav.openMenu": "Открыть меню",
   "nav.closeMenu": "Закрыть меню",

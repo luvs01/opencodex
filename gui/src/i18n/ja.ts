@@ -1914,6 +1914,7 @@ export const ja: Record<TKey, string> = {
   "codexSet.base.importPreview": "{path} のファイルがバリアントディレクトリにコピーされ、model_instructions_file がそのコピーを指すようになります。プロンプト自体は変わりません — ここで管理できるようになるだけです。",
   "codexSet.base.importConfirm": "インポートして管理",
   "codexSet.base.importFailed": "ファイルをインポートできませんでした。",
+  "codexSet.base.importChanged": "プレビュー後にファイルが変更されました。もう一度プレビューしてください。",
   "nav.api": "API",
   "nav.openMenu": "メニューを開く",
   "nav.closeMenu": "メニューを閉じる",

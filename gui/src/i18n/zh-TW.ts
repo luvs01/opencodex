@@ -1697,6 +1697,7 @@ export const zhTW: Record<TKey, string> = {
   "codexSet.base.importPreview": "{path} 的檔案會複製到變體目錄，model_instructions_file 會指向該複本。提示詞本身不變——只是可以在這裡管理。",
   "codexSet.base.importConfirm": "匯入並管理",
   "codexSet.base.importFailed": "無法匯入該檔案。",
+  "codexSet.base.importChanged": "檔案在預覽後已被更改。請重新預覽。",
   "nav.api": "API",
   "nav.openMenu": "開啟選單",
   "nav.closeMenu": "關閉選單",

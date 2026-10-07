@@ -2019,6 +2019,7 @@ export const fr: Record<TKey, string> = {
   "codexSet.base.importPreview": "Le fichier {path} est copié dans le dossier des variantes et model_instructions_file pointe vers la copie. Le prompt lui-même ne change pas — il devient simplement gérable ici.",
   "codexSet.base.importConfirm": "Importer et gérer",
   "codexSet.base.importFailed": "Le fichier n’a pas pu être importé.",
+  "codexSet.base.importChanged": "Le fichier a changé depuis l’aperçu. Relancez l’aperçu.",
   "nav.api": "API",
   "nav.openMenu": "Ouvrir le menu",
   "nav.closeMenu": "Fermer le menu",

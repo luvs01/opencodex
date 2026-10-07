@@ -49,6 +49,13 @@ function firstTableIndex(lines: string[]): number {
  * documented default means: `include_permissions_instructions = true` and an
  * absent key are different facts about the same file, and only the absent one
  * lets a changed upstream default ever take effect again.
+ *
+ * The value slot matches anything after `=` rather than only `true`/`false`: a
+ * line the pattern skipped would leave the old assignment in place while a new
+ * one was appended, and TOML refuses duplicate keys outright — the config would
+ * not parse at all. A value that is not a boolean is a bad fact about the same
+ * key, so it is REPLACED, and a whitespace-anchored trailing comment survives
+ * both a write and a removal.
  */
 export function setRootBool(content: string, key: string, value: boolean | null): string {
   const eol = dominantEol(content);
@@ -56,12 +63,15 @@ export function setRootBool(content: string, key: string, value: boolean | null)
   const lines = splitLines(body);
   const limit = firstTableIndex(lines);
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^(\\s*${escaped}\\s*=\\s*)(?:true|false)(\\s*(?:#.*)?)$`);
+  const pattern = new RegExp(`^(\\s*${escaped}\\s*=\\s*).*?(\\s+#.*)?$`);
   for (let i = 0; i < limit; i += 1) {
     const m = pattern.exec(lines[i]!);
     if (m) {
-      if (value === null) lines.splice(i, 1);
-      else lines[i] = `${m[1]}${value}${m[2]}`;
+      const trailing = m[2] ?? "";
+      if (value === null) {
+        if (trailing) lines[i] = trailing.trim();
+        else lines.splice(i, 1);
+      } else lines[i] = `${m[1]}${value}${trailing}`;
       return bom + joinLines(lines, eol);
     }
   }
@@ -83,11 +93,19 @@ export function setRootString(content: string, key: string, value: string | null
   const lines = splitLines(body);
   const limit = firstTableIndex(lines);
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^\\s*${escaped}\\s*=\\s*"[^"]*"\\s*(?:#.*)?$`);
+  // Any existing assignment is replaced, whatever shape its value is in. A
+  // pattern that only accepted `"…"` skipped a single-quoted
+  // `model_instructions_file = '…'` — TOML literal strings are valid — and the
+  // appended second assignment made the whole file unparseable.
+  const pattern = new RegExp(`^\\s*${escaped}\\s*=\\s*.*?(\\s+#.*)?$`);
   for (let i = 0; i < limit; i += 1) {
-    if (!pattern.test(lines[i]!)) continue;
-    if (value === null) lines.splice(i, 1);
-    else lines[i] = `${key} = ${encodeBasicString(value)}`;
+    const m = pattern.exec(lines[i]!);
+    if (!m) continue;
+    const trailing = m[1] ?? "";
+    if (value === null) {
+      if (trailing) lines[i] = trailing.trim();
+      else lines.splice(i, 1);
+    } else lines[i] = `${key} = ${encodeBasicString(value)}${trailing}`;
     return bom + joinLines(lines, eol);
   }
   if (value === null) return bom + joinLines(lines, eol);
@@ -115,14 +133,17 @@ export function setTableBool(content: string, table: string, key: string, value:
     return bom + joinLines(lines, eol);
   }
   const keyEscaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`^(\\s*${keyEscaped}\\s*=\\s*)(?:true|false)(\\s*(?:#.*)?)$`);
+  const pattern = new RegExp(`^(\\s*${keyEscaped}\\s*=\\s*).*?(\\s+#.*)?$`);
   let end = start + 1;
   while (end < lines.length && !TABLE_HEADER.test(lines[end]!)) end += 1;
   for (let i = start + 1; i < end; i += 1) {
     const m = pattern.exec(lines[i]!);
     if (m) {
-      if (value === null) lines.splice(i, 1);
-      else lines[i] = `${m[1]}${value}${m[2]}`;
+      const trailing = m[2] ?? "";
+      if (value === null) {
+        if (trailing) lines[i] = trailing.trim();
+        else lines.splice(i, 1);
+      } else lines[i] = `${m[1]}${value}${trailing}`;
       return bom + joinLines(lines, eol);
     }
   }

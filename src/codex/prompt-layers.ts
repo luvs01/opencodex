@@ -644,7 +644,8 @@ export type WriteError =
   // which means another writer won a race — here nobody won and nothing landed.
   | "write_failed"
   | "recovery_required"
-  | "locked";
+  | "locked"
+  | "import_body_changed";
 
 export type WriteResult =
   | { ok: true; changed: boolean; snapshot: PromptLayerSnapshot }
@@ -978,6 +979,8 @@ export interface BaseImportPreview {
   resolvedPath: string | null;
   /** The normalized body a confirm would store — byte-identical to it. */
   body: string | null;
+  /** sha256 of `body`, for a confirm that wants to prove nothing changed since. */
+  bodySha256: string | null;
   /**
    * The filename without extension, suggested as the variant title. `null` when
    * the path names no markdown file worth naming after.
@@ -1004,6 +1007,7 @@ export function previewBaseImport(opts?: Paths): BaseImportPreview {
     rawPath: selection.kind === "external" ? selection.path : null,
     resolvedPath: null,
     body: null,
+    bodySha256: null,
     suggestedTitle: null,
   };
   if (selection.kind !== "external") {
@@ -1036,6 +1040,7 @@ export function previewBaseImport(opts?: Paths): BaseImportPreview {
     rawPath: selection.path,
     resolvedPath: resolved,
     body: normalized,
+    bodySha256: createHash("sha256").update(normalized, "utf8").digest("hex"),
     suggestedTitle,
     reason: variants.length >= MAX_BASE_VARIANTS ? "slots_full" : "ok",
   };
@@ -1053,8 +1058,17 @@ export function previewBaseImport(opts?: Paths): BaseImportPreview {
  * preview and the commit another writer could have adopted or cleared the key,
  * and silently repointing then would claim an import nobody asked for.
  */
-export function importBaseVariant(input: { title: string }, revision: string, opts?: Paths): WriteResult {
+export function importBaseVariant(
+  input: { title: string; bodySha256?: string },
+  revision: string,
+  opts?: Paths,
+): WriteResult {
   const preview = previewBaseImport(opts);
+  if (input.bodySha256 !== undefined && input.bodySha256 !== preview.bodySha256) {
+    // The caller confirmed a body they previewed; a different file today is a
+    // different import they never saw. Refuse rather than install a surprise.
+    return { ok: false, error: "import_body_changed", detail: "the file changed since it was previewed" };
+  }
   if (preview.body === null || preview.resolvedPath === null) {
     return {
       ok: false,

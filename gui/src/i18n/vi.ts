@@ -2001,6 +2001,7 @@ export const vi: Record<TKey, string> = {
   "codexSet.base.importPreview": "Tệp tại {path} sẽ được sao chép vào thư mục biến thể và model_instructions_file sẽ trỏ tới bản sao. Bản thân prompt không đổi — chỉ là có thể quản lý từ đây.",
   "codexSet.base.importConfirm": "Nhập và quản lý",
   "codexSet.base.importFailed": "Không thể nhập tệp.",
+  "codexSet.base.importChanged": "Tệp đã thay đổi kể từ khi xem trước. Hãy xem trước lại.",
   "nav.api": "API",
   "nav.openMenu": "Mở menu",
   "nav.closeMenu": "Đóng menu",

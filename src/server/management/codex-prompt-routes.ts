@@ -85,6 +85,7 @@ const WRITE_ERROR_STATUS: Record<WriteError, number> = {
   write_failed: 500,
   recovery_required: 409,
   locked: 409,
+  import_body_changed: 409,
 };
 
 /** Read-only view for the route test that asserts every mapping is a client error. */
@@ -440,6 +441,7 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
           body: preview.body,
           bytes: utf8Bytes(preview.body!),
           suggestedTitle: preview.suggestedTitle,
+          bodySha256: preview.bodySha256,
         },
       }, 200, req, ctx.config);
     }
@@ -448,7 +450,16 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
     const title = typeof body.title === "string" && body.title.trim().length > 0
       ? body.title
       : preview.suggestedTitle ?? "Imported base prompt";
-    return settle(ctx, importBaseVariant({ title }, revision, paths(ctx)));
+    const bodySha256 = typeof body.bodySha256 === "string" ? body.bodySha256 : undefined;
+    if (bodySha256 !== undefined && bodySha256 !== preview.bodySha256) {
+      // The file the caller confirmed is not the file on disk any more. Refuse
+      // rather than import instructions nobody previewed.
+      return fail(ctx, "import_body_changed", 409,
+        "the file changed since it was previewed; preview it again", {
+          resolvedPath: preview.resolvedPath,
+        });
+    }
+    return settle(ctx, importBaseVariant({ title, bodySha256 }, revision, paths(ctx)));
   }
 
   if (url.pathname === "/api/codex-prompt/base" && req.method === "PUT") {

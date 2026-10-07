@@ -333,6 +333,7 @@ test("an external selection offers an import preview before anything is written"
           body: "Imported base.",
           bytes: 14,
           suggestedTitle: "somebody-elses",
+          bodySha256: "abc123",
         },
       });
     }
@@ -360,7 +361,9 @@ test("an external selection offers an import preview before anything is written"
 
   const written = calls.filter(c => c.url.includes("/import"));
   expect(written).toHaveLength(2);
-  expect(written[1]!.body).toMatchObject({ confirm: true, revision: "sha256:one" });
+  // The confirmation echoes the previewed hash so the route can refuse a file
+  // that moved between preview and confirm.
+  expect(written[1]!.body).toMatchObject({ confirm: true, revision: "sha256:one", bodySha256: "abc123" });
   await act(async () => { root.unmount(); });
 });
 

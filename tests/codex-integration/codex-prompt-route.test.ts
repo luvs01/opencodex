@@ -646,6 +646,7 @@ describe("020 coverage completions", () => {
       write_failed: 500,
       recovery_required: 409,
       locked: 409,
+      import_body_changed: 409,
     });
   });
 
@@ -1636,6 +1637,31 @@ describe("toggle restore-default (enabled: null)", () => {
     // fixture("") creates the file; the refusal leaves it byte-identical.
     expect(read(fx.configPath)).toBe("");
   });
+
+  test("null removes the key but keeps a trailing comment the user wrote", async () => {
+    const fx = fixture("model = \"x\"\ninclude_apps_instructions = false # asked for minimal prompts\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: null, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    const config = read(fx.configPath)!;
+    expect(config).not.toContain("include_apps_instructions");
+    expect(config).toContain("# asked for minimal prompts");
+  });
+
+  test("a toggle write replaces a non-boolean value instead of duplicating the key", async () => {
+    // `= "bogus"` is a bad fact about the same key. A matcher that only knew
+    // `true|false` used to append a second assignment — and TOML refuses
+    // duplicate keys, so the whole file stopped parsing.
+    const fx = fixture("model = \"x\"\ninclude_apps_instructions = \"bogus\"\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: true, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    const lines = read(fx.configPath)!.split("\n").filter(l => /^\s*include_apps_instructions\s*=/.test(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("true");
+  });
 });
 
 describe("POST /api/codex-prompt/base/import", () => {
@@ -1777,5 +1803,49 @@ describe("POST /api/codex-prompt/base/import", () => {
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("dashboard_session_required");
     expect(existsSync(fx.baseVariantDir)).toBe(false);
+  });
+
+  test("a single-quoted model_instructions_file is replaced, not duplicated", async () => {
+    // TOML literal strings are legal here; a matcher that only knew "..." used
+    // to append a second assignment and corrupt the file.
+    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
+    roots.push(root);
+    const externalPath = join(root, "quoted.md");
+    writeFileSync(externalPath, "Quoted prompt.", "utf8");
+    const fx = fixture(`model_instructions_file = '${externalPath}'\n`);
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    const config = read(fx.configPath)!;
+    const keyLines = config.split("\n").filter(l => /^\s*model_instructions_file\s*=/.test(l));
+    expect(keyLines).toHaveLength(1);
+    expect(keyLines[0]).toContain(".md");
+  });
+
+  test("the preview carries bodySha256 and a mismatched confirm is refused", async () => {
+    const { fx, externalPath } = externalFixture("Ship the external base.");
+    const preview = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    expect(preview.status).toBe(200);
+    const sha = preview.body.preview.bodySha256 as string;
+    expect(sha).toMatch(/^[0-9a-f]{64}$/);
+
+    // The file moved between preview and confirm: nobody previewed THIS body,
+    // so the route refuses rather than install a surprise.
+    writeFileSync(externalPath, "Ship the external base — revised after preview.", "utf8");
+    const stale = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx), bodySha256: sha,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body.code).toBe("import_body_changed");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+
+    // Re-preview picks up the new bytes and their hash; that confirm lands.
+    const preview2 = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx), bodySha256: preview2.body.preview.bodySha256,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.snapshot.baseVariants[0].body).toBe("Ship the external base — revised after preview.");
   });
 });

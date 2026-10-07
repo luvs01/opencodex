@@ -1481,6 +1481,7 @@ export const de: Record<TKey, string> = {
   "codexSet.base.importPreview": "Die Datei unter {path} wird in das Variantenverzeichnis kopiert und model_instructions_file zeigt auf die Kopie. Der Prompt selbst bleibt unverändert — er wird hier nur verwaltbar.",
   "codexSet.base.importConfirm": "Importieren und verwalten",
   "codexSet.base.importFailed": "Die Datei konnte nicht importiert werden.",
+  "codexSet.base.importChanged": "Die Datei hat sich seit der Vorschau geändert. Bitte erneut anzeigen.",
   "nav.api": "API",
   "nav.openMenu": "Menü öffnen",
   "nav.closeMenu": "Menü schließen",

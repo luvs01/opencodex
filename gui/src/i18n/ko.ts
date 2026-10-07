@@ -1526,6 +1526,7 @@ export const ko: Record<TKey, string> = {
   "codexSet.base.importPreview": "{path}의 파일이 variants 디렉터리로 복사되고 model_instructions_file이 그 복사본을 가리키게 됩니다. 프롬프트 자체는 바뀌지 않고 여기서 관리할 수 있게 됩니다.",
   "codexSet.base.importConfirm": "가져와서 관리",
   "codexSet.base.importFailed": "파일을 가져올 수 없습니다.",
+  "codexSet.base.importChanged": "미리 본 이후 파일이 바뀌었습니다. 다시 미리 보세요.",
   "nav.openMenu": "메뉴 열기",
   "nav.closeMenu": "메뉴 닫기",
   "nav.goHome": "대시보드로 이동",
