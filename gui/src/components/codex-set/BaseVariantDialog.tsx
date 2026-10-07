@@ -119,9 +119,9 @@ export default function BaseVariantDialog({
    */
   const [importTitle, setImportTitle] = useState(importPreview?.effectiveTitle ?? "");
   const previewedTitle = importPreview?.effectiveTitle ?? null;
-  const lastSeededTitle = useRef(previewedTitle);
-  if (previewedTitle !== lastSeededTitle.current) {
-    lastSeededTitle.current = previewedTitle;
+  const [lastSeededTitle, setLastSeededTitle] = useState(previewedTitle);
+  if (previewedTitle !== lastSeededTitle) {
+    setLastSeededTitle(previewedTitle);
     setImportTitle(previewedTitle ?? "");
   }
 
