@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "../i18n/shared";
 import { useDataSurface } from "../data-surface";
 import { setClientResourceData } from "../client-resource";
@@ -11,7 +11,15 @@ import CustomLayerRow from "../components/codex-set/CustomLayerRow";
 import CustomLayerDialog from "../components/codex-set/CustomLayerDialog";
 import PresetPicker from "../components/codex-set/PresetPicker";
 import BaseVariantDialog, { type BaseSelectionDto, type BaseVariantDto } from "../components/codex-set/BaseVariantDialog";
-import { MAX_LAYERS, moveLayer, newLayerId, type Draft } from "../components/codex-set/custom-layer-state";
+import {
+  composeBodies,
+  MAX_COMPOSED_BYTES,
+  MAX_LAYERS,
+  moveLayer,
+  newLayerId,
+  utf8Length,
+  type Draft,
+} from "../components/codex-set/custom-layer-state";
 
 /**
  * The Prompt panel of Codex Set (WP3).
@@ -58,6 +66,18 @@ export interface CustomLayerDto {
   title: string;
   body: string;
   enabled: boolean;
+}
+
+/**
+ * What /api/codex-prompt/text returns. `failure` carries the server's classified
+ * reason; its absence on a failed response means the probe was busy or cancelled
+ * rather than broken, which is the one case where an immediate retry makes sense.
+ */
+export interface PromptProbeDto {
+  ok: boolean;
+  layers?: Record<string, { text: string | null; reason: string; bytes: number; sourcePath?: string }>;
+  failure?: { kind: string; command?: string; detail?: string };
+  detail?: string;
 }
 
 export interface PromptSnapshotDto {
@@ -134,7 +154,18 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
    * `codex debug prompt-input`, so it is not part of the panel load - a user who
    * never opens a layer never pays for it.
    */
-  const [layerText, setLayerText] = useState<{ ok: boolean; layers?: Record<string, { text: string | null; reason: string; bytes: number; sourcePath?: string }> } | null>(null);
+  const [layerText, setLayerText] = useState<PromptProbeDto | null>(null);
+
+  /**
+   * The just-deleted layer, kept for a short window so delete is not a one-way
+   * door. Ten seconds is long enough to notice the notice, short enough that
+   * restoring it cannot surprise someone mid-edit.
+   */
+  const [deletedLayer, setDeletedLayer] = useState<{ layer: CustomLayerDto; index: number } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+  }, []);
 
   /**
    * Drop the measured text after any write. It describes the configuration that
@@ -347,6 +378,27 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
     setRepairBusy(true);
     setError("");
     try {
+      if (snapshot.drift === "journal-present") {
+        // The repair route refuses this drift by name, but every write's commit()
+        // runs journal recovery BEFORE comparing bytes. Re-writing the current
+        // list is byte-identical in the common case, so this clears the journal
+        // while changing nothing. A stale_revision reply is EXPECTED: recovery
+        // rolled the files back under us, and the refresh reconciles either way.
+        const res = await fetch(apiBase + "/api/codex-prompt/custom", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ layers: snapshot.custom, revision: snapshot.revision }),
+        });
+        const body = await res.json() as { ok?: boolean; code?: string; message?: string; snapshot?: PromptSnapshotDto };
+        if (res.ok && body.ok && body.snapshot) {
+          setClientResourceData(resourceKey, body.snapshot);
+        } else if (body.code !== "stale_revision") {
+          setError(body.message ?? t("codexSet.prompt.repairFailed"));
+        }
+        resource.refresh();
+        invalidateLayerText();
+        return;
+      }
       const res = await fetch(apiBase + "/api/codex-prompt/repair", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -444,7 +496,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
           if (!cancelled) setLayerText({ ok: false });
           return;
         }
-        const body = await res.json() as { ok: boolean; layers?: Record<string, { text: string | null; reason: string; bytes: number }> };
+        const body = await res.json() as PromptProbeDto;
         if (!cancelled) setLayerText(body);
       } catch {
         // A failed probe is a missing body, not a broken page. An abort lands here too, and the
@@ -459,6 +511,18 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
     <div className="panel codex-set-prompt">
       <div className="row">
         <strong>{t("codexSet.prompt.title")}</strong>
+        {/*
+          Manual re-measure: the probe runs once on mount, so a user who fixes
+          codex or a file mid-session had no way to ask again short of reloading.
+        */}
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          disabled={layerText === null || busyId !== null}
+          onClick={invalidateLayerText}
+        >
+          {t("codexSet.prompt.remeasure")}
+        </button>
       </div>
       {/*
         Fixed copy from devlog 003 section 3. Neither "applies immediately" nor
@@ -602,9 +666,11 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
           descriptor={openDescriptor}
           toggle={snapshot?.toggles.find(s => s.id === openDescriptor.id)}
           text={layerText?.layers?.[openDescriptor.id]}
+          probe={layerText}
           busy={busyId !== null}
           onToggle={(id, enabled) => { void onToggle(id, enabled); }}
           onClose={() => setOpenLayerId(null)}
+          onRemeasure={invalidateLayerText}
         />
         )
       )}
@@ -702,8 +768,55 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
             ))}
           </ul>
 
+          {/*
+            The composed meter and preview: this page is the prompt budget, so the
+            number that actually ships - the joined developer_instructions against
+            its 128 KB cap - belongs on it. Over the cap the next write would be
+            refused, so it renders as an error, not a stat.
+          */}
+          {snapshot.custom.length > 0 && (() => {
+            const composed = composeBodies(snapshot.custom);
+            const composedBytes = utf8Length(composed);
+            return (
+              <>
+                <p className={composedBytes > MAX_COMPOSED_BYTES ? "notice notice-err" : "muted small"}>
+                  {t("codexSet.custom.composedSize", { bytes: composedBytes, max: MAX_COMPOSED_BYTES })}
+                </p>
+                {composed.length > 0 && (
+                  <details className="codex-set-custom__preview">
+                    <summary className="muted small">{t("codexSet.custom.composedPreview")}</summary>
+                    <pre className="api-code codex-set-custom__preview-body">{composed}</pre>
+                  </details>
+                )}
+              </>
+            );
+          })()}
+
+          {deletedLayer && (
+            // Short-lived undo for a delete that has no trash. The layer is
+            // re-inserted at its old index so order-sensitive prompts survive.
+            <div className="notice codex-set-custom__deleted" role="status">
+              <span>{t("codexSet.custom.deletedNamed", { title: deletedLayer.layer.title })}</span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busyId !== null}
+                onClick={() => {
+                  if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+                  const { layer, index } = deletedLayer;
+                  setDeletedLayer(null);
+                  const next = [...snapshot.custom];
+                  next.splice(Math.min(index, next.length), 0, layer);
+                  void writeCustom(next, layer.id);
+                }}
+              >
+                {t("common.undo")}
+              </button>
+            </div>
+          )}
+
           {confirmingDelete && (
-            // Confirm first: a body can be long and there is no undo.
+            // Confirm first: a body can be long, and the undo window is short.
             // The named prompt below is also the accessible name: an alertdialog
             // without one is announced as an unnamed dialog, which defeats the point
             // of naming the row in the first place.
@@ -724,8 +837,18 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
                 className="btn btn-danger btn-sm"
                 onClick={() => {
                   const id = confirmingDelete;
+                  const index = snapshot.custom.findIndex(l => l.id === id);
+                  const removed = index >= 0 ? snapshot.custom[index]! : null;
                   setConfirmingDelete(null);
-                  void writeCustom(snapshot.custom.filter(l => l.id !== id), id);
+                  void (async () => {
+                    const done = await writeCustom(snapshot.custom.filter(l => l.id !== id), id);
+                    // The undo offer only stands once the delete actually landed:
+                    // restoring a row that was never removed would just be a write.
+                    if (!done || !removed) return;
+                    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+                    setDeletedLayer({ layer: removed, index });
+                    undoTimerRef.current = setTimeout(() => setDeletedLayer(null), 10_000);
+                  })();
                 }}
               >
                 {t("common.delete")}

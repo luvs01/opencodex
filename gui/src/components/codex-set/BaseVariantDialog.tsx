@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "../../i18n/shared";
+import { lintPromptLayer } from "./prompt-lint";
+import {
+  findInvalidCharacter,
+  MAX_BODY_BYTES,
+  normalizeBody,
+  utf8Length,
+} from "./custom-layer-state";
 
 export interface BaseVariantDto {
   id: string;
@@ -21,6 +28,9 @@ interface Slot {
 
 /** Horizontal travel, in px, before a drag counts as a swipe. */
 const SWIPE_THRESHOLD = 48;
+
+/** The parked draft for a slot that has no saved value: an empty one is not dirty. */
+const NEW_SLOT_KEY = "new";
 
 /**
  * The base-prompt variant picker.
@@ -76,15 +86,62 @@ export default function BaseVariantDialog({
 
   const [title, setTitle] = useState(slot.variant?.title ?? "");
   const [body, setBody] = useState(slot.variant?.body ?? "");
-  const [editingId, setEditingId] = useState<string | null>(slot.variant?.id ?? null);
 
-  // Moving slots swaps the editor contents. The id comparison is what makes it a real
-  // change, so this cannot cascade a render on every pass.
-  if ((slot.variant?.id ?? null) !== editingId) {
-    setEditingId(slot.variant?.id ?? null);
-    setTitle(slot.variant?.title ?? "");
-    setBody(slot.variant?.body ?? "");
-  }
+  /**
+   * The draft identity for the visible slot: the variant id, NEW_SLOT_KEY for the
+   * empty slot, null for the read-only default which has no editor at all.
+   */
+  const editingKey = slot.kind === "default" ? null : (slot.variant?.id ?? NEW_SLOT_KEY);
+
+  /**
+   * Unsaved edits parked while the user swipes between slots.
+   *
+   * Same hazard as the custom-layer editor: ring navigation swaps the editor's
+   * contents, so moving away from a half-written variant used to erase it. A draft
+   * that differs from its slot's saved value is live user work - it is restored on
+   * return, and it is part of what a close has to confirm.
+   */
+  const draftsRef = useRef(new Map<string, { title: string; body: string }>());
+  const lastKeyRef = useRef(editingKey);
+  const liveRef = useRef({ title, body });
+  useEffect(() => { liveRef.current = { title, body }; }, [title, body]);
+
+  useEffect(() => {
+    if (lastKeyRef.current === editingKey) return;
+    // Park the outgoing draft before adopting the incoming slot's values.
+    if (lastKeyRef.current !== null) {
+      draftsRef.current.set(lastKeyRef.current, liveRef.current);
+    }
+    lastKeyRef.current = editingKey;
+    const parked = editingKey === null ? undefined : draftsRef.current.get(editingKey);
+    setTitle(parked?.title ?? slot.variant?.title ?? "");
+    setBody(parked?.body ?? slot.variant?.body ?? "");
+  }, [editingKey, slot]);
+
+  const [discardAction, setDiscardAction] = useState<{ kind: "close" } | { kind: "save" } | null>(null);
+
+  /**
+   * A parked draft that differs from its slot's stored value still counts as
+   * unsaved work. The visible slot is excluded: its inputs supersede the parked
+   * copy the moment the user navigates back to it.
+   *
+   * State refreshed by an effect, not computed in render: the drafts live in a
+   * ref, and reading ref.current during render is what the react-compiler rule
+   * rejects.
+   */
+  const [parkedDirty, setParkedDirty] = useState(false);
+  useEffect(() => {
+    setParkedDirty([...draftsRef.current].some(([key, draft]) => {
+      if (key === editingKey) return false;
+      if (key === NEW_SLOT_KEY) return draft.title !== "" || draft.body !== "";
+      const saved = variants.find(candidate => candidate.id === key);
+      return saved === undefined || draft.title !== saved.title || draft.body !== saved.body;
+    }));
+  }, [editingKey, variants, title, body]);
+
+  const dirty = parkedDirty
+    || (editingKey !== null
+      && (title !== (slot.variant?.title ?? "") || body !== (slot.variant?.body ?? "")));
 
   const step = useCallback((delta: number) => {
     setIndex(current => {
@@ -130,15 +187,68 @@ export default function BaseVariantDialog({
     if (event.key === "ArrowRight") { event.preventDefault(); step(1); }
   };
 
+  const requestClose = useCallback(() => {
+    if (dirty) { setDiscardAction({ kind: "close" }); return; }
+    onClose();
+  }, [dirty, onClose]);
+
+  /**
+   * Escape arrives as `cancel`. Without a preventDefault the native close fires
+   * before the dirty check can run, and a half-written variant was gone without
+   * a word - the same fix the custom-layer editor needed.
+   */
+  const handleCancel = useCallback((event: React.SyntheticEvent) => {
+    event.preventDefault();
+    requestClose();
+  }, [requestClose]);
+
   const isLive = slot.kind === "default"
     ? selection.kind === "default"
     : slot.kind === "variant" && selection.kind === "variant" && selection.id === slot.variant!.id;
   const external = selection.kind === "external";
+
+  /**
+   * Same courtesy validation the custom-layer editor gets: the route enforces
+   * these limits either way, but discovering a 64 KB overflow after pressing
+   * Save is worse than seeing it while typing.
+   */
+  const normalized = normalizeBody(body);
+  const bodyBytes = utf8Length(normalized);
+  const invalid = findInvalidCharacter(normalized);
+  const problem: { kind: "body-too-large"; bytes: number } | { kind: "invalid-character"; position: number } | null =
+    bodyBytes > MAX_BODY_BYTES
+      ? { kind: "body-too-large", bytes: bodyBytes }
+      : invalid !== null
+        ? { kind: "invalid-character", position: invalid.position }
+        : null;
+  const normalizationApplied = normalized !== body;
+  // No memo: the body is capped at 64 KB and the lint pass is a handful of
+  // regexes, so recomputing per render is cheaper than fighting the compiler's
+  // manual-memoization rules over it.
+  const findings = lintPromptLayer(normalized);
+
+  const problemMessage = !problem ? null
+    : problem.kind === "body-too-large" ? t("codexSet.custom.bodyTooLarge", { bytes: problem.bytes, max: MAX_BODY_BYTES })
+    : t("codexSet.custom.invalidCharacter", { position: problem.position });
+
+  const saveNow = () => {
+    if (busy || problem !== null || body.trim().length === 0) return;
+    // A successful save replaces the parked copy of this slot, and a saved "new"
+    // draft is not unsaved work anymore - it is a variant now.
+    draftsRef.current.delete(editingKey ?? NEW_SLOT_KEY);
+    onSave({ id: slot.variant?.id ?? null, title, body: normalized });
+  };
+  const requestSave = () => {
+    if (parkedDirty) { setDiscardAction({ kind: "save" }); return; }
+    saveNow();
+  };
+
   return (
     <dialog
       ref={dialogRef}
       className="modal-overlay codex-set-base-dialog"
       aria-label={t("codexSet.base.title")}
+      onCancel={handleCancel}
       onClose={onClose}
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}
@@ -225,50 +335,97 @@ export default function BaseVariantDialog({
                 onChange={event => setBody(event.target.value)}
               />
             </label>
+            <p className="muted small">{t("codexSet.custom.bodySize", { bytes: bodyBytes, max: MAX_BODY_BYTES })}</p>
+            {normalizationApplied && (
+              // Quiet note, not an error: the text is accepted, just stored canonically.
+              <p className="muted small codex-set-custom-dialog__normalized">{t("codexSet.custom.normalized")}</p>
+            )}
+            {problemMessage && (
+              <div className="notice notice-err" role="alert">{problemMessage}</div>
+            )}
+            {findings.length > 0 && (
+              // Warnings, never blockers - a variant that deliberately takes over the
+              // base prompt is allowed to restate things it genuinely wants.
+              <ul className="codex-set-custom-dialog__lint">
+                {findings.map((finding, i) => (
+                  <li key={finding.rule + ":" + i} data-lint-rule={finding.rule} data-lint-level={finding.level}>
+                    {t(finding.messageKey)}
+                    {finding.span && (
+                      <code className="codex-set-custom-dialog__span">{normalized.slice(finding.span[0], finding.span[1])}</code>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
             {/* The whole point, stated where the user decides: a variant REPLACES Codex
                 own base prompt rather than adding to it. */}
             <p className="muted small">{t("codexSet.base.replacesWarning")}</p>
           </>
         )}
 
-        <div className="modal-actions">
-          {slot.kind !== "default" && (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={busy || external || body.trim().length === 0}
-              onClick={() => onSave({ id: slot.variant?.id ?? null, title, body })}
-            >
-              {t("common.save")}
+        {discardAction ? (
+          // role="alertdialog" + a named prompt, for the same reason as the custom
+          // layer editor's discard: an unnamed one is announced as an empty dialog.
+          <div
+            className="modal-actions codex-set-custom-dialog__discard"
+            role="alertdialog"
+            aria-labelledby="codex-set-base-dialog-discard"
+          >
+            <span id="codex-set-base-dialog-discard" className="muted small">
+              {t(discardAction.kind === "save" ? "codexSet.custom.discardOthersAndSave" : "codexSet.custom.discardPrompt")}
+            </span>
+            <button type="button" className="btn btn-sm" onClick={() => setDiscardAction(null)}>
+              {t("codexSet.custom.keepEditing")}
             </button>
-          )}
-          {!isLive && slot.kind !== "new" && (
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={busy || external}
-              onClick={() => onSelect(slot.kind === "default"
-                ? { kind: "default" }
-                : { kind: "variant", id: slot.variant!.id })}
-            >
-              {t("codexSet.base.use")}
-            </button>
-          )}
-          {isLive && <span className="pill">{t("codexSet.base.inUse")}</span>}
-          {slot.kind === "variant" && (
             <button
               type="button"
               className="btn btn-danger btn-sm"
-              disabled={busy || external}
-              onClick={() => onDelete(slot.variant!.id)}
+              disabled={discardAction.kind === "save" && (problem !== null || busy || body.trim().length === 0)}
+              onClick={() => discardAction.kind === "save" ? saveNow() : onClose()}
             >
-              {t("common.delete")}
+              {t(discardAction.kind === "save" ? "common.save" : "common.discard")}
             </button>
-          )}
-          <button type="button" className="btn btn-sm" onClick={onClose}>
-            {t("common.close")}
-          </button>
-        </div>
+          </div>
+        ) : (
+          <div className="modal-actions">
+            {slot.kind !== "default" && (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={busy || external || problem !== null || body.trim().length === 0}
+                onClick={requestSave}
+              >
+                {t("common.save")}
+              </button>
+            )}
+            {!isLive && slot.kind !== "new" && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy || external}
+                onClick={() => onSelect(slot.kind === "default"
+                  ? { kind: "default" }
+                  : { kind: "variant", id: slot.variant!.id })}
+              >
+                {t("codexSet.base.use")}
+              </button>
+            )}
+            {isLive && <span className="pill">{t("codexSet.base.inUse")}</span>}
+            {slot.kind === "variant" && (
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                disabled={busy || external}
+                onClick={() => onDelete(slot.variant!.id)}
+              >
+                {t("common.delete")}
+              </button>
+            )}
+            <button type="button" className="btn btn-sm" onClick={requestClose}>
+              {t("common.close")}
+            </button>
+          </div>
+        )}
       </div>
     </dialog>
   );

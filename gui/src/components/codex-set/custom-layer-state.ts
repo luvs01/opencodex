@@ -108,6 +108,15 @@ export function newLayerId(taken: readonly CustomLayerDto[]): string {
   }
 }
 
+/**
+ * Client mirror of the server's composeProjection: enabled bodies joined by a
+ * blank line. Stored bodies are already normalized on write, so the join is
+ * byte-for-byte what developer_instructions will hold.
+ */
+export function composeBodies(layers: readonly CustomLayerDto[]): string {
+  return layers.filter(l => l.enabled).map(l => l.body).join("\n\n");
+}
+
 /** Order is composition order, so a move is a reorder of the whole list. */
 export function moveLayer(layers: readonly CustomLayerDto[], id: string, delta: -1 | 1): CustomLayerDto[] {
   const next = [...layers];

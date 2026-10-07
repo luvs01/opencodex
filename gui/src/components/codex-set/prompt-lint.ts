@@ -75,6 +75,37 @@ const RULES: readonly Rule[] = [
     messageKey: "codexSet.lint.environment",
     pattern: /\b(your (?:cwd|working directory) is|today's date is|you have no network access|you are running on (?:macos|linux|windows))/gi,
   },
+  {
+    // A credential pasted into a layer lands in config.toml in plain text and
+    // ships to the model on every request. The shapes here cover the common
+    // token prefixes; false positives are acceptable for a warning that never
+    // blocks a save.
+    rule: "secret",
+    level: "warn",
+    messageKey: "codexSet.lint.secret",
+    pattern: /(sk-[a-zA-Z0-9_-]{20,}|ghp_[0-9a-zA-Z]{36}|github_pat_[0-9a-zA-Z_]{22,}|glpat-[0-9a-zA-Z_-]{20,}|xox[baprs]-[0-9a-zA-Z-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)/g,
+  },
+  {
+    // Phrasing that tells the model to drop its own instructions is prompt
+    // injection even when the user wrote it about themselves - it strips the
+    // guidance Codex builds up around this layer.
+    rule: "ignore-instructions",
+    level: "warn",
+    messageKey: "codexSet.lint.ignoreInstructions",
+    pattern: /\b(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:the\s+)?(?:previous|prior|above|earlier|system)\s+(?:instructions?|prompts?|rules?)\b/gi,
+  },
+  {
+    // The same identity clash as "identity", in Korean: this fork's users write
+    // layers in Korean at least as often as in English, and "당신은 클로드" is
+    // the same accident as "you are claude". Reuses the English message.
+    rule: "identity-ko",
+    level: "warn",
+    messageKey: "codexSet.lint.identity",
+    // ASCII tokens want \b so "claudette" does not match; Hangul cannot take \b
+    // because every syllable is a non-word char, so "클로드입니다" never sees a
+    // boundary. The alternation keeps both.
+    pattern: /(?:(?:당신은|너는)\s*(?:claude|grok|gemini|chatgpt|gpt)\b)|(?:(?:당신은|너는)\s*(?:클로드|그록|제미나이|챗gpt))/gi,
+  },
 ];
 
 function utf8Length(value: string): number {
