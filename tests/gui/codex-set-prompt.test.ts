@@ -18,6 +18,21 @@ describe("lintPromptLayer secret and injection rules", () => {
     expect(secret[1]!.span).toBeUndefined();
   });
 
+  test("a neighbouring rule's span overlapping a credential is suppressed too", () => {
+    // Synthetic overlap: the placeholder span covers ${{ ... }} INCLUDING the
+    // token inside it, so rendering that slice would echo the credential the
+    // secret rule just refused to show.
+    const findings = lintPromptLayer("run ${{ sk-test-0123456789abcdefghij }} now");
+    const placeholder = findings.find(f => f.rule === "placeholder");
+    const secret = findings.find(f => f.rule === "secret");
+    expect(placeholder).toBeDefined();
+    expect(secret).toBeDefined();
+    expect(placeholder!.span).toBeUndefined();
+    // A span that only touches the credential's NEIGHBOUR still renders.
+    const partial = lintPromptLayer("run ${{ x }} and sk-test-0123456789abcdefghij");
+    expect(partial.find(f => f.rule === "placeholder")!.span).toBeDefined();
+  });
+
   test("flags common token prefixes", () => {
     for (const token of [
       "ghp_" + "a".repeat(36),

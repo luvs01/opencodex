@@ -17,6 +17,7 @@ import {
   MAX_LAYERS,
   moveLayer,
   newLayerId,
+  undoWindowMs,
   utf8Length,
   type Draft,
 } from "../components/codex-set/custom-layer-state";
@@ -230,8 +231,8 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
    * tab or a hand edit moved the file, so re-read rather than retry - a retry would
    * overwrite whatever moved it.
    */
-  const writeBase = async (path: string, payload: Record<string, unknown>): Promise<void> => {
-    if (!snapshot || busyId !== null) return;
+  const writeBase = async (path: string, payload: Record<string, unknown>): Promise<boolean> => {
+    if (!snapshot || busyId !== null) return false;
     setBusyId("base");
     setError("");
     try {
@@ -245,20 +246,22 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
         if (body.code === "stale_revision") {
           resource.refresh();
           setError(t("codexSet.prompt.staleRevision"));
-          return;
+          return false;
         }
         setError(body.message ?? t("codexSet.prompt.writeFailed"));
         resource.refresh();
-        return;
+        return false;
       }
       setClientResourceData(resourceKey, body.snapshot);
       // The base prompt is a prompt layer like any other, so the measured text that
       // described the old one is no longer about this configuration.
       invalidateLayerText();
       setLayerText(null);
+      return true;
     } catch {
       setError(t("codexSet.prompt.writeFailed"));
       resource.refresh();
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -369,36 +372,17 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
 
   /**
    * Drift is REPORTED by GET and resolved only here, on an explicit,
-   * revision-checked POST. Two of the four states are repairable from WP1 exports;
-   * the route refuses the other two by name rather than duplicating its journal
-   * transaction, and the panel surfaces whatever it says.
+   * revision-checked POST. Every state the route repairs goes through this one
+   * call: journal-present replays the journal as a locked recovery-only
+   * operation — never a layers write, which used to project an empty
+   * developer_instructions whenever the store file was missing — and the panel
+   * surfaces whatever the route says.
    */
   const repair = async (confirm: boolean) => {
     if (!snapshot || snapshot.drift === null) return;
     setRepairBusy(true);
     setError("");
     try {
-      if (snapshot.drift === "journal-present") {
-        // The repair route refuses this drift by name, but every write's commit()
-        // runs journal recovery BEFORE comparing bytes. Re-writing the current
-        // list is byte-identical in the common case, so this clears the journal
-        // while changing nothing. A stale_revision reply is EXPECTED: recovery
-        // rolled the files back under us, and the refresh reconciles either way.
-        const res = await fetch(apiBase + "/api/codex-prompt/custom", {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ layers: snapshot.custom, revision: snapshot.revision }),
-        });
-        const body = await res.json() as { ok?: boolean; code?: string; message?: string; snapshot?: PromptSnapshotDto };
-        if (res.ok && body.ok && body.snapshot) {
-          setClientResourceData(resourceKey, body.snapshot);
-        } else if (body.code !== "stale_revision") {
-          setError(body.message ?? t("codexSet.prompt.repairFailed"));
-        }
-        resource.refresh();
-        invalidateLayerText();
-        return;
-      }
       const res = await fetch(apiBase + "/api/codex-prompt/repair", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -657,7 +641,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
             maxVariants={snapshot.maxBaseVariants}
             busy={busyId !== null || !snapshot.readable}
             onSelect={sel => { void writeBase("/api/codex-prompt/base/select", sel); }}
-            onSave={input => { void writeBase("/api/codex-prompt/base", input); }}
+            onSave={input => writeBase("/api/codex-prompt/base", input)}
             onDelete={id => { void writeBase("/api/codex-prompt/base", { id, delete: true }); }}
             onClose={() => setOpenLayerId(null)}
           />
@@ -805,13 +789,18 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
                   const { layer, index } = deletedLayer;
                   const next = [...snapshot.custom];
                   next.splice(Math.min(index, next.length), 0, layer);
+                  // Suspend expiry while the write is in flight: a click near the
+                  // deadline whose response lands after it must not strand the
+                  // notice — and on failure the window restarts so a retry stays
+                  // possible instead of the layer being silently unrecoverable.
+                  if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+                  undoTimerRef.current = null;
                   void (async () => {
                     const done = await writeCustom(next, layer.id);
-                    // The notice survives a failed write: clearing it first would
-                    // hide the only way to restore a layer that is still gone.
-                    if (!done) return;
-                    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-                    undoTimerRef.current = null;
+                    if (!done) {
+                      undoTimerRef.current = setTimeout(() => setDeletedLayer(null), undoWindowMs());
+                      return;
+                    }
                     setDeletedLayer(null);
                   })();
                 }}
@@ -853,7 +842,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
                     if (!done || !removed) return;
                     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
                     setDeletedLayer({ layer: removed, index });
-                    undoTimerRef.current = setTimeout(() => setDeletedLayer(null), 10_000);
+                    undoTimerRef.current = setTimeout(() => setDeletedLayer(null), undoWindowMs());
                   })();
                 }}
               >

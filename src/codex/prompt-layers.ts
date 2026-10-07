@@ -1148,3 +1148,41 @@ export function salvageProjection(revision: string, opts?: Paths): WriteResult {
     };
   });
 }
+
+/**
+ * Recovery as a first-class operation, under the same file lock every mutation
+ * takes. This is the journal-present repair: it replays the journal and writes
+ * NOTHING else.
+ *
+ * A byte-identical PUT used to stand in for it, and it was not safe. When the
+ * store file is missing, the snapshot's custom list reads [], so the "no-op"
+ * write projected an empty developer_instructions over whatever the config
+ * still carried — surviving instructions erased by the very repair that was
+ * supposed to touch nothing. Recovery alone preserves exactly the bytes it can
+ * account for — post where the pair proves the commit landed, pre where it
+ * proves it did not — and refuses rather than guess when a target matches
+ * neither image.
+ */
+export function recoverPromptJournal(opts?: Paths): WriteResult {
+  const configPath = activeConfigPath(opts);
+  const storePath = activeStorePath(opts);
+  const journalPath = journalPathFor(storePath);
+
+  const acquired = tryAcquire(lockPathFor(storePath));
+  if (!acquired.ok) return { ok: false, error: "locked" };
+  const handle = acquired.handle;
+
+  try {
+    const recovered = recoverJournal(journalPath, { configPath, storePath });
+    if (!recovered.ok) return { ok: false, error: "recovery_required", detail: recovered.detail };
+    return {
+      ok: true,
+      // The caller reports drift resolved only when recovery actually moved
+      // bytes or closed the journal; action "none" means there was no journal.
+      changed: recovered.action !== "none",
+      snapshot: readPromptLayers({ ...opts, configPath, storePath }),
+    };
+  } finally {
+    release(handle);
+  }
+}

@@ -35,6 +35,7 @@ import {
   previewAdopt,
   previewSalvage,
   readPromptLayers,
+  recoverPromptJournal,
   salvageProjection,
   selectBaseVariant,
   setToggle,
@@ -567,11 +568,28 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
       return settle(ctx, adoptDeveloperInstructions(revision, paths(ctx)));
     }
 
-    // journal-present: recovery lives inside WP1's commit and is not exported.
-    // Any ordinary mutation replays it on its own path, so the honest answer is
-    // to name the state rather than duplicate the transaction here.
+    if (drift === "journal-present") {
+      // Recovery as its own locked operation — never a disguised layers write.
+      // The GUI used to replay recovery through a byte-identical custom PUT,
+      // which projected custom=[] over a config still carrying instructions
+      // whenever the store file was missing.
+      if (!confirm) {
+        return jsonResponse({
+          ok: true,
+          changed: false,
+          preview: { drift, storePath: snapshot.storePath },
+        }, 200, req, ctx.config);
+      }
+      if (!revision) return fail(ctx, "stale_revision", 409, "revision required");
+      if (revision !== snapshot.revision) {
+        return fail(ctx, "stale_revision", 409, "the configuration moved since it was read");
+      }
+      return settle(ctx, recoverPromptJournal(paths(ctx)));
+    }
+
+    // A drift kind this build does not repair: name it rather than guess.
     return fail(ctx, "repair_unsupported", 409,
-      "a write journal is present; recovery runs automatically on the next write", {
+      "this drift has no repair on this route", {
         drift, storePath: snapshot.storePath,
       });
   }

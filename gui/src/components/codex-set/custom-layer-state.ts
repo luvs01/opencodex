@@ -117,6 +117,22 @@ export function composeBodies(layers: readonly CustomLayerDto[]): string {
   return layers.filter(l => l.enabled).map(l => l.body).join("\n\n");
 }
 
+/**
+ * The delete-undo window. Long enough to notice the notice, short enough that
+ * restoring a row cannot surprise someone mid-edit.
+ */
+export const UNDO_WINDOW_MS = 10_000;
+let undoWindowMsForTests: number | null = null;
+
+/** A regression should not have to burn ten real seconds. */
+export function setUndoWindowMsForTests(ms: number | null): void {
+  undoWindowMsForTests = ms;
+}
+
+export function undoWindowMs(): number {
+  return undoWindowMsForTests ?? UNDO_WINDOW_MS;
+}
+
 /** Order is composition order, so a move is a reorder of the whole list. */
 export function moveLayer(layers: readonly CustomLayerDto[], id: string, delta: -1 | 1): CustomLayerDto[] {
   const next = [...layers];

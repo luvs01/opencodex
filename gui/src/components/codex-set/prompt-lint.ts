@@ -126,19 +126,36 @@ function utf8Length(value: string): number {
 
 export function lintPromptLayer(body: string): LintFinding[] {
   const findings: LintFinding[] = [];
+  /**
+   * Every span a redact rule covered. Withholding only the credential's own
+   * match is not enough: a second rule whose span merely OVERLAPS it echoes the
+   * same secret back inside a different warning.
+   */
+  const hidden: [number, number][] = [];
   for (const rule of RULES) {
     // Fresh regex per call: a shared /g literal carries lastIndex between calls,
     // which makes the SECOND lint of the same text miss its first match.
     const pattern = new RegExp(rule.pattern.source, rule.pattern.flags);
     for (let match = pattern.exec(body); match !== null; match = pattern.exec(body)) {
+      const span: [number, number] = [match.index, match.index + match[0].length];
+      if (rule.redactSpan) hidden.push(span);
       findings.push({
         level: rule.level,
         rule: rule.rule,
         messageKey: rule.messageKey,
-        span: rule.redactSpan ? undefined : [match.index, match.index + match[0].length],
+        span: rule.redactSpan ? undefined : span,
       });
       // A zero-length match would spin forever.
       if (match[0].length === 0) pattern.lastIndex += 1;
+    }
+  }
+  if (hidden.length > 0) {
+    for (const finding of findings) {
+      // The rendered slice copies whatever range it is given, so a span that
+      // touches a credential loses its highlight entirely rather than a tail.
+      if (finding.span && hidden.some(([s, e]) => finding.span![0] < e && s < finding.span![1])) {
+        finding.span = undefined;
+      }
     }
   }
   if (utf8Length(body) > SIZE_ADVISORY_BYTES) {

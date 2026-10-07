@@ -115,6 +115,26 @@ function position(dlg: HTMLElement): string {
 function slotKind(dlg: HTMLElement): string | null {
   return dlg.querySelector(".codex-set-base-dialog__pos")?.getAttribute("data-slot-kind") ?? null;
 }
+
+/**
+ * React tracks the previous value on the DOM node, so assigning `.value` directly
+ * makes it skip the change as a no-op. The native setter is what a real keystroke
+ * goes through.
+ */
+function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const proto = el instanceof testWindow.HTMLTextAreaElement
+    ? testWindow.HTMLTextAreaElement.prototype
+    : testWindow.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
+  el.dispatchEvent(new testWindow.Event("change", { bubbles: true }));
+}
+
+function actionButton(dlg: HTMLElement, needle: string): HTMLButtonElement {
+  return [...dlg.querySelectorAll(".modal-actions button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes(needle)) as HTMLButtonElement;
+}
 test("the base row carries a switch that reads on for the default", async () => {
   stubRoutes(() => json(snapshot()));
   const { container, root } = await mount();
@@ -303,5 +323,137 @@ test("the dot indicator renders one dot per slot and marks the active one", asyn
   const dotsAfter = dlg.querySelectorAll(".codex-set-base-dialog__dot");
   expect(dotsAfter[0]!.classList.contains("active")).toBe(false);
   expect(dotsAfter[1]!.classList.contains("active")).toBe(true);
+  await act(async () => { root.unmount(); });
+});
+
+test("a failed delete keeps the parked draft for the variant that survived", async () => {
+  // The write was refused, so nothing was deleted. Reconciling drafts against
+  // the destination text cannot tell that from a real delete, so the check is
+  // the variant id: if the id is still in the snapshot, its draft stays.
+  stubRoutes(call => {
+    if (call.method === "PUT" && call.url.endsWith("/api/codex-prompt/base")) {
+      return json({ ok: false, code: "stale_revision", message: "moved" }, 409);
+    }
+    // The refresh after a stale revision returns the variant list intact.
+    return json(snapshot({ baseVariants: VARIANTS }));
+  });
+  const { container, root } = await mount();
+  const dlg = await openBaseDialog(container);
+  const nav = dlg.querySelectorAll(".codex-set-base-dialog__nav button");
+  const prev = nav[0] as HTMLButtonElement;
+  const next = nav[1] as HTMLButtonElement;
+
+  await act(async () => { next.click(); }); // -> aaa111
+  const input = dlg.querySelector("input") as HTMLInputElement;
+  const textarea = dlg.querySelector("textarea") as HTMLTextAreaElement;
+  await act(async () => {
+    typeInto(input, "Edited title");
+    typeInto(textarea, "Edited body.");
+  });
+  await act(async () => { actionButton(dlg, "delete").click(); });
+  expect(slotKind(dlg)).toBe("variant"); // still on aaa111, not deleted
+
+  // Park the draft by leaving, then come back. The draft rides the id, not the
+  // text, so it survives the failed delete round trip.
+  await act(async () => { next.click(); }); // -> bbb222
+  await act(async () => { prev.click(); }); // -> aaa111
+  expect(input.value).toBe("Edited title");
+  expect(textarea.value).toBe("Edited body.");
+  await act(async () => { root.unmount(); });
+});
+
+test("a draft identical to the DESTINATION text is still parked on its own id", async () => {
+  // Editing aaa111 into a byte copy of bbb222 must not trick the reconciliation
+  // into calling it a landed save - nothing was ever submitted.
+  stubRoutes(() => json(snapshot({ baseVariants: VARIANTS })));
+  const { container, root } = await mount();
+  const dlg = await openBaseDialog(container);
+  const nav = dlg.querySelectorAll(".codex-set-base-dialog__nav button");
+  const prev = nav[0] as HTMLButtonElement;
+  const next = nav[1] as HTMLButtonElement;
+
+  await act(async () => { next.click(); }); // -> aaa111
+  const input = dlg.querySelector("input") as HTMLInputElement;
+  const textarea = dlg.querySelector("textarea") as HTMLTextAreaElement;
+  await act(async () => {
+    typeInto(input, "Formal");
+    typeInto(textarea, "Answer formally.");
+  });
+  await act(async () => { next.click(); }); // -> bbb222, parks the aaa111 draft
+  await act(async () => { prev.click(); }); // -> aaa111
+  expect(input.value).toBe("Formal");
+  expect(textarea.value).toBe("Answer formally.");
+
+  // And the dialog knows the slot is dirty: closing asks before throwing it away.
+  await act(async () => { actionButton(dlg, "close").click(); });
+  expect(dlg.querySelector(".codex-set-custom-dialog__discard")).not.toBeNull();
+  await act(async () => { root.unmount(); });
+});
+
+test("discard-others-and-save clears parked drafts on success, keeps them on failure", async () => {
+  let putOk = false;
+  const calls = stubRoutes(call => {
+    if (call.method === "PUT" && call.url.endsWith("/api/codex-prompt/base")) {
+      if (!putOk) return json({ ok: false, code: "stale_revision", message: "moved" }, 409);
+      return json({ ok: true, snapshot: snapshot({
+        baseVariants: [VARIANTS[0]!, { id: "bbb222", title: "Renamed B", body: "Edited B body." }],
+        revision: "sha256:two",
+      }) });
+    }
+    return json(snapshot({ baseVariants: VARIANTS }));
+  });
+  const { container, root } = await mount();
+  const dlg = await openBaseDialog(container);
+  const nav = dlg.querySelectorAll(".codex-set-base-dialog__nav button");
+  const prev = nav[0] as HTMLButtonElement;
+  const next = nav[1] as HTMLButtonElement;
+
+  // Edit slot A, park it, then edit slot B: the two drafts are the discarded ones.
+  await act(async () => { next.click(); }); // -> aaa111
+  const input = dlg.querySelector("input") as HTMLInputElement;
+  const textarea = dlg.querySelector("textarea") as HTMLTextAreaElement;
+  await act(async () => {
+    typeInto(input, "Draft A");
+    typeInto(textarea, "Draft A body.");
+  });
+  await act(async () => { next.click(); }); // -> bbb222
+  await act(async () => {
+    typeInto(input, "Renamed B");
+    typeInto(textarea, "Edited B body.");
+  });
+
+  // Saving with a parked draft needs the confirmation.
+  await act(async () => { actionButton(dlg, "save").click(); });
+  const confirm = dlg.querySelector(".codex-set-custom-dialog__discard");
+  expect(confirm).not.toBeNull();
+  const confirmSave = [...confirm!.querySelectorAll("button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("save")) as HTMLButtonElement;
+
+  // Refused: the confirmation stays open and BOTH drafts survive. "Keep editing"
+  // backs out of the prompt without discarding anything.
+  await act(async () => { confirmSave.click(); });
+  expect(dlg.querySelector(".codex-set-custom-dialog__discard")).not.toBeNull();
+  await act(async () => {
+    [...dlg.querySelectorAll(".codex-set-custom-dialog__discard button")]
+      .find(b => (b.textContent ?? "").toLowerCase().includes("keep editing"))!.click();
+  });
+  await act(async () => { prev.click(); }); // -> aaa111
+  expect(input.value).toBe("Draft A");
+  expect(textarea.value).toBe("Draft A body.");
+  await act(async () => { next.click(); }); // -> bbb222
+  expect(input.value).toBe("Renamed B");
+
+  // Accepted this time: the confirmation dismisses and the parked draft for
+  // aaa111 is gone - going back shows the STORED values, not the draft.
+  putOk = true;
+  await act(async () => { actionButton(dlg, "save").click(); });
+  await act(async () => { [...dlg.querySelectorAll(".codex-set-custom-dialog__discard button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("save"))!.click(); });
+  expect(dlg.querySelector(".codex-set-custom-dialog__discard")).toBeNull();
+  const put = calls.find(c => c.method === "PUT")!;
+  expect(put.body).toMatchObject({ id: "bbb222", title: "Renamed B", body: "Edited B body." });
+  await act(async () => { prev.click(); }); // -> aaa111 shows stored values
+  expect(input.value).toBe("Terse");
+  expect(textarea.value).toBe("Be brief.");
   await act(async () => { root.unmount(); });
 });
