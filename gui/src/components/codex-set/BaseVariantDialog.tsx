@@ -120,7 +120,12 @@ export default function BaseVariantDialog({
    * a completed save and drop it.
    */
   const pendingSaveRef = useRef<{ id: string | null; title: string; body: string } | null>(null);
-  const prevIdsRef = useRef<ReadonlySet<string>>(new Set(variants.map(v => v.id)));
+  /**
+   * Ids seen on the previous variants change. Starts empty rather than mapped
+   * from `variants`: the mount effect runs before any save can be in flight,
+   * and an eager initializer would pay a map+alloc on every render.
+   */
+  const prevIdsRef = useRef<ReadonlySet<string>>(new Set());
   const liveRef = useRef({ title, body });
   useEffect(() => { liveRef.current = { title, body }; }, [title, body]);
 
