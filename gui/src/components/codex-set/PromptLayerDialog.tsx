@@ -20,6 +20,7 @@ export default function PromptLayerDialog({
   text,
   busy,
   onToggle,
+  onReset,
   onClose,
 }: {
   descriptor: LayerDescriptorDto;
@@ -28,6 +29,8 @@ export default function PromptLayerDialog({
   text: { text: string | null; reason: string; bytes: number; sourcePath?: string } | undefined;
   busy: boolean;
   onToggle: (id: string, enabled: boolean) => void;
+  /** Deletes the key line so the documented default applies again. */
+  onReset?: (id: string) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -124,6 +127,21 @@ export default function PromptLayerDialog({
                   fallback: String(toggle.default),
                 })}
             </span>
+            {/*
+              A literal `key = true` for a default-true toggle reads identical today
+              but freezes the override, so the restore verb deletes the line
+              entirely. Offered only while the file carries an explicit value.
+            */}
+            {toggle.userFileValue !== null && onReset && (
+              <button
+                type="button"
+                className="link-btn codex-set-prompt__reset"
+                disabled={busy}
+                onClick={() => { onReset(descriptor.id); }}
+              >
+                {t("codexSet.row.resetDefault", { value: String(toggle.default) })}
+              </button>
+            )}
           </div>
         )}
 

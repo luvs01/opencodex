@@ -136,3 +136,8 @@ Elles se trouvent dans le `config.toml` de Codex, pas dans la configuration prop
 L'écriture se fait ligne par ligne : vos commentaires et votre mise en forme sont conservés, et une clé qu'opencodex ne connaît pas est laissée telle quelle plutôt que supprimée.
 
 Une clé absente est lue comme sa valeur par défaut, et non comme `false`. Le panneau affiche la valeur réellement présente dans votre fichier et indique lorsqu'une clé n'est pas définie.
+
+Une ligne portant une valeur explicite propose aussi **Réinitialiser**, qui supprime la ligne de la clé
+plutôt que d'y réécrire la valeur par défaut. C'est le seul état qui continue de suivre la valeur par
+défaut si Codex la change plus tard — écrire `key = true` figerait la valeur d'aujourd'hui comme un
+remplacement.

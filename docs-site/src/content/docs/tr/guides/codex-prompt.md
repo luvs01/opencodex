@@ -143,3 +143,7 @@ Bunlar opencodex'in kendi yapılandırmasında değil, Codex'in `config.toml` do
 Yazma işlemi satır bazlıdır: yorumlarınız ve biçimlendirmeniz korunur, opencodex'in tanımadığı bir anahtar silinmek yerine olduğu gibi bırakılır.
 
 Bulunmayan bir anahtar `false` olarak değil, varsayılanı olarak okunur. Panel dosyanızda gerçekten bulunan değeri gösterir ve bir anahtar ayarlanmamışsa bunu belirtir.
+
+Açık bir değer taşıyan satır ayrıca **Varsayılana sıfırla** sunar; bu, varsayılanı geri yazmak yerine
+anahtar satırını siler. Codex varsayılanı daha sonra değiştirirse onu takip etmeye devam eden tek durum
+budur — `key = true` yazmak bugünün varsayılanını bir geçersiz kılma olarak dondurur.

@@ -42,8 +42,15 @@ function firstTableIndex(lines: string[]): number {
   return idx === -1 ? lines.length : idx;
 }
 
-/** Set a root-scope boolean, inserting above the first table when absent. */
-export function setRootBool(content: string, key: string, value: boolean): string {
+/**
+ * Set a root-scope boolean, inserting above the first table when absent.
+ *
+ * `null` REMOVES the key rather than writing a value, which is what restoring a
+ * documented default means: `include_permissions_instructions = true` and an
+ * absent key are different facts about the same file, and only the absent one
+ * lets a changed upstream default ever take effect again.
+ */
+export function setRootBool(content: string, key: string, value: boolean | null): string {
   const eol = dominantEol(content);
   const { bom, body } = splitBom(content);
   const lines = splitLines(body);
@@ -53,10 +60,12 @@ export function setRootBool(content: string, key: string, value: boolean): strin
   for (let i = 0; i < limit; i += 1) {
     const m = pattern.exec(lines[i]!);
     if (m) {
-      lines[i] = `${m[1]}${value}${m[2]}`;
+      if (value === null) lines.splice(i, 1);
+      else lines[i] = `${m[1]}${value}${m[2]}`;
       return bom + joinLines(lines, eol);
     }
   }
+  if (value === null) return bom + joinLines(lines, eol);
   lines.splice(limit, 0, `${key} = ${value}`);
   return bom + joinLines(lines, eol);
 }
@@ -86,14 +95,21 @@ export function setRootString(content: string, key: string, value: string | null
   return bom + joinLines(lines, eol);
 }
 
-/** Set a boolean inside `[table]`, appending the table when absent. */
-export function setTableBool(content: string, table: string, key: string, value: boolean): string {
+/**
+ * Set a boolean inside `[table]`, appending the table when absent.
+ *
+ * `null` removes the key line but leaves the table header: an empty `[skills]`
+ * is valid TOML, and deleting the header would also orphan any comments the
+ * user wrote inside the table.
+ */
+export function setTableBool(content: string, table: string, key: string, value: boolean | null): string {
   const eol = dominantEol(content);
   const { bom, body } = splitBom(content);
   const lines = splitLines(body);
   const escaped = table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const start = lines.findIndex(l => new RegExp(`^\\s*\\[${escaped}\\]\\s*(?:#.*)?$`).test(l));
   if (start === -1) {
+    if (value === null) return bom + joinLines(lines, eol);
     const tail = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
     lines.splice(tail, 0, `[${table}]`, `${key} = ${value}`);
     return bom + joinLines(lines, eol);
@@ -105,10 +121,12 @@ export function setTableBool(content: string, table: string, key: string, value:
   for (let i = start + 1; i < end; i += 1) {
     const m = pattern.exec(lines[i]!);
     if (m) {
-      lines[i] = `${m[1]}${value}${m[2]}`;
+      if (value === null) lines.splice(i, 1);
+      else lines[i] = `${m[1]}${value}${m[2]}`;
       return bom + joinLines(lines, eol);
     }
   }
+  if (value === null) return bom + joinLines(lines, eol);
   lines.splice(end, 0, `${key} = ${value}`);
   return bom + joinLines(lines, eol);
 }

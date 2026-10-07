@@ -305,3 +305,77 @@ test("the dot indicator renders one dot per slot and marks the active one", asyn
   expect(dotsAfter[1]!.classList.contains("active")).toBe(true);
   await act(async () => { root.unmount(); });
 });
+
+/**
+ * The external state is a dead end no longer: the same preview-then-confirm
+ * shape the developer_instructions adopt flow uses, so the refusal in the
+ * picker stays a refusal to act SILENTLY - not a refusal to adopt.
+ */
+test("an external selection offers an import preview before anything is written", async () => {
+  const calls = stubRoutes(call => {
+    if (call.url.includes("/api/codex-prompt/base/import")) {
+      if (call.body?.confirm === true) {
+        return json({
+          ok: true,
+          snapshot: snapshot({
+            revision: "sha256:two",
+            baseVariants: [...VARIANTS, { id: "ccc333", title: "somebody-elses", body: "Imported base.", bytes: 14 }],
+            baseSelection: { kind: "variant", id: "ccc333" },
+          }),
+        });
+      }
+      return json({
+        ok: true,
+        changed: false,
+        preview: {
+          rawPath: "/etc/somebody-elses.md",
+          resolvedPath: "/etc/somebody-elses.md",
+          body: "Imported base.",
+          bytes: 14,
+          suggestedTitle: "somebody-elses",
+        },
+      });
+    }
+    return json(snapshot({
+      baseVariants: VARIANTS,
+      baseSelection: { kind: "external", path: "/etc/somebody-elses.md" },
+    }));
+  });
+  const { container, root } = await mount();
+  const dlg = await openBaseDialog(container);
+
+  // The offer sits beside the existing refusal notice.
+  const offer = [...dlg.querySelectorAll("button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  expect(offer).not.toBeUndefined();
+  await act(async () => { offer.click(); });
+
+  // The preview shows the body that would be stored - before any write.
+  expect(dlg.textContent ?? "").toContain("Imported base.");
+  expect(calls.filter(c => c.url.includes("/import")).every(c => c.body?.confirm !== true)).toBe(true);
+
+  const confirm = [...dlg.querySelectorAll(".modal-actions button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  await act(async () => { confirm.click(); });
+
+  const written = calls.filter(c => c.url.includes("/import"));
+  expect(written).toHaveLength(2);
+  expect(written[1]!.body).toMatchObject({ confirm: true, revision: "sha256:one" });
+  await act(async () => { root.unmount(); });
+});
+
+test("a refused import lands beside the affordance rather than the page notice", async () => {
+  stubRoutes(call => {
+    if (call.url.includes("/api/codex-prompt/base/import")) {
+      return json({ ok: false, code: "variant_slots_full", message: "at most 2 base variants" }, 409);
+    }
+    return json(snapshot({ baseSelection: { kind: "external", path: "/etc/somebody-elses.md" } }));
+  });
+  const { container, root } = await mount();
+  const dlg = await openBaseDialog(container);
+  const offer = [...dlg.querySelectorAll("button")]
+    .find(b => (b.textContent ?? "").toLowerCase().includes("import")) as HTMLButtonElement;
+  await act(async () => { offer.click(); });
+  expect(dlg.textContent ?? "").toContain("at most 2 base variants");
+  await act(async () => { root.unmount(); });
+});

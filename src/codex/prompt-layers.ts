@@ -802,8 +802,16 @@ function rollback(record: JournalRecord, journalPath: string, error: WriteError)
   return { ok: false, error };
 }
 
-/** Flip one of the five prompt toggles. */
-export function setToggle(id: string, enabled: boolean, revision: string, opts?: Paths): WriteResult {
+/**
+ * Flip one of the five prompt toggles, or REMOVE its key with `enabled: null`.
+ *
+ * Removal is the "restore default" verb. A toggle's documented default lives in
+ * Codex, not in this file: writing `key = true` for a layer whose default is
+ * true produces the same prompt today but freezes the override - an upstream
+ * change to the default would then never reach this user. Deleting the line is
+ * the only state that keeps following it.
+ */
+export function setToggle(id: string, enabled: boolean | null, revision: string, opts?: Paths): WriteResult {
   if (!isToggleId(id)) return { ok: false, error: "unknown_layer" };
   const spec = TOGGLE_KEYS[id];
   return commit(opts, revision, (_snapshot, configBytes, storeBytes) => ({
@@ -951,6 +959,143 @@ function newBaseVariantId(existing: readonly BaseVariant[]): string {
     const id = randomBytes(4).toString("hex").slice(0, 6);
     if (!taken.has(id)) return id;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Import — taking ownership of an externally authored model_instructions_file.
+//
+// The picker refuses the `external` state outright, which made it a dead end:
+// the only way to manage that prompt was to delete the line by hand and retype
+// the file. Import copies the external file's body into the variant directory
+// and points the key at our copy — one file, so nothing upstream can edit out
+// from under a stored variant.
+// ---------------------------------------------------------------------------
+
+export interface BaseImportPreview {
+  /** The literal value of `model_instructions_file`, as configured. */
+  rawPath: string | null;
+  /** The absolute file the key resolves to, when it could be resolved. */
+  resolvedPath: string | null;
+  /** The normalized body a confirm would store — byte-identical to it. */
+  body: string | null;
+  /**
+   * The filename without extension, suggested as the variant title. `null` when
+   * the path names no markdown file worth naming after.
+   */
+  suggestedTitle: string | null;
+  reason: "ok" | "nothing_to_import" | "file_unreadable" | "invalid_characters" | "slots_full";
+  detail?: string;
+}
+
+/**
+ * Read-only. Runs the same steps a confirm would — resolve, read, normalize,
+ * validate — so the previewed body is byte-identical to the stored one.
+ *
+ * `slots_full` still returns the body: the preview is the place to say "this
+ * would be imported if a slot were free", and refusing to show the text at all
+ * would make the cap look like a read failure.
+ */
+export function previewBaseImport(opts?: Paths): BaseImportPreview {
+  const configPath = activeConfigPath(opts);
+  const configBytes = readFileOrNull(configPath);
+  const variants = readBaseVariants(opts);
+  const selection = resolveBaseSelection(configBytes, variants, opts);
+  const empty: Omit<BaseImportPreview, "reason"> = {
+    rawPath: selection.kind === "external" ? selection.path : null,
+    resolvedPath: null,
+    body: null,
+    suggestedTitle: null,
+  };
+  if (selection.kind !== "external") {
+    return { ...empty, reason: "nothing_to_import" };
+  }
+  const dir = dirname(configPath);
+  let resolved: string;
+  try {
+    resolved = resolve(dir, expandUserPath(selection.path));
+  } catch {
+    return { ...empty, reason: "file_unreadable", detail: `the path could not be resolved: ${selection.path}` };
+  }
+  const raw = readFileOrNull(resolved);
+  if (raw === null) {
+    return { ...empty, resolvedPath: resolved, reason: "file_unreadable", detail: `could not read ${resolved}` };
+  }
+  const normalized = normalizeBody(raw);
+  const invalid = findInvalidCharacter(normalized);
+  if (invalid !== null) {
+    return {
+      ...empty,
+      resolvedPath: resolved,
+      reason: "invalid_characters",
+      detail: `code point ${invalid.position} is a ${invalid.reason}`,
+    };
+  }
+  const suggestedTitle = resolved.replace(/\\/g, "/").split("/").pop()!
+    .replace(/\.(md|markdown|txt)$/i, "").trim() || null;
+  return {
+    rawPath: selection.path,
+    resolvedPath: resolved,
+    body: normalized,
+    suggestedTitle,
+    reason: variants.length >= MAX_BASE_VARIANTS ? "slots_full" : "ok",
+  };
+}
+
+/**
+ * Copy the external file into the variant directory and retarget the key at it.
+ *
+ * Same ordering as `writeBaseVariant` and for the same reason: the .md is
+ * written and verified before `config.toml` is ever pointed at it, and if the
+ * transaction refuses, the file is deleted rather than left behind for a write
+ * the caller was told did not happen.
+ *
+ * The `external` state is RE-CHECKED inside the transaction. Between the
+ * preview and the commit another writer could have adopted or cleared the key,
+ * and silently repointing then would claim an import nobody asked for.
+ */
+export function importBaseVariant(input: { title: string }, revision: string, opts?: Paths): WriteResult {
+  const preview = previewBaseImport(opts);
+  if (preview.body === null || preview.resolvedPath === null) {
+    return {
+      ok: false,
+      error: preview.reason === "invalid_characters" ? "invalid_characters" : "developer_instructions_not_owned",
+      detail: preview.detail,
+    };
+  }
+  const dir = activeBaseVariantDir(opts);
+  const existing = readBaseVariants(opts);
+  if (existing.length >= MAX_BASE_VARIANTS) {
+    return { ok: false, error: "unknown_layer", detail: `at most ${MAX_BASE_VARIANTS} variants` };
+  }
+  const targetId = newBaseVariantId(existing);
+  const path = join(dir, `${targetId}.md`);
+  const next = `# ${input.title.replace(/[\r\n]+/g, " ").trim() || targetId}\n${preview.body}`;
+  ensureDir(path);
+  try {
+    durableWrite(path, next);
+  } catch (error) {
+    return { ok: false, error: "write_failed", detail: error instanceof Error ? error.message : String(error) };
+  }
+
+  const result = commit(opts, revision, (snapshot, configBytes, storeBytes) => {
+    if (snapshot.baseSelection.kind !== "external") {
+      return { error: "developer_instructions_not_owned", detail: "model_instructions_file no longer points at an external file" };
+    }
+    return {
+      nextConfig: setRootString(configBytes ?? "", "model_instructions_file", resolve(path)),
+      nextStore: storeBytes,
+    };
+  });
+
+  if (!result.ok) {
+    try {
+      durableDelete(path);
+    } catch { /* the returned error already tells the caller to look */ }
+    return result;
+  }
+  // commit()'s success path already re-reads the full snapshot with the injected
+  // variant directory, so the result lists the file just written.
+  return result;
 }
 
 /** Replace the whole custom-layer list; order is composition order. */

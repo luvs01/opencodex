@@ -7,7 +7,7 @@
  * fixture changed does not prove nothing else did.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -1582,4 +1582,200 @@ describe("020 coverage completions", () => {
   });
 
 
+});
+
+describe("toggle restore-default (enabled: null)", () => {
+  test("null deletes the key line rather than writing the default literal", async () => {
+    // An explicit `include_apps_instructions = false` is an override. `null` is
+    // the restore verb: the line is removed so the file follows Codex's default
+    // again, instead of a literal that happens to match it today.
+    const fx = fixture("model = \"x\"\ninclude_apps_instructions = false\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: null, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    const config = read(fx.configPath)!;
+    expect(config).not.toContain("include_apps_instructions");
+    expect(config).toContain("model = \"x\"");
+    const apps = res.body.snapshot.toggles.find((t: any) => t.id === "apps");
+    expect(apps.userFileValue).toBeNull();
+    // The switch itself still reads on — absent means default, and the default is on.
+    expect(apps.defaultedUserValue).toBe(true);
+  });
+
+  test("null removes a key from inside a table without orphaning the table", async () => {
+    // skills.include_instructions lives under [skills]; removing the key leaves
+    // the header, which is valid TOML and keeps any hand-written comments
+    // reachable.
+    const fx = fixture("model = \"x\"\n\n[skills]\ninclude_instructions = false\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "skills", enabled: null, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    const config = read(fx.configPath)!;
+    expect(config).not.toContain("include_instructions");
+    expect(config).toContain("[skills]");
+  });
+
+  test("null on an absent key is a harmless no-op", async () => {
+    const fx = fixture("model = \"x\"\n");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", enabled: null, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    expect(read(fx.configPath)).toBe("model = \"x\"\n");
+  });
+
+  test("a missing enabled field is still invalid_body", async () => {
+    const fx = fixture("");
+    const res = await call("PUT", "/api/codex-prompt/toggle", fx, {
+      id: "apps", revision: await revision(fx),
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_body");
+    // fixture("") creates the file; the refusal leaves it byte-identical.
+    expect(read(fx.configPath)).toBe("");
+  });
+});
+
+describe("POST /api/codex-prompt/base/import", () => {
+  /** An external pointer plus the file it names, inside the fixture's own dir. */
+  function externalFixture(body: string): { fx: Fixture; externalPath: string } {
+    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
+    roots.push(root);
+    const externalPath = join(root, "somebody-elses.md");
+    writeFileSync(externalPath, body, "utf8");
+    // The value is a JSON-encoded TOML basic string, so a Windows path's
+    // backslashes land escaped exactly as a user would write them.
+    return { fx: fixture(`model_instructions_file = ${JSON.stringify(externalPath)}\n`), externalPath };
+  }
+
+  test("preview returns the file body and writes nothing", async () => {
+    const { fx, externalPath } = externalFixture("Ship the external base.");
+    const before = read(fx.configPath);
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+    expect(res.body.preview.body).toBe("Ship the external base.");
+    expect(res.body.preview.resolvedPath).toBe(externalPath);
+    expect(res.body.preview.suggestedTitle).toBe("somebody-elses");
+    expect(read(fx.configPath)).toBe(before);
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+  });
+
+  test("confirm copies the file into the variant directory and repoints the key", async () => {
+    const { fx, externalPath } = externalFixture("Ship the external base.");
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx),
+    });
+    expect(res.status).toBe(200);
+    const snapshot = res.body.snapshot;
+    expect(snapshot.baseVariants).toHaveLength(1);
+    const variant = snapshot.baseVariants[0];
+    expect(variant.title).toBe("somebody-elses");
+    expect(variant.body).toBe("Ship the external base.");
+    // The key now names OUR copy — selection resolves as a managed variant.
+    expect(snapshot.baseSelection).toEqual({ kind: "variant", id: variant.id });
+    expect(read(join(fx.baseVariantDir, `${variant.id}.md`))).toContain("Ship the external base.");
+    // The user's file is left where it was; nothing external is modified.
+    expect(read(externalPath)).toBe("Ship the external base.");
+    expect(read(fx.configPath)!).toContain(variant.id + ".md");
+    // Format-agnostic: the original file's basename is gone from the key.
+    expect(read(fx.configPath)!).not.toContain("somebody-elses.md");
+  });
+
+  test("nothing_to_import when the key is absent or already managed", async () => {
+    const absent = fixture("model = \"x\"\n");
+    const res1 = await call("POST", "/api/codex-prompt/base/import", absent, { confirm: false });
+    expect(res1.status).toBe(409);
+    expect(res1.body.code).toBe("nothing_to_import");
+
+    // A key pointing at a MANAGED variant is also not external.
+    const managed = fixture("model = \"x\"\n");
+    await call("PUT", "/api/codex-prompt/base", managed, {
+      id: null, title: "Mine", body: "b", revision: await revision(managed),
+    });
+    const id = (await call("GET", "/api/codex-prompt", managed)).body.baseVariants[0].id as string;
+    await call("PUT", "/api/codex-prompt/base/select", managed, {
+      kind: "variant", id, revision: await revision(managed),
+    });
+    const res2 = await call("POST", "/api/codex-prompt/base/import", managed, { confirm: false });
+    expect(res2.status).toBe(409);
+    expect(res2.body.code).toBe("nothing_to_import");
+  });
+
+  test("an unreadable target is refused with the resolved path", async () => {
+    // A directory where the file should be is unreadable on every platform.
+    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
+    roots.push(root);
+    const externalPath = join(root, "dir-instead.md");
+    mkdirSync(externalPath);
+    const fx = fixture(`model_instructions_file = ${JSON.stringify(externalPath)}\n`);
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("import_file_unreadable");
+    expect(res.body.path).toBe(externalPath);
+  });
+
+  test("a control character in the file is rejected before any copy is made", async () => {
+    const { fx } = externalFixture("okbad");
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_characters");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+  });
+
+  test("an oversized file is refused under the same cap as a variant body", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-prompt-ext-"));
+    roots.push(root);
+    const externalPath = join(root, "big.md");
+    // Real bytes: a truncated file is all NULs, and NUL is a control character
+    // the extractor refuses before size is ever measured.
+    writeFileSync(externalPath, "x".repeat(64 * 1024 + 10), "utf8");
+    const fx = fixture(`model_instructions_file = ${JSON.stringify(externalPath)}\n`);
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("body_too_large");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+  });
+
+  test("slots_full still returns the preview body, so the cap does not look like a read failure", async () => {
+    const { fx } = externalFixture("Third base.");
+    for (const title of ["One", "Two"]) {
+      const created = await call("PUT", "/api/codex-prompt/base", fx, {
+        id: null, title, body: "b", revision: await revision(fx),
+      });
+      expect(created.status).toBe(200);
+    }
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, { confirm: false });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("variant_slots_full");
+    expect(res.body.body).toBe("Third base.");
+    const res2 = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx),
+    });
+    expect(res2.status).toBe(409);
+  });
+
+  test("a stale revision on confirm refuses and leaves no file behind", async () => {
+    const { fx } = externalFixture("Ship the external base.");
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: "sha256:stale",
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("stale_revision");
+    // The variant file is written BEFORE the transaction touches config.toml;
+    // a refused commit must not leave it behind.
+    expect(existsSync(fx.baseVariantDir) ? readdirSync(fx.baseVariantDir) : []).toHaveLength(0);
+  });
+
+  test("an admin token cannot run the import", async () => {
+    const { fx } = externalFixture("Ship the external base.");
+    const res = await call("POST", "/api/codex-prompt/base/import", fx, {
+      confirm: true, revision: await revision(fx),
+    }, "admin-token");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("dashboard_session_required");
+    expect(existsSync(fx.baseVariantDir)).toBe(false);
+  });
 });

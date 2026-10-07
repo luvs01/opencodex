@@ -144,7 +144,13 @@ to *add* guidance, use a [custom layer](#custom-layers) instead — those are ad
 
 If `model_instructions_file` points at a file opencodex did not write, the picker
 refuses to act and says where the key points. It will not silently retarget a key
-you or another tool set. Clear it yourself first, then choose here.
+you or another tool set.
+
+You do not have to clear it by hand, though. **Import it as a variant** previews
+the file's text — before anything is written — and on confirm copies it into the
+variant directory, then points the key at the copy. The prompt in force does not
+change; it simply becomes one of your managed variants. Clear the key yourself
+instead if you would rather start from the default.
 
 This is the same principle as importing `developer_instructions`: the panel reports
 what it finds, and you decide.
@@ -225,3 +231,8 @@ does not recognise is left alone rather than removed.
 
 An absent key reads as its default rather than as `false`. The panel shows the
 value your file actually holds, and says when a key is not set.
+
+A row that carries an explicit value also offers **Reset to <default>**, which
+deletes the key line rather than writing the default back. That is the only
+state that keeps following the default if Codex changes it later — writing
+`key = true` would freeze today's default as an override.

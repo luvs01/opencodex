@@ -30,9 +30,11 @@ import {
   composeProjection,
   computePromptProbeStateFingerprint,
   findInvalidCharacter,
+  importBaseVariant,
   inspectOwnership,
   normalizeBody,
   previewAdopt,
+  previewBaseImport,
   previewSalvage,
   readPromptLayers,
   salvageProjection,
@@ -334,7 +336,12 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
     if (!body) return fail(ctx, "invalid_body", 400, "expected a JSON object");
     const id = body.id;
     if (typeof id !== "string") return fail(ctx, "invalid_body", 400, "id must be a string");
-    if (typeof body.enabled !== "boolean") return fail(ctx, "invalid_body", 400, "enabled must be a boolean");
+    // `null` is the restore-the-default verb: it deletes the line instead of
+    // writing the documented default back as a literal, so a later upstream
+    // change to the default still reaches this file.
+    if (typeof body.enabled !== "boolean" && body.enabled !== null) {
+      return fail(ctx, "invalid_body", 400, "enabled must be a boolean or null");
+    }
     const revision = revisionOf(body);
     if (!revision) return fail(ctx, "stale_revision", 409, "revision required");
 
@@ -385,6 +392,63 @@ export async function handleCodexPromptRoutes(ctx: ManagementContext): Promise<R
       selection = { kind: "variant", id: body.id };
     }
     return settle(ctx, selectBaseVariant(selection, revision, paths(ctx)));
+  }
+
+  if (url.pathname === "/api/codex-prompt/base/import" && req.method === "POST") {
+    // The adopt flow for `model_instructions_file`: preview first, write only on
+    // confirmation. The verb exists because /base/select refuses the `external`
+    // state by design — that refusal is about SILENT retargeting, and an
+    // explicit, previewed import is precisely the opt-in it protects.
+    const body = await readBody(ctx);
+    if (!body) return fail(ctx, "invalid_body", 400, "expected a JSON object");
+    const preview = previewBaseImport(paths(ctx));
+    if (preview.reason === "nothing_to_import") {
+      return fail(ctx, "nothing_to_import", 409,
+        "model_instructions_file is absent or already points at a managed variant");
+    }
+    if (preview.reason === "file_unreadable") {
+      return fail(ctx, "import_file_unreadable", 409, preview.detail, {
+        path: preview.resolvedPath ?? preview.rawPath,
+      });
+    }
+    if (preview.reason === "invalid_characters") {
+      return fail(ctx, "invalid_characters", 400, preview.detail, { path: preview.resolvedPath });
+    }
+    // Same boundary as every other write to this key: the 64 KB cap applies to
+    // what would actually be stored.
+    if (utf8Bytes(preview.body!) > MAX_BODY_BYTES) {
+      return fail(ctx, "body_too_large", 400, `the file exceeds ${MAX_BODY_BYTES} bytes`, {
+        path: preview.resolvedPath,
+      });
+    }
+    if (preview.reason === "slots_full") {
+      return fail(ctx, "variant_slots_full", 409,
+        `at most ${MAX_BASE_VARIANTS} base variants; delete one first`, {
+          maxBaseVariants: MAX_BASE_VARIANTS,
+          body: preview.body,
+          resolvedPath: preview.resolvedPath,
+        });
+    }
+    if (body.confirm !== true) {
+      // Preview writes nothing, by construction: previewBaseImport is a pure read.
+      return jsonResponse({
+        ok: true,
+        changed: false,
+        preview: {
+          rawPath: preview.rawPath,
+          resolvedPath: preview.resolvedPath,
+          body: preview.body,
+          bytes: utf8Bytes(preview.body!),
+          suggestedTitle: preview.suggestedTitle,
+        },
+      }, 200, req, ctx.config);
+    }
+    const revision = revisionOf(body);
+    if (!revision) return fail(ctx, "stale_revision", 409, "revision required");
+    const title = typeof body.title === "string" && body.title.trim().length > 0
+      ? body.title
+      : preview.suggestedTitle ?? "Imported base prompt";
+    return settle(ctx, importBaseVariant({ title }, revision, paths(ctx)));
   }
 
   if (url.pathname === "/api/codex-prompt/base" && req.method === "PUT") {

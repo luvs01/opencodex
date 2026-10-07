@@ -129,6 +129,14 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
    * directly.
    */
   const [presetSeed, setPresetSeed] = useState<{ title: string; body: string } | null>(null);
+  const [baseImportPreview, setBaseImportPreview] = useState<{
+    rawPath: string | null;
+    resolvedPath: string | null;
+    body: string;
+    bytes: number;
+    suggestedTitle: string | null;
+  } | null>(null);
+  const [baseImportRefusal, setBaseImportRefusal] = useState<string | null>(null);
   /**
    * Rendered layer text, fetched lazily on first dialog open. It shells out to
    * `codex debug prompt-input`, so it is not part of the panel load - a user who
@@ -155,7 +163,12 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
   const snapshot = resource.data;
   const state = resource.state;
 
-  const onToggle = async (id: string, enabled: boolean) => {
+  /**
+   * `enabled: null` is the restore-default verb: the key line is deleted rather
+   * than rewritten, so the documented default is followed again instead of being
+   * frozen by a literal that happens to match it today.
+   */
+  const onToggle = async (id: string, enabled: boolean | null) => {
     if (!snapshot) return;
     setBusyId(id);
     setError("");
@@ -228,6 +241,57 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
     } catch {
       setError(t("codexSet.prompt.writeFailed"));
       resource.refresh();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /**
+   * Adopt-shaped flow for `model_instructions_file`: the picker refuses to
+   * retarget a key somebody else set, and this is the explicit opt-in — preview
+   * the file body, confirm, and it becomes a managed variant the key is
+   * repointed at.
+   */
+  const importBase = async (confirm: boolean) => {
+    if (!snapshot) return;
+    setBusyId("base-import");
+    setError("");
+    try {
+      const res = await fetch(apiBase + "/api/codex-prompt/base/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(confirm ? { confirm: true, revision: snapshot.revision } : { confirm: false }),
+      });
+      const body = await res.json() as {
+        ok?: boolean; code?: string; message?: string;
+        snapshot?: PromptSnapshotDto;
+        preview?: { rawPath: string | null; resolvedPath: string | null; body: string; bytes: number; suggestedTitle: string | null };
+      };
+      if (!res.ok || !body.ok) {
+        if (body.code === "stale_revision") {
+          resource.refresh();
+          setError(t("codexSet.prompt.staleRevision"));
+          return;
+        }
+        // A refusal lands beside the affordance, not in the page-level error
+        // notice: the user is deciding about THIS file, so the reason belongs
+        // where the file is described.
+        setBaseImportRefusal(body.message ?? t("codexSet.base.importFailed"));
+        setBaseImportPreview(null);
+        return;
+      }
+      if (body.snapshot) {
+        setClientResourceData(resourceKey, body.snapshot);
+        invalidateLayerText();
+        setBaseImportPreview(null);
+        setBaseImportRefusal(null);
+        return;
+      }
+      // Preview only: nothing has been written, and the user still has to confirm.
+      setBaseImportRefusal(null);
+      setBaseImportPreview(body.preview ?? null);
+    } catch {
+      setError(t("codexSet.prompt.writeFailed"));
     } finally {
       setBusyId(null);
     }
@@ -527,6 +591,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
             busy={busyId === descriptor.id}
             writesRefused={snapshot?.readable === false}
             onToggle={(id, enabled) => { void onToggle(id, enabled); }}
+            onReset={id => { void onToggle(id, null); }}
             onSelectBase={descriptor.class === "base" && snapshot ? (useDefault => {
               // Turning it OFF has to pick something concrete. With no variant yet the
               // switch cannot act, so it opens the picker instead of writing a key that
@@ -567,6 +632,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
                 busy={busyId === descriptor.id}
                 writesRefused={snapshot?.readable === false}
                 onToggle={(id, enabled) => { void onToggle(id, enabled); }}
+                onReset={id => { void onToggle(id, null); }}
                 onOpen={setOpenLayerId}
               />
             ))}
@@ -592,10 +658,13 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
             selection={snapshot.baseSelection}
             maxVariants={snapshot.maxBaseVariants}
             busy={busyId !== null || !snapshot.readable}
+            importPreview={baseImportPreview}
+            importRefusal={baseImportRefusal}
             onSelect={sel => { void writeBase("/api/codex-prompt/base/select", sel); }}
             onSave={input => { void writeBase("/api/codex-prompt/base", input); }}
             onDelete={id => { void writeBase("/api/codex-prompt/base", { id, delete: true }); }}
-            onClose={() => setOpenLayerId(null)}
+            onImport={confirm => { void importBase(confirm); }}
+            onClose={() => { setOpenLayerId(null); setBaseImportPreview(null); setBaseImportRefusal(null); }}
           />
         ) : (
         <PromptLayerDialog
@@ -604,6 +673,7 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
           text={layerText?.layers?.[openDescriptor.id]}
           busy={busyId !== null}
           onToggle={(id, enabled) => { void onToggle(id, enabled); }}
+          onReset={id => { void onToggle(id, null); }}
           onClose={() => setOpenLayerId(null)}
         />
         )
@@ -674,13 +744,23 @@ export default function CodexSetPrompt({ apiBase }: { apiBase: string }) {
           )}
 
           {/*
-            model_instructions_file is reported, never written: it replaces the base
-            prompt outright, so the panel states that something outside opencodex
-            has taken it over.
+            "Replaced outside opencodex" is only true for the EXTERNAL selection:
+            a managed variant also sets model_instructions_file, but that file is
+            one this panel wrote, and the base row already says so.
           */}
-          {snapshot.modelInstructionsFile !== null && (
+          {snapshot.baseSelection.kind === "external" && (
             <p className="muted small codex-set-custom__replaced">
-              {t("codexSet.custom.baseReplaced", { path: snapshot.modelInstructionsFile })}
+              {t("codexSet.custom.baseReplaced", { path: snapshot.baseSelection.path })}
+              {" "}
+              {/* The affordance lives in the base prompt's own dialog; pointing
+                  there beats duplicating the whole preview-confirm flow here. */}
+              <button
+                type="button"
+                className="link-btn"
+                onClick={() => setOpenLayerId("base-instructions")}
+              >
+                {t("codexSet.custom.baseReplacedOpen")}
+              </button>
             </p>
           )}
 

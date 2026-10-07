@@ -40,18 +40,35 @@ export default function BaseVariantDialog({
   selection,
   maxVariants,
   busy,
+  importPreview,
+  importRefusal,
   onSelect,
   onSave,
   onDelete,
+  onImport,
   onClose,
 }: {
   variants: readonly BaseVariantDto[];
   selection: BaseSelectionDto;
   maxVariants: number;
   busy: boolean;
+  /**
+   * The external file's body once a preview landed. `null` while the import
+   * offer is just a button; the confirm below it writes nothing until pressed.
+   */
+  importPreview: {
+    rawPath: string | null;
+    resolvedPath: string | null;
+    body: string;
+    bytes: number;
+    suggestedTitle: string | null;
+  } | null;
+  /** Why an import was refused, when it was — shown beside the offer. */
+  importRefusal: string | null;
   onSelect: (selection: BaseSelectionDto) => void;
   onSave: (input: { id: string | null; title: string; body: string }) => void;
   onDelete: (id: string) => void;
+  onImport: (confirm: boolean) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -193,6 +210,54 @@ export default function BaseVariantDialog({
           <div className="notice notice-err" role="alert">
             {t("codexSet.base.externalBlocked", { path: selection.path })}
           </div>
+        )}
+
+        {/*
+          The refusal is about SILENT retargeting, not about importing. The
+          explicit opt-in copies the file into the variant directory and points
+          the key at the copy — previewed first, written only on confirm, the
+          same shape as the developer_instructions adopt flow.
+        */}
+        {external && (
+          importPreview ? (
+            <>
+              <p className="muted small">
+                {t("codexSet.base.importPreview", { path: importPreview.resolvedPath ?? importPreview.rawPath ?? "" })}
+              </p>
+              <pre className="api-code codex-set-custom__adopt-preview">{importPreview.body}</pre>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={busy}
+                  onClick={() => onImport(true)}
+                >
+                  {t("codexSet.base.importConfirm")}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={onClose}
+                >
+                  {t("common.cancel")}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {importRefusal !== null && (
+                <p className="muted small">{importRefusal}</p>
+              )}
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() => onImport(false)}
+              >
+                {t("codexSet.base.import")}
+              </button>
+            </>
+          )
         )}
 
         {slot.kind === "default" ? (
