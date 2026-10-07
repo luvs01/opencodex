@@ -10,8 +10,8 @@ import { classifyChatgptRefreshFailure } from "../codex/chatgpt-refresh-failure"
  */
 export const CHATGPT_FETCH_TIMEOUT_MS = 30_000;
 
-function chatGptFetchSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(CHATGPT_FETCH_TIMEOUT_MS);
+function chatGptFetchSignal(signal?: AbortSignal, timeoutMs = CHATGPT_FETCH_TIMEOUT_MS): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
@@ -35,16 +35,14 @@ export class ChatGptTokenError extends Error {
 async function chatGptTokenError(response: Response, label: string): Promise<ChatGptTokenError> {
   const body = await response.text().catch(() => "");
   const failure = classifyChatgptRefreshFailure(response.status, body);
-  let detail = "";
-  try {
-    const parsed = JSON.parse(body) as { error?: string; error_description?: string };
-    detail = [parsed.error, parsed.error_description].filter(Boolean).join(": ");
-  } catch { /* non-JSON error body */ }
+  // The message carries the status and the allowlisted OAuth code only — never the
+  // free-text `error_description`, which can echo OAuth material into log surfaces
+  // (the same closed vocabulary the pool's noteChatgptRefreshFailure logs with).
   return new ChatGptTokenError(
     response.status,
     failure.code,
     failure.reason !== "unknown",
-    `${label} failed: ${response.status} ${detail || `HTTP ${response.status}`}`,
+    `${label} failed: ${response.status} code=${failure.code ?? "none"}`,
   );
 }
 
@@ -290,7 +288,7 @@ export async function loginChatGPT(
 // Codex-rs uses JSON for refresh — intentional divergence; both accepted by auth.openai.com.
 export async function refreshChatGPTToken(
   refreshToken: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<OAuthCredentials> {
   const resp = await fetch(TOKEN_URL, {
     method: "POST",
@@ -300,7 +298,7 @@ export async function refreshChatGPTToken(
       client_id: CLIENT_ID,
       refresh_token: refreshToken,
     }).toString(),
-    signal: chatGptFetchSignal(options.signal),
+    signal: chatGptFetchSignal(options.signal, options.timeoutMs),
   });
   if (!resp.ok) throw await chatGptTokenError(resp, "ChatGPT refresh");
   return credsFromToken((await resp.json()) as Record<string, unknown>);

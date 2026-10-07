@@ -8,6 +8,7 @@ import {
   OAUTH_PROVIDERS,
 } from "../../src/oauth";
 import type { OAuthCredentials } from "../../src/oauth/types";
+import { ChatGptTokenError } from "../../src/oauth/chatgpt";
 import { getAccountCredential, getAccountSet, saveCredential } from "../../src/oauth/store";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -203,5 +204,44 @@ describe("generic OAuth refresh lock + CAS", () => {
     await expect(pending).rejects.toBeInstanceOf(OAuthLoginRequiredError);
     expect(getAccountCredential("kimi", accountId)?.access).toBe("replacement");
     expect(getAccountSet("kimi")!.accounts.find(a => a.id === accountId)!.needsReauth).toBeUndefined();
+  });
+});
+
+describe("ChatGPT terminal refresh classification", () => {
+  const origChatgptRefresh = OAUTH_PROVIDERS.chatgpt!.refresh;
+  afterEach(() => { OAUTH_PROVIDERS.chatgpt!.refresh = origChatgptRefresh; });
+
+  async function seedExpiredChatgpt(): Promise<string> {
+    await saveCredential("chatgpt", {
+      access: "chatgpt-old",
+      refresh: "rt-old",
+      expires: Date.now() - 1,
+      accountId: "chatgpt-acct",
+    });
+    return getAccountSet("chatgpt")!.activeAccountId;
+  }
+
+  test("a terminal ChatGptTokenError marks the account needsReauth", async () => {
+    const accountId = await seedExpiredChatgpt();
+    OAUTH_PROVIDERS.chatgpt!.refresh = async () => {
+      throw new ChatGptTokenError(401, "refresh_token_expired", true, "ChatGPT refresh failed: 401");
+    };
+
+    await expect(getValidAccessTokenForAccount("chatgpt", accountId))
+      .rejects.toBeInstanceOf(OAuthLoginRequiredError);
+    // The wiring a plain Error never reached: the dead grant must flip needsReauth
+    // so the account stops retrying instead of looping the same doomed refresh.
+    expect(getAccountSet("chatgpt")!.accounts.find(a => a.id === accountId)!.needsReauth).toBe(true);
+  });
+
+  test("a non-terminal ChatGptTokenError stays retryable and does not mark needsReauth", async () => {
+    const accountId = await seedExpiredChatgpt();
+    OAUTH_PROVIDERS.chatgpt!.refresh = async () => {
+      throw new ChatGptTokenError(503, "temporarily_unavailable", false, "ChatGPT refresh failed: 503");
+    };
+
+    await expect(getValidAccessTokenForAccount("chatgpt", accountId))
+      .rejects.toBeInstanceOf(ChatGptTokenError);
+    expect(getAccountSet("chatgpt")!.accounts.find(a => a.id === accountId)!.needsReauth).toBeUndefined();
   });
 });
