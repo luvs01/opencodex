@@ -7,7 +7,9 @@ const layer = (id: string, body: string, enabled = true): CustomLayerDto => ({ i
 
 describe("lintPromptLayer secret and injection rules", () => {
   test("flags credential-shaped strings", () => {
-    const findings = lintPromptLayer("authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz0123456789\n-----BEGIN RSA PRIVATE KEY-----");
+    // sk-test-<digits><letters> is the sentinel shape the privacy scan allows
+    // test fixtures to carry; a literal sk- key would be a credential finding.
+    const findings = lintPromptLayer("token sk-test-0123456789abcdefghij\n-----BEGIN RSA PRIVATE KEY-----");
     const secret = findings.filter(f => f.rule === "secret");
     expect(secret.length).toBe(2);
     // The span must not include the credential itself beyond the match.
