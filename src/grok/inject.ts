@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { atomicWriteFile } from "../config";
 import { applyEol, dominantEol, isLoopbackHostname, providerBaseHost } from "../codex/inject";
+import { withConfigWriteLock } from "../codex/config-write-lock";
 import {
   grokDefaultReasoningEffort,
   grokReasoningEffortOption,
@@ -22,7 +23,7 @@ export interface GrokInjectResult {
   ok: boolean;
   changed: boolean;
   message: string;
-  skippedReason?: "no-grok-home" | "orphaned-marker" | "non-loopback";
+  skippedReason?: "no-grok-home" | "orphaned-marker" | "non-loopback" | "locked";
 }
 
 const BEGIN_MARKER = "# >>> opencodex managed block — do not edit (removed by `ocx stop`) >>>";
@@ -992,6 +993,15 @@ function errorResult(action: string, error: unknown): GrokInjectResult {
   return { ok: false, changed: false, message: `Could not ${action} Grok config: ${detail}` };
 }
 
+function grokConfigLockedResult(action: string): GrokInjectResult {
+  return {
+    ok: false,
+    changed: false,
+    message: `Grok config ${action} refused: another opencodex process is writing Grok configuration — retry shortly.`,
+    skippedReason: "locked",
+  };
+}
+
 export function buildGrokManagedBlock(
   port: number,
   models: GrokInjectModel[],
@@ -1126,6 +1136,11 @@ export function injectGrokConfig(
   const configPath = join(grokHome, "config.toml");
   const backupPath = join(grokHome, "config.toml.bak-opencodex");
   try {
+    // The read, every transform, and the rename are ONE section of the shared
+    // write lock — the same `.ocx-write.lock` contract Codex config writers
+    // honour. Without it a sibling `ocx start`/`ocx stop` could land between
+    // our read and rename and have its managed-block update silently dropped.
+    const locked = withConfigWriteLock(configPath, (): GrokInjectResult => {
     const configExisted = existsSync(configPath);
     const rawContent = configExisted ? readFileSync(configPath, "utf8") : "";
     const eol = dominantEol(rawContent);
@@ -1249,6 +1264,9 @@ export function injectGrokConfig(
         ? "Updated the opencodex managed block in Grok config."
         : "Added the opencodex managed block to Grok config.",
     };
+    });
+    if (!locked.ok) return grokConfigLockedResult("injection");
+    return locked.value;
   } catch (error) {
     return errorResult("inject", error);
   }
@@ -1271,6 +1289,9 @@ export function stripGrokConfig(opts: { grokHome?: string } = {}): GrokInjectRes
   }
 
   try {
+    // Same shared write lock as injection: a concurrent inject's fence write
+    // must not be swept away by a strip computed against older bytes.
+    const locked = withConfigWriteLock(configPath, (): GrokInjectResult => {
     const rawContent = readFileSync(configPath, "utf8");
     const eol = dominantEol(rawContent);
     const content = applyEol(rawContent, "\n");
@@ -1360,6 +1381,9 @@ export function stripGrokConfig(opts: { grokHome?: string } = {}): GrokInjectRes
         ? "Removed the opencodex managed block from Grok config."
         : "Removed stale opencodex-managed model entries from Grok config.",
     };
+    });
+    if (!locked.ok) return grokConfigLockedResult("cleanup");
+    return locked.value;
   } catch (error) {
     return errorResult("strip", error);
   }

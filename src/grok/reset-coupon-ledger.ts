@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "../config/atomic-write";
+import { withConfigMutationLockSync } from "../config/mutation-lock";
 import { getConfigDir } from "../config/paths";
 
 export type GrokResetCouponOperationKind = "execute" | "replay" | "identity-mismatch" | "capacity";
@@ -72,6 +73,10 @@ export function openGrokResetCouponOperation(
   now = Date.now(),
   journalPath?: string,
 ): GrokResetCouponOperationRecord {
+  // Read→decide→write under the shared config mutation lock: two concurrent
+  // coupon requests on the same home must not lose an operation record — the
+  // ledger exists precisely to make an irreversible spend replay-safe.
+  return withConfigMutationLockSync(() => {
   const filePath = journalPath ?? grokCouponJournalPath();
   const ledger = readGrokCouponLedger(filePath);
 
@@ -118,6 +123,7 @@ export function openGrokResetCouponOperation(
     accountId: identity.accountId,
     tokenId: identity.tokenId,
   };
+  });
 }
 
 export function recordGrokResetCouponSettlement(
@@ -125,6 +131,7 @@ export function recordGrokResetCouponSettlement(
   now = Date.now(),
   journalPath?: string,
 ): void {
+  withConfigMutationLockSync(() => {
   const filePath = journalPath ?? grokCouponJournalPath();
   const ledger = readGrokCouponLedger(filePath);
   const existing = ledger.operations[settlement.operationId];
@@ -136,4 +143,5 @@ export function recordGrokResetCouponSettlement(
   existing.updatedAt = now;
 
   writeGrokCouponLedger(filePath, ledger, now);
+  });
 }

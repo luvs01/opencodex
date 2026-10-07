@@ -288,6 +288,36 @@ rename replaces the destination. Handled publication failures retain the previou
 directory syncing remains best-effort. This does not make a partial permanent purge reversible:
 restore still fails closed when a recorded logical entry has no surviving file.
 
+Every OpenCodex write to `config.toml` serializes through a shared advisory lock beside it,
+`config.toml.ocx-write.lock` — the same file-lock primitive as the prompt-layer store's lock,
+with token-compare release and stale takeover after ten seconds. `atomicWriteFile` made each
+individual rename atomic, but every writer still read before it renamed, so a foreign rewrite
+landing between the two was silently discarded; the lock is the mutex over that read-modify-write
+window, advisory rather than enforced because Codex itself never participates. Feature scalar
+edits and the `multi_agent_v2` transition take it for the whole staged edit; the `codex features`
+subprocess toggles (`default_mode_request_user_input`, and the transition's own flag flip) run
+under it so upstream's rewrite cannot interleave with a locked opencodex writer. Injection takes
+the file lock before the coordinator's SQLite lock N; restore takes the same order, which is why
+the journal replay, the routing removal, the provider-table re-attach, and preimage compensation
+are now one section instead of several that a foreign write could slip between. Lock order
+inside OpenCodex is file → N → store locks, documented on the lock module; the file lock is
+non-blocking by design (a sync caller's whole point is refusing fast), so an inversion fails fast
+rather than deadlocks. Multi-write operations hold the lock through the batch — the management
+route's combined PUT and injection's read-admission check run under it — and nested code paths
+receive the live handle explicitly rather than re-entering, because the primitive is not
+re-entrant. A held handle is verified against the target config's lock path before a section
+runs under it, so a handle minted on another file cannot leave its writes unserialized.
+
+The same primitive guards the other config.toml opencodex rewrites and the last unlocked
+own-state read-modify-writes. Grok injection serializes its staged `~/.grok/config.toml` edit
+through `config.toml.ocx-write.lock` beside that file, so a `grok` CLI or manual rewrite can no
+longer interleave between the scan and the atomic rename. And `links.json`
+(`link create/delete`, link compensation, the listener's own `listenerPort` persistence) plus
+`grok-reset-coupon-ledger.json` (open/settle) take the shared config mutation lock — the
+SQLite-backed cross-process mutex — around their read→transform→write windows, the same mutex
+`config.json` writers already hold. The ledger's crash-safe replay guarantee is exactly what a
+lost update there would break.
+
 Windows secret-file hardening resolves the effective token SID through an absolute, trusted
 PowerShell path before granting the owner and removing inherited broad ACL entries. The normal
 path obtains System32 from `GetSystemDirectoryW`. Windows ARM64 Bun builds that cannot execute

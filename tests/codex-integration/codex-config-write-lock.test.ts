@@ -92,6 +92,19 @@ describe("withConfigWriteLockHeld", () => {
     // must not run under it.
     expect(withConfigWriteLockHeld(path, handle, () => "no")).toEqual({ ok: false, error: "locked" });
   });
+
+  test("a handle minted on another config's lock is refused", () => {
+    const path = fixtureConfig("x = 1\n");
+    const other = fixtureConfig("y = 2\n");
+    // Live handle, wrong lock path: running under it would leave `path`'s
+    // writes unserialized while its own holders correctly believe it is free.
+    const foreign = holdLock(other);
+    try {
+      expect(withConfigWriteLockHeld(path, foreign, () => "no")).toEqual({ ok: false, error: "locked" });
+    } finally {
+      release(foreign);
+    }
+  });
 });
 
 describe("acquireConfigWriteLock", () => {
@@ -187,5 +200,52 @@ describe("heldConfigWriteLock handoff", () => {
     });
     expect(result).toEqual({ ok: false, error: CONFIG_WRITE_LOCKED_MESSAGE });
     expect(readFileSync(path, "utf8")).toBe(before);
+  });
+
+  test("scalar writers run under a caller-held lock (route batch)", () => {
+    const path = fixtureConfig("[agents]\nmax_threads = 2\n");
+    const handle = holdLock(path);
+    try {
+      // The management PUT hands its single acquired lock to every scalar
+      // writer — each must apply under it instead of refusing itself.
+      expect(setAgentsEnabled(false, path, handle)).toEqual({ ok: true, changed: true });
+      expect(readFileSync(path, "utf8")).toContain("enabled = false");
+    } finally {
+      release(handle);
+    }
+  });
+});
+
+describe("grok config.toml coverage", () => {
+  const grokConfig = "model = \"grok-4\"\n";
+
+  function fixtureGrokHome(content: string): { home: string; configPath: string } {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-cfglock-grok-"));
+    roots.push(dir);
+    const configPath = join(dir, "config.toml");
+    writeFileSync(configPath, content);
+    return { home: dir, configPath };
+  }
+
+  test("injectGrokConfig refuses fast while a holder owns ~/.grok's write lock", async () => {
+    const { home, configPath } = fixtureGrokHome(grokConfig);
+    const handle = holdLock(configPath);
+    const { injectGrokConfig } = await import("../../src/grok/inject");
+    const result = injectGrokConfig(10100, [{ id: "gpt-5.6-sol" }], { grokHome: home });
+    expect(result.ok).toBe(false);
+    expect(result.skippedReason).toBe("locked");
+    expect(readFileSync(configPath, "utf8")).toBe(grokConfig);
+    release(handle);
+  });
+
+  test("stripGrokConfig honors the same lock on its cleanup write", async () => {
+    const { home, configPath } = fixtureGrokHome(grokConfig);
+    const handle = holdLock(configPath);
+    const { stripGrokConfig } = await import("../../src/grok/inject");
+    const result = stripGrokConfig({ grokHome: home });
+    expect(result.ok).toBe(false);
+    expect(result.skippedReason).toBe("locked");
+    expect(readFileSync(configPath, "utf8")).toBe(grokConfig);
+    release(handle);
   });
 });
