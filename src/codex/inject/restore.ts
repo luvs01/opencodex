@@ -376,6 +376,16 @@ function restoreCodexConfigInlineImpl(kind: string, options: RestoreConfigOption
     const capturedBlock = options.removeProviderTable === true ? null : readOcxProviderTableBlock();
     const journal = restoreJournalState();
     if (journal.ownershipRefusal) throw new CodexHomeOwnerRefusal(journal.ownershipRefusal);
+    if (journal.lockBusy) {
+      // The file-level write lock was held by a sibling opencodex writer (the
+      // coordinated restore takes N first, then reaches the file lock inside
+      // the journal replay — the one deliberate order inversion, which must
+      // fail fast rather than wait).
+      return {
+        state: "failed", changed: false, action: "failed",
+        message: "Another process is writing Codex configuration right now. Retry shortly.",
+      };
+    }
     if (journal.unverified) {
       return {
         state: "failed", changed: false, action: "failed",

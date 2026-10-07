@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "../config";
 import { assertCodexHomeOwner, CODEX_HOME_JOURNAL_FILE, CodexHomeOwnerRefusal, opencodexHomeForInjection, readCodexHomeJournal, type CodexHomeOwnerRefusalReason } from "./codex-home-owner";
 import { hasInjectedCodexRouting } from "./injected-marker";
+import { withConfigWriteLock } from "./config-write-lock";
 import { CODEX_HOME, CODEX_CONFIG_PATH, CODEX_PROFILE_PATH } from "./paths";
 
 /**
@@ -80,6 +81,8 @@ interface Journal {
 }
 
 export interface RestoreJournalResult {
+  /** The shared config write lock was held by another opencodex writer; restore did not run. */
+  lockBusy?: true;
   /** An unchanged generated profile could not be restored; distinct from a preserved user edit. */
   profileRestoreFailed?: true;
   ownershipRefusal?: CodexHomeOwnerRefusalReason;
@@ -310,6 +313,13 @@ export function restoreJournalState(): RestoreJournalResult {
     return { configRestored: false, profileRestored: false, configRewritten: false, profileRewritten: false,
       configChanged: false, profileChanged: false, complete: false, unverified: false };
   }
+  assertCodexHomeOwner(CODEX_HOME);
+  // The whole replay — the comparison reads, the restore writes, the journal
+  // removal — is one section under the shared write lock. Reading the current
+  // bytes OUTSIDE it would compare against pre-foreign-write state and the
+  // replay could then rename a journaled original over a write that already
+  // landed, silently discarding it.
+  const locked = withConfigWriteLock(CODEX_CONFIG_PATH, () => {
   const currentConfig = existsSync(CODEX_CONFIG_PATH) ? readFileSync(CODEX_CONFIG_PATH, "utf-8") : null;
   const currentProfile = existsSync(CODEX_PROFILE_PATH) ? readFileSync(CODEX_PROFILE_PATH, "utf-8") : null;
   const comparison = compareJournalState(journal, currentConfig, currentProfile);
@@ -374,6 +384,24 @@ export function restoreJournalState(): RestoreJournalResult {
     unverified: false,
     ...(profileUnchanged && !profileRestored ? { profileRestoreFailed: true as const } : {}),
   };
+  });
+  if (!locked.ok) {
+    // Busy is not a verdict on the journal — report it as its own fact so a
+    // caller cannot mistake it for a failed or unneeded restore. Nothing was
+    // read yet, so the changed-file fields cannot be computed.
+    return {
+      configRestored: false,
+      profileRestored: false,
+      configRewritten: false,
+      profileRewritten: false,
+      configChanged: false,
+      profileChanged: false,
+      complete: false,
+      unverified: false,
+      lockBusy: true,
+    };
+  }
+  return locked.value;
 }
 
 export function restoreJournal(): boolean {

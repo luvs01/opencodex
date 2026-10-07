@@ -9,6 +9,7 @@ import {
 } from "../config";
 import { assertCodexHomeOwner, codexHomeOwnerBlocksCompensation, CodexHomeOwnerRefusal, type CodexHomeOwnerRefusalReason } from "./codex-home-owner";
 import { CodexWriteLockSkipped, withCodexWriteLock } from "./codex-write-lock";
+import { acquireConfigWriteLock, CONFIG_WRITE_LOCK_WAIT_MS, releaseConfigWriteLock, type LockHandle } from "./config-write-lock";
 import {
   localClientSkipMessage,
   localClientSkipReason,
@@ -423,7 +424,7 @@ async function injectCodexConfigImpl(
     let nativeInput = rawContent;
     let plan = admittedPlan;
     if (v1Reconcile) {
-      const reconciled = v1Reconcile.run();
+      const reconciled = v1Reconcile.run(heldConfigWriteLock);
       if (!reconciled.ok) {
         throw new CodexInjectRefusal({ success: false, message: reconciled.message });
       }
@@ -509,6 +510,16 @@ async function injectCodexConfigImpl(
   let transitionReceipt: { nativeGeneration: number; currentTxId: string } | undefined;
 
   /*
+   * The file-level write lock every config.toml writer shares (see
+   * config-write-lock.ts). The injector takes it FIRST — before the SQLite N
+   * lock below — so the feature transition and the artifact commit can never
+   * be interleaved with a scalar edit, a remove/restore transform, or a
+   * prompt-layers commit. The reconcile consumes the same handle rather than
+   * re-acquiring the file it is already holding.
+   */
+  let heldConfigWriteLock: LockHandle | undefined;
+
+  /*
    * The plan the committed write actually used: the admitted plan, or the
    * re-derivation from the post-reconcile bytes when the feature transition
    * rewrote config.toml under the lock. Every reader below the boundary takes
@@ -516,6 +527,20 @@ async function injectCodexConfigImpl(
    */
   let effectivePlan: CodexInjectionPlanOk = admittedPlan;
 
+  const configLock = await acquireConfigWriteLock(CODEX_CONFIG_PATH, {
+    timeoutMs: Math.min(options.lockTimeoutMs ?? CONFIG_WRITE_LOCK_WAIT_MS, CONFIG_WRITE_LOCK_WAIT_MS),
+  });
+  if (!configLock.ok) {
+    // Same contract as codexInjectLockOutcome's busy row: retryable, and the
+    // message names the kind of writer that blocked us.
+    return {
+      success: false,
+      retryable: true,
+      message: "Another process is writing Codex configuration right now. Retry shortly.",
+    };
+  }
+  heldConfigWriteLock = configLock.handle;
+  try {
   if (eligibility.kind === "legacy-uncoordinated") {
     const applyLegacy = (): CodexInjectResult | undefined => {
       const legacyGateSnapshot = loadConfig();
@@ -675,6 +700,10 @@ async function injectCodexConfigImpl(
       coordinated.value.receipt.currentTxId,
     );
     transitionReceipt = coordinated.value.receipt;
+  }
+  } finally {
+    releaseConfigWriteLock(configLock.handle);
+    heldConfigWriteLock = undefined;
   }
   // Legacy mode still forward-tags history so re-tagged threads stay listable. Design B needs
   // the opposite: a one-time migration of previously re-tagged threads BACK to openai (restore
