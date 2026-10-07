@@ -146,4 +146,19 @@ describe("ChatGPT OAuth refresh failure classification", () => {
     caller.abort();
     expect(observed!.aborted).toBe(true);
   });
+
+  test("the fetch deadline aborts a stalled refresh", async () => {
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () =>
+          reject(signal.reason ?? new DOMException("aborted", "AbortError")));
+      })) as typeof fetch;
+
+    const start = Date.now();
+    // Without the deadline this hung fetch would pin the refresh intent lock
+    // forever; an injectable bound proves the composite signal fires on its own.
+    await expect(refreshChatGPTToken("secret", { timeoutMs: 50 })).rejects.toThrow();
+    expect(Date.now() - start).toBeLessThan(5_000);
+  });
 });
