@@ -423,16 +423,12 @@ async function injectCodexConfigImpl(
     /*
      * Re-admission under the file lock: `rawContent` and `admittedPlan` were
      * read before this section acquired it, so the file may have moved while
-     * the lock was being waited out. Committing the stale plan would rename
-     * over bytes a competing writer already landed — the same fact the
-     * coordinated witness refuses on, which the legacy path has to check for
-     * itself. Refuse and let the caller retry; admission re-reads the fresh
-     * bytes on the next pass.
+     * the lock was being waited out — committing the stale plan would rename
+     * over bytes a competing writer landed. Refuse retryably; the next pass
+     * re-reads fresh bytes (the same witness check the coordinated path does).
      */
-    const underLockContent = existsSync(CODEX_CONFIG_PATH)
-      ? readFileSync(CODEX_CONFIG_PATH, "utf-8")
-      : null;
-    if (underLockContent !== (missingConfig ? null : rawContent)) {
+    if ((existsSync(CODEX_CONFIG_PATH) ? readFileSync(CODEX_CONFIG_PATH, "utf-8") : null)
+      !== (missingConfig ? null : rawContent)) {
       throw new CodexInjectRefusal({
         success: false,
         retryable: true,
