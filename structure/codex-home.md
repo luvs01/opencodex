@@ -312,7 +312,8 @@ The same primitive guards the other config.toml opencodex rewrites and the last 
 own-state read-modify-writes. Grok injection serializes its staged `~/.grok/config.toml` edit
 through `config.toml.ocx-write.lock` beside that file, so two cooperating opencodex writers can no
 longer interleave between the scan and the atomic rename — a `grok` CLI or manual rewrite honours
-no such lock and can still race the window, which the injection witness and drift healer absorb. And `links.json`
+no such lock and can still race the window, and unlike the Codex injector there is no witness or
+drift healer on this path to absorb it. And `links.json`
 (`link create/delete`, link compensation, the listener's own `listenerPort` persistence) plus
 `grok-reset-coupon-ledger.json` (open/settle) take the shared config mutation lock — the
 SQLite-backed cross-process mutex — around their read→transform→write windows, the same mutex

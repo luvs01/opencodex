@@ -262,9 +262,10 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
     }
 
     // Settlement after a successful redemption is a ledger write, not a
-    // redemption step: if it throws, the operation must not be reported as
-    // redeem_failed — that reply invites a retry the open ledger record would
-    // honour by spending a second coupon.
+    // redemption step: the coupon IS spent, so any failure to record it must
+    // still answer as a redemption — reporting a failure invites a retry the
+    // still-open ledger record would honour by spending a second coupon.
+    let settlementRecorded = true;
     try {
       recordGrokResetCouponSettlement({
         operationId: effectiveOpId,
@@ -272,18 +273,8 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
         code: "redeemed",
         status: "success",
       });
-    } catch (err) {
-      return jsonResponse(
-        {
-          error: {
-            code: "settlement_record_failed",
-            message: `coupon redeemed but settlement could not be recorded: ${err instanceof Error ? err.message : String(err)}`,
-          },
-        },
-        500,
-        req,
-        config,
-      );
+    } catch {
+      settlementRecorded = false;
     }
 
     return jsonResponse(
@@ -294,6 +285,7 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
           tokenId: resolvedTokenId,
           accountId,
           operationId: effectiveOpId,
+          settlementRecorded,
         },
         200,
         req,
