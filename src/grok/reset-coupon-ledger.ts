@@ -25,7 +25,8 @@ interface GrokResetCouponOperationState {
   accountId: string;
   tokenId?: string;
   // "attempted" sits between open and settled: the spend call already fired,
-  // so the operation must never execute again — any non-open status replays.
+  // so the operation must never execute again. Its replay carries no code —
+  // the route reconciles it against upstream instead of trusting a status.
   status: "open" | "attempted" | "settled" | "failed";
   code?: string;
   createdAt: number;
@@ -58,12 +59,13 @@ function readGrokCouponLedger(filePath: string): GrokResetCouponLedger {
 }
 
 function writeGrokCouponLedger(filePath: string, ledger: GrokResetCouponLedger, now = Date.now()): void {
-  // Prune settled/failed operations older than 30 days to avoid unbounded growth
+  // Prune every record past the 30-day window — including "open" and
+  // "attempted". An unresolved attempt is only reconcilable while its coupon
+  // is still valid (hours, not months), and a ledger that strands records
+  // forever would eventually fill the operation cap with dead attempts.
   const retentionCutoff = now - 30 * 24 * 60 * 60_000;
   ledger.operations = Object.fromEntries(
-    Object.entries(ledger.operations).filter(
-      ([, op]) => op.status === "open" || op.status === "attempted" || op.updatedAt > retentionCutoff,
-    ),
+    Object.entries(ledger.operations).filter(([, op]) => op.updatedAt > retentionCutoff),
   );
   atomicWriteFile(filePath, JSON.stringify(ledger, null, 2));
 }
@@ -92,8 +94,8 @@ export function openGrokResetCouponOperation(
       return { kind: "identity-mismatch", operationId: identity.operationId };
     }
     if (existing.status !== "open") {
-      // Durably settled already: replay the recorded outcome instead of
-      // trusting upstream idempotency for an irreversible spend.
+      // Non-open: replay the recorded outcome. "attempted" records carry no
+      // code — the caller must reconcile them against upstream, never re-run.
       return {
         kind: "replay",
         operationId: identity.operationId,
@@ -132,7 +134,8 @@ export function openGrokResetCouponOperation(
  * Flip an open operation to `attempted` BEFORE the upstream spend call. The
  * write happens while nothing is irreversible yet: if it throws, the caller
  * aborts without spending; if a later settle write dies instead, the
- * operation still refuses re-execution because it is no longer "open".
+ * operation still refuses blind re-execution — the next open returns a
+ * code-less replay the route resolves via the upstream remaining-resets list.
  */
 export function markGrokResetCouponAttempt(
   operationId: string,

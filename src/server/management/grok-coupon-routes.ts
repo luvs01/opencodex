@@ -172,18 +172,83 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       operationId: effectiveOpId,
     });
 
+    let resolvedTokenId = requestedTokenId;
+    let resumingAttempt = false;
+
     if (opRecord.kind === "replay") {
-      return jsonResponse(
-        {
-          code: opRecord.code,
-          replayed: true,
-          tokenId: opRecord.tokenId,
-          settledAt: opRecord.settledAt,
-        },
-        200,
-        req,
-        config,
-      );
+      if (opRecord.code !== undefined) {
+        return jsonResponse(
+          {
+            code: opRecord.code,
+            replayed: true,
+            tokenId: opRecord.tokenId,
+            settledAt: opRecord.settledAt,
+          },
+          200,
+          req,
+          config,
+        );
+      }
+      // "attempted" with no recorded outcome: the spend call fired (or the
+      // process died right after the mark) but nothing was settled. Never
+      // replay this as a success — reconcile against upstream instead. A
+      // token missing from the remaining list was consumed; a token still
+      // listed means the redeem never landed and the op can safely resume.
+      if (opRecord.tokenId === undefined) {
+        // An attempted record always stores its token — an absent one means
+        // the ledger was hand-edited; refuse rather than guess at a spend.
+        return jsonResponse(
+          {
+            error: {
+              code: "attempt_unresolved",
+              message: "Attempted operation has no recorded token; retry with a new operationId",
+            },
+          },
+          409,
+          req,
+          config,
+        );
+      }
+      let remainingTokens: GrokResetCoupon[];
+      try {
+        const remaining = await getGrokRemainingResets({ accessToken: tokenSnapshot.accessToken });
+        remainingTokens = remaining.tokens;
+      } catch (err) {
+        return jsonResponse(
+          { error: { code: "attempt_reconcile_failed", message: err instanceof Error ? err.message : String(err) } },
+          502,
+          req,
+          config,
+        );
+      }
+      if (!remainingTokens.some((t) => t.tokenId === opRecord.tokenId)) {
+        try {
+          recordGrokResetCouponSettlement({
+            operationId: effectiveOpId,
+            tokenId: opRecord.tokenId,
+            code: "redeemed",
+            status: "success",
+          });
+        } catch {
+          // Settle failed again — the op stays "attempted" and the next retry
+          // reconciles the same way; the consumed token still bars a re-spend.
+        }
+        return jsonResponse(
+          {
+            success: true,
+            code: "redeemed",
+            replayed: true,
+            tokenId: opRecord.tokenId,
+            accountId,
+            operationId: effectiveOpId,
+          },
+          200,
+          req,
+          config,
+        );
+      }
+      resolvedTokenId = opRecord.tokenId;
+      resumingAttempt = true;
     }
 
     if (opRecord.kind === "identity-mismatch") {
@@ -214,8 +279,7 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       );
     }
 
-    let resolvedTokenId = requestedTokenId;
-    if (!resolvedTokenId) {
+    if (!resumingAttempt && !resolvedTokenId) {
       try {
         const remaining = await getGrokRemainingResets({ accessToken: tokenSnapshot.accessToken });
         if (!remaining.tokens || remaining.tokens.length === 0) {
@@ -242,9 +306,20 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       }
     }
 
+    if (resolvedTokenId === undefined) {
+      // Unreachable: every path above either resolves a token or returns.
+      return jsonResponse(
+        { error: { code: "token_unresolved", message: "No reset coupon token could be resolved" } },
+        500,
+        req,
+        config,
+      );
+    }
+
     // Record the attempt BEFORE the spend call: a crash between redemption and
     // settlement must still leave the operation non-open so a retry can never
     // execute it again. A failed mark write aborts here — nothing was spent.
+    // A resumed attempt is already marked; the call is a no-op for it.
     try {
       markGrokResetCouponAttempt(effectiveOpId, resolvedTokenId);
     } catch (err) {
