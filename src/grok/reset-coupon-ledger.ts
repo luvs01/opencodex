@@ -24,7 +24,9 @@ export interface GrokResetCouponOperationRecord {
 interface GrokResetCouponOperationState {
   accountId: string;
   tokenId?: string;
-  status: "open" | "settled" | "failed";
+  // "attempted" sits between open and settled: the spend call already fired,
+  // so the operation must never execute again — any non-open status replays.
+  status: "open" | "attempted" | "settled" | "failed";
   code?: string;
   createdAt: number;
   updatedAt: number;
@@ -60,7 +62,7 @@ function writeGrokCouponLedger(filePath: string, ledger: GrokResetCouponLedger, 
   const retentionCutoff = now - 30 * 24 * 60 * 60_000;
   ledger.operations = Object.fromEntries(
     Object.entries(ledger.operations).filter(
-      ([, op]) => op.status === "open" || op.updatedAt > retentionCutoff,
+      ([, op]) => op.status === "open" || op.status === "attempted" || op.updatedAt > retentionCutoff,
     ),
   );
   atomicWriteFile(filePath, JSON.stringify(ledger, null, 2));
@@ -123,6 +125,30 @@ export function openGrokResetCouponOperation(
     accountId: identity.accountId,
     tokenId: identity.tokenId,
   };
+  });
+}
+
+/**
+ * Flip an open operation to `attempted` BEFORE the upstream spend call. The
+ * write happens while nothing is irreversible yet: if it throws, the caller
+ * aborts without spending; if a later settle write dies instead, the
+ * operation still refuses re-execution because it is no longer "open".
+ */
+export function markGrokResetCouponAttempt(
+  operationId: string,
+  tokenId: string,
+  now = Date.now(),
+  journalPath?: string,
+): void {
+  withConfigMutationLockSync(() => {
+    const filePath = journalPath ?? grokCouponJournalPath();
+    const ledger = readGrokCouponLedger(filePath);
+    const existing = ledger.operations[operationId];
+    if (!existing || existing.status !== "open") return;
+    existing.status = "attempted";
+    existing.tokenId = tokenId;
+    existing.updatedAt = now;
+    writeGrokCouponLedger(filePath, ledger, now);
   });
 }
 

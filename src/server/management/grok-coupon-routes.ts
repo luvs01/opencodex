@@ -20,6 +20,7 @@ import {
   type GrokResetCoupon,
 } from "../../grok/reset-coupons";
 import {
+  markGrokResetCouponAttempt,
   openGrokResetCouponOperation,
   recordGrokResetCouponSettlement,
   type GrokResetCouponOperationRecord,
@@ -241,18 +242,37 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       }
     }
 
+    // Record the attempt BEFORE the spend call: a crash between redemption and
+    // settlement must still leave the operation non-open so a retry can never
+    // execute it again. A failed mark write aborts here — nothing was spent.
+    try {
+      markGrokResetCouponAttempt(effectiveOpId, resolvedTokenId);
+    } catch (err) {
+      return jsonResponse(
+        { error: { code: "attempt_mark_failed", message: err instanceof Error ? err.message : String(err) } },
+        500,
+        req,
+        config,
+      );
+    }
+
     try {
       await redeemGrokResetCoupon({
         accessToken: tokenSnapshot.accessToken,
         tokenId: resolvedTokenId,
       });
     } catch (err) {
-      recordGrokResetCouponSettlement({
-        operationId: effectiveOpId,
-        tokenId: resolvedTokenId,
-        code: "redeem_failed",
-        status: "failed",
-      });
+      try {
+        recordGrokResetCouponSettlement({
+          operationId: effectiveOpId,
+          tokenId: resolvedTokenId,
+          code: "redeem_failed",
+          status: "failed",
+        });
+      } catch {
+        // The operation stays "attempted" — non-open, so a retry still cannot
+        // re-execute; the failure is only lost from the record, not replayed.
+      }
       return jsonResponse(
         { error: { code: "redeem_failed", message: err instanceof Error ? err.message : String(err) } },
         502,
