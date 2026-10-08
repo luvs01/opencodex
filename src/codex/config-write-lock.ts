@@ -22,12 +22,12 @@
  *   be serialized from here. That residual is why the injector's witness and
  *   the drift healer still exist.
  * - Lock ordering: prompt-layers commit() takes the prompt store lock first,
- *   then this one; the injector takes this one first, then N, then C. The one
- *   inversion is the coordinated restore path (N, then this lock inside
- *   `restoreJournalState`/`removeCodexConfig`), and it is safe BECAUSE this
- *   lock never blocks: the second acquire fails instantly, its holder unwinds
- *   N, and the other writer's bounded wait proceeds. No order here can
- *   deadlock.
+ *   then this one; the injector takes this one first, then N, then C — and the
+ *   coordinated restore path follows that same file-first order
+ *   (`restoreNativeCodexAsyncImpl` acquires this lock before its `withCodexWriteLock`
+ *   journal replay), so no cross-lock inversion remains. Even if one ever did,
+ *   it could not deadlock: this lock never blocks, so a second acquire fails
+ *   instantly and the other writer's bounded wait proceeds.
  * - The injector's held section contains awaits (`withCodexWriteLock` is
  *   async), so the lock must NOT be implicitly reentrant — a same-process
  *   writer that slipped inside on a process-global check would interleave
