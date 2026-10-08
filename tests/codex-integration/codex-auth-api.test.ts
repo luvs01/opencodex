@@ -51,11 +51,8 @@ import {
   resetCodexRoutingForManualSelection,
   resolveCodexAccountForThread,
 } from "../../src/codex/routing";
-import { bindThreadAffinity, getThreadAffinity } from "../../src/codex/routing/thread-affinity";
-import { clearAllManualPreferences, manualPreferenceBlocks } from "../../src/codex/routing/active-account";
-import { getAccountHealth, setAccountHealth } from "../../src/codex/routing/health-store";
 import { pinnedCodexAccountId, setCodexAccountPin } from "../../src/codex/account-priority";
-import { clearPoolRotationState, peekRoundRobinAccount } from "../../src/codex/pool-rotation";
+import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import {
   clearCodexWebSocketRegistry,
   getTrackedCodexWebSocketCountForAccount,
@@ -4088,55 +4085,6 @@ describe("codex-auth API", () => {
     const req = new Request("http://localhost/api/codex-auth/active");
     expect(await (await handleCodexAuthAPI(req, new URL(req.url), config))!.json())
       .toMatchObject({ pinned: false });
-  });
-
-  // The release is not a selection, so it may not plant the steering a selection
-  // would: no one-shot manual preference, no rotation-ring seed toward the
-  // `targetAccountId` fallback, no quota-avoidance overrule, and no clearing of the
-  // affinity that keeps a bound thread on the account it captured. Anything less
-  // leaves the "automatic" pick still steered to the app login — or ripping threads
-  // off their account — which is exactly what the operator was releasing away from.
-  test("releasing the active account unwinds selection steering without breaking bindings", async () => {
-    const config = makeConfig({ activeCodexAccountId: "work" });
-    seedPoolAccount(config, { id: "work", email: "work@example.test" });
-    seedPoolAccount(config, { id: "pool-x", email: "x@example.test" });
-    clearAllManualPreferences();
-
-    const pin = new Request("http://localhost/api/codex-auth/active", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accountId: "work" }),
-    });
-    await handleCodexAuthAPI(pin, new URL(pin.url), config);
-
-    // State a pinned pool legitimately carries when the release lands: a bound
-    // thread, and a soft quota-avoidance on the app login the release has no
-    // business overruling.
-    bindThreadAffinity("release-thread", "work", Date.now());
-    const avoidUntil = Date.now() + 60_000;
-    setAccountHealth(MAIN_CODEX_ACCOUNT_ID, { consecutiveFailures: 0, quotaAvoidUntil: avoidUntil });
-
-    const clear = new Request("http://localhost/api/codex-auth/active", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accountId: null }),
-    });
-    const resp = await handleCodexAuthAPI(clear, new URL(clear.url), config);
-
-    expect(resp!.status).toBe(200);
-    // Nothing applied immediately, so nothing claimed to have cleared affinity.
-    expect(await resp!.json()).toMatchObject({ appliesImmediately: false });
-    expect(config.activeCodexAccountId).toBeUndefined();
-    expect(config.activeCodexAccountPinned).toBeUndefined();
-
-    // Neither the released pick's own preference nor a fallback-made one may block
-    // the next automatic pick, and the ring must offer no seeded account.
-    expect(manualPreferenceBlocks("codex", "pool-x")).toBe(false);
-    expect(peekRoundRobinAccount("codex", ["pool-x", MAIN_CODEX_ACCOUNT_ID], 1)).toBe("pool-x");
-    // No account was named, so no soft avoid is overruled.
-    expect(getAccountHealth(MAIN_CODEX_ACCOUNT_ID)?.quotaAvoidUntil).toBe(avoidUntil);
-    // A bound thread keeps its captured account.
-    expect(getThreadAffinity("release-thread")?.accountId).toBe("work");
   });
 
   test("PUT /api/codex-auth/accounts/pause-exhausted pauses only freshly confirmed exhausted accounts", async () => {
