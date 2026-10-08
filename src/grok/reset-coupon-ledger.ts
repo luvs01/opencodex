@@ -20,6 +20,9 @@ export interface GrokResetCouponOperationRecord {
   /** Token expiry (ms) captured when the attempt was marked, if known — used
    * at reconcile time to tell a consumed coupon from one that merely lapsed. */
   tokenValidityEnd?: number;
+  /** When the attempt was marked (ms) — set only on an "attempted" replay so
+   * the route can refuse to resume an attempt that may still be in flight. */
+  attemptedAt?: number;
   code?: string;
   settledAt?: number;
 }
@@ -115,6 +118,7 @@ export function openGrokResetCouponOperation(
         accountId: existing.accountId,
         tokenId: existing.tokenId,
         tokenValidityEnd: existing.tokenValidityEnd,
+        attemptedAt: existing.status === "attempted" ? existing.updatedAt : undefined,
         code: existing.code,
         settledAt: existing.updatedAt,
       };

@@ -53,9 +53,11 @@ describe("grok coupon attempt reconciliation", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  const STALE = 120_000;
+
   it("resumes an interrupted attempt when the coupon is still listed", async () => {
     openGrokResetCouponOperation({ accountId: "acc-1", tokenId: "tok-live", operationId: "11111111-1111-4111-8111-111111111111" });
-    markGrokResetCouponAttempt("11111111-1111-4111-8111-111111111111", "tok-live");
+    markGrokResetCouponAttempt("11111111-1111-4111-8111-111111111111", "tok-live", Date.now() - STALE);
 
     const res = await handleGrokCouponRoutes(consumeRequest("11111111-1111-4111-8111-111111111111", "tok-live"));
     expect(res).not.toBeNull();
@@ -71,7 +73,7 @@ describe("grok coupon attempt reconciliation", () => {
 
   it("settles an interrupted attempt as redeemed when the token is gone but still in-window", async () => {
     openGrokResetCouponOperation({ accountId: "acc-1", tokenId: "tok-live", operationId: "22222222-2222-4222-8222-222222222222" });
-    markGrokResetCouponAttempt("22222222-2222-4222-8222-222222222222", "tok-live", Date.now(), undefined, Date.now() + 86_400_000);
+    markGrokResetCouponAttempt("22222222-2222-4222-8222-222222222222", "tok-live", Date.now() - STALE, undefined, Date.now() + 86_400_000);
     remainingSpy.mockResolvedValue({ tokens: [] } as never);
 
     const res = await handleGrokCouponRoutes(consumeRequest("22222222-2222-4222-8222-222222222222", "tok-live"));
@@ -81,15 +83,39 @@ describe("grok coupon attempt reconciliation", () => {
     expect(redeemSpy).not.toHaveBeenCalled();
   });
 
-  it("reports coupon_expired when the token lapsed during an interrupted attempt", async () => {
+  it("reports attempt_unresolved when the token lapsed during an interrupted attempt", async () => {
     openGrokResetCouponOperation({ accountId: "acc-1", tokenId: "tok-live", operationId: "33333333-3333-4333-8333-333333333333" });
     markGrokResetCouponAttempt("33333333-3333-4333-8333-333333333333", "tok-live", Date.now() - 3_600_000, undefined, Date.now() - 60_000);
     remainingSpy.mockResolvedValue({ tokens: [] } as never);
 
     const res = await handleGrokCouponRoutes(consumeRequest("33333333-3333-4333-8333-333333333333", "tok-live"));
-    expect(res!.status).toBe(410);
+    expect(res!.status).toBe(409);
     const body = await res!.json();
-    expect(body.error.code).toBe("coupon_expired");
+    expect(body.error.code).toBe("attempt_unresolved");
+    expect(redeemSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume an attempt that may still be in flight", async () => {
+    openGrokResetCouponOperation({ accountId: "acc-1", tokenId: "tok-live", operationId: "55555555-5555-4555-8555-555555555555" });
+    markGrokResetCouponAttempt("55555555-5555-4555-8555-555555555555", "tok-live");
+
+    const res = await handleGrokCouponRoutes(consumeRequest("55555555-5555-4555-8555-555555555555", "tok-live"));
+    expect(res!.status).toBe(409);
+    const body = await res!.json();
+    expect(body.error.code).toBe("attempt_in_progress");
+    // No upstream calls at all — the in-flight window is checked first.
+    expect(remainingSpy).not.toHaveBeenCalled();
+    expect(redeemSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects a retry that names a different coupon than the recorded attempt", async () => {
+    openGrokResetCouponOperation({ accountId: "acc-1", tokenId: "tok-live", operationId: "66666666-6666-4666-8666-666666666666" });
+    markGrokResetCouponAttempt("66666666-6666-4666-8666-666666666666", "tok-live", Date.now() - STALE);
+
+    const res = await handleGrokCouponRoutes(consumeRequest("66666666-6666-4666-8666-666666666666", "tok-other"));
+    expect(res!.status).toBe(409);
+    const body = await res!.json();
+    expect(body.error.code).toBe("operation_token_mismatch");
     expect(redeemSpy).not.toHaveBeenCalled();
   });
 

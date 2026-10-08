@@ -42,6 +42,12 @@ export interface GrokConsumeCouponRequestBody {
   operationId?: string;
 }
 
+// An "attempted" operation younger than this may still be in flight in the
+// request that marked it — resuming it would send a second spend upstream.
+// Generous vs the upstream redeem call's own timeout; a crashed request is
+// stranded past the window and only then resumable.
+const GROK_COUPON_ATTEMPT_STALE_MS = 90_000;
+
 function resolveTargetAccountId(requestedAccountId?: string): string {
   if (requestedAccountId && requestedAccountId.trim() !== "") {
     return requestedAccountId.trim();
@@ -195,6 +201,22 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       // replay this as a success — reconcile against upstream instead. A
       // token missing from the remaining list was consumed; a token still
       // listed means the redeem never landed and the op can safely resume.
+      if (requestedTokenId !== undefined && requestedTokenId !== opRecord.tokenId) {
+        // The retry names a different coupon than the one marked: spending
+        // either of them would surprise the caller — refuse and let them
+        // retry with the recorded token or a fresh operationId.
+        return jsonResponse(
+          {
+            error: {
+              code: "operation_token_mismatch",
+              message: "Operation was attempted with a different coupon; retry with the same tokenId or a new operationId",
+            },
+          },
+          409,
+          req,
+          config,
+        );
+      }
       if (opRecord.tokenId === undefined) {
         // An attempted record always stores its token — an absent one means
         // the ledger was hand-edited; refuse rather than guess at a spend.
@@ -203,6 +225,25 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
             error: {
               code: "attempt_unresolved",
               message: "Attempted operation has no recorded token; retry with a new operationId",
+            },
+          },
+          409,
+          req,
+          config,
+        );
+      }
+      if (
+        opRecord.attemptedAt === undefined ||
+        Date.now() - opRecord.attemptedAt < GROK_COUPON_ATTEMPT_STALE_MS
+      ) {
+        // A fresh attempt may still be in flight in the original request —
+        // resuming it here would send a second spend upstream. Only an
+        // attempt older than the stale window is provably stranded.
+        return jsonResponse(
+          {
+            error: {
+              code: "attempt_in_progress",
+              message: "A redemption attempt for this operation is recent and may still be running; retry later",
             },
           },
           409,
@@ -225,35 +266,11 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       if (!remainingTokens.some((t) => t.tokenId === opRecord.tokenId)) {
         // Absent from the remaining list: either the spend landed or the
         // coupon merely lapsed. Only a recorded validity window still in the
-        // future proves consumption — an already-expired token must not be
-        // reported as redeemed.
+        // future proves consumption; out-of-window and unrecorded cases are
+        // undecidable — the spend may have succeeded AND lapsed — so report
+        // nothing instead of fabricating an outcome either way.
         const validityEnd = opRecord.tokenValidityEnd;
-        if (validityEnd !== undefined && validityEnd <= Date.now()) {
-          try {
-            recordGrokResetCouponSettlement({
-              operationId: effectiveOpId,
-              tokenId: opRecord.tokenId,
-              code: "coupon_expired",
-              status: "failed",
-            });
-          } catch {
-            // Op stays "attempted"; the next retry reconciles the same way.
-          }
-          return jsonResponse(
-            {
-              error: {
-                code: "coupon_expired",
-                message: "Coupon expired before its interrupted redemption could be verified",
-              },
-            },
-            410,
-            req,
-            config,
-          );
-        }
-        if (validityEnd === undefined) {
-          // No recorded window: cannot honestly distinguish a spent coupon
-          // from an expired one — refuse rather than fabricate an outcome.
+        if (validityEnd === undefined || validityEnd <= Date.now()) {
           return jsonResponse(
             {
               error: {
