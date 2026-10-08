@@ -17,6 +17,9 @@ export interface GrokResetCouponOperationRecord {
   operationId: string;
   accountId?: string;
   tokenId?: string;
+  /** Token expiry (ms) captured when the attempt was marked, if known — used
+   * at reconcile time to tell a consumed coupon from one that merely lapsed. */
+  tokenValidityEnd?: number;
   code?: string;
   settledAt?: number;
 }
@@ -29,6 +32,7 @@ interface GrokResetCouponOperationState {
   // the route reconciles it against upstream instead of trusting a status.
   status: "open" | "attempted" | "settled" | "failed";
   code?: string;
+  tokenValidityEnd?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -84,6 +88,15 @@ export function openGrokResetCouponOperation(
   const filePath = journalPath ?? grokCouponJournalPath();
   const ledger = readGrokCouponLedger(filePath);
 
+  // Prune BEFORE the capacity check: expiry is enforced on write, so a ledger
+  // full of stale records would otherwise reject every new operation forever
+  // (the prune path inside writeGrokCouponLedger is never reached when all
+  // openings are rejected).
+  const retentionCutoff = now - 30 * 24 * 60 * 60_000;
+  ledger.operations = Object.fromEntries(
+    Object.entries(ledger.operations).filter(([, op]) => op.updatedAt > retentionCutoff),
+  );
+
   if (Object.keys(ledger.operations).length >= MAX_GROK_RESET_COUPON_OPERATION_IDS) {
     return { kind: "capacity", operationId: identity.operationId };
   }
@@ -101,6 +114,7 @@ export function openGrokResetCouponOperation(
         operationId: identity.operationId,
         accountId: existing.accountId,
         tokenId: existing.tokenId,
+        tokenValidityEnd: existing.tokenValidityEnd,
         code: existing.code,
         settledAt: existing.updatedAt,
       };
@@ -142,6 +156,7 @@ export function markGrokResetCouponAttempt(
   tokenId: string,
   now = Date.now(),
   journalPath?: string,
+  tokenValidityEnd?: number,
 ): void {
   withConfigMutationLockSync(() => {
     const filePath = journalPath ?? grokCouponJournalPath();
@@ -150,6 +165,7 @@ export function markGrokResetCouponAttempt(
     if (!existing || existing.status !== "open") return;
     existing.status = "attempted";
     existing.tokenId = tokenId;
+    if (tokenValidityEnd !== undefined) existing.tokenValidityEnd = tokenValidityEnd;
     existing.updatedAt = now;
     writeGrokCouponLedger(filePath, ledger, now);
   });

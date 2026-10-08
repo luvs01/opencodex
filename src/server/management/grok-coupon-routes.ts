@@ -173,6 +173,7 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
     });
 
     let resolvedTokenId = requestedTokenId;
+    let resolvedTokenValidityEnd: number | undefined;
     let resumingAttempt = false;
 
     if (opRecord.kind === "replay") {
@@ -222,6 +223,49 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
         );
       }
       if (!remainingTokens.some((t) => t.tokenId === opRecord.tokenId)) {
+        // Absent from the remaining list: either the spend landed or the
+        // coupon merely lapsed. Only a recorded validity window still in the
+        // future proves consumption — an already-expired token must not be
+        // reported as redeemed.
+        const validityEnd = opRecord.tokenValidityEnd;
+        if (validityEnd !== undefined && validityEnd <= Date.now()) {
+          try {
+            recordGrokResetCouponSettlement({
+              operationId: effectiveOpId,
+              tokenId: opRecord.tokenId,
+              code: "coupon_expired",
+              status: "failed",
+            });
+          } catch {
+            // Op stays "attempted"; the next retry reconciles the same way.
+          }
+          return jsonResponse(
+            {
+              error: {
+                code: "coupon_expired",
+                message: "Coupon expired before its interrupted redemption could be verified",
+              },
+            },
+            410,
+            req,
+            config,
+          );
+        }
+        if (validityEnd === undefined) {
+          // No recorded window: cannot honestly distinguish a spent coupon
+          // from an expired one — refuse rather than fabricate an outcome.
+          return jsonResponse(
+            {
+              error: {
+                code: "attempt_unresolved",
+                message: "Interrupted redemption could not be verified against upstream; check the account's remaining resets",
+              },
+            },
+            409,
+            req,
+            config,
+          );
+        }
         try {
           recordGrokResetCouponSettlement({
             operationId: effectiveOpId,
@@ -265,7 +309,7 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       );
     }
 
-    if (opRecord.kind !== "execute") {
+    if (opRecord.kind !== "execute" && !resumingAttempt) {
       return jsonResponse(
         {
           error: {
@@ -279,10 +323,25 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       );
     }
 
-    if (!resumingAttempt && !resolvedTokenId) {
+    if (!resumingAttempt) {
+      // Always consult the upstream list: it resolves the token when the
+      // caller omits one, and — for an explicit tokenId — proves the coupon
+      // still exists while capturing its validity window so an interrupted
+      // attempt can later tell "spent" from "expired".
+      let tokens: GrokResetCoupon[];
       try {
         const remaining = await getGrokRemainingResets({ accessToken: tokenSnapshot.accessToken });
-        if (!remaining.tokens || remaining.tokens.length === 0) {
+        tokens = remaining.tokens ?? [];
+      } catch (err) {
+        return jsonResponse(
+          { error: { code: "fetch_resets_failed", message: err instanceof Error ? err.message : String(err) } },
+          502,
+          req,
+          config,
+        );
+      }
+      if (!resolvedTokenId) {
+        if (tokens.length === 0) {
           recordGrokResetCouponSettlement({
             operationId: effectiveOpId,
             code: "no_coupons_available",
@@ -295,15 +354,32 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
             config,
           );
         }
-        resolvedTokenId = remaining.tokens[0].tokenId;
-      } catch (err) {
+        resolvedTokenId = tokens[0].tokenId;
+      }
+      const match = tokens.find((t) => t.tokenId === resolvedTokenId);
+      if (!match) {
+        // The requested coupon is already consumed or expired upstream —
+        // redeeming it would only surface an upstream error.
+        recordGrokResetCouponSettlement({
+          operationId: effectiveOpId,
+          tokenId: resolvedTokenId,
+          code: "coupon_unavailable",
+          status: "failed",
+        });
         return jsonResponse(
-          { error: { code: "fetch_resets_failed", message: err instanceof Error ? err.message : String(err) } },
-          502,
+          {
+            error: {
+              code: "coupon_unavailable",
+              message: "The requested reset coupon is no longer available upstream",
+            },
+          },
+          409,
           req,
           config,
         );
       }
+      const parsedEnd = Date.parse(match.validityEnd);
+      if (!Number.isNaN(parsedEnd)) resolvedTokenValidityEnd = parsedEnd;
     }
 
     if (resolvedTokenId === undefined) {
@@ -321,7 +397,7 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
     // execute it again. A failed mark write aborts here — nothing was spent.
     // A resumed attempt is already marked; the call is a no-op for it.
     try {
-      markGrokResetCouponAttempt(effectiveOpId, resolvedTokenId);
+      markGrokResetCouponAttempt(effectiveOpId, resolvedTokenId, undefined, undefined, resolvedTokenValidityEnd);
     } catch (err) {
       return jsonResponse(
         { error: { code: "attempt_mark_failed", message: err instanceof Error ? err.message : String(err) } },
