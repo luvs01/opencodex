@@ -8,7 +8,7 @@ import { deleteCodexAccount } from "../account-lifecycle";
 import { isCodexAccountPaused, setCodexAccountPaused } from "../account-pause";
 import { setAllCodexAccountsCreditsAfterLimit, setCodexAccountCreditsAfterLimit } from "../account-credit-use";
 import { clearCodexAccountPin, isCodexAccountPriorityKey, pinnedCodexAccountId, setCodexAccountPin, setCodexAccountPriority } from "../account-priority";
-import { codexAccountPinDrainReason, codexQuotaScopeForModel, clearCodexAccountCooldown, clearThreadAccountMapForAccount, getEffectiveActiveCodexAccountId, isEffectiveCodexAccountPinned, resetCodexRoutingForManualSelection } from "../routing";
+import { codexAccountPinDrainReason, codexQuotaScopeForModel, clearCodexAccountCooldown, clearThreadAccountMapForAccount, getEffectiveActiveCodexAccountId, isEffectiveCodexAccountPinned, resetCodexRoutingForClearedSelection, resetCodexRoutingForManualSelection } from "../routing";
 import { DEFAULT_ACCOUNT_PRIORITY, MAX_ACCOUNT_PRIORITY, MIN_ACCOUNT_PRIORITY, normalizeAccountPoolStickyLimit, normalizeCodexAccountPoolStrategy, parseAccountPoolStickyLimit, parseCodexAccountPoolStrategy, parseAccountPriority } from "../pool-rotation";
 import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
@@ -273,24 +273,34 @@ export async function handleCodexAuthAPI(
     // fallback would leave a pin that no effective active account matches, which
     // `isEffectiveCodexAccountPinned` reports as unpinned while the tier filter still
     // honours it as a ceiling — invisibly capping the pool at the main account's tier.
-    if (body.accountId == null) clearCodexAccountPin(runtimeConfig);
-    else setCodexAccountPin(runtimeConfig, targetAccountId);
-    resetCodexRoutingForManualSelection(targetAccountId);
+    if (body.accountId == null) {
+      clearCodexAccountPin(runtimeConfig);
+      // A release names no replacement, so it must not run the selection reset:
+      // `resetCodexRoutingForManualSelection(targetAccountId)` would fall back to
+      // __main__ and record it as the operator's pick — seeding a manual preference
+      // and RR ring that keep steering unbound requests to the app login, overruling
+      // its quota avoidance, and clearing every bound thread off its captured account.
+      resetCodexRoutingForClearedSelection();
+    } else {
+      setCodexAccountPin(runtimeConfig, targetAccountId);
+      resetCodexRoutingForManualSelection(targetAccountId);
+    }
     saveRuntimeConfig(config, runtimeConfig);
     // A pin this route accepts can still be dropped by the very next resolve, and saying
     // nothing about that is what made the setting look ignored (#4521). The checks above
     // refuse an account that cannot be selected at all; this reports the one remaining
     // outcome they do not cover, from the same predicate routing releases on, so the two
     // cannot drift. Absent means the pin survives — additive for existing clients.
-    // `appliesImmediately` is unchanged: it answers whether thread affinity was cleared,
-    // not whether the pin is durable.
+    // `appliesImmediately` answers whether thread affinity was cleared, not whether
+    // the pin is durable. A release clears no bindings — bound threads keep their
+    // captured account — so it reports false while a real selection still reports true.
     const pinDrainReason = body.accountId == null
       ? undefined
       : codexAccountPinDrainReason(runtimeConfig, targetAccountId);
     return jsonResponse({
       ok: true,
       activeCodexAccountId: body.accountId,
-      appliesImmediately: true,
+      appliesImmediately: body.accountId != null,
       ...(pinDrainReason !== undefined ? { pinDrained: true, pinDrainReason } : {}),
     });
   }

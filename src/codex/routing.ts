@@ -209,6 +209,7 @@ export {
 } from "./routing/selection";
 export {
   resetCodexRoutingForManualSelection,
+  resetCodexRoutingForClearedSelection,
   getEffectiveActiveCodexAccountId,
   isEffectiveCodexAccountPinned,
 } from "./routing/active-account";
