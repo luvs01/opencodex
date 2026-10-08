@@ -48,6 +48,14 @@ export interface GrokConsumeCouponRequestBody {
 // stranded past the window and only then resumable.
 const GROK_COUPON_ATTEMPT_STALE_MS = 90_000;
 
+// Single-process spend exclusion: the ledger marks are advisory file writes,
+// not held locks, so a stale-window resume could otherwise run while the
+// ORIGINAL request's upstream spend is still in flight (e.g. a hung redeem
+// outliving the window). Any second request for the same operationId gets
+// attempt_in_progress while the first holds this set — only a genuinely
+// dead attempt can ever resume.
+const grokCouponInFlightAttempts = new Set<string>();
+
 function resolveTargetAccountId(requestedAccountId?: string): string {
   if (requestedAccountId && requestedAccountId.trim() !== "") {
     return requestedAccountId.trim();
@@ -409,63 +417,82 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
       );
     }
 
-    // Record the attempt BEFORE the spend call: a crash between redemption and
-    // settlement must still leave the operation non-open so a retry can never
-    // execute it again. A failed mark write aborts here — nothing was spent.
-    // A resumed attempt is already marked; the call is a no-op for it.
-    try {
-      markGrokResetCouponAttempt(effectiveOpId, resolvedTokenId, undefined, undefined, resolvedTokenValidityEnd);
-    } catch (err) {
+    if (grokCouponInFlightAttempts.has(effectiveOpId)) {
+      // The original request holding this operation is still running in this
+      // process — its upstream spend has not concluded, so nothing may spend
+      // on this operationId again regardless of how stale the mark looks.
       return jsonResponse(
-        { error: { code: "attempt_mark_failed", message: err instanceof Error ? err.message : String(err) } },
-        500,
+        {
+          error: {
+            code: "attempt_in_progress",
+            message: "A redemption attempt for this operation is still running; retry later",
+          },
+        },
+        409,
         req,
         config,
       );
     }
 
+    grokCouponInFlightAttempts.add(effectiveOpId);
     try {
-      await redeemGrokResetCoupon({
-        accessToken: tokenSnapshot.accessToken,
-        tokenId: resolvedTokenId,
-      });
-    } catch (err) {
+      // Record the attempt BEFORE the spend call: a crash between redemption
+      // and settlement must still leave the operation non-open so a retry can
+      // never execute it again. A failed mark write aborts here — nothing was
+      // spent. A resumed attempt is already marked; the call is a no-op.
+      try {
+        markGrokResetCouponAttempt(effectiveOpId, resolvedTokenId, undefined, undefined, resolvedTokenValidityEnd);
+      } catch (err) {
+        return jsonResponse(
+          { error: { code: "attempt_mark_failed", message: err instanceof Error ? err.message : String(err) } },
+          500,
+          req,
+          config,
+        );
+      }
+
+      try {
+        await redeemGrokResetCoupon({
+          accessToken: tokenSnapshot.accessToken,
+          tokenId: resolvedTokenId,
+        });
+      } catch (err) {
+        try {
+          recordGrokResetCouponSettlement({
+            operationId: effectiveOpId,
+            tokenId: resolvedTokenId,
+            code: "redeem_failed",
+            status: "failed",
+          });
+        } catch {
+          // The operation stays "attempted" — non-open, so a retry still
+          // cannot re-execute; the failure is only lost from the record.
+        }
+        return jsonResponse(
+          { error: { code: "redeem_failed", message: err instanceof Error ? err.message : String(err) } },
+          502,
+          req,
+          config,
+        );
+      }
+
+      // Settlement after a successful redemption is a ledger write, not a
+      // redemption step: the coupon IS spent, so any failure to record it
+      // must still answer as a redemption — reporting a failure invites a
+      // retry the still-open ledger record would honour with a second coupon.
+      let settlementRecorded = true;
       try {
         recordGrokResetCouponSettlement({
           operationId: effectiveOpId,
           tokenId: resolvedTokenId,
-          code: "redeem_failed",
-          status: "failed",
+          code: "redeemed",
+          status: "success",
         });
       } catch {
-        // The operation stays "attempted" — non-open, so a retry still cannot
-        // re-execute; the failure is only lost from the record, not replayed.
+        settlementRecorded = false;
       }
+
       return jsonResponse(
-        { error: { code: "redeem_failed", message: err instanceof Error ? err.message : String(err) } },
-        502,
-        req,
-        config,
-      );
-    }
-
-    // Settlement after a successful redemption is a ledger write, not a
-    // redemption step: the coupon IS spent, so any failure to record it must
-    // still answer as a redemption — reporting a failure invites a retry the
-    // still-open ledger record would honour by spending a second coupon.
-    let settlementRecorded = true;
-    try {
-      recordGrokResetCouponSettlement({
-        operationId: effectiveOpId,
-        tokenId: resolvedTokenId,
-        code: "redeemed",
-        status: "success",
-      });
-    } catch {
-      settlementRecorded = false;
-    }
-
-    return jsonResponse(
         {
           success: true,
           code: "redeemed",
@@ -479,6 +506,9 @@ export async function handleGrokCouponRoutes(ctx: ManagementContext): Promise<Re
         req,
         config,
       );
+    } finally {
+      grokCouponInFlightAttempts.delete(effectiveOpId);
+    }
   }
 
   return null;

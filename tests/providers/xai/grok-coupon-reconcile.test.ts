@@ -119,6 +119,32 @@ describe("grok coupon attempt reconciliation", () => {
     expect(redeemSpy).not.toHaveBeenCalled();
   });
 
+  it("serializes a stale-window resume against a still-running original", async () => {
+    let releaseRedeem!: () => void;
+    redeemSpy.mockImplementation(() => new Promise<void>((done) => { releaseRedeem = done; }));
+
+    // Attempt marked long enough ago that the stale window alone would allow
+    // a resume — the in-flight original must still win.
+    openGrokResetCouponOperation({ accountId: "acc-1", tokenId: "tok-live", operationId: "77777777-7777-4777-8777-777777777777" });
+    markGrokResetCouponAttempt("77777777-7777-4777-8777-777777777777", "tok-live", Date.now() - STALE);
+
+    const first = handleGrokCouponRoutes(consumeRequest("77777777-7777-4777-8777-777777777777", "tok-live"));
+    // Give the first request a moment to reach the hung redeem.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(redeemSpy).toHaveBeenCalledTimes(1);
+
+    const second = await handleGrokCouponRoutes(consumeRequest("77777777-7777-4777-8777-777777777777", "tok-live"));
+    expect(second!.status).toBe(409);
+    const body = await second!.json();
+    expect(body.error.code).toBe("attempt_in_progress");
+    // The resume never reached a second spend.
+    expect(redeemSpy).toHaveBeenCalledTimes(1);
+
+    releaseRedeem();
+    const firstRes = await first;
+    expect(firstRes!.status).toBe(200);
+  });
+
   it("rejects a requested coupon that is no longer listed upstream", async () => {
     const res = await handleGrokCouponRoutes(consumeRequest("44444444-4444-4444-8444-444444444444", "tok-stale"));
     expect(res!.status).toBe(409);
