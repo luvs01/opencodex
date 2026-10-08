@@ -1,5 +1,5 @@
 import { X509Certificate } from "node:crypto";
-import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, rmSync, writeFileSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import {
   decodePickerCaCredential, openPickerCaCredential, pickerCaConfigId, readPickerCaCredential,
@@ -21,18 +21,22 @@ export function canonicalPickerConfigDir(configDir: string): string {
 
 /** Public records still cannot follow symlinks or accept oversized/malformed recovery data. */
 function readState(path: string, configId: string, initialization: boolean): Initialization | AuthorityMetadata | null {
-  let expected: Stats;
-  try { expected = lstatSync(path); }
+  // Bigint stats: plain `ino` folds the 64-bit Windows file index into a double, so adjacent
+  // NTFS records can round equal and hide a substitution; `ctimeNs` still differs on a
+  // recycled file id, and a zero `ino` means identity was never verified.
+  let expected: BigIntStats;
+  try { expected = lstatSync(path, { bigint: true }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw new Error("picker_ca_metadata_unsafe"); }
   if (expected.isSymbolicLink()) throw new Error("picker_ca_metadata_unsafe");
   let fd: number;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw new Error("picker_ca_metadata_unsafe"); }
   try {
-    const stat = fstatSync(fd);
-    if (stat.dev !== expected.dev || stat.ino !== expected.ino) throw new Error("picker_ca_metadata_unsafe");
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_PUBLIC_STATE_BYTES
-      || (process.platform !== "win32" && stat.uid !== process.getuid!())) throw new Error();
+    const stat = fstatSync(fd, { bigint: true });
+    if (stat.dev !== expected.dev || stat.ino !== expected.ino || stat.ino === 0n
+      || stat.ctimeNs !== expected.ctimeNs) throw new Error("picker_ca_metadata_unsafe");
+    if (!stat.isFile() || stat.nlink !== 1n || stat.size > BigInt(MAX_PUBLIC_STATE_BYTES)
+      || (process.platform !== "win32" && stat.uid !== BigInt(process.getuid!()))) throw new Error();
     const bytes = Buffer.alloc(MAX_PUBLIC_STATE_BYTES + 1);
     let used = 0;
     while (used < bytes.length) {
