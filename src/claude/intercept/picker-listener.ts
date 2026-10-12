@@ -279,7 +279,7 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
           req.resume();
         }
       }
-      res.writeHead(status, { "Content-Length": "0" });
+      res.writeHead(status, { "Content-Length": "0", ...(!h2 && uploading && !req.complete ? { Connection: "close" } : {}) });
       res.end();
       options.log?.(`picker request refused ${status}`);
     };

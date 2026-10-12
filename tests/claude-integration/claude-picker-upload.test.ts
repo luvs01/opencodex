@@ -133,7 +133,7 @@ for (const protocol of ["h1", "h2"] as const) {
           }
           if (input === "buffered") upload.write(Buffer.alloc(4 * 1024 * 1024, 0x61));
           expect(await wait(result)).toEqual({ status, text: "" });
-          if (protocol === "h1") expect(connection).not.toBe("close");
+          if (protocol === "h1") expect(connection).toBe("close");
           await wait(closed);
           if (protocol === "h2") expect((upload as ClientHttp2Stream).rstCode).toBe(constants.NGHTTP2_NO_ERROR);
           expect(relayed).toBe(0);
@@ -147,7 +147,7 @@ for (const protocol of ["h1", "h2"] as const) {
   }
 }
 
-bounded("h1 refusal keeps the same connection alive once the upload drains", async wait => {
+bounded("h1 unfinished refusal closes its advertised connection and the next request stays healthy", async wait => {
   const body = "complete";
   const f = await fixture((req, res) => {
     req.resume(); res.end("ordinary");
@@ -166,7 +166,7 @@ bounded("h1 refusal keeps the same connection alive once the upload drains", asy
     next.once("socket", nextSocket.resolve);
     const nextResult = h1Result(next); next.end();
     expect(await wait(nextResult)).toEqual({ status: 200, text: "ordinary" });
-    expect(await wait(nextSocket.promise)).toBe(await wait(firstSocket.promise));
+    expect(await wait(nextSocket.promise)).not.toBe(await wait(firstSocket.promise));
   } finally { await wait(f.close()); }
 });
 
