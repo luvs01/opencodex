@@ -340,8 +340,8 @@ ChatGPT forward surface, the official OpenAI API, or a provider with the explici
 than one backend, including OpenAI and xAI, mints native blobs: a destination can decode its own blob
 without being able to decode the previous backend's. The same serving-identity mismatch signal
 therefore strips reasoning `encrypted_content` and degrades native compaction blobs through the
-existing opaque-note path. Claude-native reasoning adds a per-blob tag check at every route binding:
-only the matching durable endpoint and generation-bearing credential retain raw and parsed carriers. Without recorded thread identity, the destination gate remains. Noncanonical forward providers
+existing opaque-note path. Claude-native reasoning rechecks blob tags for every route binding, collects rejected blobs before one raw/context-history scrub pass, and parses each signature at most once per binding, including switches and rebindings.
+Only the matching durable endpoint and generation-bearing credential retain raw and parsed carriers. Without recorded thread identity, the destination gate remains. Noncanonical forward providers
 receive no caller credentials and may point at any backend. On any other routed destination the blob
 also degrades to the same opaque note the bridged parser uses, because forwarding it there fails the
 turn and the item outlives the failure in the client transcript, repeating on every later turn
