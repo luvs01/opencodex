@@ -30,12 +30,12 @@ export function readBoundedRegularFileSync(path: string, limit: number): Buffer 
     }
 
     // Start near the observed size, but keep probing up to limit + 1 if the file grows.
-    let bytes = Buffer.allocUnsafe(Number(opened.size) + 1);
+    let bytes = Buffer.alloc(Number(opened.size) + 1);
     let length = 0;
     while (length < limit + 1) {
       if (length === bytes.length) {
         const capacity = Math.min(limit + 1, Math.max(bytes.length * 2, bytes.length + READ_CHUNK_BYTES));
-        const next = Buffer.allocUnsafe(capacity);
+        const next = Buffer.alloc(capacity);
         bytes.copy(next, 0, 0, length);
         bytes = next;
       }
