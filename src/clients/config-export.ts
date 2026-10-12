@@ -24,6 +24,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "nod
 import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
 import { shouldInjectApiAuthHeader, standaloneCodexRoutingTarget } from "../codex/inject";
 import { FORMAT_MEDIA_TYPE, serializeDocument, type ConfigFormat } from "../integrations/serialize";
+import { fileIO } from "../integrations/config-io";
 import { canonicalizeReasoningEfforts } from "../reasoning-effort";
 import { expandFastExportModels } from "./config-export/fast-models";
 import { probeHostname } from "../server/proxy-liveness";
@@ -475,10 +476,7 @@ export type ZcodePathIO = {
   readText: (path: string) => { kind: "text"; text: string } | { kind: "missing" } | { kind: "failed"; code?: string };
 };
 const zcodePathIO: ZcodePathIO = {
-  readText: path => {
-    try { return { kind: "text", text: readFileSync(path, "utf8") }; }
-    catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "failed" }; }
-  },
+  readText: path => fileIO().readText(path),
 };
 export class ZcodeSettingsPathError extends ClientPathError {}
 
