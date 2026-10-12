@@ -164,7 +164,7 @@ function commit(args: CommitArgs): WriteOutcome {
     if (transactionStarted) return compensate(args, error, "could not write both Cline files");
     if (error instanceof IntegrationWriteSizeError && args.snapshotPath) {
       try {
-        io.removeFile(args.snapshotPath);
+        args.store.discardUncommittedSnapshot(clientId, args.entry.opId);
       } catch (cleanupError) {
         return refuse(clientId, "write_failed", args.state,
           `${messageOf(error)}; could not remove the unused backup: ${messageOf(cleanupError)}`, args.snapshotPath);
