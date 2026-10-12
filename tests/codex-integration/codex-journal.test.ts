@@ -440,6 +440,7 @@ describe("codex-journal", () => {
 
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout).success).toBe(false);
+    expect(JSON.parse(r.stdout).message).toContain("symbolic link");
     expect(readFileSync(configPath, "utf8")).toBe(config);
     expect(readFileSync(targetPath, "utf8")).toBe(target);
     expect(readFileSync(journalPath, "utf8")).toBe(journal);
