@@ -1595,7 +1595,7 @@ describe("the managed file size bound", () => {
     writeFileSync(configPath, seed);
     const result = applyIntegration(input({
       clientId: "pi",
-      io: { ...store.io(), removeFile: () => { throw new Error("cleanup denied"); } },
+      store: { ...store, discardUncommittedSnapshot: () => { throw new Error("cleanup denied"); } },
     }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
