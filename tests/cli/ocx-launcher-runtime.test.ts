@@ -517,6 +517,25 @@ describe("failure-only Desktop CLI pointer", () => {
 });
 
 describe("real PATH Bun validation", () => {
+  test("normalizes case-variant macOS PATH spelling after validating its ancestry", () => {
+    const fixture = pathProbeFixture("darwin");
+    fixture.io.realpath = path => path.replace("/OPT/fixture", "/opt/fixture");
+    expect(fixture.find({ PATH: "/OPT/fixture/bin" })).toEqual({ path: "/opt/fixture/bin/bun", version: "1.4.0" });
+    expect(fixture.calls).toHaveLength(2);
+  });
+
+  test("a foreign-owned entry below a root-owned sticky ancestor is refused before spawning", () => {
+    const fixture = pathProbeFixture();
+    fixture.io.lstat = path => ({
+      isFile: () => path.endsWith("/bun"), isDirectory: () => !path.endsWith("/bun"),
+      isSymbolicLink: () => false,
+      uid: path === "/tmp/foreign" ? 2000 : 0,
+      mode: path === "/tmp" ? 0o1777 : 0o755,
+    });
+    expect(fixture.find({ PATH: "/tmp/foreign/bin" })).toBeNull();
+    expect(fixture.calls).toHaveLength(0);
+  });
+
   test.each(["file-group", "file-world", "parent-group", "parent-world"])("rejects POSIX %s write access before spawning", kind => {
     const fixture = pathProbeFixture();
     const trustedLstat = fixture.io.lstat!;
@@ -608,7 +627,7 @@ describe("real PATH Bun validation", () => {
     const visited: string[] = [];
     fixture.io.realpath = path => { visited.push(path); return path; };
     expect(fixture.find({ PATH: ":.:relative:~/bin:/trusted" })?.path).toBe("/trusted/bun");
-    expect(visited).toEqual(["/trusted/bun"]);
+    expect(visited).toEqual(["/trusted/bun", "/trusted/bun"]);
   });
 
   test("Windows accepts UNC bun.exe and deduplicates case aliases", () => {

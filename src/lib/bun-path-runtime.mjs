@@ -65,7 +65,7 @@ function trustedPosixCandidate(candidate, canonical, io) {
   };
 
   const resolved = walk(candidate);
-  if (!resolved || resolved !== canonical) return false;
+  if (!resolved || (io.realpath ?? realpathSync.native)(resolved) !== canonical) return false;
   const parent = lstat(posix.dirname(canonical));
   return parent.isDirectory()
     && Number.isSafeInteger(parent.uid)

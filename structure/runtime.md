@@ -99,7 +99,7 @@ derives the four inputs from the proof-bound launcher snapshot: the configured c
 the first codex on the captured PATH, an OpenCodex wrapper resolving to its renamed npm
 backing, the npm prefix layout, and the Node/npm toolchain beside the resolved node.exe.
 Configured values containing a path separator must be drive-absolute; otherwise derivation
-refuses with `candidate_unavailable` instead of substituting a different PATH candidate. Bare
+refuses with `candidate_unavailable` instead of substituting a different PATH candidate. Bare POSIX PATH validation walks the original spelling and symlink targets, requires each entry to be owned by root or the effective user, rejects writable ancestors except root-owned sticky directories, and rejects writable final parents, and normalizes validated spelling through realpath before matching the canonical candidate.
 command names and the unset default continue to resolve only through the captured PATH.
 Discovery probes candidates through the same local-volume, reparse-refusing held-handle reader as final observation, so captured PATH entries cannot trigger network filesystem I/O.
 It never reads ambient state. Four explicit absolute paths remain accepted as an all-or-none override.
