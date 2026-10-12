@@ -238,6 +238,7 @@ generated 502s and can reuse the same client socket.
 `tests/claude-integration/claude-picker-upload.test.ts` covers headers-only refusals on both
 protocols, byte-exact early replies under backpressure, completed uploads with SSE, cancellation,
 failure and shutdown cleanup, and healthy sibling streams.
+The upload regression fixture holds and observes the relay's actual upstream writable before asserting idle and absolute-deadline behavior.
 The picker CA (`picker-ca.ts`) carries critical
 name constraints permitting only `claude.ai` and excluding every IPv4 and IPv6 address. Its exportable
 signing identity is protected by the OS credential store and scoped to the canonical config directory;

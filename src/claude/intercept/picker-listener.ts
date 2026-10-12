@@ -38,6 +38,8 @@ export interface PickerListenerOptions {
   uploadDeadlineMs?: number;
   /** Test seam: maximum time without upload progress. */
   uploadIdleTimeoutMs?: number;
+  /** Test seam: observe or hold the relay's upstream writable before piping input. */
+  onUpstreamRequest?: (request: ReturnType<typeof httpsRequest>) => void;
   log?: (line: string) => void;
 }
 export interface PickerListenerHandle { port: number; close(): Promise<void> }
@@ -461,6 +463,7 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
       deadlineTimer.unref?.();
       onUploadProgress();
     }
+    options.onUpstreamRequest?.(upReq);
     req.pipe(upReq);
   };
   server.on("request", relay);

@@ -323,12 +323,16 @@ bounded("absolute upload deadline expires despite continued progress", async wai
 });
 
 bounded("upstream backpressure does not expire an active upload as idle", async wait => {
-  const arrived = Promise.withResolvers<void>();
-  const f = await fixture((req, res) => {
-    // Never consume the body: the upstream read buffer stays full, so the relay
-    // pipe pauses client input even though the client has more bytes to send.
-    if (req.url === "/stall") arrived.resolve(); else res.end("ordinary");
-  }, { uploadDeadlineMs: 1_000, uploadIdleTimeoutMs: 250 });
+  const upstreamRequest = Promise.withResolvers<ClientRequest>();
+  const f = await fixture((_req, res) => res.end("ordinary"), {
+    uploadDeadlineMs: 1_000, uploadIdleTimeoutMs: 250,
+    onUpstreamRequest: request => {
+      // Hold the actual relay writable so the fixture, not socket buffer sizing,
+      // determines how long upstream backpressure persists.
+      request.cork();
+      upstreamRequest.resolve(request);
+    },
+  });
   try {
     const session = f.h2();
     const upload = session.request({ ":method": "POST", ":path": "/stall", ":authority": "claude.ai" });
@@ -336,10 +340,15 @@ bounded("upstream backpressure does not expire an active upload as idle", async 
     let closedEarly = false;
     upload.once("close", () => { closedEarly = true; });
     upload.write(Buffer.alloc(4 * 1024 * 1024, 0x61));
-    await wait(arrived.promise);
-    // Past the idle interval the upload must still be open: the client is stalled
-    // by upstream backpressure, not idle. The absolute deadline still ends it.
-    await new Promise(resolve => setTimeout(resolve, 600));
+    const relayRequest = await wait(upstreamRequest.promise);
+    await wait((async () => {
+      while (!relayRequest.writableNeedDrain) {
+        if (relayRequest.destroyed) throw new Error("relay closed before upstream backpressure");
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+    })());
+    await wait(new Promise(resolve => setTimeout(resolve, 600)));
+    expect(relayRequest.writableNeedDrain).toBe(true);
     expect(closedEarly).toBe(false);
     await wait(closed);
     expect(upload.rstCode).toBe(constants.NGHTTP2_CANCEL);
