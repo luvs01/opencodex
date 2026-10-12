@@ -131,7 +131,7 @@ client registry + export context
   -> build managed contribution
   -> load and parse current config
   -> classify exact recorded fragments
-  -> snapshot prior bytes
+  -> snapshot prior bytes (discard the unused snapshot on a size refusal before mutation; report cleanup failures with its recovery path)
   -> merge or remove only recorded paths
   -> compare current bytes again
   -> atomic write

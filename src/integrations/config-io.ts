@@ -27,6 +27,9 @@ import type { IntegrationClientId } from "./registry";
 export const PARSE_FAILED = Symbol("parse-failed");
 const MAX_INTEGRATION_CONFIG_FILE_BYTES = 4 * 1024 * 1024;
 
+/** Raised before any target mutation, including pending-marker creation. */
+export class IntegrationWriteSizeError extends Error {}
+
 /**
  * What `JSON.parse` has already discarded by the time we hold the parsed value,
  * and a rewrite would therefore silently change. Both classes are invisible in
@@ -310,7 +313,7 @@ export function fileIO(): Omit<IntegrationIO, "appendJournal" | "putRecord" | "d
        */
       const bytes = Buffer.byteLength(text, "utf8");
       if (bytes > MAX_INTEGRATION_CONFIG_FILE_BYTES) {
-        throw new Error(
+        throw new IntegrationWriteSizeError(
           `refusing oversized integration write to ${path}: `
           + `${bytes} bytes is past the ${MAX_INTEGRATION_CONFIG_FILE_BYTES}-byte read bound`,
         );

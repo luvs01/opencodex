@@ -366,9 +366,16 @@ describe("Cline journaled pair", () => {
     const pad = "x".repeat(3 * 1024 * 1024);
     const seeded = `{"pad":"${pad}","version":1,"providers":{"mine":{"settings":{"provider":"mine"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}}}\n`;
     writeFileSync(settings, seeded);
-    const result = applyIntegration(input);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.reason).toBe("write_failed");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = applyIntegration(input);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe("write_failed");
+        expect(result.snapshotPath).toBeUndefined();
+      }
+      expect(input.store!.countSnapshots("cline")).toBe(0);
+      expect(input.store!.listOperations("cline")).toEqual([]);
+    }
     expect(readFileSync(settings, "utf8")).toBe(seeded);
     expect(existsSync(catalog)).toBe(false);
     expect(existsSync(clinePendingPath(input.store!, settings))).toBe(false);
