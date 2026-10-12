@@ -318,12 +318,16 @@ warmup remains conservative and does not spend paid credits to validate an exhau
 
 For an opted-in, unpaused main account with a currently full usage window, the existing
 `src/codex/auth-api/pool-mode-gate.ts` recovery sweep renews credit observations from three minutes
-of age, leaving time for token preparation before the five-minute freshness limit. Only valid,
-previously spendable positive or unlimited evidence bound to the same physical account schedules
-renewal; missing, zero, restricted or retracted credits do not. Admission still uses the actual
-clock and original spending controls. Native profile ownership, generation fences, single-flight,
+of age, leaving time for token preparation before the five-minute freshness limit. Missing, zero,
+restricted or retracted evidence remains eligible for recovery discovery bound to the same physical
+account; a negative observation never stops later probes. Admission still requires fresh positive
+or unlimited evidence and the original spending controls; flags or approximate message counts alone
+cannot authorize spending. Native profile ownership, generation fences, single-flight,
 query pacing and failure backoff remain in force, including upstream Retry-After. Eligibility is
 checked again after token preparation. The independent hard lock still applies.
+When consent is on but spendable evidence is unavailable, the local credit refusal caps Retry-After
+at the base five-minute metadata recovery interval (or a sooner included reset), even when probe
+backoff grows longer. Without consent, Retry-After retains the included-quota reset deadline.
 
 Credit renewal supplies the passive option to `src/codex/auth-api/main-account-probe.ts`, including
 identity retries: WHAM success and terminal 401/403 responses never set or clear needs-reauth in
@@ -502,6 +506,12 @@ A manual activation pins its account and lowers the tier ceiling to that account
 is released by drain, exclusion, deletion, an explicit failover/promotion away, and any write to
 `codexAccountPriorities` — a pin and an order are both the operator naming an account to use, so the
 newer statement wins. Ordinary round-robin movement inside the capped tier does not release it.
+`PUT /api/codex-auth/active` with a null id is the explicit release, and a release is not a
+selection: it clears the pin and the stored active id, unwinds the steering a selection planted
+(one-shot manual preference, runtime cursor, and the rotation seeds on the shared and independent
+quota-scope rings), and leaves bound threads on their captured account and quota-avoidance health
+standing — nothing was named, so nothing new applies immediately, which is why the route reports
+`appliesImmediately: false` there. A release may include `expectedPinnedAccountId`: the lock-protected persisted mutation checks that exact pin again before publication, returning `account_pin_changed` if a newer pin replaced it. Callers that omit the precondition retain the explicit global release contract.
 Without that last rule a pin made before any order existed, which is just an ordinary account switch,
 would outrank every order set afterwards for as long as the account kept headroom.
 
