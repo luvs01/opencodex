@@ -1,14 +1,18 @@
 # Windows synchronous runtime-selection control
 
 This optional Rust control exercises `GET /v1/models` in a separate Bun process
-using the repository's unchanged `tests/helpers/native-main-owner-child.ts`.
+using the repository's `tests/helpers/native-main-owner-child.ts`.
 It does not connect to a running proxy, install accounts, or replay turns.
 It is a reproducer, not a runtime fix or proof of a historical production cause.
 
 The child gets a cleared environment, synthetic homes, fixed fixture-only
 authentication values, and an ephemeral loopback listener. It is configured
 with no real credentials and one unavailable loopback provider. Other network
-egress is not blocked or audited.
+egress is not blocked or audited. The helper explicitly substitutes rejecting
+Codex desktop state/restart callbacks, so those management routes cannot fall
+back to inspecting or restarting the installed application. This applies even
+outside the ordinary test runner, without its home guard. Other management
+surfaces are not redesigned; synthetic homes and the Job are not an OS sandbox.
 
 ```powershell
 cargo test --locked --manifest-path scripts/diagnostics/windows-version-control/Cargo.toml --test async_contracts -- --test-threads=4
@@ -76,3 +80,17 @@ Abort finalization changes accounting only; transports retain producer cancellat
 The async executor contract waits for a real child to install its signal handler before abort or deadline. Caller-facing rejection remains prompt while an independent reaper owns actual exit; on POSIX the SIGTERM-ignoring child is still alive at rejection and must exit after escalation. Windows exercises the same owner with native termination.
 
 The eager-relay EOF contract reads a real ephemeral loopback Bun HTTP response. It verifies that payload messages and the terminal survive, the producer completes once, and a live upstream controller has no remaining relay abort listeners. Ordinary isolated GC must collect the observed native reader. This tests relay ownership, not attribution of a historical production stall.
+
+## Desktop-control wiring contract
+
+```sh
+bun --no-env-file scripts/diagnostics/windows-version-control/tests/fixtures/native-owner-restart-contract.ts
+```
+
+This standalone contract loads the actual helper with a mocked server and native
+profile dependencies in a bounded child process. It verifies both primary and
+additional fixture servers supply rejecting state/restart callbacks while their
+profile managers and shutdown remain connected. The test clears the home-guard
+flag and makes no network or installed-desktop call. It is a wiring regression,
+not a real HTTP endpoint or native Windows acceptance test, and is invoked
+explicitly rather than by the existing Cargo contract roster.

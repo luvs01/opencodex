@@ -137,7 +137,15 @@ function start(home = codexHome): ReturnType<typeof startServer> {
           }
         : undefined,
     },
-    managementApi: { nativeProfileApi: { manager } },
+    managementApi: {
+      nativeProfileApi: { manager },
+      // Synthetic homes do not confine OS process control. This fixture is also used by
+      // diagnostics outside the test runner, so never fall back to the installed desktop.
+      codexRestartService: {
+        readState: async () => { throw new Error("desktop process control is unavailable in this fixture"); },
+        performRestart: async () => { throw new Error("desktop process control is unavailable in this fixture"); },
+      },
+    },
   });
   servers.push(server);
   return server;
