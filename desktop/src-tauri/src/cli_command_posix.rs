@@ -94,18 +94,45 @@ pub fn render_shim(cli: &Path, owner: &str) -> Result<String> {
 pub fn render_helper(bin: &Path) -> Result<String> {
     Ok(HELPER.replace("@BIN@", &quote(bin)?))
 }
+const TEMPORARY_ROOTS: [&str; 6] = [
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+];
+/// A caller-selected TMPDIR only proves transience when it resolves inside a recognized
+/// temporary root or is itself a shared sticky directory. An arbitrary override such as
+/// TMPDIR=$HOME can name an ordinary ancestor of a permanent install.
+fn environment_temp_root(temp_dir: &Path) -> Option<PathBuf> {
+    let real = fs::canonicalize(temp_dir).ok()?;
+    if TEMPORARY_ROOTS
+        .iter()
+        .map(Path::new)
+        .any(|root| real.starts_with(root))
+    {
+        return Some(real);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(&real)
+            .map(|m| m.permissions().mode() & 0o1777 == 0o1777)
+            .unwrap_or(false)
+        {
+            return Some(real);
+        }
+    }
+    None
+}
 fn is_temporary_bundle_path(path: &Path, temp_dir: &Path) -> bool {
-    [
-        Path::new("/tmp"),
-        Path::new("/private/tmp"),
-        Path::new("/var/tmp"),
-        Path::new("/private/var/tmp"),
-        Path::new("/var/folders"),
-        Path::new("/private/var/folders"),
-    ]
-    .into_iter()
-    .chain(std::iter::once(temp_dir))
-    .any(|root| path.starts_with(root))
+    let env_root = environment_temp_root(temp_dir);
+    TEMPORARY_ROOTS
+        .iter()
+        .map(Path::new)
+        .chain(env_root.as_deref())
+        .any(|root| path.starts_with(root))
         || path.starts_with("/Volumes")
 }
 fn has_app_translocation_marker(path: &Path) -> bool {
@@ -176,8 +203,7 @@ pub fn stable_bundle(exe: &Path, debug: bool, version: &str) -> Result<Bundle> {
     }
     let real = fs::canonicalize(exe).map_err(|_| "bundle-unavailable")?;
     let s = text(&real)?;
-    if has_app_translocation_marker(&real)
-        || is_temporary_bundle_path(&real, &std::env::temp_dir())
+    if has_app_translocation_marker(&real) || is_temporary_bundle_path(&real, &std::env::temp_dir())
     {
         return Err("temporary-bundle".into());
     }
@@ -242,7 +268,10 @@ mod temporary_bundle_path_tests {
             "/private/var/folders/xx/App.app/Contents/MacOS/app",
             "/Volumes/Installer/App.app/Contents/MacOS/app",
         ] {
-            assert!(is_temporary_bundle_path(Path::new(path), temp_dir), "{path}");
+            assert!(
+                is_temporary_bundle_path(Path::new(path), temp_dir),
+                "{path}"
+            );
         }
         for path in [
             "/Applications/OpenCodex.app/Contents/MacOS/app",
@@ -250,7 +279,10 @@ mod temporary_bundle_path_tests {
             "/tmp-old/OpenCodex.app/Contents/MacOS/app",
             "/private/var/folder-old/OpenCodex.app/Contents/MacOS/app",
         ] {
-            assert!(!is_temporary_bundle_path(Path::new(path), temp_dir), "{path}");
+            assert!(
+                !is_temporary_bundle_path(Path::new(path), temp_dir),
+                "{path}"
+            );
         }
         assert!(is_temporary_bundle_path(
             Path::new("/var/folders/test/app/OpenCodex.app/Contents/MacOS/app"),
@@ -262,6 +294,36 @@ mod temporary_bundle_path_tests {
         assert!(!has_app_translocation_marker(Path::new(
             "/Volumes/Installer/AppTranslocation-old/OpenCodex.app/Contents/MacOS/app"
         )));
+    }
+
+    #[test]
+    fn environment_temp_dir_must_prove_transience() {
+        // An ordinary ancestor named by a custom TMPDIR must not misclassify a stable
+        // install; "/" resolves but is not a shared sticky directory, and a missing
+        // path cannot be verified as temporary at all.
+        for temp_dir in ["/", "/definitely/absent/ocx-tmpdir"] {
+            let temp_dir = Path::new(temp_dir);
+            assert!(
+                !is_temporary_bundle_path(
+                    Path::new("/Applications/OpenCodex.app/Contents/MacOS/app"),
+                    temp_dir,
+                ),
+                "{temp_dir:?}"
+            );
+            assert!(
+                !is_temporary_bundle_path(
+                    Path::new("/Users/alice/Applications/OpenCodex.app/Contents/MacOS/app"),
+                    temp_dir,
+                ),
+                "{temp_dir:?}"
+            );
+        }
+        // The recognized temporary roots still prove transience on their own.
+        let temp_dir = Path::new("/var/folders/test/app");
+        assert!(is_temporary_bundle_path(
+            Path::new("/var/folders/test/app/OpenCodex.app/Contents/MacOS/app"),
+            temp_dir,
+        ));
     }
 }
 // Return exact block range, including its line terminator. Reject malformed or changed markers.

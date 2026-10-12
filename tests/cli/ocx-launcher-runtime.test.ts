@@ -536,6 +536,18 @@ describe("real PATH Bun validation", () => {
     expect(fixture.calls).toHaveLength(0);
   });
 
+  test("a user-owned entry below a shared sticky ancestor is refused before spawning", () => {
+    const fixture = pathProbeFixture();
+    fixture.io.lstat = path => ({
+      isFile: () => path.endsWith("/bun"), isDirectory: () => !path.endsWith("/bun"),
+      isSymbolicLink: () => false,
+      uid: path === "/tmp" ? 0 : 1000,
+      mode: path === "/tmp" ? 0o1777 : 0o755,
+    });
+    expect(fixture.find({ PATH: "/tmp/own/bin" })).toBeNull();
+    expect(fixture.calls).toHaveLength(0);
+  });
+
   test.each(["file-group", "file-world", "parent-group", "parent-world"])("rejects POSIX %s write access before spawning", kind => {
     const fixture = pathProbeFixture();
     const trustedLstat = fixture.io.lstat!;

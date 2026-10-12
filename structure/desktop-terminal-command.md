@@ -25,7 +25,9 @@ ownership; remove walks the recorded list and preserves modified blocks and unsa
 An rc file with an ACL is never rewritten (`rc-acl-present`). The shim captures exported
 Anthropic slot names with an argv-bound random proof before dotenv; failure keeps stripping.
 Persistent bundle registration rejects raw and canonical locations under system and OS temporary
-directories, while ordinary `/Applications` and user Applications bundles remain eligible.
+directories. A caller-selected TMPDIR counts only when it resolves inside a recognized temporary
+root or a shared sticky directory, so ordinary `/Applications` and user Applications bundles
+remain eligible even beneath a custom temporary-directory override.
 
 `desktop/src-tauri/src/cli_command_windows.rs` preserves raw HKCU Path text/type, changes only
 the owned entry and broadcasts Environment; a top-level `notifyPending` debt survives crashes and

@@ -53,9 +53,10 @@ function trustedPosixCandidate(candidate, canonical, io) {
         continue;
       }
       if (remaining.length || pending.length) {
-        if (!info.isDirectory()) return null;
-        const stickyRootAncestor = info.uid === 0 && (info.mode & 0o1000) !== 0;
-        if ((info.mode & 0o022) !== 0 && !stickyRootAncestor) return null;
+        // No writable-ancestor exemption: a shared sticky directory passes its own
+        // ownership check but lets another user replace a child entry between the
+        // ancestry walk and the exec probe, substituting an unvalidated binary.
+        if (!info.isDirectory() || (info.mode & 0o022) !== 0) return null;
       } else if (!info.isFile() || (info.mode & 0o022) !== 0) {
         return null;
       }
