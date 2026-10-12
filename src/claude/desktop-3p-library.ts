@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeDesktopConfigLibraryDir, resolveConfigLibraryDir } from "./desktop-3p-paths";
@@ -44,9 +44,32 @@ export interface Desktop3pMetadata {
 
 export const DESKTOP_PICKER_ENTRY_NAME = "opencodex-picker";
 
+/** Read regular config files only; a path swap must not turn an observation into a FIFO wait. */
+export function readDesktopLibraryBytes(path: string): Buffer {
+  const expected = lstatSync(path, { bigint: true });
+  if (!expected.isFile()) throw new Error("desktop_config_not_regular");
+  // POSIX open of a FIFO can itself block, before fstat is possible. Windows has no POSIX
+  // FIFO entry; retain descriptor identity validation there without unsupported open flags.
+  const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  const fd = openSync(path, flags);
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino
+      || opened.ctimeNs !== expected.ctimeNs) throw new Error("desktop_config_not_regular");
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Text decoding stays identical to node:fs readFileSync(path, "utf8"). */
+export function readDesktopLibraryText(path: string): string {
+  return readDesktopLibraryBytes(path).toString("utf8");
+}
+
 export function parseMetadata(path: string): Desktop3pMetadata {
   if (!existsSync(path)) return { entries: [] };
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Desktop3pMetadata>;
+  const parsed = JSON.parse(readDesktopLibraryText(path)) as Partial<Desktop3pMetadata>;
   if (!Array.isArray(parsed.entries)) throw new Error("Claude Desktop 3P _meta.json has no entries array");
   return { ...parsed, entries: parsed.entries };
 }
@@ -82,7 +105,7 @@ export const OPENCODEX_DESKTOP_PROFILE_KEYS = new Set([
 
 export function readDesktopProfileForeignKeys(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  const parsed = JSON.parse(readDesktopLibraryText(path)) as unknown;
   if (!isRecord(parsed)) throw new Error("Claude Desktop 3P profile is not a JSON object");
   return Object.fromEntries(
     Object.entries(parsed).filter(([key]) => !OPENCODEX_DESKTOP_PROFILE_KEYS.has(key)),
