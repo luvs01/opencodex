@@ -29,9 +29,16 @@ export function readBoundedRegularFileSync(path: string, limit: number): Buffer 
       throw new Error("file entry changed while opening");
     }
 
-    const bytes = Buffer.alloc(limit + 1);
+    // Start near the observed size, but keep probing up to limit + 1 if the file grows.
+    let bytes = Buffer.allocUnsafe(Number(opened.size) + 1);
     let length = 0;
-    while (length < bytes.length) {
+    while (length < limit + 1) {
+      if (length === bytes.length) {
+        const capacity = Math.min(limit + 1, Math.max(bytes.length * 2, bytes.length + READ_CHUNK_BYTES));
+        const next = Buffer.allocUnsafe(capacity);
+        bytes.copy(next, 0, 0, length);
+        bytes = next;
+      }
       const count = readSync(fd, bytes, length, Math.min(READ_CHUNK_BYTES, bytes.length - length), null);
       if (count === 0) break;
       length += count;
