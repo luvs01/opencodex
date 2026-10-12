@@ -1375,6 +1375,7 @@ describe("empty and absent tool catalogs", () => {
     model = "fixture/deepseek-v4-flash",
     previousResponseId?: string,
     toolChoice?: unknown,
+    inboundWire?: "chat" | "anthropic",
   ) {
     const savedFetch = globalThis.fetch;
     globalThis.fetch = (async () => upstream()) as typeof fetch;
@@ -1397,7 +1398,7 @@ describe("empty and absent tool catalogs", () => {
           ...(tools === undefined ? {} : { tools }),
           ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
         }),
-      }), requestConfig, { model: "", provider: "" });
+      }), requestConfig, { model: "", provider: "" }, { inboundWire });
     } finally {
       globalThis.fetch = savedFetch;
     }
@@ -1436,6 +1437,42 @@ describe("empty and absent tool catalogs", () => {
     expect(body).not.toContain(UNDECLARED_TOOL_CALL_ERROR_CODE);
     expect(body).toContain("response.completed");
   });
+
+  for (const inboundWire of ["chat", "anthropic"] as const) {
+    for (const stream of [false, true]) {
+      test(`${inboundWire} passthrough refuses undeclared Write calls (${stream ? "streaming" : "JSON"})`, async () => {
+        const writeCall = { ...call, name: "Write" };
+        const upstream = stream
+          ? () => new Response([
+            frame("response.output_item.added", { output_index: 0, item: writeCall }),
+            frame("response.completed", { response: { id: "resp_1", status: "completed", output: [writeCall] } }),
+          ].join("\n\n") + "\n\n", { headers: { "content-type": "text/event-stream" } })
+          : () => new Response(
+            JSON.stringify({ id: "resp_1", status: "completed", output: [writeCall] }),
+            { headers: { "content-type": "application/json" } },
+          );
+        const response = await post(
+          stream,
+          [{ type: "function", name: "Read", parameters: { type: "object" } }],
+          upstream,
+          undefined,
+          config,
+          [],
+          "fixture/deepseek-v4-flash",
+          undefined,
+          undefined,
+          inboundWire,
+        );
+
+        if (stream) {
+          expect(await response.text()).toContain(UNDECLARED_TOOL_CALL_ERROR_CODE);
+        } else {
+          expect(response.status).toBe(502);
+          expect(await response.text()).toContain("undeclared");
+        }
+      });
+    }
+  }
 
   test("non-streaming, an unreadable top-level catalog — relayed, not refused", async () => {
     const response = await post(false, [{ type: "function" }], jsonUpstream);

@@ -436,8 +436,7 @@ export async function deliverPassthroughResponse(
     normalizeFunctionCompletionJson,
   } = nativeExchange;
   const { commitReasoningReplayServingRoute, recordTerminalOutcomes } = responseEffects;
-  const { parsed, subagentQuotaFailureModel, clientRequestedStream, translatorBudget, inboundWire } = requestState;
-  const enforceDeclaredToolNames = inboundWire !== "chat" && inboundWire !== "anthropic";
+  const { parsed, subagentQuotaFailureModel, clientRequestedStream, translatorBudget } = requestState;
   const { openAiSidecar } = sidecarState;
   const { requestBindings } = transportState;
 
@@ -861,7 +860,6 @@ export async function deliverPassthroughResponse(
             providerExecutedCallTypes,
             declaredBareWireToolNames,
             recoverableBareCustomWireToolNames,
-            enforceDeclaredToolNames,
           )
           : undefined,
         grokUpstreamEchoEnabled
@@ -1319,10 +1317,7 @@ export async function deliverPassthroughResponse(
       if (grokUpstreamEchoEnabled) {
         clientJson = stripGrokUpstreamEnvelopeEchoFromResponsesJson(clientJson);
       }
-      // #1700: same inbound-wire refusal policy as the SSE relay above. Both the plain JSON answer and
-      // the reframed-SSE branch below are built from this body, so one check covers them. This
-      // runs BEFORE the continuation cache write below: a refused turn must not become state a
-      // later `previous_response_id` replay can expand from.
+      // Both response formats use this body, before a refused turn can enter continuation state.
       if (nativeExchange.undeclaredToolGuardActive) {
         const undeclared = (() => {
           try {
@@ -1338,7 +1333,7 @@ export async function deliverPassthroughResponse(
             return undefined;
           }
         })();
-        if (enforceDeclaredToolNames && undeclared !== undefined) {
+        if (undeclared !== undefined) {
           return formatErrorResponse(502, "upstream_error", undeclaredToolCallMessage(undeclared));
         }
         clientJson = normalizeDefaultNamespaceInJson(
