@@ -8,7 +8,10 @@
  * Plan: devlog/_fin/260815_gui_codex_restart/010_phase1_backend_endpoint.md
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startServer } from "../../src/server";
 import { helperPath } from "../helpers/repo-root";
 import { nativeOwnerRestartService, NATIVE_OWNER_RESTART_REFUSAL } from "../helpers/native-owner-restart-service";
 import { handleSystemRoutes } from "../../src/server/management/system-routes";
@@ -187,5 +190,71 @@ describe("native-owner fixture process-control boundary", () => {
     // A refused call does not poison a later read or make the next restart succeed.
     expect(await nativeOwnerRestartService.readState()).toEqual({ state: "unknown", runningCount: 0 });
     await expect(nativeOwnerRestartService.performRestart()).rejects.toThrow(NATIVE_OWNER_RESTART_REFUSAL);
+  });
+
+  test("servers on the common startup path serve the injected service over authenticated HTTP", async () => {
+    // The child's start() is a thin wrapper over this same startServer call: driving real
+    // listeners proves the managementApi -> ctx.deps forwarding cannot silently drop the
+    // boundary while the source guard above still passes. Primary and extra fixture
+    // servers share one injection path, so both are exercised here. The sentinel restart
+    // body is one the live implementation could never emit: it does not fabricate a pid.
+    const root = mkdtempSync(join(tmpdir(), "ocx-restart-boundary-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    process.env.OPENCODEX_HOME = root;
+    process.env.CODEX_HOME = root;
+    process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "restart-boundary-admin";
+    const sentinel: CodexRestartResponse = {
+      success: true,
+      stateBefore: "unknown",
+      synced: false,
+      requested: [424242],
+      stopped: [424242],
+      surviving: [],
+      failed: [],
+      code: "stopped",
+    };
+    const calls: string[] = [];
+    const observed = {
+      readState: async () => {
+        calls.push("readState");
+        return nativeOwnerRestartService.readState();
+      },
+      performRestart: async () => {
+        calls.push("performRestart");
+        return sentinel;
+      },
+    };
+    const deps = { managementApi: { codexRestartService: observed } };
+    const primary = startServer(0, deps);
+    const extra = startServer(0, deps);
+    try {
+      const headers = { "x-opencodex-api-key": "restart-boundary-admin" };
+      for (const server of [primary, extra]) {
+        const state = await fetch(new URL(CODEX_APP_SERVER_STATE_PATH, server.url), { headers });
+        expect(state.status).toBe(200);
+        expect(await state.json()).toEqual({ state: "unknown", runningCount: 0 });
+        const restart = await fetch(new URL(CODEX_RESTART_PATH, server.url), { method: "POST", headers });
+        expect(restart.status).toBe(200);
+        expect(await restart.json()).toEqual(sentinel);
+      }
+      expect(calls).toEqual([
+        "readState", "performRestart",
+        "readState", "performRestart",
+      ]);
+    } finally {
+      await primary.stop(true);
+      await extra.stop(true);
+      for (const [name, value] of [
+        ["OPENCODEX_HOME", previousHome],
+        ["CODEX_HOME", previousCodexHome],
+        ["OPENCODEX_ADMIN_AUTH_TOKEN", previousAdminToken],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
   });
 });
