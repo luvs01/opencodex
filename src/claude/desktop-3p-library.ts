@@ -51,7 +51,14 @@ export function readDesktopLibraryBytes(path: string): Buffer {
   // POSIX open of a FIFO can itself block, before fstat is possible. Windows has no POSIX
   // FIFO entry; retain descriptor identity validation there without unsupported open flags.
   const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NONBLOCK | constants.O_NOFOLLOW);
-  const fd = openSync(path, flags);
+  let fd: number;
+  try {
+    fd = openSync(path, flags);
+  } catch (error) {
+    // A symlink swapped in after lstat fails the no-follow open with ELOOP; surface the refusal name.
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error("desktop_config_not_regular");
+    throw error;
+  }
   try {
     const opened = fstatSync(fd, { bigint: true });
     if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino

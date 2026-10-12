@@ -263,3 +263,21 @@ test.skipIf(process.platform === "win32")("a regular-to-FIFO replacement between
     expect(filesystem.lstatSync(path).isFIFO()).toBe(true);
   } finally { opening.mockRestore(); }
 });
+
+test.skipIf(process.platform === "win32")("a regular-to-symlink replacement between stat and open is refused", () => {
+  const path = join(fixtureHome, "race-link.json");
+  const target = join(fixtureHome, "link-target.json");
+  const link = join(fixtureHome, "link-replacement");
+  writeFileSync(path, "{}");
+  writeFileSync(target, "{}");
+  filesystem.symlinkSync(target, link);
+  const open = filesystem.openSync;
+  const opening = spyOn(filesystem, "openSync").mockImplementation((target_, flags, mode) => {
+    if (target_ === path) filesystem.renameSync(link, path);
+    return open(target_, flags, mode);
+  });
+  try {
+    expect(() => readDesktopLibraryText(path)).toThrow("desktop_config_not_regular");
+    expect(filesystem.lstatSync(path).isSymbolicLink()).toBe(true);
+  } finally { opening.mockRestore(); }
+});
