@@ -8,6 +8,9 @@
  * Plan: devlog/_fin/260815_gui_codex_restart/010_phase1_backend_endpoint.md
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { helperPath } from "../helpers/repo-root";
+import { nativeOwnerRestartService, NATIVE_OWNER_RESTART_REFUSAL } from "../helpers/native-owner-restart-service";
 import { handleSystemRoutes } from "../../src/server/management/system-routes";
 import type { ManagementContext } from "../../src/server/management/context";
 import {
@@ -162,3 +165,27 @@ describe("POST /api/system/codex-restart", () => {
   });
 });
 
+
+describe("native-owner fixture process-control boundary", () => {
+  test("the fixture installs its non-operating service on the common server startup path", () => {
+    // This source-wiring guard complements the real route dispatch checks below. Do not import
+    // the helper here: its top level starts a server and reads the stdin control protocol.
+    const source = readFileSync(helperPath("native-main-owner-child.ts"), "utf8");
+    const start = source.slice(source.indexOf("function start("), source.indexOf("const primary = start();"));
+    expect(start).toContain("codexRestartService: nativeOwnerRestartService");
+  });
+
+  test("state queries use a synthetic unknown result without host process enumeration", async () => {
+    const response = await handleSystemRoutes(contextFor(CODEX_APP_SERVER_STATE_PATH, "GET", nativeOwnerRestartService));
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toEqual({ state: "unknown", runningCount: 0 });
+  });
+
+  test("restart is refused instead of invoking the live service or claiming a successful restart", async () => {
+    await expect(handleSystemRoutes(contextFor(CODEX_RESTART_PATH, "POST", nativeOwnerRestartService)))
+      .rejects.toThrow(NATIVE_OWNER_RESTART_REFUSAL);
+    // A refused call does not poison a later read or make the next restart succeed.
+    expect(await nativeOwnerRestartService.readState()).toEqual({ state: "unknown", runningCount: 0 });
+    await expect(nativeOwnerRestartService.performRestart()).rejects.toThrow(NATIVE_OWNER_RESTART_REFUSAL);
+  });
+});
