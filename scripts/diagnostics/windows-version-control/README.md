@@ -10,6 +10,12 @@ authentication values, and an ephemeral loopback listener. It is configured
 with no real credentials and one unavailable loopback provider. Other network
 egress is not blocked or audited.
 
+The controller captures the original home before replacing the child
+environment and arms the test-home guard (`OCX_TEST_HOME_GUARD`,
+`OCX_REAL_HOME`) with that protected identity. Rewriting fixture `HOME` and
+`USERPROFILE` does not redefine the protected OpenCodex and Codex homes.
+The module contracts exercise the same setup with a synthetic original home.
+
 ```powershell
 cargo test --locked --manifest-path scripts/diagnostics/windows-version-control/Cargo.toml --test async_contracts -- --test-threads=4
 cargo clippy --locked --manifest-path scripts/diagnostics/windows-version-control/Cargo.toml --all-targets -- -D warnings
