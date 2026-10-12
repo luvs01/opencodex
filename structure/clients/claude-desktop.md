@@ -110,6 +110,12 @@ longer names the expected file, while a same-path failure keeps its own errno. I
 refusal through its existing `metadata_unreadable`/`broken` outcomes and the writer through its
 existing refusals; `StoreIO.read` in `src/claude/desktop-remote-store-io.ts` layers its size cap,
 private-file mode and post-read identity contract on top of the same read and reports it as `unsafe`.
+The opened size is checked before allocation, reads stop after the bound plus one sentinel byte, and
+the path must still name the opened file after the read completes or the same
+`desktop_config_not_regular` refusal is raised. Profiles and `_meta.json` metadata are capped at
+4 MiB (`MAX_DESKTOP_PROFILE_FILE_BYTES`); the connection store keeps its existing tighter limits. Profile, metadata and removal writes preflight
+the bounded serialization of both outputs before any replacement, pivot or unlink mutation, so a
+`desktop_config_too_large` refusal cannot strand the reader on a file the writer just created.
 
 Mode switches establish the replacement before removing the previous connection. A failed
 first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
