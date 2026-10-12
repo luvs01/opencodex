@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, type BigIntStats } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeDesktopConfigLibraryDir, resolveConfigLibraryDir } from "./desktop-3p-paths";
@@ -44,6 +44,15 @@ export interface Desktop3pMetadata {
 
 export const DESKTOP_PICKER_ENTRY_NAME = "opencodex-picker";
 
+/** A path that no longer names the observed file was swapped; a same-path failure keeps its own errno. */
+function pathStillNamesExpectedFile(path: string, expected: BigIntStats): boolean {
+  try {
+    const now = lstatSync(path, { bigint: true });
+    return now.isFile() && now.dev === expected.dev && now.ino === expected.ino
+      && now.ctimeNs === expected.ctimeNs;
+  } catch { return false; }
+}
+
 /** Read regular config files only; a path swap must not turn an observation into a FIFO wait. */
 export function readDesktopLibraryBytes(path: string): Buffer {
   const expected = lstatSync(path, { bigint: true });
@@ -55,9 +64,10 @@ export function readDesktopLibraryBytes(path: string): Buffer {
   try {
     fd = openSync(path, flags);
   } catch (error) {
-    // A symlink swapped in after lstat fails the no-follow open with ELOOP; surface the refusal name.
-    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error("desktop_config_not_regular");
-    throw error;
+    // A swap can fail at open — ELOOP on a symlink, ENXIO on a socket — before fstat can
+    // classify it. Re-observing the path reports every swap as the documented refusal.
+    if (pathStillNamesExpectedFile(path, expected)) throw error;
+    throw new Error("desktop_config_not_regular");
   }
   try {
     const opened = fstatSync(fd, { bigint: true });
