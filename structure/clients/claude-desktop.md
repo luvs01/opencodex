@@ -226,10 +226,12 @@ response closes; upstream request closure alone does not prove a buffered reply 
 After a complete response, HTTP/2 closes only that stream with `RST_STREAM NO_ERROR` (RFC 9113
 §8.1), including a complete generated 502. Without a complete downstream response, cleanup uses
 `CANCEL` for a premature downstream close or an upstream close without a reply.
-An early HTTP/1.1 refusal preserves its reply, then unpipes upstream and drains unfinished input
-until body completion or the absolute or idle deadline, then closes gracefully. Errors and premature downstream
+An early HTTP/1.1 refusal preserves its reply, then drains unfinished input: a body that
+completes leaves the keep-alive socket reusable, while only a body that stalls past the absolute
+or idle deadline, or a premature close, ends it. Errors and premature downstream
 closes still destroy the request. The 60-second absolute and 15-second idle-progress deadlines
-close client input and upstream work and release the aggregate slot. Body
+close client input and upstream work and release the aggregate slot; upstream backpressure only
+suspends the idle clock, never the absolute deadline. Body
 completion removes the input-cleanup listeners and both timers, leaving long-lived responses and
 SSE subscriptions independent of upload cleanup. Completed HTTP/1.1 uploads retain keep-alive on
 generated 502s and can reuse the same client socket.

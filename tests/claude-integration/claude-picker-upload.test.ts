@@ -147,6 +147,29 @@ for (const protocol of ["h1", "h2"] as const) {
   }
 }
 
+bounded("h1 refusal keeps the same connection alive once the upload drains", async wait => {
+  const body = "complete";
+  const f = await fixture((req, res) => {
+    req.resume(); res.end("ordinary");
+  });
+  try {
+    // A refused upload that finishes its body must not have its socket closed:
+    // the keep-alive advertisement in the empty reply stays honest and the next
+    // request on that socket is relayed instead of dropped.
+    const upload = f.h1("//[", "POST", { "Content-Length": String(body.length) });
+    const firstSocket = Promise.withResolvers<Duplex>();
+    upload.once("socket", firstSocket.resolve);
+    const result = h1Result(upload); upload.end(body);
+    expect(await wait(result)).toEqual({ status: 400, text: "" });
+    const next = f.h1("/next");
+    const nextSocket = Promise.withResolvers<Duplex>();
+    next.once("socket", nextSocket.resolve);
+    const nextResult = h1Result(next); next.end();
+    expect(await wait(nextResult)).toEqual({ status: 200, text: "ordinary" });
+    expect(await wait(nextSocket.promise)).toBe(await wait(firstSocket.promise));
+  } finally { await wait(f.close()); }
+});
+
 bounded("h1 completed upload keeps the same connection alive after an upstream failure", async wait => {
   const body = "complete";
   let received = "";
@@ -297,6 +320,30 @@ bounded("absolute upload deadline expires despite continued progress", async wai
     await wait(closed);
     expect(upload.rstCode).toBe(constants.NGHTTP2_CANCEL);
   } finally { if (progress) clearInterval(progress); await wait(f.close()); }
+});
+
+bounded("upstream backpressure does not expire an active upload as idle", async wait => {
+  const arrived = Promise.withResolvers<void>();
+  const f = await fixture((req, res) => {
+    // Never consume the body: the upstream read buffer stays full, so the relay
+    // pipe pauses client input even though the client has more bytes to send.
+    if (req.url === "/stall") arrived.resolve(); else res.end("ordinary");
+  }, { uploadDeadlineMs: 1_000, uploadIdleTimeoutMs: 250 });
+  try {
+    const session = f.h2();
+    const upload = session.request({ ":method": "POST", ":path": "/stall", ":authority": "claude.ai" });
+    const closed = observeClose(upload);
+    let closedEarly = false;
+    upload.once("close", () => { closedEarly = true; });
+    upload.write(Buffer.alloc(4 * 1024 * 1024, 0x61));
+    await wait(arrived.promise);
+    // Past the idle interval the upload must still be open: the client is stalled
+    // by upstream backpressure, not idle. The absolute deadline still ends it.
+    await new Promise(resolve => setTimeout(resolve, 600));
+    expect(closedEarly).toBe(false);
+    await wait(closed);
+    expect(upload.rstCode).toBe(constants.NGHTTP2_CANCEL);
+  } finally { await wait(f.close()); }
 });
 
 bounded("completed uploads are not timed out while a long response is pending", async wait => {

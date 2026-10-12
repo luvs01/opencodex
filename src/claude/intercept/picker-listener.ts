@@ -238,8 +238,8 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
             if (idleTimer) clearTimeout(idleTimer);
             req.off("data", onProgress);
             req.off("end", onBodyEnd);
-            req.off("close", onBodyEnd);
-            req.off("error", onBodyEnd);
+            req.off("close", onBodyGone);
+            req.off("error", onBodyGone);
             responseWritable.off("finish", onReplyFinished);
           };
           const closeOnTimeout = () => {
@@ -252,22 +252,29 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
             idleTimer = setTimeout(closeOnTimeout, uploadIdleTimeoutMs);
             idleTimer.unref?.();
           };
+          // A body that finishes cleanly leaves a keep-alive socket the client may
+          // reuse; only a deadline or a premature close ends it.
           const onBodyEnd = () => {
+            inputFinished = true;
+            if (replyFinished) cleanup();
+          };
+          const onBodyGone = () => {
+            if (inputFinished) return;
             inputFinished = true;
             if (replyFinished) { cleanup(); closeInput(true); }
           };
           const onReplyFinished = () => {
             if (settled) return;
             replyFinished = true;
-            if (inputFinished || req.complete) { cleanup(); closeInput(true); return; }
+            if (inputFinished || req.complete) { cleanup(); return; }
             deadlineTimer = setTimeout(closeOnTimeout, uploadDeadlineMs);
             deadlineTimer.unref?.();
             onProgress();
           };
           req.on("data", onProgress);
           req.once("end", onBodyEnd);
-          req.once("close", onBodyEnd);
-          req.once("error", onBodyEnd);
+          req.once("close", onBodyGone);
+          req.once("error", onBodyGone);
           responseWritable.once("finish", onReplyFinished);
           req.resume();
         }
@@ -398,9 +405,17 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
         deadlineTimer = undefined;
         idleTimer = undefined;
       };
+      const onUploadIdle = () => {
+        idleTimer = undefined;
+        // A full upstream buffer pauses the pipe: 'data' stops even while the client
+        // keeps sending, so backpressure is not client idleness. Recheck each interval
+        // until the upstream drains; the absolute deadline still bounds the upload.
+        if (upReq.writableNeedDrain) { onUploadProgress(); return; }
+        expireUpload();
+      };
       const onUploadProgress = () => {
         if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(expireUpload, uploadIdleTimeoutMs);
+        idleTimer = setTimeout(onUploadIdle, uploadIdleTimeoutMs);
         idleTimer.unref?.();
       };
       const finishUpload = () => {
