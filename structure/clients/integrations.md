@@ -31,7 +31,7 @@ parsing and ownership rules below.
 | `src/clients/config-export.ts` | Pure per-client config builders and the exact managed fragments each client receives. It never writes files. |
 | `src/integrations/registry.ts` | Canonical config/detection paths, current-provider-store declarations, source-preserving YAML declarations, writer-lock behavior, and client IDs. |
 | `src/integrations/target.ts` | Which file one operation reads, writes and records, and whether a write there reaches the client. |
-| `src/integrations/config-io.ts` | Bounded file loading and parsing. Values that cannot round-trip through the target serializer are rejected before mutation. |
+| `src/integrations/config-io.ts` | Bounded regular-file loading and parsing; production reads reject symlinks and stop after 4 MiB. Values that cannot round-trip through the target serializer are rejected before mutation. |
 | `src/integrations/kilo-candidates.ts` | Inspects all Kilo global config candidates for unsafe files and a competing `provider.opencodex` block before status or any operation that adds or replaces a block. |
 | `src/integrations/state.ts` | The single `absent` / `current` / `stale` / `conflict` / `unsafe` classifier used by status and every writer operation. |
 | `src/integrations/ownership.ts` | Durable ownership records: file, generated contribution, protected contribution, exact fragment paths, and operation identity. |
