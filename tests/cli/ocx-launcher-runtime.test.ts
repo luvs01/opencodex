@@ -390,6 +390,7 @@ describe.skipIf(!runnable)("ocx package launcher effective Bun runtime", () => {
 });
 
 function pathFixtureRoot(prefix: string): string {
+  if (process.platform === "win32") return mkdtempSync(join(tmpdir(), prefix));
   // A trusted-executable fixture cannot live beneath a shared temp ancestor whose
   // owner is neither root nor this user (common in user-namespace sandboxes).
   // Keep the launcher package isolated from this checkout's installed Bun.
@@ -747,7 +748,11 @@ describe("real PATH Bun validation", () => {
       if (process.platform === "win32") copyFileSync(process.execPath, join(last, name));
       else writeFileSync(join(last, name), '#!/bin/sh\ncase "$1" in --version|-e) printf "1.4.0\\n";; *) exit 1;; esac\n#' + "x".repeat(REAL_BUN_MIN_BYTES));
       chmodSync(join(first, name), 0o755); chmodSync(join(last, name), 0o755);
-      const selected = findPathBun({ env: { ...process.env, PATH: [first, last].join(process.platform === "win32" ? ";" : ":") }, pinnedVersion: "1.4.2", deadlineMs: 2000 });
+      const env = { ...process.env, PATH: [first, last].join(process.platform === "win32" ? ";" : ":") };
+      // Windows keeps the inherited variable under its stored case (e.g. `Path`);
+      // the resolver's case-insensitive lookup would reach it before this override.
+      for (const key of Object.keys(env)) if (key !== "PATH" && key.toLowerCase() === "path") delete env[key];
+      const selected = findPathBun({ env, pinnedVersion: "1.4.2", deadlineMs: 2000 });
       expect(selected?.path).toBe(realpathSync.native(join(last, name)));
       expect(selected?.version).toMatch(/^1\.(?:[4-9]|[1-9]\d+)\./);
     } finally { removeTree(root); }
