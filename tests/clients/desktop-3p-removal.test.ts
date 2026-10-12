@@ -151,7 +151,7 @@ test("an owned gateway with no saved fingerprint is treated as drifted and can b
   expect(inspectDesktop3pConfigLibrary({ env: envFor(library), appliedFingerprint: null }).kind).toBe("gateway_drifted");
   expect(removeDesktop3pStandardPivot({ env: envFor(library), appliedFingerprint: null })).toMatchObject({
     ok: true, changed: true, kind: "removed",
-  }));
+  });
   expect(existsSync(join(library, `${id}.json`))).toBe(false);
 });
 
