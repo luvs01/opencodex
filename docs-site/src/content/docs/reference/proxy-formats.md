@@ -71,6 +71,16 @@ returns 504, and client cancellation returns 499. Bun does not expose the exact 
 cannot currently be forwarded precisely. A successful connection preserves the initial session
 frames in order. This handshake policy is separate from the Responses WebSocket transport.
 
+## Undeclared tool calls
+
+When a request declares a tool catalog, a native passthrough reply that calls a client-executed
+tool outside that catalog fails the turn instead of relaying the call — on every inbound dialect:
+Responses, Chat Completions, and Messages. Streaming replies emit `response.failed` with error
+code `undeclared_tool_call`, then `data: [DONE]`; buffered JSON returns HTTP 502 `upstream_error`
+naming the tool. The refusal runs before the response can enter continuation state, and it stands
+down only for `authMode: "forward"` providers or a request with no declared catalog. An explicitly
+empty catalog counts as a declared catalog and therefore authorizes nothing.
+
 ## Endpoint overview
 
 | Client surface | Endpoint | Successful non-stream result | Successful stream or socket result |
