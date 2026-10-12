@@ -75,11 +75,19 @@ frames in order. This handshake policy is separate from the Responses WebSocket 
 
 When a request declares a tool catalog, a native passthrough reply that calls a client-executed
 tool outside that catalog fails the turn instead of relaying the call — on every inbound dialect:
-Responses, Chat Completions, and Messages. Streaming replies emit `response.failed` with error
-code `undeclared_tool_call`, then `data: [DONE]`; buffered JSON returns HTTP 502 `upstream_error`
-naming the tool. The refusal runs before the response can enter continuation state, and it stands
-down only for `authMode: "forward"` providers or a request with no declared catalog. An explicitly
-empty catalog counts as a declared catalog and therefore authorizes nothing.
+Responses, Chat Completions, and Messages. The client-facing streaming failure depends on the endpoint:
+
+- **Responses:** a `response.failed` event with error code `undeclared_tool_call`, then `data: [DONE]`.
+- **Chat Completions:** a `data:` frame containing an OpenAI-style `error` object, then the stream
+  closes without a success completion or `[DONE]`.
+- **Messages:** an Anthropic `event: error` frame with a `{ "type": "error", "error": ... }` body,
+  without a successful `message_stop` or `[DONE]`. The Responses error code is not preserved.
+
+Buffered JSON returns HTTP 502 with an error naming the tool, using the endpoint's error envelope
+(the internal `upstream_error` is translated for Chat and Messages clients). The refusal runs
+before the response can enter continuation state, and it stands down only for `authMode: "forward"`
+providers or a request with no declared catalog. An explicitly empty catalog counts as a declared
+catalog and therefore authorizes nothing.
 
 ## Endpoint overview
 
