@@ -1,0 +1,30 @@
+name: Pinned follow-up source
+on:
+  push:
+    branches: [codex/security-workspace-20261012]
+    paths: [.github/workflows/security-source-20261012.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/security-workspace-20261012'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 384c93affb53868239cbf172d80ae18625303413
+          persist-credentials: false
+      - name: Archive the exact tree without executing repository code
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output="$RUNNER_TEMP/security-source-384c93af.tar.gz" 384c93affb53868239cbf172d80ae18625303413
+          sha256sum "$RUNNER_TEMP/security-source-384c93af.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-source-384c93af
+          path: ${{ runner.temp }}/security-source-384c93af.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
