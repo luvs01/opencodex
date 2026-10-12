@@ -24,6 +24,16 @@ Responses 表示是橋接的中心。原生相容的路由可跳過部分轉譯�
 
 在非 combo 的 Responses 請求上，OpenCodex 會把這種在允許清單中的 403 改寫為 HTTP 200 的 Responses 內容，帶有 `status: "incomplete"` 與 `incomplete_details.reason: "content_filter"`。改寫同時作用於 openai-chat 轉接器路徑與 openai-responses 直通（grok-4.6 / grok-4.5 OAuth）。串流使用相同的 incomplete 邊界。空白的 403 本文仍是錯誤。訂閱、點數、權限與 `not allowed to use this model` 的 403 仍是錯誤。Combo failover 仍看到原始的 HTTP 403。
 
+## 未宣告的工具呼叫
+
+當請求宣告了工具目錄時，原生直通回應若呼叫目錄之外、由用戶端執行的工具，不會轉送該呼叫，而是讓本回合失敗。此行為適用於所有輸入方言：Responses、Chat Completions 與 Messages。串流失敗在用戶端呈現的格式取決於端點：
+
+- **Responses：**傳送帶有錯誤碼 `undeclared_tool_call` 的 `response.failed` 事件，接著傳送 `data: [DONE]`。
+- **Chat Completions：**傳送包含 OpenAI 格式 `error` 物件的 `data:` frame，接著關閉串流，不會傳送成功完成訊號或 `[DONE]`。
+- **Messages：**傳送包含 `{ "type": "error", "error": ... }` 內文的 Anthropic `event: error` frame；不會傳送成功的 `message_stop` 或 `[DONE]`。Responses 錯誤碼不會保留。
+
+緩衝式 JSON 回應會傳回 HTTP 502，並在錯誤中指出工具名稱；錯誤格式依端點而異（內部的 `upstream_error` 會轉換為 Chat 與 Messages 用戶端所需的格式）。拒絕會在回應進入延續狀態之前執行。只有 `authMode: "forward"` 供應商或未宣告工具目錄的請求不會觸發此拒絕。明確宣告為空的目錄仍視為已宣告，因此不會授權任何工具。
+
 ## 端點概覽
 
 | 客戶端介面 | 端點 | 成功的非串流結果 | 成功的串流或 socket 結果 |

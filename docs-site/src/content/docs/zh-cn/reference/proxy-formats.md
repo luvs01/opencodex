@@ -29,6 +29,16 @@ Responses 表示是这座桥的中心。原生兼容的路由可以跳过部分�
 
 在非 combo 的 Responses 请求上，OpenCodex 会把该 allowlist 中的 403 改写为 HTTP 200 Responses，`status: "incomplete"`，`incomplete_details.reason: "content_filter"`。openai-chat 适配器路径和 openai-responses passthrough（grok-4.6 / grok-4.5 OAuth）都会改写。流式响应使用同一 incomplete 边界。空正文 403 仍是错误。订阅、额度、权限以及 `not allowed to use this model` 的 403 仍是错误。combo 故障切换仍会看到原始 HTTP 403。
 
+## 未声明的工具调用
+
+当请求声明了工具目录时，原生直通响应如果调用目录之外的客户端执行工具，不会转发该调用，而是使本轮失败。此行为适用于所有入站方言：Responses、Chat Completions 和 Messages。流式失败在客户端的呈现方式取决于端点：
+
+- **Responses：**发送带有错误代码 `undeclared_tool_call` 的 `response.failed` 事件，然后发送 `data: [DONE]`。
+- **Chat Completions：**发送包含 OpenAI 风格 `error` 对象的 `data:` 帧，随后关闭流，不发送成功完成标记或 `[DONE]`。
+- **Messages：**发送包含 `{ "type": "error", "error": ... }` 正文的 Anthropic `event: error` 帧；不会发送成功的 `message_stop` 或 `[DONE]`。Responses 错误代码不会保留。
+
+缓冲式 JSON 响应会返回 HTTP 502，并在错误中注明工具名称；错误格式因端点而异（内部的 `upstream_error` 会转换为 Chat 和 Messages 客户端所用的格式）。拒绝发生在响应进入续接状态之前。只有 `authMode: "forward"` 提供方或未声明工具目录的请求才不会触发此拒绝。显式声明为空的目录仍算已声明，因此不授权任何工具。
+
 ## 端点总览
 
 | 客户端表面 | 端点 | 成功的非流式结果 | 成功的流式或套接字结果 |

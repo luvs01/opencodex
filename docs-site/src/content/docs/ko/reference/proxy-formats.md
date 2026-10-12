@@ -29,6 +29,16 @@ Responses 표현이 이 연결의 중심입니다. 네이티브 호환 경로는
 
 콤보가 아닌 Responses 요청에서 OpenCodex는 allowlist에 오른 그 403을 HTTP 200 Responses, `status: "incomplete"`, `incomplete_details.reason: "content_filter"`로 바꿉니다. openai-chat 어댑터 경로와 openai-responses passthrough(grok-4.6 / grok-4.5 OAuth) 모두에서 동작합니다. 스트리밍도 같은 incomplete 경계입니다. 빈 본문 403은 오류로 남습니다. 구독, 크레딧, 권한, `not allowed to use this model` 403은 오류로 남습니다. 콤보 페일오버는 원래 HTTP 403을 그대로 봅니다.
 
+## 선언되지 않은 도구 호출
+
+요청에서 도구 카탈로그를 선언한 경우, 네이티브 패스스루 응답이 해당 카탈로그에 없는 클라이언트 실행 도구를 호출하면 그 호출을 전달하는 대신 턴을 실패 처리합니다. 이 동작은 Responses, Chat Completions, Messages를 비롯한 모든 인바운드 방언에 적용됩니다. 스트리밍 실패의 클라이언트 표시 형식은 엔드포인트마다 다릅니다.
+
+- **Responses:** 오류 코드 `undeclared_tool_call`이 포함된 `response.failed` 이벤트를 보낸 다음 `data: [DONE]`을 보냅니다.
+- **Chat Completions:** OpenAI 형식의 `error` 객체가 포함된 `data:` 프레임을 보낸 뒤, 성공 완료나 `[DONE]` 없이 스트림을 닫습니다.
+- **Messages:** `{ "type": "error", "error": ... }` 본문이 포함된 Anthropic `event: error` 프레임을 보냅니다. 성공적인 `message_stop`이나 `[DONE]`은 보내지 않으며, Responses 오류 코드는 보존되지 않습니다.
+
+버퍼링된 JSON 응답은 도구 이름이 포함된 오류와 함께 HTTP 502를 반환합니다. 오류 형식은 엔드포인트별로 다르며, 내부 `upstream_error`는 Chat 및 Messages 클라이언트용으로 변환됩니다. 이 거부 처리는 응답이 후속 처리 상태에 들어가기 전에 실행됩니다. `authMode: "forward"` 공급자이거나 요청에 선언된 카탈로그가 없는 경우에만 이 거부 처리가 적용되지 않습니다. 명시적으로 빈 카탈로그도 선언된 것으로 간주되므로 어떤 도구도 허용하지 않습니다.
+
 ## 엔드포인트 개요
 
 | 클라이언트 표면 | 엔드포인트 | 성공한 비스트리밍 결과 | 성공한 스트리밍 또는 소켓 결과 |

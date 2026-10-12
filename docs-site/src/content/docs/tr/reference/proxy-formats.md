@@ -33,6 +33,16 @@ Bazı xAI Chat Completions retleri, HTTP 200 ve `finish_reason: content_filter` 
 
 Kombo olmayan bir Responses isteğinde OpenCodex, izin listesindeki bu 403'ü `status: "incomplete"` ve `incomplete_details.reason: "content_filter"` içeren bir HTTP 200 Responses yanıtına dönüştürür. Dönüştürme openai-chat bağdaştırıcı yolunda ve openai-responses geçişinde (grok-4.6 / grok-4.5 OAuth) çalışır. Akış da aynı incomplete sınırını kullanır. Boş veya yalnızca boşluk içeren 403 gövdeleri hata olarak kalır. Abonelik, kredi, yetki ve `not allowed to use this model` 403'leri hata olarak kalır. Kombo yük devretmesi özgün HTTP 403'ü görmeye devam eder.
 
+## Bildirilmemiş araç çağrıları
+
+Bir istek bir araç kataloğu bildirdiğinde, katalog dışındaki istemci tarafından çalıştırılan bir aracı çağıran native passthrough yanıtı, çağrıyı aktarmak yerine turu başarısız kılar. Bu, gelen tüm lehçeler için geçerlidir: Responses, Chat Completions ve Messages. İstemcinin akış sırasında göreceği hata, endpoint’e göre değişir:
+
+- **Responses:** `undeclared_tool_call` hata kodunu içeren bir `response.failed` olayı, ardından `data: [DONE]`.
+- **Chat Completions:** OpenAI biçiminde bir `error` nesnesi içeren `data:` çerçevesi gönderilir; ardından başarılı bir tamamlanma veya `[DONE]` olmadan akış kapatılır.
+- **Messages:** `{ "type": "error", "error": ... }` gövdeli bir Anthropic `event: error` çerçevesi gönderilir; başarılı bir `message_stop` veya `[DONE]` gönderilmez. Responses hata kodu korunmaz.
+
+Arabelleğe alınmış JSON yanıtı, araç adını içeren bir hatayla HTTP 502 döndürür; endpoint’e özgü hata biçimini kullanır (dahili `upstream_error`, Chat ve Messages istemcileri için dönüştürülür). Ret, yanıt devam durumuna girmeden önce gerçekleşir. Bu ret yalnızca `authMode: "forward"` sağlayıcıları veya bildirilmiş kataloğu olmayan istekler için devre dışıdır. Açıkça boş bir katalog bildirilmiş sayılır ve hiçbir araca izin vermez.
+
 ## Uç nokta genel bakışı
 
 | İstemci yüzeyi | Uç nokta | Başarılı akışsız sonuç | Başarılı akış veya soket sonucu |

@@ -30,6 +30,16 @@ Certains refus xAI de Chat Completions arrivent en HTTP 403 avec une phrase de r
 
 Sur une requête Responses hors combo, OpenCodex réécrit ce 403 de la liste autorisée en réponse Responses HTTP 200 avec `status: "incomplete"` et `incomplete_details.reason: "content_filter"`. La réécriture s'applique au chemin de l'adaptateur openai-chat et au passthrough openai-responses (OAuth grok-4.6 / grok-4.5). Le streaming utilise la même limite incomplete. Un corps 403 vide ou fait d'espaces reste une erreur. Les 403 d'abonnement, de crédits, de droits d'accès et `not allowed to use this model` restent des erreurs. Le basculement de combo voit toujours le HTTP 403 d'origine.
 
+## Appels d’outils non déclarés
+
+Lorsqu’une requête déclare un catalogue d’outils, une réponse en passthrough natif qui appelle un outil exécuté par le client hors de ce catalogue fait échouer le tour au lieu de relayer l’appel. Cela s’applique à tous les dialectes entrants : Responses, Chat Completions et Messages. En streaming, l’échec présenté au client dépend du point de terminaison :
+
+- **Responses :** un événement `response.failed` avec le code d’erreur `undeclared_tool_call`, puis `data: [DONE]`.
+- **Chat Completions :** une trame `data:` contenant un objet `error` au format OpenAI, puis la fermeture du flux sans fin de succès ni `[DONE]`.
+- **Messages :** une trame Anthropic `event: error` avec le corps `{ "type": "error", "error": ... }`, sans `message_stop` réussi ni `[DONE]`. Le code d’erreur Responses n’est pas conservé.
+
+La réponse JSON mise en mémoire tampon renvoie un HTTP 502 avec une erreur qui nomme l’outil ; le format d’erreur dépend du point de terminaison (l’`upstream_error` interne est traduit pour les clients Chat et Messages). Le refus intervient avant que la réponse puisse entrer dans l’état de continuation. Il n’est désactivé que pour les fournisseurs avec `authMode: "forward"` ou pour une requête sans catalogue déclaré. Un catalogue explicitement vide est considéré comme déclaré et n’autorise donc aucun outil.
+
 ## Présentation du point de terminaison
 
 | Espace client | Point de terminaison | Résultat non-stream réussi | Résultat de flux ou de socket réussi |

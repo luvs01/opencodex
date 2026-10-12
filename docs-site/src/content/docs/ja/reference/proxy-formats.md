@@ -24,6 +24,16 @@ provider events → internal adapter events → client dialect
 
 コンボではない Responses リクエストでは、OpenCodex はその allowlist 対象の 403 を HTTP 200 の Responses、`status: "incomplete"`、`incomplete_details.reason: "content_filter"` に書き換えます。openai-chat アダプタ経路と openai-responses パススルー（grok-4.6 / grok-4.5 OAuth）の両方です。ストリーミングも同じ incomplete 境界です。空本文の 403 はエラーのままです。サブスクリプション、クレジット、権限、`not allowed to use this model` の 403 はエラーのままです。コンボのフェイルオーバーは元の HTTP 403 を見ます。
 
+## 宣言されていないツール呼び出し
+
+リクエストでツールカタログが宣言されている場合、ネイティブのパススルー応答がそのカタログにないクライアント実行ツールを呼び出すと、その呼び出しを中継せずにターンを失敗させます。この動作はすべての受信ダイアレクト（Responses、Chat Completions、Messages）に適用されます。ストリーミング時にクライアントへ返す失敗形式は、エンドポイントによって異なります。
+
+- **Responses:** エラーコード `undeclared_tool_call` を含む `response.failed` イベントを送り、その後に `data: [DONE]` を送ります。
+- **Chat Completions:** OpenAI 形式の `error` オブジェクトを含む `data:` フレームを送り、成功完了や `[DONE]` を送らずにストリームを閉じます。
+- **Messages:** `{ "type": "error", "error": ... }` 本文を含む Anthropic の `event: error` フレームを送り、成功した `message_stop` や `[DONE]` は送りません。Responses のエラーコードは引き継がれません。
+
+バッファリングされた JSON 応答は、ツール名を含むエラーとともに HTTP 502 を返します。エラー形式はエンドポイント固有で、内部の `upstream_error` は Chat および Messages クライアント向けに変換されます。この拒否処理は、応答が継続状態に入る前に実行されます。この拒否が行われないのは、`authMode: "forward"` のプロバイダー、またはカタログが宣言されていないリクエストに限られます。明示的に空のカタログも宣言済みとして扱われ、どのツールも許可しません。
+
 ## エンドポイントの概要
 
 |クライアントサーフェス |エンドポイント |非ストリームの結果が成功 |成功したストリームまたはソケットの結果 |
