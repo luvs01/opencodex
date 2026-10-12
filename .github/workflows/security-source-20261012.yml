@@ -1,4 +1,5 @@
 name: Pinned follow-up source
+# Retry the interrupted source export; target, permissions and output are unchanged.
 on:
   push:
     branches: [codex/security-workspace-20261012]
