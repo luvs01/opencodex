@@ -94,6 +94,24 @@ pub fn render_shim(cli: &Path, owner: &str) -> Result<String> {
 pub fn render_helper(bin: &Path) -> Result<String> {
     Ok(HELPER.replace("@BIN@", &quote(bin)?))
 }
+fn is_temporary_bundle_path(path: &Path, temp_dir: &Path) -> bool {
+    [
+        Path::new("/tmp"),
+        Path::new("/private/tmp"),
+        Path::new("/var/tmp"),
+        Path::new("/private/var/tmp"),
+        Path::new("/var/folders"),
+        Path::new("/private/var/folders"),
+    ]
+    .into_iter()
+    .chain(std::iter::once(temp_dir))
+    .any(|root| path.starts_with(root))
+        || path.starts_with("/Volumes")
+}
+fn has_app_translocation_marker(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().to_str() == Some("AppTranslocation"))
+}
 pub fn block(shell: &str, root: &Path) -> Result<String> {
     let body = if shell == "fish" {
         format!(
@@ -148,10 +166,9 @@ pub fn stable_bundle(exe: &Path, debug: bool, version: &str) -> Result<Bundle> {
     if debug {
         return Err("development-launch".into());
     }
-    let raw = text(exe)?;
-    if raw.starts_with("/Volumes/")
-        || raw.starts_with("/private/var/folders/") && raw.contains("/AppTranslocation/")
-        || raw.contains("/tmp/.mount_")
+    text(exe)?;
+    if has_app_translocation_marker(exe)
+        || is_temporary_bundle_path(exe, &std::env::temp_dir())
         || std::env::var_os("APPIMAGE").is_some()
         || std::env::var_os("APPDIR").is_some()
     {
@@ -159,7 +176,8 @@ pub fn stable_bundle(exe: &Path, debug: bool, version: &str) -> Result<Bundle> {
     }
     let real = fs::canonicalize(exe).map_err(|_| "bundle-unavailable")?;
     let s = text(&real)?;
-    if s.starts_with("/Volumes/") || s.contains("/AppTranslocation/") || s.contains("/tmp/.mount_")
+    if has_app_translocation_marker(&real)
+        || is_temporary_bundle_path(&real, &std::env::temp_dir())
     {
         return Err("temporary-bundle".into());
     }
@@ -205,6 +223,46 @@ pub fn stable_bundle(exe: &Path, debug: bool, version: &str) -> Result<Bundle> {
         cli_executable: text(&cli)?,
         version: version.into(),
     })
+}
+
+#[cfg(test)]
+mod temporary_bundle_path_tests {
+    use super::{has_app_translocation_marker, is_temporary_bundle_path};
+    use std::path::Path;
+
+    #[test]
+    fn temporary_bundle_roots_are_component_aware() {
+        let temp_dir = Path::new("/var/folders/test/app");
+        for path in [
+            "/tmp/App.app/Contents/MacOS/app",
+            "/private/tmp/App.app/Contents/MacOS/app",
+            "/var/tmp/App.app/Contents/MacOS/app",
+            "/private/var/tmp/App.app/Contents/MacOS/app",
+            "/var/folders/xx/App.app/Contents/MacOS/app",
+            "/private/var/folders/xx/App.app/Contents/MacOS/app",
+            "/Volumes/Installer/App.app/Contents/MacOS/app",
+        ] {
+            assert!(is_temporary_bundle_path(Path::new(path), temp_dir), "{path}");
+        }
+        for path in [
+            "/Applications/OpenCodex.app/Contents/MacOS/app",
+            "/Users/alice/Applications/OpenCodex.app/Contents/MacOS/app",
+            "/tmp-old/OpenCodex.app/Contents/MacOS/app",
+            "/private/var/folder-old/OpenCodex.app/Contents/MacOS/app",
+        ] {
+            assert!(!is_temporary_bundle_path(Path::new(path), temp_dir), "{path}");
+        }
+        assert!(is_temporary_bundle_path(
+            Path::new("/var/folders/test/app/OpenCodex.app/Contents/MacOS/app"),
+            temp_dir,
+        ));
+        assert!(has_app_translocation_marker(Path::new(
+            "/Volumes/Installer/AppTranslocation/OpenCodex.app/Contents/MacOS/app"
+        )));
+        assert!(!has_app_translocation_marker(Path::new(
+            "/Volumes/Installer/AppTranslocation-old/OpenCodex.app/Contents/MacOS/app"
+        )));
+    }
 }
 // Return exact block range, including its line terminator. Reject malformed or changed markers.
 fn range(bytes: &[u8], expected: &str) -> Result<Option<std::ops::Range<usize>>> {

@@ -114,17 +114,34 @@ async function disconnectedTurn(protocol: Protocol, phase: Phase) {
       await until(() => getActiveTurnCount() === before.turns + 1, "HTTP admitted");
       client.destroy();
     }
-    await until(() => getActiveTurnCount() === before.turns && sessionLaneMetrics().active === before.lanes, `${protocol}/${phase} released`);
+    if (phase === "selection") {
+      await until(() => capturedSignal?.aborted === true, `${protocol}/${phase} cancelled`);
+      expect(getActiveTurnCount()).toBe(before.turns + 1);
+      expect(sessionLaneMetrics().active).toBe(before.lanes + 1);
+      if (protocol === "responses-http") expect(workflowBudgetSnapshot(root)?.active ?? 0).toBeGreaterThan(0);
+      expect(upstreamRequests).toBe(0);
+    } else {
+      await until(() => getActiveTurnCount() === before.turns && sessionLaneMetrics().active === before.lanes, `${protocol}/${phase} released`);
+    }
     console.log(JSON.stringify({ protocol, phase, before, after: { turns: getActiveTurnCount(), lanes: sessionLaneMetrics().active }, upstreamRequests, clientSignalAborted: capturedSignal?.aborted }));
-    expect(getActiveTurnCount()).toBe(before.turns);
-    expect(sessionLaneMetrics().active).toBe(before.lanes);
-    if (protocol !== "responses-ws") expect(workflowBudgetSnapshot(root)?.active ?? 0).toBe(0);
+    if (phase === "selection") {
+      expect(getActiveTurnCount()).toBe(before.turns + 1);
+      expect(sessionLaneMetrics().active).toBe(before.lanes + 1);
+      if (protocol === "responses-http") expect(workflowBudgetSnapshot(root)?.active ?? 0).toBeGreaterThan(0);
+    } else {
+      expect(getActiveTurnCount()).toBe(before.turns);
+      expect(sessionLaneMetrics().active).toBe(before.lanes);
+      if (protocol !== "responses-ws") expect(workflowBudgetSnapshot(root)?.active ?? 0).toBe(0);
+    }
   } catch (error) {
     console.log(JSON.stringify({ protocol, phase, before, after: { turns: getActiveTurnCount(), lanes: sessionLaneMetrics().active }, upstreamRequests, clientSignalAborted: capturedSignal?.aborted }));
     throw error;
   } finally {
     closeClient?.();
     unblock.resolve();
+    if (phase === "selection") {
+      await until(() => getActiveTurnCount() === before.turns && sessionLaneMetrics().active === before.lanes, `${protocol}/${phase} finalized`);
+    }
     prepare.mockRestore();
     abortAndReleaseAllTurns(new Error("fixture teardown"));
     await server.stop(true);
@@ -140,11 +157,11 @@ for (const protocol of ["responses-http", "responses-ws", "messages"] as const) 
   }
 }
 for (const protocol of ["responses-http", "responses-ws"] as const) {
-  test(`${protocol} releases while account selection stays pending`, () => disconnectedTurn(protocol, "selection"), 15_000);
+  test(`${protocol} retains admission while account selection stays pending`, () => disconnectedTurn(protocol, "selection"), 15_000);
 }
 test("compact releases its lane after disconnect before upstream headers", () => disconnectedTurn("compact", "silent"), 15_000);
 
-test("an aborted registered controller releases once while its work stays pending", () => {
+test("an aborted registered controller retains ownership while its work stays pending", () => {
   const before = activeRegistryMetrics().activeTurns;
   const laneBefore = sessionLaneMetrics().active;
   const lease = tryAdmitTurn("fixture-controller")!;
@@ -154,23 +171,26 @@ test("an aborted registered controller releases once while its work stays pendin
   lease.bindAbortController(ac);
   try {
     ac.abort(new Error("fixture client closed"));
-    expect(getActiveTurnCount()).toBe(before.active);
-    expect(sessionLaneMetrics().active).toBe(laneBefore);
-    expect(released).toBe(1);
+    expect(getActiveTurnCount()).toBe(before.active + 1);
+    expect(sessionLaneMetrics().active).toBe(laneBefore + 1);
+    expect(released).toBe(0);
     unregisterTurn(ac);
     lease.release();
+    expect(getActiveTurnCount()).toBe(before.active);
+    expect(sessionLaneMetrics().active).toBe(laneBefore);
     expect(released).toBe(1);
     expect(activeRegistryMetrics().activeTurns.releaseMisses).toBe(before.releaseMisses);
   } finally { lease.release(); }
 });
 
 
-test("ingress cancellation releases pending selection and all bound controllers", () => {
+test("ingress cancellation retains admission until pending selection unwinds", () => {
   const before = getActiveTurnCount();
   const nativeBefore = getNativeMainProfileRequestCount();
   const client = new AbortController();
   const lease = tryAdmitTurn("fixture-selection", client.signal)!;
   const selection = lease.beginCodexAccountSelection();
+  const duringSelection = getNativeMainProfileRequestCount();
   const first = new AbortController();
   const second = new AbortController();
   lease.bindAbortController(first);
@@ -178,8 +198,8 @@ test("ingress cancellation releases pending selection and all bound controllers"
   lease.bindAbortController(first);
   const reason = new Error("fixture ingress closed");
   client.abort(reason);
-  expect(getActiveTurnCount()).toBe(before);
-  expect(getNativeMainProfileRequestCount()).toBe(nativeBefore);
+  expect(getActiveTurnCount()).toBe(before + 1);
+  expect(getNativeMainProfileRequestCount()).toBe(duringSelection);
   expect(first.signal.reason).toBe(reason);
   expect(second.signal.reason).toBe(reason);
   expect(selection.claimMainProfile()).toBe(false);
@@ -194,18 +214,15 @@ test("ingress cancellation releases pending selection and all bound controllers"
   expect(released).toBe(1);
 });
 
-test("already aborted ingress cannot retain admission or selection", () => {
+test("already aborted ingress cannot acquire admission or selection", () => {
   const before = getActiveTurnCount();
   const nativeBefore = getNativeMainProfileRequestCount();
   const client = new AbortController();
   client.abort(new Error("fixture already closed"));
-  const lease = tryAdmitTurn("fixture-pre-aborted", client.signal)!;
+  const lease = tryAdmitTurn("fixture-pre-aborted", client.signal);
   expect(getActiveTurnCount()).toBe(before);
-  const selection = lease.beginCodexAccountSelection();
-  expect(selection.claimMainProfile()).toBe(false);
+  expect(lease).toBeNull();
   expect(getNativeMainProfileRequestCount()).toBe(nativeBefore);
-  selection.release();
-  lease.release();
 });
 
 test("normal completion detaches cancellation listeners", () => {
@@ -222,7 +239,7 @@ test("normal completion detaches cancellation listeners", () => {
 });
 
 
-test("internal decision cancellation releases admission while dispatch remains pending", async () => {
+test("internal decision cancellation retains admission while dispatch remains pending", async () => {
   const before = getActiveTurnCount();
   const entered = deferred<void>();
   const unblock = deferred<Response>();
@@ -239,7 +256,7 @@ test("internal decision cancellation releases admission while dispatch remains p
   expect(getActiveTurnCount()).toBe(before + 1);
   try {
     client.abort(new Error("fixture decision closed"));
-    expect(getActiveTurnCount()).toBe(before);
+    expect(getActiveTurnCount()).toBe(before + 1);
   } finally {
     unblock.resolve(new Response(null, { status: 499 }));
     await settled;
@@ -247,7 +264,7 @@ test("internal decision cancellation releases admission while dispatch remains p
 });
 
 
-test("Live upgrade disconnect releases admission while resolution remains pending", async () => {
+test("Live upgrade disconnect retains admission while resolution remains pending", async () => {
   const previousHome = process.env.OPENCODEX_HOME;
   const home = mkdtempSync(join(tmpdir(), "ocx-upgrade-disconnect-"));
   process.env.OPENCODEX_HOME = home;
@@ -269,7 +286,9 @@ test("Live upgrade disconnect releases admission while resolution remains pendin
     await entered.promise;
     expect(getActiveTurnCount()).toBe(before + 1);
     socket.close();
-    await until(() => getActiveTurnCount() === before, "Live upgrade admission released");
+    expect(getActiveTurnCount()).toBe(before + 1);
+    unblock.resolve(new Response(null, { status: 499 }));
+    await until(() => getActiveTurnCount() === before, "Live upgrade admission finalized");
   } finally {
     unblock.resolve(new Response(null, { status: 499 }));
     resolve.mockRestore();
@@ -295,5 +314,7 @@ test("upgrade transfer detaches ingress cancellation and keeps connection owners
   expect(getActiveTurnCount()).toBe(before + 1);
   expect(connection.signal.aborted).toBe(false);
   connection.abort(new Error("fixture socket closed"));
+  expect(getActiveTurnCount()).toBe(before + 1);
+  lease.release();
   expect(getActiveTurnCount()).toBe(before);
 });

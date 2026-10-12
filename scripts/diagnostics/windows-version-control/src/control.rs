@@ -370,6 +370,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .env("OPENCODEX_ADMIN_AUTH_TOKEN", "version-fixture-admin")
         .env("OPENCODEX_API_AUTH_TOKEN", "version-fixture-data")
         .env("CODEX_CI", "1")
+        .env("OCX_TEST_HOME_GUARD", "1")
         .args(["--no-env-file", "--no-orphans", "--cpu-prof"])
         .arg(format!("--cpu-prof-dir={}", root.display()))
         .arg("--cpu-prof-name=version.cpuprofile")

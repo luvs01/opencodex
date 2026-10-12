@@ -22,6 +22,7 @@
 import { homedir } from "node:os";
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { readBoundedRegularFileSync } from "../lib/bounded-file-read";
 import { shouldInjectApiAuthHeader, standaloneCodexRoutingTarget } from "../codex/inject";
 import { FORMAT_MEDIA_TYPE, serializeDocument, type ConfigFormat } from "../integrations/serialize";
 import { canonicalizeReasoningEfforts } from "../reasoning-effort";
@@ -476,7 +477,7 @@ export type ZcodePathIO = {
 };
 const zcodePathIO: ZcodePathIO = {
   readText: path => {
-    try { return { kind: "text", text: readFileSync(path, "utf8") }; }
+    try { return { kind: "text", text: readBoundedRegularFileSync(path, 1024 * 1024).toString("utf8") }; }
     catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "failed" }; }
   },
 };

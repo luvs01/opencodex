@@ -92,7 +92,7 @@ traffic through a local interception proxy, which Anthropic may treat as a terms
 owned settings are still observed; otherwise the field is `null`.
 `/api/sync` and roster-update auto-apply never write a gateway profile while the resolved mode is
 first-party; both re-resolve after model discovery before writing.
-Background refresh preserves the selected owned gateway profile's mode, refuses symlinked library, metadata, profile or backup paths and non-regular profiles, and rechecks admission, the selected owned metadata entry and its applied fingerprint in the no-follow writer's pre-rename hook; it leaves metadata and backup bytes unchanged.
+Background refresh preserves the selected owned gateway profile's mode, refuses symlinked library, metadata, profile or backup paths and non-regular profiles, and rechecks admission, the selected owned metadata entry and its applied fingerprint in the no-follow writer's pre-rename hook; it leaves metadata and backup bytes unchanged. Observer, metadata, foreign-key, refresh and fingerprint reads use no-follow bounded regular-file reads with a 4 MiB cap.
 
 Mode switches establish the replacement before removing the previous connection. A failed
 first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
@@ -220,20 +220,21 @@ natively, counting name + value + 32 bytes per field and rejecting an oversized 
 The relay retains its 256-request aggregate ceiling across both HTTP versions and all sessions.
 Upload framing, not the method, determines whether input cleanup is needed: HTTP/2 headers
 without END_STREAM, or HTTP/1.1 transfer encoding or a positive Content-Length.
-Rejected unfinished uploads close after their empty reply's writable finishes; HTTP/2 uses the
+Rejected unfinished uploads preserve the empty reply before cleanup; HTTP/2 uses the
 underlying stream's finish event rather than the compatibility response's finish event, which
-waits for both stream halves to close. HTTP/1.1 refusals advertise `Connection: close` only while input is unfinished.
+waits for both stream halves to close.
 Early replies stop relaying unfinished input only after the downstream writable finishes or the
 response closes; upstream request closure alone does not prove a buffered reply was delivered.
 After a complete response, HTTP/2 closes only that stream with `RST_STREAM NO_ERROR` (RFC 9113
 §8.1), including a complete generated 502. Without a complete downstream response, cleanup uses
 `CANCEL` for a premature downstream close or an upstream close without a reply.
-HTTP/1.1 refusals, generated 502s and early replies advertise `Connection: close` only while input is unfinished; after the writable finishes,
-the listener unpipes the upstream upload, reads and discards remaining input, and ends the socket
-gracefully so queued response bytes flush. Errors and premature downstream closes still destroy
-the request. Draining adds no upload deadline or byte cap and does not wait for request-body
-completion before ending the response side. Body completion removes the input-cleanup listeners,
-leaving long-lived responses and SSE subscriptions independent of upload cleanup. Completed HTTP/1.1 uploads retain keep-alive on generated 502s and can reuse the same client socket.
+An early HTTP/1.1 refusal preserves its reply, then unpipes upstream and drains unfinished input
+only until the absolute or idle deadline before graceful close. Errors and premature downstream
+closes still destroy the request. The 60-second absolute and 15-second idle-progress deadlines
+close client input and upstream work and release the aggregate slot. Body
+completion removes the input-cleanup listeners and both timers, leaving long-lived responses and
+SSE subscriptions independent of upload cleanup. Completed HTTP/1.1 uploads retain keep-alive on
+generated 502s and can reuse the same client socket.
 `tests/claude-integration/claude-picker-upload.test.ts` covers headers-only refusals on both
 protocols, byte-exact early replies under backpressure, completed uploads with SSE, cancellation,
 failure and shutdown cleanup, and healthy sibling streams.

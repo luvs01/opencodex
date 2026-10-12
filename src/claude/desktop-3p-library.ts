@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readBoundedRegularFileSync } from "../lib/bounded-file-read";
 import { claudeDesktopConfigLibraryDir, resolveConfigLibraryDir } from "./desktop-3p-paths";
 
 export interface Desktop3pConfigLibraryOptions {
@@ -43,10 +43,17 @@ export interface Desktop3pMetadata {
 }
 
 export const DESKTOP_PICKER_ENTRY_NAME = "opencodex-picker";
+export const MAX_DESKTOP_PROFILE_FILE_BYTES = 4 * 1024 * 1024;
 
 export function parseMetadata(path: string): Desktop3pMetadata {
-  if (!existsSync(path)) return { entries: [] };
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<Desktop3pMetadata>;
+  let bytes: Buffer;
+  try {
+    bytes = readBoundedRegularFileSync(path, MAX_DESKTOP_PROFILE_FILE_BYTES);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { entries: [] };
+    throw error;
+  }
+  const parsed = JSON.parse(bytes.toString("utf8")) as Partial<Desktop3pMetadata>;
   if (!Array.isArray(parsed.entries)) throw new Error("Claude Desktop 3P _meta.json has no entries array");
   return { ...parsed, entries: parsed.entries };
 }
@@ -81,8 +88,14 @@ export const OPENCODEX_DESKTOP_PROFILE_KEYS = new Set([
 ]);
 
 export function readDesktopProfileForeignKeys(path: string): Record<string, unknown> {
-  if (!existsSync(path)) return {};
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  let bytes: Buffer;
+  try {
+    bytes = readBoundedRegularFileSync(path, MAX_DESKTOP_PROFILE_FILE_BYTES);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+  const parsed = JSON.parse(bytes.toString("utf8")) as unknown;
   if (!isRecord(parsed)) throw new Error("Claude Desktop 3P profile is not a JSON object");
   return Object.fromEntries(
     Object.entries(parsed).filter(([key]) => !OPENCODEX_DESKTOP_PROFILE_KEYS.has(key)),

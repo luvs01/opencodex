@@ -7,8 +7,9 @@
  *
  * Design of record: devlog/_fin/260802_client_toggle_api/021 §5-6.
  */
-import { lstatSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, rmSync, statSync } from "node:fs";
 import type { ConfigFormat } from "../clients/config-export";
+import { readBoundedRegularFileSync } from "../lib/bounded-file-read";
 import { canonicalizeJsonc } from "../lib/jsonc";
 import { MAX_JSON_NESTING } from "./serialize";
 import { atomicWriteFileNoFollow, isMissingPathError } from "../config/atomic-write";
@@ -24,6 +25,7 @@ import type { IntegrationClientId } from "./registry";
  * then overwritten.
  */
 export const PARSE_FAILED = Symbol("parse-failed");
+const MAX_INTEGRATION_CONFIG_FILE_BYTES = 4 * 1024 * 1024;
 
 /**
  * What `JSON.parse` has already discarded by the time we hold the parsed value,
@@ -285,7 +287,7 @@ export function fileIO(): Omit<IntegrationIO, "appendJournal" | "putRecord" | "d
     lstatKind,
     readText: path => {
       try {
-        return { kind: "text", text: readFileSync(path, "utf8") };
+        return { kind: "text", text: readBoundedRegularFileSync(path, MAX_INTEGRATION_CONFIG_FILE_BYTES).toString("utf8") };
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         return code === "ENOENT" ? { kind: "missing" } : { kind: "failed", ...(code ? { code } : {}) };

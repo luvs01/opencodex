@@ -41,6 +41,11 @@ function request(input: unknown, stream = true): Request {
     body: JSON.stringify({ model: "github-copilot/auto", input, stream,
       tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: { name: { type: "string" } } } }] }) });
 }
+
+function scopedAdmission(config: OcxConfig, allowedModels: string[]) {
+  config.apiKeys = [{ id: "copilot-scope", name: "fixture", allowedModels }] as OcxConfig["apiKeys"];
+  return { kind: "configured" as const, keyId: "copilot-scope", source: "bearer" as const };
+}
 /** Seed two synthetic OAuth accounts in the test-owned home, select A, and return store IDs for rotation assertions. */
 async function accounts() {
   for (const account of ["a", "b"]) await saveCredential("github-copilot", {
@@ -54,7 +59,7 @@ async function accounts() {
   return { a, b };
 }
 /** Return an Auto provider config and send ledger; options drive refusal, expiry, rotation, and tool events through both inference wires. */
-function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; native429?: boolean; onNativeCancel?: () => void; chatRefresh?: boolean; closedNativeBody?: boolean; renewedChatRefusal?: boolean; rotate?: boolean; tool?: boolean; key?: boolean; refusal?: number; negotiationRefusal?: number; negotiationRefusalAt?: number; alwaysRefuse?: boolean; advanceAfterIntent?: () => void; onSession?: (count: number) => void; malformedSessionAt?: number; negotiationRetryAfter?: string } = {}) {
+function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; native429?: boolean; onNativeCancel?: () => void; chatRefresh?: boolean; closedNativeBody?: boolean; renewedChatRefusal?: boolean; rotate?: boolean; tool?: boolean; key?: boolean; refusal?: number; negotiationRefusal?: number; negotiationRefusalAt?: number; alwaysRefuse?: boolean; advanceAfterIntent?: () => void | Promise<void>; onSession?: (count: number) => void | Promise<void>; malformedSessionAt?: number; negotiationRetryAfter?: string } = {}) {
   const sent: Array<{ host: string; path: string; token: string | null; body: any; signal?: AbortSignal | null }> = [];
   let inferenceCount = 0;
   let sessionCount = 0;
@@ -84,7 +89,7 @@ function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; nativ
       supported_endpoints: [options.nativeExpiry ? (expiredNative ? "/chat/completions" : "/responses") : options.native429 ? (account === "a" ? "/responses" : "/chat/completions") : options.chatRefresh ? (renewed ? "/responses" : "/chat/completions") : options.nativeFirst ? (headers.get("authorization")!.includes("-renewed") ? "/chat/completions" : "/responses") : account === "a" ? "/chat/completions" : "/responses"] }] });
     if (destination.pathname === "/models/session") {
       sessionCount++;
-      options.onSession?.(sessionCount);
+      await options.onSession?.(sessionCount);
       if (sessionCount === options.malformedSessionAt) return Response.json({ session_token: "must-not-echo" });
       if (options.negotiationRefusal && (sessionCount === (options.negotiationRefusalAt ?? 1) || (options.alwaysRefuse && sessionCount >= (options.negotiationRefusalAt ?? 1)))) return Response.json({ token: "must-not-echo" },
         { status: options.negotiationRefusal, headers: { "retry-after": options.negotiationRetryAfter ?? "12" } });
@@ -92,7 +97,7 @@ function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; nativ
     }
     if (destination.pathname === "/models/session/intent") {
       intentCount++;
-      if (intentCount === 1) options.advanceAfterIntent?.();
+      if (intentCount === 1) await options.advanceAfterIntent?.();
       return Response.json({ candidate_models: [model] });
     }
     expect(body.model).toBe(model);
@@ -427,6 +432,41 @@ describe("Copilot Auto through the Responses pipeline", () => {
     expect(await response.text()).not.toContain("must-not-echo");
     expect(sent.filter(call => call.path === "/chat/completions")).toHaveLength(0);
   });
+  test("Auto negotiation is denied when its selected model is outside the admission scope", async () => {
+    await accounts();
+    const { config, sent } = fixture();
+    const admission = scopedAdmission(config, ["github-copilot/auto"]);
+    const response = await handleResponses(request("hello"), config, { model: "", provider: "" }, { admission });
+
+    expect(response.status).toBe(403);
+    const body = await response.text();
+    expect(body).toContain("model_not_allowed_for_key");
+    expect(body).not.toContain("gpt-4o");
+    expect(sent.filter(call => ["/chat/completions", "/responses"].includes(call.path))).toHaveLength(0);
+  });
+  test("Auto negotiation dispatches a model admitted by scope", async () => {
+    await accounts();
+    const { config, sent } = fixture();
+    const admission = scopedAdmission(config, ["github-copilot/auto", "gpt-4o"]);
+    const response = await handleResponses(request("hello"), config, { model: "", provider: "" }, { admission });
+
+    expect(response.status).toBe(200);
+    expect(sent.filter(call => call.path === "/chat/completions").map(call => call.body.model)).toEqual(["gpt-4o"]);
+  });
+  test("dispatch-retried Auto selection outside admission scope returns 403", async () => {
+    const { b } = await accounts();
+    const { config, sent } = fixture({
+      advanceAfterIntent: async () => { await setActiveAccount("github-copilot", b); },
+    });
+    const admission = scopedAdmission(config, ["github-copilot/auto", "gpt-4o"]);
+    const response = await handleResponses(request("hello", false), config, { model: "", provider: "" }, { admission });
+
+    expect(response.status).toBe(403);
+    const body = await response.text();
+    expect(body).toContain("model_not_allowed_for_key");
+    expect(body).not.toContain("gpt-5.4");
+    expect(sent.filter(call => ["/chat/completions", "/responses"].includes(call.path))).toHaveLength(0);
+  });
   test.each([401, 429])("key pool %s rotation reacquires a new session and endpoint", async status => {
     const { config, sent } = fixture({ key: true, rotate: true, refusal: status });
     await saveConfig(config);
@@ -617,5 +657,3 @@ for (const bDiscovery of ["named", "outage"] as const) test(`leaving Auto on acc
   expect(named.token).toBeNull();
   expect(named.apiVersion).not.toBe("2026-08-01");
 });
-
-

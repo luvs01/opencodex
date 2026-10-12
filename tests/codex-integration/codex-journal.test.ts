@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -418,6 +418,32 @@ describe("codex-journal", () => {
     expect(result.remove.message).toContain("no native restore was needed");
     expect(result.restore.success).toBe(true);
     expect(existsSync(join(testDir, "opencodex.config.toml"))).toBe(false);
+  });
+
+  test.skipIf(process.platform === "win32")("removeCodexConfig refuses a symlinked profile without changing its target or config", () => {
+    const configPath = join(testDir, "config.toml");
+    const profilePath = join(testDir, "opencodex.config.toml");
+    const targetPath = join(testDir, "external-profile.toml");
+    const journalPath = join(testDir, "opencodex-journal.json");
+    const config = '# Auto-injected by opencodex\nopenai_base_url = "http://127.0.0.1:10100/v1"\n';
+    const target = 'model_provider = "openai"\nmodel = "external-profile"\n';
+    const journal = '{"recovery":"sentinel"}\n';
+    writeFileSync(configPath, config, "utf8");
+    writeFileSync(targetPath, target, "utf8");
+    writeFileSync(journalPath, journal, "utf8");
+    symlinkSync(targetPath, profilePath, "file");
+
+    const r = runScript(testDir, `
+      const { removeCodexConfig } = require("./src/codex/inject");
+      console.log(JSON.stringify(removeCodexConfig()));
+    `);
+
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).success).toBe(false);
+    expect(readFileSync(configPath, "utf8")).toBe(config);
+    expect(readFileSync(targetPath, "utf8")).toBe(target);
+    expect(readFileSync(journalPath, "utf8")).toBe(journal);
+    expect(existsSync(profilePath)).toBe(true);
   });
 
   test("removeCodexConfig reports damaged managed-default cleanup and preserves the ambiguous value", () => {

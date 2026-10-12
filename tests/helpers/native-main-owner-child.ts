@@ -137,7 +137,22 @@ function start(home = codexHome): ReturnType<typeof startServer> {
           }
         : undefined,
     },
-    managementApi: { nativeProfileApi: { manager } },
+    managementApi: {
+      nativeProfileApi: { manager },
+      codexRestartService: {
+        readState: async () => ({ state: "unknown", runningCount: 0 }),
+        performRestart: async () => ({
+          success: false,
+          stateBefore: "unknown",
+          synced: false,
+          requested: [],
+          stopped: [],
+          surviving: [],
+          failed: [],
+          code: "enumeration_unavailable",
+        }),
+      },
+    },
   });
   servers.push(server);
   return server;
@@ -164,6 +179,13 @@ async function request(port: number, kind: string): Promise<{ status: number; te
   if (kind === "management-list" || kind === "management-doctor") {
     const path = kind === "management-doctor" ? "/api/native-main-profiles/doctor" : "/api/native-main-profiles";
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+      headers: { "x-opencodex-api-key": process.env.OPENCODEX_ADMIN_AUTH_TOKEN ?? "" },
+    });
+    return { status: response.status, text: await response.text() };
+  }
+  if (kind === "management-restart-state" || kind === "management-restart") {
+    const response = await fetch(`http://127.0.0.1:${port}/api/system/${kind === "management-restart-state" ? "codex-app-server" : "codex-restart"}`, {
+      method: kind === "management-restart" ? "POST" : "GET",
       headers: { "x-opencodex-api-key": process.env.OPENCODEX_ADMIN_AUTH_TOKEN ?? "" },
     });
     return { status: response.status, text: await response.text() };

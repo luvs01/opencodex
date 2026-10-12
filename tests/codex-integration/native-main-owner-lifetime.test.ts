@@ -461,6 +461,13 @@ describe("native-main process owner lease", () => {
       expect((direct.lastReceipt as { authorization?: string }).authorization).toBe("Bearer direct-test-key");
       expect((await support.command("request", { kind: "health" })).status).toBe(200);
       expect((await support.command("request", { kind: "management-list" })).status).toBe(200);
+      const restartState = await support.command("request", { kind: "management-restart-state" });
+      expect(restartState).toMatchObject({ status: 200 });
+      expect(restartState.text).toContain('"state":"unknown"');
+      const restart = await support.command("request", { kind: "management-restart" });
+      expect(restart.status).toBe(200);
+      expect(restart.text).toContain('"success":false');
+      expect(restart.text).toContain('"code":"enumeration_unavailable"');
       await support.stop();
 
       const before = await second.command("snapshot");
