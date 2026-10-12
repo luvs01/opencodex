@@ -302,6 +302,19 @@ export function fileIO(): Omit<IntegrationIO, "appendJournal" | "putRecord" | "d
       }
     },
     writeText: (path, text) => {
+      /*
+       * One bound on both halves of the seam: a file past this size is one
+       * readText refuses, so writing it would strand the integration against
+       * its own configuration — or, for Cline's pending marker, leave a
+       * transaction recovery could never read back.
+       */
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (bytes > MAX_INTEGRATION_CONFIG_FILE_BYTES) {
+        throw new Error(
+          `refusing oversized integration write to ${path}: `
+          + `${bytes} bytes is past the ${MAX_INTEGRATION_CONFIG_FILE_BYTES}-byte read bound`,
+        );
+      }
       const kind = lstatKind(path);
       if (kind !== "file" && kind !== "missing") {
         throw new Error(`refusing unsafe integration write target: ${path}`);

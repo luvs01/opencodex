@@ -354,4 +354,23 @@ describe("Cline journaled pair", () => {
     expect(decodeClinePair(result.text)).toEqual({ settings: originalSettings, catalog: originalCatalog });
     expect(adapter.statKind(dirname(settings))).toBe("dir");
   });
+
+  test("a transaction journal past the read bound refuses before either file moves", () => {
+    /*
+     * The pending marker embeds the before-and-after pair, so a pair near the
+     * bound serializes past it. beginTransaction must refuse: writing the
+     * marker would leave a pending file recovery itself could never read
+     * back, stranding every later Cline operation behind an unreadable
+     * transaction.
+     */
+    const pad = "x".repeat(3 * 1024 * 1024);
+    const seeded = `{"pad":"${pad}","version":1,"providers":{"mine":{"settings":{"provider":"mine"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}}}\n`;
+    writeFileSync(settings, seeded);
+    const result = applyIntegration(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("write_failed");
+    expect(readFileSync(settings, "utf8")).toBe(seeded);
+    expect(existsSync(catalog)).toBe(false);
+    expect(existsSync(clinePendingPath(input.store!, settings))).toBe(false);
+  });
 });

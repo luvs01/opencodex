@@ -1586,3 +1586,22 @@ describe("integration write ownership guard (#4197)", () => {
     })).not.toThrow();
   });
 });
+
+describe("the managed file size bound", () => {
+  test("a serialized write past the read bound refuses and leaves the file alone", () => {
+    const configPath = installPi();
+    /*
+     * Just under the bound, so status and the compare-before-commit recheck
+     * still read it, while the merged document lands past it. The write must
+     * refuse: landing it would leave a config the same seam then refuses to
+     * read, stranding the integration against its own file.
+     */
+    const seed = `{"pad":"${"x".repeat(4 * 1024 * 1024 - 256)}"}\n`;
+    writeFileSync(configPath, seed);
+    const result = applyIntegration(input({ clientId: "pi" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("write_failed");
+    expect(readFileSync(configPath, "utf8")).toBe(seed);
+    expect(readIntegrationState(input({ clientId: "pi" })).state).toBe("absent");
+  });
+});
