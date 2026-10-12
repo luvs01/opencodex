@@ -34,6 +34,10 @@ export interface PickerListenerOptions {
   maxEncodedBytes?: number;
   /** Test seam: concurrent upstream requests; production uses PICKER_MAX_ACTIVE_UPSTREAMS. */
   maxActiveUpstreams?: number;
+  /** Test seam: maximum time for a client upload to finish. */
+  uploadDeadlineMs?: number;
+  /** Test seam: maximum time without upload progress. */
+  uploadIdleTimeoutMs?: number;
   log?: (line: string) => void;
 }
 export interface PickerListenerHandle { port: number; close(): Promise<void> }
@@ -51,6 +55,9 @@ export const PICKER_MAX_ACTIVE_UPSTREAMS = 256;
 export const PICKER_MAX_CONCURRENT_STREAMS = 100;
 /** A connection that has not sent a complete ClientHello by then is dropped. */
 const CLIENT_HELLO_TIMEOUT_MS = 10_000;
+const PICKER_UPLOAD_DEADLINE_MS = 60_000;
+const PICKER_UPLOAD_IDLE_TIMEOUT_MS = 15_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const HOP_HEADERS = new Set([
   "connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization",
@@ -152,6 +159,13 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
   const upstream = options.upstream ?? { host: "claude.ai", port: 443, servername: "claude.ai" };
   const cap = options.maxEncodedBytes ?? BOOTSTRAP_MAX_ENCODED_BYTES;
   const maxActiveUpstreams = options.maxActiveUpstreams ?? PICKER_MAX_ACTIVE_UPSTREAMS;
+  const uploadDeadlineMs = options.uploadDeadlineMs ?? PICKER_UPLOAD_DEADLINE_MS;
+  const uploadIdleTimeoutMs = options.uploadIdleTimeoutMs ?? PICKER_UPLOAD_IDLE_TIMEOUT_MS;
+  for (const [name, value] of [["uploadDeadlineMs", uploadDeadlineMs], ["uploadIdleTimeoutMs", uploadIdleTimeoutMs]] as const) {
+    if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMER_DELAY_MS) {
+      throw new RangeError(`${name} must be a positive finite timer duration`);
+    }
+  }
   let activeUpstreams = 0;
   const upgrades = new Set<Duplex>();
   const spliced = new Set<Socket>();
@@ -209,10 +223,56 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
     const refuse = (status: 400 | 503) => {
       // Do not leave a refused, still-uploading stream behind after delivering its empty reply.
       if (uploading && !req.complete) {
-        req.once("error", () => res.destroy());
-        responseWritable.once("finish", () => closeInput(true));
+        if (h2) {
+          responseWritable.once("finish", () => closeInput(true));
+        } else {
+          let settled = false;
+          let replyFinished = false;
+          let inputFinished = false;
+          let deadlineTimer: NodeJS.Timeout | undefined;
+          let idleTimer: NodeJS.Timeout | undefined;
+          const cleanup = () => {
+            if (settled) return;
+            settled = true;
+            if (deadlineTimer) clearTimeout(deadlineTimer);
+            if (idleTimer) clearTimeout(idleTimer);
+            req.off("data", onProgress);
+            req.off("end", onBodyEnd);
+            req.off("close", onBodyEnd);
+            req.off("error", onBodyEnd);
+            responseWritable.off("finish", onReplyFinished);
+          };
+          const closeOnTimeout = () => {
+            cleanup();
+            closeInput(true);
+          };
+          const onProgress = () => {
+            if (settled || !deadlineTimer) return;
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(closeOnTimeout, uploadIdleTimeoutMs);
+            idleTimer.unref?.();
+          };
+          const onBodyEnd = () => {
+            inputFinished = true;
+            if (replyFinished) { cleanup(); closeInput(true); }
+          };
+          const onReplyFinished = () => {
+            if (settled) return;
+            replyFinished = true;
+            if (inputFinished || req.complete) { cleanup(); closeInput(true); return; }
+            deadlineTimer = setTimeout(closeOnTimeout, uploadDeadlineMs);
+            deadlineTimer.unref?.();
+            onProgress();
+          };
+          req.on("data", onProgress);
+          req.once("end", onBodyEnd);
+          req.once("close", onBodyEnd);
+          req.once("error", onBodyEnd);
+          responseWritable.once("finish", onReplyFinished);
+          req.resume();
+        }
       }
-      res.writeHead(status, { "Content-Length": "0", ...(!h2 && uploading && !req.complete ? { Connection: "close" } : {}) });
+      res.writeHead(status, { "Content-Length": "0" });
       res.end();
       options.log?.(`picker request refused ${status}`);
     };
@@ -329,9 +389,25 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
     if (h2) (req as Http2ServerRequest).stream.once("close", onClientClose);
     if (uploading) {
       let uploadFinished = false;
+      let deadlineTimer: NodeJS.Timeout | undefined;
+      let idleTimer: NodeJS.Timeout | undefined;
+      let expireUpload: () => void = () => {};
+      const clearUploadTimers = () => {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        if (idleTimer) clearTimeout(idleTimer);
+        deadlineTimer = undefined;
+        idleTimer = undefined;
+      };
+      const onUploadProgress = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(expireUpload, uploadIdleTimeoutMs);
+        idleTimer.unref?.();
+      };
       const finishUpload = () => {
         if (uploadFinished) return;
         uploadFinished = true;
+        clearUploadTimers();
+        req.off("data", onUploadProgress);
         req.off("end", finishUpload);
         req.off("close", finishUpload);
         upReq.off("close", onUpstreamClose);
@@ -349,16 +425,26 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
           upReq.destroy();
         }
       };
+      expireUpload = () => {
+        if (uploadFinished) return;
+        clientGone = true;
+        stopUnfinishedUpload();
+        release();
+      };
       const onResponseFinish = () => stopUnfinishedUpload(true);
       const onUpstreamClose = () => {
         if (!upstreamResponded && !res.writableEnded) stopUnfinishedUpload();
       };
       req.once("end", finishUpload);
       req.once("close", finishUpload);
+      req.on("data", onUploadProgress);
       upReq.once("close", onUpstreamClose);
       responseWritable.once("finish", onResponseFinish);
       res.once("close", stopUnfinishedUpload);
       if (h2) (req as Http2ServerRequest).stream.once("close", finishUpload);
+      deadlineTimer = setTimeout(expireUpload, uploadDeadlineMs);
+      deadlineTimer.unref?.();
+      onUploadProgress();
     }
     req.pipe(upReq);
   };

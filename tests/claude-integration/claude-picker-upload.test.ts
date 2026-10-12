@@ -70,13 +70,15 @@ function h2Result(stream: ClientHttp2Stream) {
 }
 function h1Result(req: ClientRequest) {
   const result = Promise.withResolvers<{ status: number; text: string }>();
+  let responseStarted = false;
   req.once("response", res => {
+    responseStarted = true;
     const chunks: Buffer[] = [];
     res.on("data", chunk => chunks.push(Buffer.from(chunk)));
     res.once("end", () => result.resolve({ status: res.statusCode!, text: Buffer.concat(chunks).toString() }));
     res.once("error", result.reject);
   });
-  req.once("error", result.reject);
+  req.once("error", error => { if (!responseStarted) result.reject(error); });
   void result.promise.catch(() => {});
   return result.promise;
 }
@@ -89,7 +91,7 @@ function observeClose(stream: ClientRequest | ClientHttp2Stream | ClientHttp2Ses
 function observeSocketClose(req: ClientRequest) {
   const closed = Promise.withResolvers<void>();
   req.once("socket", socket => { socket.once("close", () => closed.resolve()); });
-  req.on("error", () => req.destroy());
+  req.on("error", () => {});
   return closed.promise;
 }
 function normalH2(session: ClientHttp2Session, path = "/ok") {
@@ -109,7 +111,7 @@ for (const protocol of ["h1", "h2"] as const) {
           if (req.url === "/held") {
             req.once("close", () => left.resolve()); held.resolve();
           } else { relayed++; res.end("ordinary"); }
-        }, { maxActiveUpstreams: 1 });
+        }, { maxActiveUpstreams: 1, uploadIdleTimeoutMs: 250 });
         try {
           const session = f.h2();
           let blocker: ClientHttp2Stream | undefined;
@@ -131,7 +133,7 @@ for (const protocol of ["h1", "h2"] as const) {
           }
           if (input === "buffered") upload.write(Buffer.alloc(4 * 1024 * 1024, 0x61));
           expect(await wait(result)).toEqual({ status, text: "" });
-          if (protocol === "h1") expect(connection).toBe("close");
+          if (protocol === "h1") expect(connection).not.toBe("close");
           await wait(closed);
           if (protocol === "h2") expect((upload as ClientHttp2Stream).rstCode).toBe(constants.NGHTTP2_NO_ERROR);
           expect(relayed).toBe(0);
@@ -250,6 +252,66 @@ for (const protocol of ["h1", "h2"] as const) {
     } finally { await wait(f.close()); }
   });
 }
+
+bounded("unfinished uploads share the aggregate budget across HTTP/2 sessions and recover on idle timeout", async wait => {
+  const arrived = Promise.withResolvers<void>();
+  let requests = 0;
+  const f = await fixture((req, res) => {
+    requests++;
+    if (req.url === "/stall") {
+      req.on("data", () => {});
+      req.once("end", () => res.end("uploaded"));
+      arrived.resolve();
+    } else res.end("ordinary");
+  }, { maxActiveUpstreams: 1, uploadDeadlineMs: 1_000, uploadIdleTimeoutMs: 350 });
+  try {
+    const firstSession = f.h2();
+    const secondSession = f.h2();
+    const upload = firstSession.request({ ":method": "POST", ":path": "/stall", ":authority": "claude.ai" });
+    const uploadClosed = observeClose(upload);
+    upload.write("partial");
+    await wait(arrived.promise);
+    const blocked = await wait(normalH2(secondSession, "/blocked"));
+    expect(blocked.status).toBe(503);
+    await wait(uploadClosed);
+    expect((await wait(normalH2(secondSession, "/ok"))).status).toBe(200);
+    expect(requests).toBe(2);
+  } finally { await wait(f.close()); }
+});
+
+bounded("absolute upload deadline expires despite continued progress", async wait => {
+  const arrived = Promise.withResolvers<void>();
+  const f = await fixture((req, res) => {
+    req.on("data", () => {});
+    arrived.resolve();
+    req.once("end", () => res.end("uploaded"));
+  }, { uploadDeadlineMs: 400, uploadIdleTimeoutMs: 250 });
+  let progress: NodeJS.Timeout | undefined;
+  try {
+    const session = f.h2();
+    const upload = session.request({ ":method": "POST", ":path": "/trickle", ":authority": "claude.ai" });
+    const closed = observeClose(upload);
+    progress = setInterval(() => upload.write("x"), 80);
+    upload.write("start");
+    await wait(arrived.promise);
+    await wait(closed);
+    expect(upload.rstCode).toBe(constants.NGHTTP2_CANCEL);
+  } finally { if (progress) clearInterval(progress); await wait(f.close()); }
+});
+
+bounded("completed uploads are not timed out while a long response is pending", async wait => {
+  const f = await fixture((req, res) => {
+    req.resume();
+    req.once("end", () => setTimeout(() => res.end("slow response"), 120));
+  }, { uploadDeadlineMs: 50, uploadIdleTimeoutMs: 25 });
+  try {
+    const session = f.h2();
+    const upload = session.request({ ":method": "POST", ":path": "/complete", ":authority": "claude.ai" });
+    const result = h2Result(upload);
+    upload.end("complete");
+    expect(await wait(result)).toEqual({ status: 200, text: "slow response" });
+  } finally { await wait(f.close()); }
+});
 
 for (const protocol of ["h1", "h2"] as const) {
   bounded(`${protocol} backpressure preserves every byte of a large early reply`, async wait => {
