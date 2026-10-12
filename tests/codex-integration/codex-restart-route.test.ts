@@ -174,8 +174,11 @@ describe("native-owner fixture process-control boundary", () => {
     // This source-wiring guard complements the real route dispatch checks below. Do not import
     // the helper here: its top level starts a server and reads the stdin control protocol.
     const source = readFileSync(helperPath("native-main-owner-child.ts"), "utf8");
-    const start = source.slice(source.indexOf("function start("), source.indexOf("const primary = start();"));
-    expect(start).toContain("codexRestartService: nativeOwnerRestartService");
+    const from = source.indexOf("function start(");
+    const to = source.indexOf("const primary = start();");
+    expect(from).toBeGreaterThanOrEqual(0);
+    expect(to).toBeGreaterThan(from);
+    expect(source.slice(from, to)).toContain("codexRestartService: nativeOwnerRestartService");
   });
 
   test("state queries use a synthetic unknown result without host process enumeration", async () => {
@@ -226,7 +229,18 @@ describe("native-owner fixture process-control boundary", () => {
         return sentinel;
       },
     };
-    const deps = { managementApi: { codexRestartService: observed } };
+    // startServer probes service ownership on every boot; without this seam it inspects the
+    // developer machine's installed service state — the host coupling this fixture exists to
+    // remove (the same seam native-main-owner-child.ts injects). "foreign" is deliberate: it
+    // fences native-main admission with no lifecycle machinery, which this restart-route test
+    // does not exercise; "owned" would start a real owner drive on the fixture home.
+    const deps = {
+      inspectNativeCodexOwnership: () => ({
+        ownership: "foreign",
+        reason: "restart route test fixture",
+      }),
+      managementApi: { codexRestartService: observed },
+    };
     const primary = startServer(0, deps);
     const extra = startServer(0, deps);
     try {
