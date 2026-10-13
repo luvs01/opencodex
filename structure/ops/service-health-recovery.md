@@ -71,9 +71,9 @@ Probes accept only numeric IPv4/IPv6 destinations. Default and localhost binds u
   between that check and `kill` while the parent exits, is reaped, and a new process receives the
   same id, the signal reaches that process. Bun exposes no pidfd or process handle on POSIX.
 
-The final runtime-record re-read and the durable `intent` write run under the service ownership
+The lease-held runtime-record re-read and the durable `intent` write run under the service ownership
 mutation lease (`src/service/ownership-mutation-lease.mjs`, 500 ms wait, no subprocess); a busy lease
-defers. Right before the kill the runner re-checks that the last failing observation is at most
+defers. After releasing the lease, the final runtime-record read precedes the evidence-age and target-exit checks, so time spent on that read cannot authorize termination on stale observations. Right before the kill the runner re-checks that the last failing observation is at most
 5 s old on the wall clock (and not in the future); older evidence is discarded, the `intent` entry is
 settled as `skipped`, and a fresh failing streak is required. The lease is released before the kill, because on Windows the sentinel may end with the
 proxy and a held lease would delay the replacement's startup. Every history write takes the lease.

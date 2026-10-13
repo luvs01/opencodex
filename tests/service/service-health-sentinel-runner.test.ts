@@ -115,6 +115,42 @@ describe("health sentinel runner (#6671)", () => {
     }
   });
 
+  test.each([10 * 60_000, -2 * 60 * 60_000])("final runtime re-read invalidates stale evidence after clock shift %s", async shift => {
+    const { deps, events, history, advance } = world(["answer", "timeout"]);
+    const read = deps.readRuntime;
+    let shifted = false;
+    deps.readRuntime = () => {
+      const record = read();
+      if (!shifted && history.some(entry => entry.state === "intent")) {
+        shifted = true;
+        advance(shift);
+      }
+      return record;
+    };
+    expect(await runHealthSentinel(deps)).toEqual({ outcome: "recovered", state: "terminated" });
+    expect(history.map(entry => entry.state)).toEqual(["intent", "skipped", "intent", "terminated"]);
+    const discarded = events.findIndex(event => event.includes("discarding stale evidence"));
+    const kill = events.findIndex(event => event.startsWith("terminate:"));
+    expect(discarded).toBeGreaterThan(-1);
+    expect(kill).toBeGreaterThan(discarded);
+    const fresh = events.slice(discarded, kill).filter(event => event === "probe:timeout").length;
+    expect(fresh).toBeGreaterThanOrEqual(3);
+    expect(fresh).toBeLessThanOrEqual(6);
+  });
+
+  test("target exit during final runtime re-read prevents termination", async () => {
+    const { deps, events, history, exitTarget } = world(["answer", "timeout"]);
+    const read = deps.readRuntime;
+    deps.readRuntime = () => {
+      const record = read();
+      if (history.some(entry => entry.state === "intent")) exitTarget();
+      return record;
+    };
+    expect(await runHealthSentinel(deps)).toEqual({ outcome: "target_exited" });
+    expect(terminated(events)).toBe(false);
+    expect(history.map(entry => entry.state)).toEqual(["intent", "skipped"]);
+  });
+
   test("a healthy or refusing target is never terminated", async () => {
     for (const kind of ["answer", "refused"] as const) {
       const { deps, events, exitTarget } = world(["answer", kind]);

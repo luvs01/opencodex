@@ -213,7 +213,10 @@ export async function runHealthSentinel(deps: HealthSentinelDeps): Promise<Healt
         const { entry } = attempt;
         // The lease, history and log work above takes time. Re-check that the evidence is still
         // fresh right before the irreversible step: a proxy that recovered meanwhile must not be
-        // killed on old observations. A clock that ran backwards makes the evidence stale too.
+        // killed on old observations. A clock that ran backwards makes the evidence stale too. The
+        // final runtime-record read is included before the freshness check so time spent on it
+        // cannot authorize termination on stale observations.
+        const finalRuntime = deps.readRuntime();
         const evidenceAge = deps.now() - outcome.endedAt;
         if (evidenceAge < 0 || evidenceAge > timing.maxEvidenceAgeMs || deps.isTargetGone()) {
           settle({ ...entry, state: "skipped" });
@@ -222,7 +225,7 @@ export async function runHealthSentinel(deps: HealthSentinelDeps): Promise<Healt
           if (await raceGone(deps.sleep(policy.nextDelayMs()), exitSignal) === GONE) return { outcome: "target_exited" };
           continue;
         }
-        if (!matchesProbeTarget(deps.readRuntime(), deps.targetPid, target)) {
+        if (!matchesProbeTarget(finalRuntime, deps.targetPid, target)) {
           settle({ ...entry, state: "skipped" });
           return standDown("the recorded probe endpoint changed before termination");
         }
