@@ -95,14 +95,21 @@ export function readDesktopLibraryBytes(
       || opened.ctimeNs !== expected.ctimeNs) throw new Error("desktop_config_not_regular");
     if (opened.size > BigInt(maxBytes)) throw new Error("desktop_config_too_large");
     // Allocate for the observed size plus one sentinel byte, not the full cap: callers scan many
-    // small profiles, and the cap would zero-fill megabytes per read. A grown file is caught by
-    // the post-read identity check.
-    const bytes = Buffer.alloc(Number(opened.size) + 1);
+    // small profiles, and the cap would zero-fill megabytes per read. A file that fills the
+    // buffer grew after validation — keep reading within the bound so it classifies as
+    // desktop_config_too_large rather than silently truncating.
+    let bytes = Buffer.alloc(Number(opened.size) + 1);
     let length = 0;
-    while (length < bytes.length) {
+    for (;;) {
       const count = readSync(fd, bytes, length, Math.min(64 * 1024, bytes.length - length), null);
       if (count === 0) break;
       length += count;
+      if (length > maxBytes) throw new Error("desktop_config_too_large");
+      if (length === bytes.length && bytes.length <= maxBytes) {
+        const grown = Buffer.alloc(Math.min(maxBytes + 1, bytes.length * 2));
+        bytes.copy(grown, 0, 0, length);
+        bytes = grown;
+      }
     }
     if (length > maxBytes) throw new Error("desktop_config_too_large");
     if (!pathStillNamesExpectedFile(path, opened)) throw new Error("desktop_config_not_regular");
