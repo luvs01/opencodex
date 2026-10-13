@@ -448,9 +448,7 @@ neither prove nor contradict a native surface.
 The two checks are asymmetric on purpose: evidence needs a rendered section, while the
 contradiction check reads every heading and declaration line, quoted or not, so text copied into
 the listing can push a turn toward `null` but cannot hide another surface.
-The parse is request input, so it is bounded and linear-time: descriptions over 1 MiB carry no
-nested evidence (the contradiction scan still applies), declarations over 64 KiB are not
-recognized, and the fence body is validated by fixed boundaries and a name-indexed owner lookup.
+The parse is bounded and linear-time: over-1 MiB descriptions carry no nested evidence, over-64 KiB declarations are not recognized, and each fence body is checked once against fixed boundaries.
 Nested evidence never produces `v2`. When the model supports tool search (every OpenCodex catalog
 row), codex-rs defers the V1 tools and leaves them out of the description. Its own
 `<multi_agent_mode>` item exists only on V2 and it pins the version per session, so neither the saved
