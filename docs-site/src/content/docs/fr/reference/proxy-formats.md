@@ -32,13 +32,14 @@ Sur une requête Responses hors combo, OpenCodex réécrit ce 403 de la liste au
 
 ## Appels d’outils non déclarés
 
-Lorsqu’une requête déclare un catalogue d’outils, une réponse en passthrough natif qui appelle un outil exécuté par le client hors de ce catalogue fait échouer le tour au lieu de relayer l’appel. Cela s’applique à tous les dialectes entrants : Responses, Chat Completions et Messages. En streaming, l’échec présenté au client dépend du point de terminaison :
+Sur le point de terminaison Responses, lorsqu’une requête déclare un catalogue d’outils, une réponse en passthrough natif qui appelle un outil exécuté par le client hors de ce catalogue fait échouer le tour au lieu de relayer l’appel : un événement `response.failed` avec le code d’erreur `undeclared_tool_call`, puis `data: [DONE]` ; le JSON mis en mémoire tampon renvoie HTTP 502 avec le même code. Le refus intervient avant que la réponse puisse entrer dans l’état de continuation, et il n’est désactivé que pour les fournisseurs avec `authMode: "forward"` ou pour une requête sans catalogue déclaré.
 
-- **Responses :** un événement `response.failed` avec le code d’erreur `undeclared_tool_call`, puis `data: [DONE]`.
-- **Chat Completions :** une trame `data:` contenant un objet `error` au format OpenAI, puis la fermeture du flux sans fin de succès ni `[DONE]`.
-- **Messages :** une trame Anthropic `event: error` avec le corps `{ "type": "error", "error": ... }`, sans `message_stop` réussi ni `[DONE]`. Le code d’erreur Responses n’est pas conservé.
+Les points de terminaison Chat Completions et Messages honorent les catalogues d’outils différés : ces clients peuvent ne déclarer qu’un catalogue partiel et découvrir le reste à l’exécution via leur propre registre d’outils, qui — et non l’instantané de catalogue traduit — détient la frontière complète de déclaration. Un appel hors de la liste déclarée est relayé pour que le client le valide ; un appel inventé contre un `tools: []` explicitement vide est toujours refusé, car aucun registre différé n’existe sous une déclaration vide. Ces refus conservent le code `undeclared_tool_call` sur chaque voie :
 
-La réponse JSON mise en mémoire tampon renvoie un HTTP 502 avec une erreur qui nomme l’outil ; le format d’erreur dépend du point de terminaison (l’`upstream_error` interne est traduit pour les clients Chat et Messages). Le refus intervient avant que la réponse puisse entrer dans l’état de continuation. Il n’est désactivé que pour les fournisseurs avec `authMode: "forward"` ou pour une requête sans catalogue déclaré. Un catalogue explicitement vide est considéré comme déclaré et n’autorise donc aucun outil.
+- **Chat Completions :** une trame `data:` contenant un objet `error` au format OpenAI portant le code, puis la fermeture du flux sans fin de succès ni `[DONE]` ; le JSON mis en mémoire tampon renvoie HTTP 502 avec le code.
+- **Messages :** une trame Anthropic `event: error` dont le corps est `{ "type": "error", "error": { "type": "api_error", "code": "undeclared_tool_call", ... } }`, sans `message_stop` réussi ni `[DONE]` ; le JSON mis en mémoire tampon renvoie HTTP 502 `api_error` avec le code. Une violation déterministe du catalogue n’est jamais rapportée comme un `overloaded_error` réessayable (HTTP 529).
+
+Par ailleurs, sur chaque voie entrante, un appel dans l’espace de noms `default.` d’un fournisseur est normalisé vers le nom d’outil nu déclaré par la requête (`default.Read` → `Read`).
 
 ## Présentation du point de terminaison
 

@@ -35,13 +35,14 @@ Kombo olmayan bir Responses isteğinde OpenCodex, izin listesindeki bu 403'ü `s
 
 ## Bildirilmemiş araç çağrıları
 
-Bir istek bir araç kataloğu bildirdiğinde, katalog dışındaki istemci tarafından çalıştırılan bir aracı çağıran native passthrough yanıtı, çağrıyı aktarmak yerine turu başarısız kılar. Bu, gelen tüm lehçeler için geçerlidir: Responses, Chat Completions ve Messages. İstemcinin akış sırasında göreceği hata, endpoint’e göre değişir:
+Responses uç noktasında, bir istek araç kataloğu bildirdiğinde, bu kataloğun dışında istemci tarafından çalıştırılan bir aracı çağıran native passthrough yanıtı, çağrıyı aktarmak yerine turu başarısız kılar: `undeclared_tool_call` hata kodlu bir `response.failed` olayı ve ardından `data: [DONE]`; arabelleğe alınmış JSON aynı kodla HTTP 502 döndürür. Ret, yanıt devam durumuna girmeden önce gerçekleşir ve yalnızca `authMode: "forward"` sağlayıcıları veya bildirilmiş kataloğu olmayan istekler için devre dışıdır.
 
-- **Responses:** `undeclared_tool_call` hata kodunu içeren bir `response.failed` olayı, ardından `data: [DONE]`.
-- **Chat Completions:** OpenAI biçiminde bir `error` nesnesi içeren `data:` çerçevesi gönderilir; ardından başarılı bir tamamlanma veya `[DONE]` olmadan akış kapatılır.
-- **Messages:** `{ "type": "error", "error": ... }` gövdeli bir Anthropic `event: error` çerçevesi gönderilir; başarılı bir `message_stop` veya `[DONE]` gönderilmez. Responses hata kodu korunmaz.
+Chat Completions ve Messages uç noktaları ertelenmiş araç kataloglarını destekler: bu istemciler kataloğun yalnızca bir bölümünü bildirebilir ve kalanını çalışma zamanında kendi araç kayıt defterleri aracılığıyla keşfedebilir — tam bildirim sınırına çevrilmiş katalog anlık görüntüsü değil bu kayıt defteri sahiptir. Bildirilen listenin dışındaki bir çağrı, istemcinin doğrulaması için aktarılır; açıkça boş `tools: []` üzerine kurulan bir çağrı yine de reddedilir, çünkü boş bir bildirimin altında ertelenmiş kayıt defteri bulunmaz. Bu retler de her bağlantıda `undeclared_tool_call` kodunu korur:
 
-Arabelleğe alınmış JSON yanıtı, araç adını içeren bir hatayla HTTP 502 döndürür; endpoint’e özgü hata biçimini kullanır (dahili `upstream_error`, Chat ve Messages istemcileri için dönüştürülür). Ret, yanıt devam durumuna girmeden önce gerçekleşir. Bu ret yalnızca `authMode: "forward"` sağlayıcıları veya bildirilmiş kataloğu olmayan istekler için devre dışıdır. Açıkça boş bir katalog bildirilmiş sayılır ve hiçbir araca izin vermez.
+- **Chat Completions:** kodu taşıyan OpenAI biçimli bir `error` nesnesi içeren `data:` çerçevesi gönderilir; ardından başarılı tamamlanma veya `[DONE]` olmadan akış kapatılır. Arabelleğe alınmış JSON kodla birlikte HTTP 502 döndürür.
+- **Messages:** gövdesi `{ "type": "error", "error": { "type": "api_error", "code": "undeclared_tool_call", ... } }` olan bir Anthropic `event: error` çerçevesi gönderilir; başarılı `message_stop` veya `[DONE]` gönderilmez. Arabelleğe alınmış JSON kodla birlikte HTTP 502 `api_error` döndürür. Deterministik bir katalog ihlali asla yeniden denenebilir `overloaded_error` (HTTP 529) olarak raporlanmaz.
+
+Ayrıca, her gelen bağlantıda sağlayıcının `default.` ad alanlı çağrısı, isteğin bildirdiği yalın araç adına normalleştirilir (`default.Read` → `Read`).
 
 ## Uç nokta genel bakışı
 

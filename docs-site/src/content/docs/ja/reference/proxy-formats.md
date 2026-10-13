@@ -26,13 +26,14 @@ provider events → internal adapter events → client dialect
 
 ## 宣言されていないツール呼び出し
 
-リクエストでツールカタログが宣言されている場合、ネイティブのパススルー応答がそのカタログにないクライアント実行ツールを呼び出すと、その呼び出しを中継せずにターンを失敗させます。この動作はすべての受信ダイアレクト（Responses、Chat Completions、Messages）に適用されます。ストリーミング時にクライアントへ返す失敗形式は、エンドポイントによって異なります。
+Responses エンドポイントでは、リクエストがツールカタログを宣言している場合、ネイティブのパススルー応答がそのカタログにないクライアント実行ツールを呼び出すと、その呼び出しを中継せずにターンを失敗させます: エラーコード `undeclared_tool_call` を含む `response.failed` イベントに続き `data: [DONE]` を送り、バッファリングされた JSON は同じコードで HTTP 502 を返します。この拒否は応答が継続状態に入る前に実行され、`authMode: "forward"` のプロバイダーまたは宣言済みカタログのないリクエストに限り無効になります。
 
-- **Responses:** エラーコード `undeclared_tool_call` を含む `response.failed` イベントを送り、その後に `data: [DONE]` を送ります。
-- **Chat Completions:** OpenAI 形式の `error` オブジェクトを含む `data:` フレームを送り、成功完了や `[DONE]` を送らずにストリームを閉じます。
-- **Messages:** `{ "type": "error", "error": ... }` 本文を含む Anthropic の `event: error` フレームを送り、成功した `message_stop` や `[DONE]` は送りません。Responses のエラーコードは引き継がれません。
+Chat Completions と Messages の各エンドポイントは遅延ツールカタログを尊重します: これらのクライアントはカタログの一部だけを宣言し、残りを実行時に自身のツールレジストリを通じて発見できます。完全な宣言境界を所有するのは翻訳されたカタログのスナップショットではなくそのレジストリです。宣言リスト外の呼び出しはクライアントが検証するために中継され、明示的に空の `tools: []` に対する呼び出しは依然として拒否されます — 空の宣言の下には遅延レジストリが存在しないためです。これらの拒否もすべてのワイヤで `undeclared_tool_call` コードを保持します:
 
-バッファリングされた JSON 応答は、ツール名を含むエラーとともに HTTP 502 を返します。エラー形式はエンドポイント固有で、内部の `upstream_error` は Chat および Messages クライアント向けに変換されます。この拒否処理は、応答が継続状態に入る前に実行されます。この拒否が行われないのは、`authMode: "forward"` のプロバイダー、またはカタログが宣言されていないリクエストに限られます。明示的に空のカタログも宣言済みとして扱われ、どのツールも許可しません。
+- **Chat Completions:** そのコードを含む OpenAI 形式の `error` オブジェクトを含む `data:` フレームを送り、成功完了や `[DONE]` を送らずにストリームを閉じます。バッファリングされた JSON はコード付きの HTTP 502 を返します。
+- **Messages:** 本文が `{ "type": "error", "error": { "type": "api_error", "code": "undeclared_tool_call", ... } }` の Anthropic `event: error` フレームを送り、成功した `message_stop` や `[DONE]` は送りません。バッファリングされた JSON はコード付きの HTTP 502 `api_error` を返します。確定的なカタログ違反は再試行可能な `overloaded_error`（HTTP 529）として報告されません。
+
+これとは別に、すべての受信ワイヤで、プロバイダーの `default.` 名前空間の呼び出しはリクエストが宣言した素のツール名に正規化されます（`default.Read` → `Read`）。
 
 ## エンドポイントの概要
 

@@ -88,7 +88,9 @@ describe("native passthrough inbound tool catalogs", () => {
 
   for (const inboundWire of ["chat", "anthropic"] as const) {
     for (const stream of [false, true]) {
-      test(`${inboundWire} passthrough refuses undeclared Write calls (${stream ? "streaming" : "JSON"})`, async () => {
+      // Deferred-catalog wires relay an undeclared client call: the caller's own tool
+      // registry owns the full declaration boundary, not the partial translated catalog.
+      test(`${inboundWire} passthrough relays an undeclared Write call (${stream ? "streaming" : "JSON"})`, async () => {
         const writeCall = { ...call, name: "Write" };
         const upstream = stream
           ? () => new Response([
@@ -102,6 +104,43 @@ describe("native passthrough inbound tool catalogs", () => {
         const response = await post(
           stream,
           [{ type: "function", name: "Read", parameters: { type: "object" } }],
+          upstream,
+          undefined,
+          config,
+          [],
+          "fixture/deepseek-v4-flash",
+          undefined,
+          undefined,
+          inboundWire,
+        );
+
+        if (stream) {
+          const body = await response.text();
+          const frames = readFrames(body);
+          expect(frames.some(item => item.payload?.type === "response.failed")).toBe(false);
+          expect(frames.some(item => item.payload?.type === "response.completed")).toBe(true);
+        } else {
+          expect(response.status).toBe(200);
+          expect(await response.text()).not.toContain("undeclared");
+        }
+      });
+
+      // An explicit empty catalog is still a deny-all the caller declared; it is the one
+      // case a deferred wire cannot leave to a fuller client registry.
+      test(`${inboundWire} passthrough refuses undeclared Write under tools:[] (${stream ? "streaming" : "JSON"})`, async () => {
+        const writeCall = { ...call, name: "Write" };
+        const upstream = stream
+          ? () => new Response([
+            frame("response.output_item.added", { output_index: 0, item: writeCall }),
+            frame("response.completed", { response: { id: "resp_1", status: "completed", output: [writeCall] } }),
+          ].join("\n\n") + "\n\n", { headers: { "content-type": "text/event-stream" } })
+          : () => new Response(
+            JSON.stringify({ id: "resp_1", status: "completed", output: [writeCall] }),
+            { headers: { "content-type": "application/json" } },
+          );
+        const response = await post(
+          stream,
+          [],
           upstream,
           undefined,
           config,
@@ -143,14 +182,14 @@ describe("native passthrough inbound tool catalogs", () => {
         takeSpendHome();
         const model = "fixture/deepseek-v4-flash";
         const schema = { type: "object" };
+        // Deferred wires only fail closed on an explicit empty catalog; the Responses wire
+        // fails closed on any catalog the call's name is absent from.
         const input = surface === "responses"
           ? { input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
             tools: [{ type: "function", name: "Read", parameters: schema }] }
           : surface === "chat"
-            ? { messages: [{ role: "user", content: "hi" }],
-              tools: [{ type: "function", function: { name: "Read", parameters: schema } }] }
-            : { max_tokens: 64, messages: [{ role: "user", content: "hi" }],
-              tools: [{ name: "Read", input_schema: schema }] };
+            ? { messages: [{ role: "user", content: "hi" }], tools: [] }
+            : { max_tokens: 64, messages: [{ role: "user", content: "hi" }], tools: [] };
         const path = surface === "responses" ? "responses" : surface === "chat" ? "chat/completions" : "messages";
         const request = new Request(`http://localhost/v1/${path}`, {
           method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
@@ -183,11 +222,18 @@ describe("native passthrough inbound tool catalogs", () => {
             expect(errors[0]?.event).toBeUndefined();
             expect(errors[0]?.payload?.type).toBeUndefined();
             expect(typeof (errors[0]?.payload?.error as { type?: unknown }).type).toBe("string");
+            // The deterministic refusal keeps its code on every translated wire.
+            expect(errors[0]?.payload?.error).toMatchObject({ code: UNDECLARED_TOOL_CALL_ERROR_CODE });
             const choices = payloads.flatMap(item => Array.isArray(item.choices) ? item.choices : []);
             expect(choices.some(choice => choice.finish_reason != null)).toBe(false);
           } else {
             expect(errors[0]?.event).toBe("error");
             expect(errors[0]?.payload?.type).toBe("error");
+            // A catalog violation is api_error + its code — never a retryable overloaded_error.
+            expect(errors[0]?.payload?.error).toMatchObject({
+              type: "api_error",
+              code: UNDECLARED_TOOL_CALL_ERROR_CODE,
+            });
             expect(frames.some(item => item.event === "message_stop" || item.payload?.type === "message_stop")).toBe(false);
             expect(payloads.some(item => item.type === "message_delta"
               && (item.delta as { stop_reason?: unknown } | undefined)?.stop_reason != null)).toBe(false);

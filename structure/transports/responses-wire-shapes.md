@@ -300,25 +300,27 @@ executes a top-level tool call, so a hallucinated `apply_patch` — which under 
 as a nested `tools.apply_patch(...)` helper inside `exec` — is refused before it reaches the
 runtime, where it previously surfaced as a bare `aborted` with the file untouched.
 
-On the native passthrough lane the refusal covers every inbound wire: `chat`, `anthropic` and
-`responses` each reject an undeclared client-executed call, in SSE and buffered JSON alike, before
-continuation state is stored. The translated delivery paths keep the narrower scope —
-`src/server/responses/run-turn-execution.ts` and `src/server/responses/adapter-delivery.ts` still
-derive `enforceDeclaredToolNames` from `inboundWire`, and only `responses` refuses undeclared calls
-there; `chat` and `anthropic` translated replies relay the call instead. Harnesses on those
-endpoints may defer part of their catalog to conserve prompt tokens and discover the rest at
-runtime, and both vendor specs leave the client's own runner responsible for validating a tool
-call — enforcing membership against a partial catalog would kill those streams mid-turn for a
-call the client could execute.
+On the native passthrough lane the refusal matches the translated delivery scope:
+`src/server/responses/run-turn-execution.ts`, `src/server/responses/adapter-delivery.ts` and
+the native guard in `src/server/responses/passthrough-dispatch.ts` all derive enforcement from
+`inboundWire`, so only `responses` refuses an undeclared client-executed call — in SSE and
+buffered JSON alike, before continuation state is stored. `chat` and `anthropic` inbound
+replies relay the call instead: those harnesses may defer part of their catalog to conserve
+prompt tokens and discover the rest at runtime, and both vendor specs leave the client's own
+runner responsible for validating it — membership enforcement against a partial catalog would
+kill those streams mid-turn for a call the client could execute.
 
-An explicitly empty catalog still authorizes nothing wherever enforcement runs. A request declaring
-an empty tool list is making a statement rather than omitting one, which is how the passthrough
-guard reads it through `clientExplicitWireToolCatalog` in
-`src/server/responses/passthrough-dispatch.ts`.
+An explicitly empty catalog authorizes nothing wherever enforcement runs — deferred wires
+included: `tools: []` is a statement, not an omission, and no deferred registry exists under
+it. The ingresses carry the fact as `clientDeclaredEmptyToolCatalog`
+(`src/server/chat-completions.ts`, `src/server/claude-messages.ts`) since translation drops an
+empty catalog with the rest; `hasExplicitEmptyToolCatalog` reads a verbatim `tools: []` or
+`additional_tools: []` too. Refusals keep `undeclared_tool_call` across the buffered envelope
+and endpoint projections, so Messages sees a deterministic `api_error`, never `overloaded_error`.
 
-`undeclaredToolGuardActive` still gates namespace normalization and continuation suppression on the
-passthrough lane, standing down only for `authMode: "forward"` and requests with no catalog; a
-refused turn never enters continuation state.
+`undeclaredToolGuardActive` gates refusal and continuation suppression, standing down only for
+`authMode: "forward"`, deferred catalogs, and absent ones; a refused turn never enters
+continuation state. `default.` normalization is scoped separately.
 
 ## Selection outlives the declaration check
 
