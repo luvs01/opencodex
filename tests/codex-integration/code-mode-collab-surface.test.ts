@@ -223,6 +223,9 @@ describe("code mode without V1 evidence stays null", () => {
     ["surplus text after the return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<unknown>; garbage>; };"],
     ["an unbalanced parameter type", "declare const tools: { multi_agent_v1__spawn_agent(args: {: Promise<unknown>; };"],
     ["a return type missing its generic closer", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<Map<string, unknown>; };"],
+    ["an unterminated quoted return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<\"unterminated>; };"],
+    ["an unterminated block comment", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<unknown /* truncated>; };"],
+    ["a line comment consuming the closing suffix", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<unknown // truncated>; };"],
   ])("%s is not a rendered declaration", (_label, declaration) => {
     const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
     expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBeNull();
@@ -232,6 +235,11 @@ describe("code mode without V1 evidence stays null", () => {
     ["a nested generic return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<Map<string, unknown>>; };"],
     ["a function-typed parameter", "declare const tools: { multi_agent_v1__spawn_agent(args: (task: string) => void): Promise<unknown>; };"],
     ["a quoted bracket inside the parameter type", "declare const tools: { multi_agent_v1__spawn_agent(args: { choice: \")\" }): Promise<unknown>; };"],
+    ["an apostrophe in a field line comment", "declare const tools: { multi_agent_v1__spawn_agent(args: {\n  // The agent's task.\n  message: string;\n}): Promise<unknown>; };"],
+    ["an unmatched bracket in a field line comment", "declare const tools: { multi_agent_v1__spawn_agent(args: {\n  // Optional unmatched bracket ) in prose.\n  message: string;\n}): Promise<unknown>; };"],
+    ["delimiters in a block comment", "declare const tools: { multi_agent_v1__spawn_agent(args: { /* ) < ' */ message: string }): Promise<unknown>; };"],
+    ["a comment in the return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise</* ' < ) */ unknown>; };"],
+    ["comment markers inside quoted type text", "declare const tools: { multi_agent_v1__spawn_agent(args: { marker: \"/* not a comment */ //\" }): Promise<\"// quoted < )\">; };"],
   ])("%s still completes the declaration", (_label, declaration) => {
     const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
     expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBe("v1");
@@ -384,5 +392,13 @@ describe("an adversarial declaration body stays linear work", () => {
   test("a description beyond the nested-listing bound contributes no evidence", () => {
     const padded = SPAWN_DESCRIPTION + "\n" + "padding ".repeat(200_000);
     expect(surfaceOf(codeModeTools(execDescription(nested("multi_agent_v1__spawn_agent", padded))))).toBeNull();
+  });
+
+  test("comment-heavy declarations below the bound retain their evidence", () => {
+    const comments = "/* ): Promise<' */".repeat(2048);
+    const declaration = `declare const tools: { multi_agent_v1__spawn_agent(args: { ${comments} message: string }): Promise<unknown>; };`;
+    expect(declaration.length).toBeLessThan(64 * 1024);
+    const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
+    expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBe("v1");
   });
 });

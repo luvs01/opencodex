@@ -106,19 +106,33 @@ function completeDeclarationName(body: readonly string[]): string | undefined {
   const rest = signature.slice(openParen + 1);
   const typed = rest.startsWith("args: ") ? 6 : rest.startsWith("input: ") ? 7 : -1;
   if (typed < 0 || isSpace(rest[typed])) return undefined;
-  // Quoted type text is opaque to structure: a ")" inside `{ choice: ")" }` must not close the
-  // parameter list, and a "<" inside a string literal must not open a generic. One forward scan
-  // with escape-aware skipping keeps the whole check linear.
-  const skipQuoted = (at: number): number => {
+  // Quoted text and comments are opaque to delimiter matching. Each skip advances
+  // past its text once; an unterminated region cannot contain a closing declaration.
+  const isOpaqueTypeText = (at: number): boolean => {
+    const ch = rest[at];
+    return ch === '"' || ch === "'" || ch === "`"
+      || ch === "/" && (rest[at + 1] === "/" || rest[at + 1] === "*");
+  };
+  const skipTypeText = (at: number): number | undefined => {
     const quote = rest[at]!;
+    if (quote === "/" && rest[at + 1] === "/") {
+      let i = at + 2;
+      while (i < rest.length && rest[i] !== "\n" && rest[i] !== "\r"
+        && rest[i] !== "\u2028" && rest[i] !== "\u2029") i += 1;
+      return i < rest.length ? i : undefined;
+    }
+    if (quote === "/" && rest[at + 1] === "*") {
+      const end = rest.indexOf("*/", at + 2);
+      return end < 0 ? undefined : end + 1;
+    }
     let i = at + 1;
     while (i < rest.length) {
-      const c = rest[i]!;
-      if (c === "\\") i += 2;
-      else if (c === quote) return i;
+      const ch = rest[i]!;
+      if (ch === "\\") i += 2;
+      else if (ch === quote) return i;
       else i += 1;
     }
-    return rest.length;
+    return undefined;
   };
   // The parameter list ends at the ')' that balances the opening '(': a ')' nested inside the
   // parameter's own type (e.g. `args: (a: string) => Promise<void>`) cannot pose as the separator.
@@ -126,7 +140,12 @@ function completeDeclarationName(body: readonly string[]): string | undefined {
   let close = -1;
   for (let at = typed; at < rest.length; at += 1) {
     const ch = rest[at]!;
-    if (ch === '"' || ch === "'" || ch === "`") { at = skipQuoted(at); continue; }
+    if (isOpaqueTypeText(at)) {
+      const end = skipTypeText(at);
+      if (end === undefined) return undefined;
+      at = end;
+      continue;
+    }
     if (ch === "(" || ch === "[" || ch === "{") depth += 1;
     else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
     if (depth === 0) { close = at; break; }
@@ -141,7 +160,12 @@ function completeDeclarationName(body: readonly string[]): string | undefined {
   let generic = 1;
   for (let at = close + PROMISE_SEPARATOR.length; at < rest.length; at += 1) {
     const ch = rest[at]!;
-    if (ch === '"' || ch === "'" || ch === "`") { at = skipQuoted(at); continue; }
+    if (isOpaqueTypeText(at)) {
+      const end = skipTypeText(at);
+      if (end === undefined) return undefined;
+      at = end;
+      continue;
+    }
     if (ch === "<") generic += 1;
     else if (ch === ">" && rest[at - 1] !== "=") generic -= 1;
     if (generic === 0) return undefined;
