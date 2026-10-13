@@ -26,13 +26,14 @@ Responses 表示是橋接的中心。原生相容的路由可跳過部分轉譯�
 
 ## 未宣告的工具呼叫
 
-當請求宣告了工具目錄時，原生直通回應若呼叫目錄之外、由用戶端執行的工具，不會轉送該呼叫，而是讓本回合失敗。此行為適用於所有輸入方言：Responses、Chat Completions 與 Messages。串流失敗在用戶端呈現的格式取決於端點：
+在 Responses 端點上，當請求宣告了工具目錄時，原生直通回應若呼叫目錄之外由用戶端執行的工具，本回合會失敗而不會轉送該呼叫：串流回應傳送帶有錯誤碼 `undeclared_tool_call` 的 `response.failed` 事件，接著傳送 `data: [DONE]`；緩衝式 JSON 傳回 HTTP 502 與相同錯誤碼。拒絕發生在回應進入延續狀態之前。只有 `authMode: "forward"` 供應商或未宣告目錄的請求才略過這項拒絕。
 
-- **Responses：**傳送帶有錯誤碼 `undeclared_tool_call` 的 `response.failed` 事件，接著傳送 `data: [DONE]`。
-- **Chat Completions：**傳送包含 OpenAI 格式 `error` 物件的 `data:` frame，接著關閉串流，不會傳送成功完成訊號或 `[DONE]`。
-- **Messages：**傳送包含 `{ "type": "error", "error": ... }` 內文的 Anthropic `event: error` frame；不會傳送成功的 `message_stop` 或 `[DONE]`。Responses 錯誤碼不會保留。
+Chat Completions 與 Messages 端點支援延後提供的工具目錄：用戶端可先宣告部分目錄，再透過自己的工具登錄表於執行期間探索其餘工具；完整宣告邊界由用戶端登錄表決定，而非轉譯後的目錄快照。目錄之外的呼叫會轉送給用戶端驗證；但針對明確空目錄 `tools: []` 的呼叫仍會被拒絕。這些拒絕在每種協定中都保留 `undeclared_tool_call`：
 
-緩衝式 JSON 回應會傳回 HTTP 502，並在錯誤中指出工具名稱；錯誤格式依端點而異（內部的 `upstream_error` 會轉換為 Chat 與 Messages 用戶端所需的格式）。拒絕會在回應進入延續狀態之前執行。只有 `authMode: "forward"` 供應商或未宣告工具目錄的請求不會觸發此拒絕。明確宣告為空的目錄仍視為已宣告，因此不會授權任何工具。
+- **Chat Completions：**傳送包含帶有該錯誤碼的 OpenAI 格式 `error` 物件的 `data:` frame，然後關閉串流，不傳送成功完成訊號或 `[DONE]`；緩衝式 JSON 傳回 HTTP 502 與該錯誤碼。
+- **Messages：**傳送 Anthropic `event: error` frame，內文為 `{ "type": "error", "error": { "type": "api_error", "code": "undeclared_tool_call", ... } }`，不傳送成功的 `message_stop` 或 `[DONE]`；緩衝式 JSON 傳回 HTTP 502 `api_error` 與該錯誤碼。確定性的目錄違規不會被回報為可重試的 `overloaded_error`（HTTP 529）。
+
+此外，在所有輸入協定中，供應商回傳的 `default.` 命名空間呼叫都會正規化為用戶端宣告的裸名稱，即使延後目錄規則停用了上述拒絕檢查。
 
 ## 端點概覽
 

@@ -31,13 +31,14 @@ Responses 表示是这座桥的中心。原生兼容的路由可以跳过部分�
 
 ## 未声明的工具调用
 
-当请求声明了工具目录时，原生直通响应如果调用目录之外的客户端执行工具，不会转发该调用，而是使本轮失败。此行为适用于所有入站方言：Responses、Chat Completions 和 Messages。流式失败在客户端的呈现方式取决于端点：
+在 Responses 端点上，当请求声明了工具目录时，原生直通响应若调用目录之外由客户端执行的工具，本轮会失败而不会转发该调用：流式响应发送带有错误代码 `undeclared_tool_call` 的 `response.failed` 事件，然后发送 `data: [DONE]`；缓冲式 JSON 返回 HTTP 502 和相同错误代码。拒绝发生在响应进入续接状态之前。只有 `authMode: "forward"` 提供方或未声明目录的请求才跳过这一拒绝。
 
-- **Responses：**发送带有错误代码 `undeclared_tool_call` 的 `response.failed` 事件，然后发送 `data: [DONE]`。
-- **Chat Completions：**发送包含 OpenAI 风格 `error` 对象的 `data:` 帧，随后关闭流，不发送成功完成标记或 `[DONE]`。
-- **Messages：**发送包含 `{ "type": "error", "error": ... }` 正文的 Anthropic `event: error` 帧；不会发送成功的 `message_stop` 或 `[DONE]`。Responses 错误代码不会保留。
+Chat Completions 和 Messages 端点支持延迟提供的工具目录：客户端可先声明部分目录，再通过自己的工具注册表在运行时发现其余工具；完整声明边界由客户端注册表决定，而不是翻译后的目录快照。目录之外的调用会转发给客户端验证；但针对显式空目录 `tools: []` 的调用仍会被拒绝。此类拒绝在每种协议中都保留 `undeclared_tool_call`：
 
-缓冲式 JSON 响应会返回 HTTP 502，并在错误中注明工具名称；错误格式因端点而异（内部的 `upstream_error` 会转换为 Chat 和 Messages 客户端所用的格式）。拒绝发生在响应进入续接状态之前。只有 `authMode: "forward"` 提供方或未声明工具目录的请求才不会触发此拒绝。显式声明为空的目录仍算已声明，因此不授权任何工具。
+- **Chat Completions：**发送包含带有该错误代码的 OpenAI 风格 `error` 对象的 `data:` 帧，然后关闭流，不发送成功完成标记或 `[DONE]`；缓冲式 JSON 返回 HTTP 502 和该代码。
+- **Messages：**发送 Anthropic `event: error` 帧，正文为 `{ "type": "error", "error": { "type": "api_error", "code": "undeclared_tool_call", ... } }`，不发送成功的 `message_stop` 或 `[DONE]`；缓冲式 JSON 返回 HTTP 502 `api_error` 和该代码。确定性的目录违规不会被报告为可重试的 `overloaded_error`（HTTP 529）。
+
+此外，在所有入站协议中，提供方返回的 `default.` 命名空间调用都会规范化为客户端声明的裸名称，即使延迟目录规则关闭了上述拒绝检查。
 
 ## 端点总览
 
