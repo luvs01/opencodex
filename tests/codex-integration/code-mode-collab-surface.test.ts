@@ -222,18 +222,17 @@ describe("code mode without V1 evidence stays null", () => {
     ["an empty return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<>; };"],
     ["surplus text after the return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<unknown>; garbage>; };"],
     ["an unbalanced parameter type", "declare const tools: { multi_agent_v1__spawn_agent(args: {: Promise<unknown>; };"],
+    ["a return type missing its generic closer", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<Map<string, unknown>; };"],
   ])("%s is not a rendered declaration", (_label, declaration) => {
     const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
     expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBeNull();
   });
 
   test.each([
-    ["a nested generic return type", "Promise<Map<string, unknown>>"],
-    ["a function-typed parameter", undefined],
-  ])("%s still completes the declaration", (_label, returnType) => {
-    const declaration = returnType === undefined
-      ? "declare const tools: { multi_agent_v1__spawn_agent(args: (task: string) => void): Promise<unknown>; };"
-      : "declare const tools: { multi_agent_v1__spawn_agent(args: {}): " + returnType + "; };";
+    ["a nested generic return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<Map<string, unknown>>; };"],
+    ["a function-typed parameter", "declare const tools: { multi_agent_v1__spawn_agent(args: (task: string) => void): Promise<unknown>; };"],
+    ["a quoted bracket inside the parameter type", "declare const tools: { multi_agent_v1__spawn_agent(args: { choice: \")\" }): Promise<unknown>; };"],
+  ])("%s still completes the declaration", (_label, declaration) => {
     const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
     expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBe("v1");
   });
