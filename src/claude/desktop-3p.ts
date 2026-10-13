@@ -6,6 +6,7 @@ import { canonicalDirectory } from "./desktop-remote-store-io";
 import {
   resolveDesktop3pConfigLibraryPath, parseMetadata, SAFE_DESKTOP_PROFILE_ID, isRecord,
   isOwnedDesktopEntry, isOwnedDesktopGatewayEntry, profilePath, readDesktopProfileForeignKeys, readDesktopLibraryText, readDesktopLibraryBytes,
+  assertDesktopLibraryTextSize, serializeDesktopLibraryJson,
   type Desktop3pConfigLibraryOptions, type Desktop3pMetadata, type Desktop3pMetadataEntry,
 } from "./desktop-3p-library";
 export { resolveDesktop3pConfigLibraryPath, type Desktop3pConfigLibraryOptions } from "./desktop-3p-library";
@@ -627,13 +628,24 @@ function removeDesktop3pStandardPivotLocal(
     if (targetIds.length === 0) return { ok: true, changed: false, kind: "noop", libraryPath: inspected.libraryPath };
 
     let metadataAfterPivot = metadata;
+    let standardPath: string | undefined;
+    let pivotMetadataJson: string | undefined;
     if (selectedOwnedGatewayActive) {
       const standardId = randomUUID();
-      const standardPath = profilePath(inspected.libraryPath, standardId);
-      atomicWriteFile(standardPath, "{}\n");
+      standardPath = profilePath(inspected.libraryPath, standardId);
       const standardEntry: Desktop3pMetadataEntry = { id: standardId, name: "opencodex-standard" };
       metadataAfterPivot = { ...metadata, appliedId: standardId, entries: [...metadata.entries, standardEntry] };
-      atomicWriteFile(metadataPath, JSON.stringify(metadataAfterPivot, null, 2) + "\n");
+      pivotMetadataJson = serializeDesktopLibraryJson(metadataAfterPivot);
+    }
+    // Bound the final metadata before any unlink so a size refusal cannot strand
+    // a row pointing at an already-deleted profile.
+    const removalMetadataJson = serializeDesktopLibraryJson({
+      ...metadataAfterPivot,
+      entries: metadataAfterPivot.entries.filter(entry => !targetIds.includes(entry.id)),
+    });
+    if (standardPath !== undefined && pivotMetadataJson !== undefined) {
+      atomicWriteFile(standardPath, "{}\n");
+      atomicWriteFile(metadataPath, pivotMetadataJson);
     }
 
     const residualPaths: string[] = [];
@@ -659,10 +671,7 @@ function removeDesktop3pStandardPivotLocal(
     }
     // Do not leave a metadata row pointing at a deleted profile. For a foreign
     // selection this only removes proven opencodex residues; appliedId is kept.
-    atomicWriteFile(
-      metadataPath,
-      JSON.stringify({ ...metadataAfterPivot, entries: metadataAfterPivot.entries.filter(entry => !targetIds.includes(entry.id)) }, null, 2) + "\n",
-    );
+    atomicWriteFile(metadataPath, removalMetadataJson);
     return { ok: true, changed: true, kind: "removed", libraryPath: inspected.libraryPath };
   } catch (error) {
     return { ok: false, changed: false, kind: "write_failed", libraryPath: inspected.libraryPath, reason: desktopMutationFailureReason(error) };
@@ -815,7 +824,7 @@ function writeDesktop3pConfigWithGenerator(
 
     const generated = generate();
     const preserved = readDesktopProfileForeignKeys(configPath);
-    const configJson = JSON.stringify({ ...preserved, ...generated }, null, 2) + "\n";
+    const configJson = serializeDesktopLibraryJson({ ...preserved, ...generated });
     const fingerprint = createHash("sha256").update(configJson).digest("hex").slice(0, 16);
     if (refreshOnly) {
       atomicWriteFileNoFollow(configPath, configJson, undefined, {
@@ -833,9 +842,10 @@ function writeDesktop3pConfigWithGenerator(
       });
       return { written: true, path: configPath, fingerprint };
     }
+    const metadataJson = serializeDesktopLibraryJson({ ...metadata, appliedId: id, entries });
     const { backupPath } = atomicReplaceDesktopConfig(configPath, configJson);
     try {
-      atomicWriteFile(metadataPath, JSON.stringify({ ...metadata, appliedId: id, entries }, null, 2) + "\n");
+      atomicWriteFile(metadataPath, metadataJson);
     } catch (metaError) {
       // Rollback: restore the backed-up config if metadata write fails.
       if (backupPath && existsSync(backupPath)) copyFileSync(backupPath, configPath);
@@ -855,6 +865,7 @@ export function atomicReplaceDesktopConfig(
   writer: (path: string, content: string) => void = atomicWriteFile,
 ): { backupPath?: string } {
   const backupPath = `${path}.bak`;
+  assertDesktopLibraryTextSize(content);
   if (existsSync(path)) copyFileSync(path, backupPath);
   writer(path, content);
   return existsSync(backupPath) ? { backupPath } : {};

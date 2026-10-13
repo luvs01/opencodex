@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ import {
   removeDesktop3pStandardPivot,
   writeDesktop3pConfig,
 } from "../../src/claude/desktop-3p";
-import { isOwnedDesktopEntry, isOwnedDesktopGatewayEntry } from "../../src/claude/desktop-3p-library";
+import { isOwnedDesktopEntry, isOwnedDesktopGatewayEntry, MAX_DESKTOP_PROFILE_FILE_BYTES } from "../../src/claude/desktop-3p-library";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let root: string;
@@ -173,6 +173,27 @@ describe("Claude Desktop picker profile", () => {
     expect(isOwnedDesktopGatewayEntry({ id: picker, name: "opencodex-picker" })).toBe(false);
     expect(inspectDesktop3pConfigLibrary({ env: env() })).toMatchObject({ kind: "standard", appliedId: picker });
   });
+
+  // Multi-MiB real-file fixtures plus ACL-hardened writes need extra Windows wall-clock budget.
+  test("oversized picker metadata refuses before profile and state writes", () => {
+    const id = "foreign-selected";
+    writeFileSync(join(library, `${id}.json`), "{}\n");
+    const metadata = {
+      appliedId: id, entries: [{ id, name: "Personal" }],
+      foreignRows: Array(500_000).fill("x"),
+    };
+    const before = JSON.stringify(metadata);
+    expect(Buffer.byteLength(before)).toBeLessThan(MAX_DESKTOP_PROFILE_FILE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(metadata, null, 2))).toBeGreaterThan(MAX_DESKTOP_PROFILE_FILE_BYTES);
+    const path = join(library, "_meta.json");
+    writeFileSync(path, before);
+    const names = readdirSync(library).sort();
+    const result = applyDesktopPickerProfile({ proxyPort: 41234, env: env(), configDir });
+    expect(result.ok).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(library).sort()).toEqual(names);
+    expect(existsSync(join(configDir, "claude-picker", "profile-state.json"))).toBe(false);
+  }, 20_000);
 
   test("a non-regular picker profile path inspects as unsafe instead of blocking", () => {
     const picker = "picker";
