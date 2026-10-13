@@ -228,15 +228,29 @@ response closes; upstream request closure alone does not prove a buffered reply 
 After a complete response, HTTP/2 closes only that stream with `RST_STREAM NO_ERROR` (RFC 9113
 §8.1), including a complete generated 502. Without a complete downstream response, cleanup uses
 `CANCEL` for a premature downstream close or an upstream close without a reply.
-An early HTTP/1.1 refusal advertises `Connection: close` when input is unfinished at response
-headers, preserves its reply, then drains input before graceful close. Requests already complete
-retain keep-alive; completing a body after an early refusal does not reverse its close header. Errors and premature downstream
-closes still destroy the request. The 60-second absolute and 15-second idle-progress deadlines
-close client input and upstream work and release the aggregate slot; upstream backpressure only
-suspends the idle clock, never the absolute deadline. Body
-completion removes the input-cleanup listeners and both timers, leaving long-lived responses and
-SSE subscriptions independent of upload cleanup. Completed HTTP/1.1 uploads retain keep-alive on
-generated 502s and can reuse the same client socket.
+HTTP/1.1 refusals, generated 502s and early replies advertise `Connection: close` only while input is unfinished; after the writable finishes,
+the listener unpipes the upstream upload, reads and discards remaining input, and ends the socket
+gracefully so queued response bytes flush. Errors and premature downstream closes still destroy
+the request. The request-side drain adds no byte cap and does not wait for request-body
+completion before ending the response side. Bun 1.4.3's HTTP server ends a `Connection: close`
+response with `socket.destroySoon()` before the listener's own finish handler runs, which reset
+the splice before the reply reached the client; every HTTP/1.1 reply that closes unfinished input
+(refusal, generated 502, early upstream reply) therefore replaces that socket's `destroySoon` with
+the same resume-and-`end()`. A refused HTTP/1.1 socket whose client keeps uploading past that
+graceful close is then destroyed outright at the upload deadline or after 15 s without progress.
+On the relay path the 60-second absolute and 15-second idle-progress deadlines close client input
+and upstream work and release the aggregate slot; upstream backpressure only
+suspends the idle clock, never the absolute deadline. The TCP front
+enables half-open reads once a ClientHello is recognized and, when the backend side ends, unpipes
+and keeps discarding client ciphertext, so a client still writing an abandoned upload reads the
+reply and FIN and can close (Bun 1.4.2 otherwise left it open). That front-side discard is bounded:
+once the reply has flushed to the client socket (`finish`), the connection is dropped after
+`PICKER_ABANDONED_INPUT_LINGER_MS` (30 s), so a peer that keeps trickling an abandoned upload cannot
+hold it until shutdown (#6984). The timer is armed only after the reply has left the process, so
+it cannot cut a reply that is still being written; `finish` is not peer receipt, though, and a client
+that also stops reading for the whole budget can still lose unread reply bytes when the drop fires.
+A connection that closes first cancels the timer. Body completion removes the input-cleanup listeners and both timers,
+leaving long-lived responses and SSE subscriptions independent of upload cleanup. Completed HTTP/1.1 uploads retain keep-alive on generated 502s and can reuse the same client socket.
 `tests/claude-integration/claude-picker-upload.test.ts` covers headers-only refusals on both
 protocols, byte-exact early replies under backpressure, completed uploads with SSE, cancellation,
 failure and shutdown cleanup, and healthy sibling streams.
