@@ -92,9 +92,16 @@ describe("readBoundedRegularFileSync", () => {
     writeFileSync(path, "x".repeat(33));
     expect(() => readBoundedRegularFileSync(path, 32)).toThrow();
 
+    // Windows can deny symlink creation without developer mode or privileges; the oversize
+    // assertion above already ran, so skip only the link-specific assertion in that case.
     const link = join(root, "linked.json");
-    symlinkSync(path, link, "file");
-    expect(() => readBoundedRegularFileSync(link, 64)).toThrow();
+    let linked = true;
+    try {
+      symlinkSync(path, link, "file");
+    } catch {
+      linked = false;
+    }
+    if (linked) expect(() => readBoundedRegularFileSync(link, 64)).toThrow();
   });
 
   test.skipIf(process.platform === "win32")("rejects a FIFO without blocking", () => {
