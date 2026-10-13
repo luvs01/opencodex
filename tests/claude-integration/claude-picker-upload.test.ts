@@ -496,3 +496,29 @@ for (const protocol of ["h1", "h2"] as const) {
     } finally { await wait(f.close()); }
   });
 }
+
+for (const protocol of ["h1", "h2"] as const) {
+  bounded(`${protocol} first upstream response stops upload clocks so a slow reply completes`, async wait => {
+    // Upload deadline 400ms, idle 250ms: the reply lands at ~600ms, so either clock
+    // would abort the relay mid-response if it survived the upstream's first reply.
+    const f = await fixture((req, res) => {
+      req.on("error", () => res.destroy()); req.resume();
+      const socket = req.socket;
+      socket.destroySoon = () => { socket.end(); return socket; };
+      if (req.url === "/slow-reply") {
+        res.writeHead(200, { "Content-Length": "5" });
+        res.write("s");
+        setTimeout(() => res.end("low!"), 600);
+      } else res.end("ordinary");
+    }, { uploadDeadlineMs: 400, uploadIdleTimeoutMs: 250 });
+    try {
+      const session = f.h2();
+      const upload = protocol === "h2"
+        ? session.request({ ":method": "POST", ":path": "/slow-reply", ":authority": "claude.ai" })
+        : f.h1("/slow-reply", "POST", { "Content-Length": "100" });
+      const result = protocol === "h2" ? h2Result(upload as ClientHttp2Stream) : h1Result(upload as ClientRequest);
+      upload.write("x");
+      expect(await wait(result)).toEqual({ status: 200, text: "slow!" });
+    } finally { await wait(f.close()); }
+  });
+}

@@ -344,6 +344,9 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
     if (bootstrap) headers.push("Accept-Encoding", narrowBootstrapAcceptEncoding());
     let upReq: ReturnType<typeof httpsRequest>;
     let upstreamResponded = false;
+    // Upload clocks only bound the pre-response wait: once upstream answers, the
+    // reply must be allowed to finish even if the client's input never does.
+    let stopUploadClocks: () => void = () => {};
     try {
       // The HTTP/1.1 client validates the method, path and header values synchronously.
       upReq = httpsRequest({
@@ -352,6 +355,7 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
         method, path: req.url, headers, maxHeaderSize: PICKER_MAX_HEADER_BYTES,
         }, upRes => {
         upstreamResponded = true;
+        stopUploadClocks();
         const status = upRes.statusCode ?? 502;
         const originalHeaders = filteredHeaders(upRes.rawHeaders);
         const sendHead = (raw: string[]) => {
@@ -440,8 +444,10 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
         deadlineTimer = undefined;
         idleTimer = undefined;
       };
+      stopUploadClocks = clearUploadTimers;
       const onUploadIdle = () => {
         idleTimer = undefined;
+        if (upstreamResponded) return;
         // A full upstream buffer pauses the pipe: 'data' stops even while the client
         // keeps sending, so backpressure is not client idleness. Recheck each interval
         // until the upstream drains; the absolute deadline still bounds the upload.
@@ -449,6 +455,7 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
         expireUpload();
       };
       const onUploadProgress = () => {
+        if (upstreamResponded) return;
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(onUploadIdle, uploadIdleTimeoutMs);
         idleTimer.unref?.();
@@ -476,7 +483,7 @@ export async function startPickerListener(options: PickerListenerOptions): Promi
         }
       };
       expireUpload = () => {
-        if (uploadFinished) return;
+        if (uploadFinished || upstreamResponded) return;
         clientGone = true;
         stopUnfinishedUpload();
         release();
