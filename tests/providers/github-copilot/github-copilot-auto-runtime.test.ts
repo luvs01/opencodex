@@ -66,7 +66,7 @@ async function accounts() {
   return { a, b };
 }
 /** Return an Auto provider config and send ledger; options drive refusal, expiry, rotation, and tool events through both inference wires. */
-function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; native429?: boolean; onNativeCancel?: () => void; chatRefresh?: boolean; closedNativeBody?: boolean; renewedChatRefusal?: boolean; rotate?: boolean; tool?: boolean; key?: boolean; refusal?: number; negotiationRefusal?: number; negotiationRefusalAt?: number; alwaysRefuse?: boolean; advanceAfterIntent?: () => void | Promise<void>; onSession?: (count: number) => void | Promise<void>; malformedSessionAt?: number; negotiationRetryAfter?: string; replyText?: string; onInference?: (count: number) => void | Promise<void> } = {}) {
+function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; native429?: boolean; onNativeCancel?: () => void; chatRefresh?: boolean; closedNativeBody?: boolean; renewedChatRefusal?: boolean; rotate?: boolean; rotateAt?: number; tool?: boolean; key?: boolean; refusal?: number; negotiationRefusal?: number; negotiationRefusalAt?: number; alwaysRefuse?: boolean; advanceAfterIntent?: () => void | Promise<void>; onSession?: (count: number) => void | Promise<void>; malformedSessionAt?: number; negotiationRetryAfter?: string; replyText?: string; onInference?: (count: number) => void | Promise<void> } = {}) {
   const sent: Array<{ host: string; path: string; token: string | null; body: any; signal?: AbortSignal | null }> = [];
   let inferenceCount = 0;
   let sessionCount = 0;
@@ -120,7 +120,7 @@ function fixture(options: { nativeExpiry?: boolean; nativeFirst?: boolean; nativ
       cancel() { cancelledNativeBodies++; options.onNativeCancel?.(); },
     }), { status: options.native429 ? 429 : 401, headers: { "content-type": "application/json", "retry-after": "1" } });
     if (options.chatRefresh && inferenceCount === 1) return Response.json({ error: { message: "refresh" } }, { status: 401 });
-    if (options.rotate && inferenceCount === 1) return Response.json({ error: { message: "limited" } }, { status: options.refusal ?? 429, headers: { "retry-after": "1" } });
+    if (options.rotate && inferenceCount === (options.rotateAt ?? 1)) return Response.json({ error: { message: "limited" } }, { status: options.refusal ?? 429, headers: { "retry-after": "1" } });
     if (destination.pathname === "/responses") return Response.json({ id: "resp-fixture", model, object: "response", status: "completed",
       output: [{ id: "msg-fixture", type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
       usage: { input_tokens: 2, output_tokens: 1 } });
@@ -698,6 +698,24 @@ describe("Copilot Auto through the Responses pipeline", () => {
     expect(text).toContain("model_not_allowed_for_key");
     expect(text).not.toContain("gpt-5.4");
     expect(sent.filter(call => ["/chat/completions", "/responses"].includes(call.path))).toHaveLength(1);
+  });
+  test("OAuth 429 during terminal continuation preserves the scope refusal", async () => {
+    await accounts();
+    const { config, sent } = fixture({ rotate: true, rotateAt: 2, replyText: "I will modify the file now." });
+    globalThis.fetch = config.providers["github-copilot"]!.fetch as typeof fetch;
+    config.providers["github-copilot"]!.terminalContinuationGuard = true;
+    const admission = scopedAdmission(config, ["github-copilot/auto", "gpt-4o"]);
+    const response = await handleResponses(request("Modify the file now."), config, { model: "", provider: "" }, { admission });
+    const text = await response.text();
+    const inference = sent.filter(call => ["/chat/completions", "/responses"].includes(call.path));
+    expect(inference.map(call => [call.host, call.body.model])).toEqual([
+      ["a.githubcopilot.com", "gpt-4o"], ["a.githubcopilot.com", "gpt-4o"],
+    ]);
+    const sessions = sent.filter(call => call.path === "/models/session").map(call => call.host);
+    expect(sessions[0]).toBe("a.githubcopilot.com");
+    expect(sessions.at(-1)).toBe("b.githubcopilot.com");
+    expect(text).toContain("model_not_allowed_for_key");
+    expect(text).not.toContain("gpt-5.4");
   });
 });
 

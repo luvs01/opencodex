@@ -636,13 +636,17 @@ export function createAdapterContinuations(
               nextContinuationRecoveryKind = "oauth-account-429";
               continue;
             }
-          } catch {
+          } catch (error) {
             // Everything in this try runs before the replay: the send happens on the next
             // iteration, after `continue`. A throw here therefore leaves a reservation that
             // never dispatched, and holding it would refuse a later recovery in this same
             // request for a send that never left the process.
             hop.permit?.release();
-            // fall through to emit continuation error below
+            if (unwrapUpstreamRetryEvidenceError(error) instanceof AdmissionModelDeniedError) {
+              yield continuationFailureEvent(error);
+              return;
+            }
+            // Other negotiation failures preserve the original provider refusal.
           }
         }
       }
