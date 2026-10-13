@@ -346,3 +346,31 @@ describe("a caller-defined exec contributes no nested evidence", () => {
     expect(surfaceOf([{ type: "custom", name: "exec", description: foreign }])).toBeNull();
   });
 });
+
+describe("an adversarial declaration body stays linear work", () => {
+  // Regression: the declaration check must not backtrack per candidate Promise separator, and the
+  // owner lookup must not re-validate the body once per pending heading. On the pre-fix regex this
+  // ~393 KiB body starved the event loop for seconds well inside the default test timeout.
+  const separators = "): Promise<a".repeat(32768);
+  const listing = [
+    "exec tool declaration:",
+    FENCE + "ts",
+    "declare const tools: { multi_agent_v1__spawn_agent(args: x" + separators,
+    FENCE,
+  ].join("\n");
+
+  test("repeated Promise separators without a terminator are no declaration", () => {
+    const section = [heading("multi_agent_v1__spawn_agent"), listing].join("\n");
+    expect(surfaceOf(codeModeTools(execDescription(section)))).toBeNull();
+  });
+
+  test("many pending same-name headings do not multiply the parse", () => {
+    const headings = Array.from({ length: 256 }, () => heading("multi_agent_v1__spawn_agent")).join("\n");
+    expect(surfaceOf(codeModeTools(execDescription(headings, listing)))).toBeNull();
+  });
+
+  test("a description beyond the nested-listing bound contributes no evidence", () => {
+    const padded = SPAWN_DESCRIPTION + "\n" + "padding ".repeat(200_000);
+    expect(surfaceOf(codeModeTools(execDescription(nested("multi_agent_v1__spawn_agent", padded))))).toBeNull();
+  });
+});

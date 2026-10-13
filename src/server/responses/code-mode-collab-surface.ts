@@ -66,13 +66,39 @@ interface RenderedTool { name: string; raw: string }
 /** The declaration fence codex-rs opens: three backticks and "ts". */
 const DECLARATION_FENCE_SHAPE: Fence = { char: "`", length: 3 };
 
-/** A complete declaration as render_code_mode_sample emits it, single- or multi-line. */
-function isCompleteDeclaration(body: readonly string[], name: string): boolean {
+const DECLARATION_PREFIX = "declare const tools: { ";
+const PROMISE_SEPARATOR = "): Promise<";
+const DECLARATION_SUFFIX = ">; };";
+// Bounds keep a caller-controlled description linear work: a rendered listing is a heading, a
+// description, and a small declaration per tool, so anything this large cannot be the codex-rs
+// shape this parser exists to recognize.
+const MAX_DESCRIPTION_LENGTH = 1 << 20;
+const MAX_DECLARATION_LENGTH = 64 * 1024;
+
+const isSpace = (ch: string | undefined): boolean => ch === undefined || /\s/.test(ch);
+
+/**
+ * The declared tool name when body is a complete declaration as render_code_mode_sample emits it,
+ * single- or multi-line, else undefined. Fixed boundaries plus one forward scan for the Promise
+ * separator: no backtracking, so a fence body full of candidate separators stays linear work.
+ */
+function completeDeclarationName(body: readonly string[]): string | undefined {
   const text = body.join("\n");
-  const prefix = "declare const tools: { " + name + "(";
-  if (!text.startsWith(prefix)) return false;
+  if (text.length > MAX_DECLARATION_LENGTH) return undefined;
+  if (!text.startsWith(DECLARATION_PREFIX) || !text.endsWith(DECLARATION_SUFFIX)) return undefined;
+  const signature = text.slice(DECLARATION_PREFIX.length, -DECLARATION_SUFFIX.length);
+  const openParen = signature.indexOf("(");
+  const name = openParen > 0 ? signature.slice(0, openParen) : "";
+  if (!/^[A-Za-z_$][\w$]*$/.test(name)) return undefined;
   // A named, typed parameter (`args` for functions, `input` for freeform) and a non-empty return type.
-  return /^(?:args|input): \S[\s\S]*\): Promise<[^>\s][\s\S]*>; \};$/.test(text.slice(prefix.length));
+  const rest = signature.slice(openParen + 1);
+  const typed = rest.startsWith("args: ") ? 6 : rest.startsWith("input: ") ? 7 : -1;
+  if (typed < 0 || isSpace(rest[typed])) return undefined;
+  for (let at = rest.indexOf(PROMISE_SEPARATOR, typed + 1); at >= 0; at = rest.indexOf(PROMISE_SEPARATOR, at + 1)) {
+    const ch = rest[at + PROMISE_SEPARATOR.length];
+    if (ch !== ">" && !isSpace(ch)) return name;
+  }
+  return undefined;
 }
 
 /** codex-rs normalize_code_mode_identifier: invalid identifier characters become `_`. */
@@ -103,9 +129,21 @@ function renderedHeading(match: RegExpExecArray): RenderedTool | undefined {
  * alone. Lines inside a quoted fence can neither open a section nor declare a tool.
  */
 function renderedNestedTools(description: string): RenderedTool[] {
+  if (description.length > MAX_DESCRIPTION_LENGTH) return [];
   const lines = description.split("\n");
   const rendered: RenderedTool[] = [];
   const pending: RenderedTool[] = [];
+  // Ascending indexes into `pending` per name, so a declaration finds its owner in one lookup
+  // instead of rescanning every pending heading.
+  const pendingByName = new Map<string, number[]>();
+  const dropPendingTo = (length: number): void => {
+    while (pending.length > length) {
+      const removed = pending.pop()!;
+      const indexes = pendingByName.get(removed.name)!;
+      indexes.pop();
+      if (indexes.length === 0) pendingByName.delete(removed.name);
+    }
+  };
   let fence: Fence | undefined;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -116,7 +154,11 @@ function renderedNestedTools(description: string): RenderedTool[] {
     const match = TOOL_HEADING.exec(line);
     if (match) {
       const heading = renderedHeading(match);
-      if (heading) pending.push(heading);
+      if (heading) {
+        const indexes = pendingByName.get(heading.name);
+        if (indexes) indexes.push(pending.length); else pendingByName.set(heading.name, [pending.length]);
+        pending.push(heading);
+      }
       continue;
     }
     if (line === DECLARATION_LEAD && lines[i + 1] === DECLARATION_FENCE) {
@@ -126,10 +168,11 @@ function renderedNestedTools(description: string): RenderedTool[] {
       const body = lines.slice(i + 2, close);
       // The outermost pending heading with the declared name owns it, so a same-name heading quoted
       // inside the tool's own description cannot take over the genuine section.
-      const owner = pending.findIndex(tool => isCompleteDeclaration(body, tool.name));
+      const declared = completeDeclarationName(body);
+      const owner = declared === undefined ? -1 : pendingByName.get(declared)?.[0] ?? -1;
       if (owner >= 0) {
         rendered.push(pending[owner]!);
-        pending.length = owner;
+        dropPendingTo(owner);
       }
       i = close;
       continue;
