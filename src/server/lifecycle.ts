@@ -230,13 +230,13 @@ export function tryAdmitTurn(sessionLaneId?: string, clientSignal?: AbortSignal)
         ac.abort(cancellationReason ?? new Error("turn already settled"));
         return;
       }
-      transferred = true;
-      controllers.add(ac);
-      activeTurns.set(ac, lease);
       if (cancelled) {
         ac.abort(cancellationReason ?? new Error("turn cancelled"));
         return;
       }
+      transferred = true;
+      controllers.add(ac);
+      activeTurns.set(ac, lease);
       lease.bindAbortSignal(ac.signal);
     },
     beginCodexAccountSelection() {

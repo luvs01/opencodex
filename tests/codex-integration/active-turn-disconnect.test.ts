@@ -139,15 +139,18 @@ async function disconnectedTurn(protocol: Protocol, phase: Phase) {
   } finally {
     closeClient?.();
     unblock.resolve();
-    if (phase === "selection") {
-      await until(() => getActiveTurnCount() === before.turns && sessionLaneMetrics().active === before.lanes, `${protocol}/${phase} finalized`);
+    try {
+      if (phase === "selection") {
+        await until(() => getActiveTurnCount() === before.turns && sessionLaneMetrics().active === before.lanes, `${protocol}/${phase} finalized`);
+      }
+    } finally {
+      prepare.mockRestore();
+      abortAndReleaseAllTurns(new Error("fixture teardown"));
+      await server.stop(true);
+      await upstream.stop(true);
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(home);
     }
-    prepare.mockRestore();
-    abortAndReleaseAllTurns(new Error("fixture teardown"));
-    await server.stop(true);
-    await upstream.stop(true);
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
-    removeTreeWithRetry(home);
   }
 }
 
@@ -370,5 +373,40 @@ test("cancellation aborts all controllers when an abort listener releases the le
     expect(first.signal.reason).toBe(reason);
     expect(second.signal.reason).toBe(reason);
     expect(getActiveTurnCount()).toBe(before);
+  } finally { lease.release(); }
+});
+
+test.each([false, true])("late cancelled controller unregister preserves its owner's admission (transferred=%s)", transferred => {
+  const before = activeRegistryMetrics().activeTurns;
+  const lanes = sessionLaneMetrics().active;
+  const nativeBefore = getNativeMainProfileRequestCount();
+  const ingress = new AbortController();
+  const lease = tryAdmitTurn(`fixture-late-controller-${transferred}`, ingress.signal)!;
+  const selection = lease.beginCodexAccountSelection();
+  const duringSelection = getNativeMainProfileRequestCount();
+  let released = 0;
+  lease.attach({ release() { released += 1; } });
+  if (transferred) lease.bindAbortController(new AbortController());
+  const reason = new Error("fixture cancelled before late binding");
+  ingress.abort(reason);
+  const late = new AbortController();
+  late.signal.addEventListener("abort", () => unregisterTurn(late), { once: true });
+  try {
+    lease.bindAbortController(late);
+    expect(late.signal.reason).toBe(reason);
+    expect(getActiveTurnCount()).toBe(before.active + 1);
+    expect(sessionLaneMetrics().active).toBe(lanes + 1);
+    expect(getNativeMainProfileRequestCount()).toBe(duringSelection);
+    expect(selection.claimMainProfile()).toBe(false);
+    expect(released).toBe(0);
+    expect(lease.isTransferred()).toBe(transferred);
+    unregisterTurn(late);
+    expect(getActiveTurnCount()).toBe(before.active + 1);
+    expect(activeRegistryMetrics().activeTurns.releaseMisses).toBe(before.releaseMisses);
+    lease.release();
+    expect(getActiveTurnCount()).toBe(before.active);
+    expect(sessionLaneMetrics().active).toBe(lanes);
+    expect(getNativeMainProfileRequestCount()).toBe(nativeBefore);
+    expect(released).toBe(1);
   } finally { lease.release(); }
 });
