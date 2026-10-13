@@ -94,7 +94,10 @@ export function readDesktopLibraryBytes(
     if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino
       || opened.ctimeNs !== expected.ctimeNs) throw new Error("desktop_config_not_regular");
     if (opened.size > BigInt(maxBytes)) throw new Error("desktop_config_too_large");
-    const bytes = Buffer.alloc(maxBytes + 1);
+    // Allocate for the observed size plus one sentinel byte, not the full cap: callers scan many
+    // small profiles, and the cap would zero-fill megabytes per read. A grown file is caught by
+    // the post-read identity check.
+    const bytes = Buffer.alloc(Number(opened.size) + 1);
     let length = 0;
     while (length < bytes.length) {
       const count = readSync(fd, bytes, length, Math.min(64 * 1024, bytes.length - length), null);

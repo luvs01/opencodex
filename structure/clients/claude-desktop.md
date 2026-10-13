@@ -95,7 +95,7 @@ first-party; both re-resolve after model discovery before writing.
 Background refresh preserves the selected owned gateway profile's mode, refuses symlinked library, metadata, profile or backup paths and non-regular profiles, and rechecks admission, the selected owned metadata entry and its applied fingerprint in the no-follow writer's pre-rename hook; it leaves metadata and backup bytes unchanged.
 
 Every Desktop library configuration read uses the verified regular-file reader in `src/claude/desktop-3p-library.ts` (`readDesktopLibraryBytes`/`readDesktopLibraryText`): selected-profile
-inspection, metadata parsing, foreign-key preservation, refresh mode and fingerprint reads, and connection-owned metadata/profile reads. `lstat` must name a regular file. POSIX opens
+inspection, metadata parsing, foreign-key preservation, refresh mode and fingerprint reads, picker inspection/apply snapshots, and connection-owned metadata/profile reads. `lstat` must name a regular file. POSIX opens
 are nonblocking and no-follow; Windows retains path/descriptor identity checks without these flags. The opened descriptor must be regular and match the observed bigint device,
 inode and change time before reading, and is always closed. The path is checked again after reading. Nonregular or replaced paths raise `desktop_config_not_regular`. An open
 failure (`ELOOP`, `ENXIO`, or `ENOENT`) rechecks the path and uses that refusal if its identity changed; a same-path failure retains its errno. Inspection maps refusals to

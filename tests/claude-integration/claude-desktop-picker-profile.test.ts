@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -193,4 +194,22 @@ describe("Claude Desktop picker profile", () => {
     expect(readdirSync(library).sort()).toEqual(names);
     expect(existsSync(join(configDir, "claude-picker", "profile-state.json"))).toBe(false);
   }, 20_000);
+
+  test("a non-regular picker profile path inspects as unsafe instead of blocking", () => {
+    const picker = "picker";
+    mkdirSync(join(library, `${picker}.json`));
+    writeMetadata({ appliedId: picker, entries: [{ id: picker, name: "opencodex-picker" }] });
+    expect(inspectDesktopPickerProfile({ env: env(), configDir })).toEqual({ kind: "unsafe", reason: "desktop_config_not_regular" });
+  });
+
+  test("a FIFO swapped onto the picker profile path refuses instead of waiting", () => {
+    // Windows has no POSIX FIFO entry; the directory case above covers the portable contract.
+    if (process.platform === "win32") return;
+    const picker = "picker";
+    const result = spawnSync("mkfifo", [join(library, `${picker}.json`)]);
+    expect(result.status).toBe(0);
+    writeMetadata({ appliedId: picker, entries: [{ id: picker, name: "opencodex-picker" }] });
+    expect(inspectDesktopPickerProfile({ env: env(), configDir })).toEqual({ kind: "unsafe", reason: "desktop_config_not_regular" });
+    expect(applyDesktopPickerProfile({ proxyPort: 41234, env: env(), configDir })).toEqual({ ok: false, reason: "write_failed" });
+  });
 });
