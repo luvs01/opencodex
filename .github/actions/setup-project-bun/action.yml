@@ -54,3 +54,11 @@ runs:
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       with:
         bun-version: ${{ steps.resolve.outputs.version }}
+        # ci.yml resolves needs.changes.outputs.checkout_ref to a dev commit on
+        # schedule, so a scheduled job runs a different ref's code under the
+        # default branch's Actions-cache scope. setup-bun saves the installed
+        # executable into that cache in its post step; letting the checked-out
+        # code influence a default-branch cache entry is the
+        # actions/cache-poisoning/poisonable-step chain. Every other trigger
+        # checks out the run's own ref, where the cache is branch-scoped.
+        no-cache: ${{ github.event_name == 'schedule' }}
