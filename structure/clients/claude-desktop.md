@@ -94,17 +94,15 @@ owned settings are still observed; otherwise the field is `null`.
 first-party; both re-resolve after model discovery before writing.
 Background refresh preserves the selected owned gateway profile's mode, refuses symlinked library, metadata, profile or backup paths and non-regular profiles, and rechecks admission, the selected owned metadata entry and its applied fingerprint in the no-follow writer's pre-rename hook; it leaves metadata and backup bytes unchanged.
 
-Every Desktop library configuration read uses the verified regular-file reader in `src/claude/desktop-3p-library.ts`
-(`readDesktopLibraryBytes`/`readDesktopLibraryText`): selected-profile inspection, metadata parsing, foreign-key preservation, refresh mode and fingerprint
-reads, and connection-owned metadata/profile reads. `lstat` must name a regular file. POSIX opens are nonblocking and no-follow; Windows retains
-path/descriptor identity checks without these flags. The opened descriptor must be regular and match the observed bigint device, inode and change
-time before reading, and is always closed. The path is checked again after reading. Nonregular or replaced paths raise `desktop_config_not_regular`.
-An open failure (`ELOOP`, `ENXIO`, or `ENOENT`) rechecks the path and uses that refusal if its identity changed; a same-path failure retains its
-errno. Inspection maps refusals to `metadata_unreadable`/`broken`, and writers retain their existing refusal results. `StoreIO.read` in
-`src/claude/desktop-remote-store-io.ts` adds its tighter byte cap, private-file mode and post-read identity contract, reporting unsafe reads as
-`unsafe`. The opened size is checked before allocation; reads stop at the bound plus one sentinel byte. Profiles and `_meta.json` have a 4 MiB cap
-(`MAX_DESKTOP_PROFILE_FILE_BYTES`). Profile, metadata and removal writes preflight both serialized outputs before replacement, pivot or unlink, so
-`desktop_config_too_large` cannot leave a newly written file that the reader refuses.
+Every Desktop library configuration read uses the verified regular-file reader in `src/claude/desktop-3p-library.ts` (`readDesktopLibraryBytes`/`readDesktopLibraryText`): selected-profile
+inspection, metadata parsing, foreign-key preservation, refresh mode and fingerprint reads, and connection-owned metadata/profile reads. `lstat` must name a regular file. POSIX opens
+are nonblocking and no-follow; Windows retains path/descriptor identity checks without these flags. The opened descriptor must be regular and match the observed bigint device,
+inode and change time before reading, and is always closed. The path is checked again after reading. Nonregular or replaced paths raise `desktop_config_not_regular`. An open
+failure (`ELOOP`, `ENXIO`, or `ENOENT`) rechecks the path and uses that refusal if its identity changed; a same-path failure retains its errno. Inspection maps refusals to
+`metadata_unreadable`/`broken`, and writers retain their existing refusal results. `StoreIO.read` in `src/claude/desktop-remote-store-io.ts` adds its tighter byte cap,
+private-file mode and post-read identity contract, reporting unsafe reads as `unsafe`. The opened size is checked before allocation; reads stop at the bound plus one sentinel
+byte. Profiles and `_meta.json` have a 4 MiB cap (`MAX_DESKTOP_PROFILE_FILE_BYTES`). Profile, metadata and removal writes preflight both serialized outputs before replacement,
+pivot or unlink, so `desktop_config_too_large` cannot leave a newly written file that the reader refuses.
 
 Mode switches establish the replacement before removing the previous connection. A failed
 first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
