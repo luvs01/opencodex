@@ -220,9 +220,22 @@ describe("code mode without V1 evidence stays null", () => {
   test.each([
     ["an abbreviated parameter list", "declare const tools: { multi_agent_v1__spawn_agent(...): Promise<unknown>; };"],
     ["an empty return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<>; };"],
+    ["surplus text after the return type", "declare const tools: { multi_agent_v1__spawn_agent(args: {}): Promise<unknown>; garbage>; };"],
+    ["an unbalanced parameter type", "declare const tools: { multi_agent_v1__spawn_agent(args: {: Promise<unknown>; };"],
   ])("%s is not a rendered declaration", (_label, declaration) => {
     const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
     expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBeNull();
+  });
+
+  test.each([
+    ["a nested generic return type", "Promise<Map<string, unknown>>"],
+    ["a function-typed parameter", undefined],
+  ])("%s still completes the declaration", (_label, returnType) => {
+    const declaration = returnType === undefined
+      ? "declare const tools: { multi_agent_v1__spawn_agent(args: (task: string) => void): Promise<unknown>; };"
+      : "declare const tools: { multi_agent_v1__spawn_agent(args: {}): " + returnType + "; };";
+    const snippet = [heading("multi_agent_v1__spawn_agent"), "exec tool declaration:", FENCE + "ts", declaration, FENCE].join("\n");
+    expect(surfaceOf(codeModeTools(execDescription(nested("docs__lookup", snippet))))).toBe("v1");
   });
 
   test("a raw-name suffix that does not normalize to its heading is not a heading", () => {

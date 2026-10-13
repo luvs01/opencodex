@@ -90,8 +90,9 @@ const isSpace = (ch: string | undefined): boolean => ch === undefined || /\s/.te
 
 /**
  * The declared tool name when body is a complete declaration as render_code_mode_sample emits it,
- * single- or multi-line, else undefined. Fixed boundaries plus one forward scan for the Promise
- * separator: no backtracking, so a fence body full of candidate separators stays linear work.
+ * single- or multi-line, else undefined. Fixed boundaries plus one forward scan that balances the
+ * parameter list's brackets and the return type's generics: no backtracking, so a fence body full
+ * of candidate separators stays linear work.
  */
 function completeDeclarationName(body: readonly string[]): string | undefined {
   const text = body.join("\n");
@@ -105,11 +106,30 @@ function completeDeclarationName(body: readonly string[]): string | undefined {
   const rest = signature.slice(openParen + 1);
   const typed = rest.startsWith("args: ") ? 6 : rest.startsWith("input: ") ? 7 : -1;
   if (typed < 0 || isSpace(rest[typed])) return undefined;
-  for (let at = rest.indexOf(PROMISE_SEPARATOR, typed + 1); at >= 0; at = rest.indexOf(PROMISE_SEPARATOR, at + 1)) {
-    const ch = rest[at + PROMISE_SEPARATOR.length];
-    if (ch !== ">" && !isSpace(ch)) return name;
+  // The parameter list ends at the ')' that balances the opening '(': a ')' nested inside the
+  // parameter's own type (e.g. `args: (a: string) => Promise<void>`) cannot pose as the separator.
+  let depth = 1;
+  let close = -1;
+  for (let at = typed; at < rest.length; at += 1) {
+    const ch = rest[at]!;
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+    if (depth === 0) { close = at; break; }
   }
-  return undefined;
+  if (close < 0 || !rest.startsWith(PROMISE_SEPARATOR, close)) return undefined;
+  const head = rest[close + PROMISE_SEPARATOR.length];
+  if (head === ">" || isSpace(head)) return undefined;
+  // The return type runs to the stripped suffix, which already supplied Promise's final '>':
+  // generic depth must stay positive to the end, so a '>' that reaches zero ('Promise<unknown>;
+  // garbage') is surplus text, and a '=>' arrow never counts as a closer.
+  let generic = 1;
+  for (let at = close + PROMISE_SEPARATOR.length; at < rest.length; at += 1) {
+    const ch = rest[at]!;
+    if (ch === "<") generic += 1;
+    else if (ch === ">" && rest[at - 1] !== "=") generic -= 1;
+    if (generic === 0) return undefined;
+  }
+  return name;
 }
 
 /** codex-rs normalize_code_mode_identifier: invalid identifier characters become `_`. */
