@@ -253,6 +253,7 @@ function consentedDesktopBundle(home: string, installId: string, run: Execute): 
   if (!isDesktopExecutable(executable, "darwin")) return null;
   accessSync(executable, constants.X_OK);
   const bundle = dirname(dirname(dirname(executable)));
+  if (!bundle.endsWith(".app")) return null;
   const info = JSON.parse(
     run("/usr/bin/plutil", ["-convert", "json", "-o", "-", join(bundle, "Contents", "Info.plist")], 3_000),
   ) as { CFBundleIdentifier?: unknown };

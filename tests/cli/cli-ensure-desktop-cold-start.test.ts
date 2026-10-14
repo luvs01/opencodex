@@ -166,10 +166,10 @@ describe("Desktop process detection by executable identity", () => {
   /** A fake consented install: app-local install-id, a LaunchAgent plist, and a bundle on disk. */
   function fakeDesktopHome(options: {
     installId?: string; args?: string[]; bareArgs?: boolean; label?: string; identifier?: string;
-    plist?: "present" | "absent"; executable?: "present" | "absent";
+    plist?: "present" | "absent"; executable?: "present" | "absent"; bundleName?: string;
   } = {}) {
     const home = mkdtempSync(join(tmpdir(), "ocx-desktop-home-"));
-    const bundle = join(home, "Applications", "OpenCodex.app");
+    const bundle = join(home, "Applications", options.bundleName ?? "OpenCodex.app");
     const executable = join(bundle, "Contents", "MacOS", "opencodex-desktop");
     mkdirSync(join(bundle, "Contents", "MacOS"), { recursive: true });
     if (options.executable !== "absent") { writeFileSync(executable, ""); chmodSync(executable, 0o755); }
@@ -213,6 +213,24 @@ describe("Desktop process detection by executable identity", () => {
       expect(launch(fixture)).toBe(true);
       expect(fixture.seen.at(-1)).toEqual(["/usr/bin/open", "-g", realpathSync(fixture.bundle), "--args", "--autostart"]);
     } finally { removeTreeWithRetry(fixture.home); }
+  });
+
+  test("a non-app directory refuses the launch without reading its Info.plist or waiting for a proxy", async () => {
+    for (const bundleName of ["OpenCodex", "OpenCodex.app.backup"]) {
+      const fixture = fakeDesktopHome({ installId: "install-a", bundleName });
+      try {
+        const calls = fresh();
+        const dependencies = deps({ ownership: "desktop", process: "absent" }, calls);
+        dependencies.launchDesktop = () => launch(fixture);
+        const result = await runDesktopColdStart(dependencies);
+        expect(result.kind === "failed" && result.message).toContain("Open OpenCodex manually");
+        expect(calls.waits).toEqual([]);
+        expect(calls.released).toBe(1);
+        expect(fixture.seen).toHaveLength(1);
+        expect(fixture.seen[0]?.[0]).toBe("/usr/bin/plutil");
+        expect(fixture.seen[0]?.at(-1)).toEndWith("OpenCodex.plist");
+      } finally { removeTreeWithRetry(fixture.home); }
+    }
   });
 
   test("a claim without matching install-id, registration or Desktop executable refuses the launch", () => {
