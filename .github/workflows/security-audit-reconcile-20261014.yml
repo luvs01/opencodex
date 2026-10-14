@@ -1,0 +1,31 @@
+name: Pinned follow-up integration source
+on:
+  push:
+    branches: [codex/security-audit-source-20261014]
+    paths: [.github/workflows/security-audit-reconcile-20261014.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/security-audit-source-20261014'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 9b31677c4704215e8f3db1c321a38b36b40062a9
+          persist-credentials: false
+      - name: Archive exact updated source without running repository code
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 9b31677c4704215e8f3db1c321a38b36b40062a9
+          git archive --format=tar.gz --output="$RUNNER_TEMP/ocx-reconcile-9b31677c.tar.gz" HEAD
+          sha256sum "$RUNNER_TEMP/ocx-reconcile-9b31677c.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ocx-reconcile-9b31677c
+          path: ${{ runner.temp }}/ocx-reconcile-9b31677c.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
