@@ -1,0 +1,26 @@
+name: Publish checked fork corrections
+on:
+  push:
+    branches: [codex/security-audit-source-20261014]
+    paths: [.github/workflows/security-fixes-publish-20261014.yml]
+permissions:
+  contents: read
+concurrency:
+  group: security-fixes-publish-20261014
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/security-audit-source-20261014'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish only new refs with exact locally checked trees
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/security-followup-20261014/publish.py
