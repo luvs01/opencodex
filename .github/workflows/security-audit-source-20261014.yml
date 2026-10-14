@@ -1,0 +1,40 @@
+name: Pinned security follow-up workspace
+on:
+  push:
+    branches: [codex/security-audit-source-20261014]
+    paths: [.github/workflows/security-audit-source-20261014.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/security-audit-source-20261014'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: f5f73ff3970b3b238c4e2fade29ba3f64914f637
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - name: Collect source and frozen dependencies without lifecycle scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = f5f73ff3970b3b238c4e2fade29ba3f64914f637
+          bun install --frozen-lockfile --ignore-scripts
+          mkdir -p "$RUNNER_TEMP/ocx-audit/source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/ocx-audit/source"
+          cp -a node_modules "$RUNNER_TEMP/ocx-audit/source/node_modules"
+          cp "$(command -v bun)" "$RUNNER_TEMP/ocx-audit/bun-test"
+          printf '%s\n' f5f73ff3970b3b238c4e2fade29ba3f64914f637 > "$RUNNER_TEMP/ocx-audit/SOURCE_SHA"
+          tar -czf "$RUNNER_TEMP/ocx-audit-f5f73ff3.tar.gz" -C "$RUNNER_TEMP/ocx-audit" .
+          sha256sum "$RUNNER_TEMP/ocx-audit-f5f73ff3.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ocx-audit-f5f73ff3
+          path: ${{ runner.temp }}/ocx-audit-f5f73ff3.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
