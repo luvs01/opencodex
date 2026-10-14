@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -172,7 +172,7 @@ describe("Desktop process detection by executable identity", () => {
     const bundle = join(home, "Applications", "OpenCodex.app");
     const executable = join(bundle, "Contents", "MacOS", "opencodex-desktop");
     mkdirSync(join(bundle, "Contents", "MacOS"), { recursive: true });
-    if (options.executable !== "absent") writeFileSync(executable, "");
+    if (options.executable !== "absent") { writeFileSync(executable, ""); chmodSync(executable, 0o755); }
     writeFileSync(join(bundle, "Contents", "Info.plist"), "");
     const store = join(home, "Library", "Application Support", "com.opencodex.desktop");
     mkdirSync(store, { recursive: true });
