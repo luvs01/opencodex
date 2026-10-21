@@ -1,0 +1,180 @@
+name: PR7154 author integration check
+
+on:
+  push:
+    branches: [codex/pr7154-author-check-20261021]
+    paths: [.github/workflows/pr7154-author-check-20261021.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr7154-author-check-20261021
+  cancel-in-progress: false
+
+env:
+  PR_HEAD: 1da3dfbfe19ebeff25e497aae374f94550ca49bc
+  DEV_HEAD: 12025981e5a304cdb6b1b54f525ba8554f623977
+
+jobs:
+  validate:
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/pr7154-author-check-20261021'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tree: ${{ steps.merge.outputs.tree }}
+    steps:
+      - name: Checkout the existing author head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 1da3dfbfe19ebeff25e497aae374f94550ca49bc
+          fetch-depth: 200
+          persist-credentials: false
+      - name: Build the pinned union without changing any remote branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr7154-evidence"
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          test "$(git rev-parse HEAD)" = "$PR_HEAD"
+          git fetch --no-tags --depth=200 origin "$DEV_HEAD"
+          git merge-base "$PR_HEAD" "$DEV_HEAD"
+          if ! git merge --no-ff --no-commit "$DEV_HEAD"; then
+            git diff --name-only --diff-filter=U | tee "$RUNNER_TEMP/pr7154-evidence/conflicts.txt"
+            git diff --cc > "$RUNNER_TEMP/pr7154-evidence/conflicts.diff"
+            cat "$RUNNER_TEMP/pr7154-evidence/conflicts.diff"
+            exit 1
+          fi
+          git diff --cached --check
+          tree=$(git write-tree)
+          printf 'tree=%s\n' "$tree" >> "$GITHUB_OUTPUT"
+          printf 'PR_HEAD=%s\nDEV_HEAD=%s\nTREE=%s\n' "$PR_HEAD" "$DEV_HEAD" "$tree" | tee "$RUNNER_TEMP/pr7154-evidence/revision.txt"
+          git diff --stat "$DEV_HEAD" "$tree" | tee "$RUNNER_TEMP/pr7154-evidence/delta.txt"
+      - name: Setup the repository test runner
+        uses: ./.github/actions/setup-project-bun
+        with:
+          role: test-runner
+      - name: Install frozen dependencies and build the fixture dashboard
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --version
+          bun install --frozen-lockfile
+          bun run build:gui
+      - name: Focused updater and author-contract regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun scripts/test.ts --timeout 30000 \
+            tests/update/update-bun-ownership-lease.test.ts \
+            tests/update/update-stop-first.test.ts \
+            tests/update/update-service-home-policy.test.ts \
+            tests/update/update-home-worker.test.ts \
+            tests/update/update-home-launcher.test.ts \
+            tests/update/update-home-recovery.test.ts \
+            tests/update/update-service-home.test.ts \
+            tests/update/update-job-supervised-restart.test.ts \
+            tests/update/update-supervised-recovery.test.ts \
+            tests/update/update-job.test.ts \
+            tests/update/update-restart-lease.test.ts \
+            tests/update/update-desktop-owner.test.ts \
+            tests/update/update-npm-cache-preflight.test.ts \
+            tests/service/service-desktop-supervision-windows.test.ts \
+            tests/cli/ocx-launcher-source.test.ts \
+            tests/windows/windows-service-wrappers.test.ts \
+            tests/windows/windows-deploy-close-regressions.test.ts \
+            tests/test-layout.test.ts \
+            tests/test-layout-tooling.test.ts \
+            tests/ci-workflows/file-size-ratchet.test.ts \
+            2>&1 | tee "$RUNNER_TEMP/pr7154-evidence/tests.log"
+      - name: Type, privacy, structure and exact-tree checks
+        shell: bash
+        env:
+          EXPECTED_TREE: ${{ steps.merge.outputs.tree }}
+        run: |
+          set -euo pipefail
+          {
+            bun node_modules/typescript/bin/tsc --noEmit
+            bun scripts/privacy-scan.ts
+            bun scripts/structure-ssot.ts
+            bun scripts/file-size-ratchet.ts
+            git diff --cached --check
+            git diff --exit-code
+            test "$(git write-tree)" = "$EXPECTED_TREE"
+          } 2>&1 | tee "$RUNNER_TEMP/pr7154-evidence/gates.log"
+      - name: Retain bounded validation receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr7154-author-check-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr7154-evidence
+          retention-days: 7
+          if-no-files-found: error
+
+  publish-candidate:
+    needs: validate
+    if: github.repository == 'luvs01/opencodex' && github.ref == 'refs/heads/codex/pr7154-author-check-20261021'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout only for a fresh pure-Git reconstruction
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: 1da3dfbfe19ebeff25e497aae374f94550ca49bc
+          fetch-depth: 200
+          persist-credentials: false
+      # No repository scripts, dependency installs, patched code or artifact-provided commands
+      # execute in this job. Recompute the native Git merge before publishing a NEW ref only.
+      - name: Publish only the validated candidate ref
+        shell: bash
+        env:
+          EXPECTED_TREE: ${{ needs.validate.outputs.tree }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, re, subprocess
+          env = dict(os.environ)
+          base = '1da3dfbfe19ebeff25e497aae374f94550ca49bc'
+          dev = '12025981e5a304cdb6b1b54f525ba8554f623977'
+          branch = 'codex/pr7154-dev-integration-20261021'
+          expected = env['EXPECTED_TREE']
+          if not re.fullmatch('[0-9a-f]{40}', expected):
+              raise RuntimeError('missing validated tree')
+          env.update(GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+              GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + base64.b64encode(('x-access-token:' + env['GH_TOKEN']).encode()).decode(),
+              GIT_CONFIG_KEY_1='core.hooksPath', GIT_CONFIG_VALUE_1='/dev/null',
+              GIT_AUTHOR_NAME='github-actions[bot]', GIT_COMMITTER_NAME='github-actions[bot]',
+              GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com',
+              GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com')
+          def git(*args, data=None):
+              return subprocess.run(['git', *args], input=data, stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE, env=env, check=True).stdout.decode().strip()
+          if git('remote', 'get-url', 'origin') not in ('https://github.com/luvs01/opencodex', 'https://github.com/luvs01/opencodex.git'):
+              raise RuntimeError('unexpected remote')
+          if git('rev-parse', 'HEAD') != base:
+              raise RuntimeError('unexpected parent')
+          if git('ls-remote', '--heads', 'origin', 'refs/heads/' + branch):
+              raise RuntimeError('candidate already exists; no overwrite')
+          git('fetch', '--no-tags', '--depth=200', 'origin', dev)
+          git('merge', '--no-ff', '--no-commit', dev)
+          git('diff', '--cached', '--check')
+          tree = git('write-tree')
+          if tree != expected:
+              raise RuntimeError('reconstructed union differs from tested tree')
+          message = ('Merge current dev into the service-home recovery correction\n\n'
+              'Preserve the author history and current dev without changing integration branches.\n'
+              'Focused updater, layout and static checks passed on this exact union in fork\n'
+              'Actions run ' + env['GITHUB_RUN_ID'] + '. Independent review and native acceptance\n'
+              'remain required; do not infer deployment or a resolved Security Cloud finding.\n')
+          commit = git('commit-tree', tree, '-p', base, '-p', dev, data=message.encode())
+          git('push', 'origin', commit + ':refs/heads/' + branch)
+          print('CANDIDATE_COMMIT=' + commit)
+          print('TESTED_TREE=' + tree)
+          with open(env['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Candidate: `' + commit + '`\n\nTree: `' + tree + '`\n')
+          PY
