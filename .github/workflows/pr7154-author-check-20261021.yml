@@ -30,7 +30,7 @@ jobs:
           ref: 1da3dfbfe19ebeff25e497aae374f94550ca49bc
           fetch-depth: 200
           persist-credentials: false
-      - name: Build the pinned union without changing any remote branch
+      - name: Build and repair the pinned union without changing remote branches
         id: merge
         shell: bash
         run: |
@@ -49,10 +49,46 @@ jobs:
             cat "$RUNNER_TEMP/pr7154-evidence/conflicts.diff"
             exit 1
           fi
+          test "$(git write-tree)" = 8ddb7b24fa10b3639f30e90ad4314ef2a483841d
+          # The unmodified union failed only the 2,000-line ratchet (layout.json: 2,003).
+          # Move this PR's five registrations into the existing explicitShards mechanism.
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('scripts/test-layout/layout.json')
+          shard = path.with_name('layout-update-home.json')
+          names = ('update-home-launcher.test.ts', 'update-home-recovery.test.ts',
+              'update-home-worker.test.ts', 'update-service-home-policy.test.ts', 'update-service-home.test.ts')
+          text = path.read_text()
+          before = json.loads(text)
+          if shard.exists() or before['explicitShards'] != ['layout-clients.json', 'layout-codex-collision.json']:
+              raise RuntimeError('unexpected layout preimage')
+          added = {}
+          for name in names:
+              line = '    ' + json.dumps(name) + ': "update",\n'
+              if text.count(line) != 1 or before['explicit'].get(name) != 'update':
+                  raise RuntimeError('registration preimage mismatch: ' + name)
+              text = text.replace(line, '', 1)
+              added[name] = 'update'
+          old = '  "explicitShards": ' + json.dumps(before['explicitShards']) + ',\n'
+          new_shards = [*before['explicitShards'], shard.name]
+          if text.count(old) != 1:
+              raise RuntimeError('shard-list preimage mismatch')
+          text = text.replace(old, '  "explicitShards": ' + json.dumps(new_shards) + ',\n', 1)
+          after = json.loads(text)
+          expected = {**before, 'explicitShards': new_shards,
+              'explicit': {k: v for k, v in before['explicit'].items() if k not in names}}
+          if after != expected or {**after['explicit'], **added} != before['explicit']:
+              raise RuntimeError('mapping changed during relocation')
+          if len(text.splitlines()) >= 2000:
+              raise RuntimeError('layout remains oversized')
+          path.write_text(text)
+          shard.write_text(json.dumps(added, indent=2) + '\n')
+          print('Preserved all registrations; layout lines:', len(text.splitlines()))
+          PY
+          git add -- scripts/test-layout/layout.json scripts/test-layout/layout-update-home.json
           tree=$(git write-tree)
           printf 'TREE=%s\n' "$tree" | tee -a "$RUNNER_TEMP/pr7154-evidence/revision.txt"
-          # Review the PR's delta against its current target, not unrelated whitespace
-          # already committed in the 124 intervening dev commits. No source is rewritten.
           git diff --check "$DEV_HEAD" "$tree"
           printf 'tree=%s\n' "$tree" >> "$GITHUB_OUTPUT"
           git diff --stat "$DEV_HEAD" "$tree" | tee "$RUNNER_TEMP/pr7154-evidence/delta.txt"
@@ -131,8 +167,8 @@ jobs:
           ref: 1da3dfbfe19ebeff25e497aae374f94550ca49bc
           fetch-depth: 200
           persist-credentials: false
-      # No repository scripts, dependency installs, patched code or artifact-provided commands
-      # execute in this job. Recompute the native Git merge before publishing a NEW ref only.
+      # No patched application code or dependency installation executes with the write token.
+      # Reconstruct the same native Git merge and fixed data-only registration relocation.
       - name: Publish only the validated candidate ref
         shell: bash
         env:
@@ -140,7 +176,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64, os, re, subprocess
+          import base64, json, os, re, subprocess
+          from pathlib import Path
           env = dict(os.environ)
           base = '1da3dfbfe19ebeff25e497aae374f94550ca49bc'
           dev = '12025981e5a304cdb6b1b54f525ba8554f623977'
@@ -165,12 +202,45 @@ jobs:
               raise RuntimeError('candidate already exists; no overwrite')
           git('fetch', '--no-tags', '--depth=200', 'origin', dev)
           git('merge', '--no-ff', '--no-commit', dev)
+          if git('write-tree') != '8ddb7b24fa10b3639f30e90ad4314ef2a483841d':
+              raise RuntimeError('unexpected merge preimage')
+          path = Path('scripts/test-layout/layout.json')
+          shard = path.with_name('layout-update-home.json')
+          names = ('update-home-launcher.test.ts', 'update-home-recovery.test.ts',
+              'update-home-worker.test.ts', 'update-service-home-policy.test.ts', 'update-service-home.test.ts')
+          text = path.read_text()
+          before = json.loads(text)
+          if shard.exists() or before['explicitShards'] != ['layout-clients.json', 'layout-codex-collision.json']:
+              raise RuntimeError('unexpected layout preimage')
+          added = {}
+          for name in names:
+              line = '    ' + json.dumps(name) + ': "update",\n'
+              if text.count(line) != 1 or before['explicit'].get(name) != 'update':
+                  raise RuntimeError('registration preimage mismatch: ' + name)
+              text = text.replace(line, '', 1)
+              added[name] = 'update'
+          old = '  "explicitShards": ' + json.dumps(before['explicitShards']) + ',\n'
+          new_shards = [*before['explicitShards'], shard.name]
+          if text.count(old) != 1:
+              raise RuntimeError('shard-list preimage mismatch')
+          text = text.replace(old, '  "explicitShards": ' + json.dumps(new_shards) + ',\n', 1)
+          after = json.loads(text)
+          expected_mapping = {**before, 'explicitShards': new_shards,
+              'explicit': {k: v for k, v in before['explicit'].items() if k not in names}}
+          if after != expected_mapping or {**after['explicit'], **added} != before['explicit']:
+              raise RuntimeError('mapping changed during relocation')
+          if len(text.splitlines()) >= 2000:
+              raise RuntimeError('layout remains oversized')
+          path.write_text(text)
+          shard.write_text(json.dumps(added, indent=2) + '\n')
+          git('add', '--', str(path), str(shard))
           tree = git('write-tree')
           git('diff', '--check', dev, tree)
           if tree != expected:
               raise RuntimeError('reconstructed union differs from tested tree')
-          message = ('Merge current dev into the service-home recovery correction\n\n'
-              'Preserve the author history and current dev without changing integration branches.\n'
+          message = ('Merge current dev and keep service-home test registration within the ratchet\n\n'
+              'Preserve both parent histories. Relocate the same five update-home registrations\n'
+              'into an explicit shard; do not raise a cap or drop any regression.\n\n'
               'Focused updater, layout and static checks passed on this exact union in fork\n'
               'Actions run ' + env['GITHUB_RUN_ID'] + '. Independent review and native acceptance\n'
               'remain required; do not infer deployment or a resolved Security Cloud finding.\n')
