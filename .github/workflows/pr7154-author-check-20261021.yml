@@ -36,6 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pr7154-evidence"
+          printf 'PR_HEAD=%s\nDEV_HEAD=%s\n' "$PR_HEAD" "$DEV_HEAD" > "$RUNNER_TEMP/pr7154-evidence/revision.txt"
           git config core.hooksPath /dev/null
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -48,10 +49,12 @@ jobs:
             cat "$RUNNER_TEMP/pr7154-evidence/conflicts.diff"
             exit 1
           fi
-          git diff --cached --check
           tree=$(git write-tree)
+          printf 'TREE=%s\n' "$tree" | tee -a "$RUNNER_TEMP/pr7154-evidence/revision.txt"
+          # Review the PR's delta against its current target, not unrelated whitespace
+          # already committed in the 124 intervening dev commits. No source is rewritten.
+          git diff --check "$DEV_HEAD" "$tree"
           printf 'tree=%s\n' "$tree" >> "$GITHUB_OUTPUT"
-          printf 'PR_HEAD=%s\nDEV_HEAD=%s\nTREE=%s\n' "$PR_HEAD" "$DEV_HEAD" "$tree" | tee "$RUNNER_TEMP/pr7154-evidence/revision.txt"
           git diff --stat "$DEV_HEAD" "$tree" | tee "$RUNNER_TEMP/pr7154-evidence/delta.txt"
       - name: Setup the repository test runner
         uses: ./.github/actions/setup-project-bun
@@ -101,7 +104,7 @@ jobs:
             bun scripts/privacy-scan.ts
             bun scripts/structure-ssot.ts
             bun scripts/file-size-ratchet.ts
-            git diff --cached --check
+            git diff --cached --check "$DEV_HEAD"
             git diff --exit-code
             test "$(git write-tree)" = "$EXPECTED_TREE"
           } 2>&1 | tee "$RUNNER_TEMP/pr7154-evidence/gates.log"
@@ -162,8 +165,8 @@ jobs:
               raise RuntimeError('candidate already exists; no overwrite')
           git('fetch', '--no-tags', '--depth=200', 'origin', dev)
           git('merge', '--no-ff', '--no-commit', dev)
-          git('diff', '--cached', '--check')
           tree = git('write-tree')
+          git('diff', '--check', dev, tree)
           if tree != expected:
               raise RuntimeError('reconstructed union differs from tested tree')
           message = ('Merge current dev into the service-home recovery correction\n\n'
