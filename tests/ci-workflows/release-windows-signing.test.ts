@@ -266,6 +266,18 @@ describe("Windows signing test workflow", () => {
   });
 });
 
+describe("Windows MSI verification", () => {
+  test("authenticates the outer MSI before Windows Installer can process it", () => {
+    const verifier = readFileSync(repoPath("scripts", "ci", "verify-authenticode.ps1"), "utf8");
+    const preflight = verifier.indexOf("$outerSignature = Get-AuthenticodeSignature");
+    const releaseTrust = verifier.indexOf("$signtool.FullName verify /pa /v \"$msiPath\"");
+    const extraction = verifier.indexOf('Start-Process -FilePath "msiexec.exe"');
+    expect(preflight).toBeGreaterThanOrEqual(0);
+    expect(releaseTrust).toBeGreaterThan(preflight);
+    expect(extraction).toBeGreaterThan(releaseTrust);
+  });
+});
+
 /**
  * The swap script runs under PowerShell, which the hosted Ubuntu image ships. A fake verifier and
  * a fake bunx stand in for Authenticode and the Tauri CLI, so these cases prove the ordering the

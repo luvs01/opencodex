@@ -1,10 +1,10 @@
 # Verify the Authenticode signatures of the Windows release binaries (#7207). Built-in tools only:
-# Get-AuthenticodeSignature, msiexec administrative extraction, and the Windows SDK signtool that
+# Get-AuthenticodeSignature, authenticated MSI expansion, and the Windows SDK signtool that
 # the GitHub-hosted Windows image already carries.
 #
 #   -Path             PE files (or MSIs) to verify directly.
 #   -Msi              An installer to verify, together with every .exe it installs. The MSI is
-#                     expanded with "msiexec /a" (an administrative image, nothing is installed).
+#                     authenticated before it is expanded with "msiexec /a".
 #   -RequireInnerExe  File names that must be among the executables inside -Msi; a sweep that
 #                     finds fewer files than expected must not pass by inspecting nothing.
 #   -MinimumInnerExe  The fewest executables -Msi may contain (default 1).
@@ -30,9 +30,40 @@ foreach ($candidate in $Path) {
   $targets.Add((Resolve-Path -LiteralPath $candidate).Path)
 }
 
+$signtool = $null
+if ($Trust -eq "release") {
+  $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+    Sort-Object FullName -Descending | Select-Object -First 1
+  if (-not $signtool) { throw "signtool.exe was not found in the Windows SDK on this runner." }
+  Write-Host "Using $($signtool.FullName)"
+}
+
 if ($Msi) {
   $msiPath = (Resolve-Path -LiteralPath $Msi).Path
   $targets.Add($msiPath)
+
+  # Windows Installer can run custom actions even for an administrative image. Authenticate the
+  # externally returned package before allowing msiexec to parse or execute any part of it.
+  $outerSignature = Get-AuthenticodeSignature -LiteralPath $msiPath
+  $outerCertificate = $outerSignature.SignerCertificate
+  $outerStatus = [string]$outerSignature.Status
+  if (-not $outerCertificate) {
+    throw "$msiPath carries no Authenticode signature (status $outerStatus)"
+  }
+  if ($Trust -eq "release") {
+    if ($outerStatus -ne "Valid" -or
+        $outerCertificate.Subject -notmatch '(^|,\s*)CN="?SignPath Foundation"?(,|$)' -or
+        -not $outerSignature.TimeStamperCertificate) {
+      throw "$msiPath failed release Authenticode preflight (status $outerStatus; signer '$($outerCertificate.Subject)')"
+    }
+    & $signtool.FullName verify /pa /v "$msiPath" | Write-Host
+    if ($LASTEXITCODE -ne 0) {
+      throw "signtool verify /pa rejected $msiPath before extraction (exit code $LASTEXITCODE)"
+    }
+  } elseif (@("Valid", "UnknownError", "NotTrusted") -notcontains $outerStatus) {
+    throw "$msiPath has an unusable test signature (status ${outerStatus}: $($outerSignature.StatusMessage))"
+  }
+
   $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("ocx-msi-" + [guid]::NewGuid().ToString("N"))
   $image = Join-Path $scratch "image"
   $log = Join-Path $scratch "administrative-image.log"
@@ -58,14 +89,6 @@ if ($Msi) {
 
 if ($targets.Count -eq 0) {
   throw "Nothing to verify: pass -Path and/or -Msi."
-}
-
-$signtool = $null
-if ($Trust -eq "release") {
-  $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
-    Sort-Object FullName -Descending | Select-Object -First 1
-  if (-not $signtool) { throw "signtool.exe was not found in the Windows SDK on this runner." }
-  Write-Host "Using $($signtool.FullName)"
 }
 
 # Statuses a test-signing signature may legitimately report on a runner that does not trust the
