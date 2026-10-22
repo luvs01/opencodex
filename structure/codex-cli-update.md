@@ -69,6 +69,10 @@ exact versions, canonical SHA-512 integrity and official registry tarball URLs; 
 platform and inspection architecture contribute to plan identity. Platform aliases whose published
 manifest name is also `@openai/codex` are modeled explicitly. The existing isolated npm environment,
 cwd, cache and distinct npmrc boundary is reused for metadata, exact-version pack and install calls.
+Ambient NODE_COMPILE_CACHE is removed and replaced with an owned path inside each isolation directory:
+npm's own enableCompileCache() otherwise recreates a default cache outside that directory. The version
+verification child inherits the same path, so its cache is also removed with apply staging. The published
+outer Node launcher retains the caller's cache policy and does not own the updater's staging lifetime.
 The owned staging directory is canonicalized immediately after creation, so symlinked temporary roots
 and macOS's /var alias are supported without accepting a linked archive file.
 `src/codex/cli-update-artifacts.ts` streams compressed integrity and tar validation with independent

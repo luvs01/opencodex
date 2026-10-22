@@ -17,6 +17,8 @@ import {
   CODEX_CLI_REGISTRY,
   codexCliUpdatePlanId,
   createCodexCliUpdatePlan,
+  createNpmConfigIsolation,
+  isolatedNpmTarget,
   resolveCodexCliUpdateTarget,
   type CodexCliUpdatePlan,
   type CodexCliUpdatePlanDeps,
@@ -789,7 +791,7 @@ describe("registry configuration isolation", () => {
     expect(refused.kind).toBe("unresolved");
   });
 
-  test("npm cache and log state stay inside the owned temporary root", () => {
+  test("npm and Node caches and logs stay inside the owned temporary root", () => {
     const { calls, spawn } = capturingSpawn(RESOLVE_OUTPUTS);
     const target = resolveCodexCliUpdateTarget("latest", spawn);
     expect(target.kind).toBe("resolved");
@@ -799,6 +801,39 @@ describe("registry configuration isolation", () => {
       // The cache root (and therefore npm's _logs directory beneath it) must live
       // inside the owned isolation dir, not under an ambient ~/.npm.
       expect(cachePath(call)).toBe(join(cwd, "npm-cache"));
+      expect((call.options.env as NodeJS.ProcessEnv).NODE_COMPILE_CACHE).toBe(join(cwd, "node-compile-cache"));
+    }
+  });
+
+  test("real npm cannot recreate its default Node compile cache outside isolation", () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-update-node-cache-"));
+    const owned = join(root, "owned"), home = join(root, "home"), temporaryRoot = join(root, "temp");
+    const ambientCache = join(root, "ambient-cache");
+    const previous = process.env.NODE_COMPILE_CACHE;
+    try {
+      for (const dir of [owned, home, temporaryRoot]) fs.mkdirSync(dir);
+      process.env.NODE_COMPILE_CACHE = ambientCache;
+      const isolation = createNpmConfigIsolation(owned);
+      if (previous === undefined) delete process.env.NODE_COMPILE_CACHE;
+      else process.env.NODE_COMPILE_CACHE = previous;
+      const env = { ...isolation.env, HOME: home, USERPROFILE: home,
+        TMPDIR: temporaryRoot, TMP: temporaryRoot, TEMP: temporaryRoot };
+      // Exercise npm's own enableCompileCache(), even when the test runner disabled it.
+      for (const key of Object.keys(env)) if (key.toLowerCase() === "node_disable_compile_cache") delete env[key];
+      const target = isolatedNpmTarget(["--version", "--offline", "--ignore-scripts"], { ...isolation, env });
+      expect(target).not.toBeNull();
+      const result = spawnSync(target!.bin, target!.args, { ...target!.options,
+        timeout: 15_000, windowsHide: true, encoding: "utf8" });
+      expect(result.error).toBeUndefined(); expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+      expect(readdirSync(temporaryRoot)).toEqual([]);
+      expect(existsSync(ambientCache)).toBe(false);
+      expect(readdirSync(home)).toEqual([]);
+      expect(isolation.env.NODE_COMPILE_CACHE).toBe(join(owned, "node-compile-cache"));
+    } finally {
+      if (previous === undefined) delete process.env.NODE_COMPILE_CACHE;
+      else process.env.NODE_COMPILE_CACHE = previous;
+      rmSync(root, { recursive: true });
     }
   });
 
@@ -878,7 +913,7 @@ describe("registry configuration isolation", () => {
       // Anything npm persisted was inside the owned root and is removed with it;
       // the disposable HOME stays completely empty (no ~/.npm, no ~/.npmrc, no _logs).
       for (const name of ownedDuringRun) {
-        expect(["package.json", "ocx-update.npmrc", "ocx-update-global.npmrc", "npm-cache"].includes(name)).toBe(true);
+        expect(["package.json", "ocx-update.npmrc", "ocx-update-global.npmrc", "npm-cache", "node-compile-cache"].includes(name)).toBe(true);
       }
       expect(existsSync(cwd)).toBe(false);
       expect(readdirSync(fakeHome)).toEqual([]);
