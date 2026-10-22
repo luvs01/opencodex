@@ -1,0 +1,18 @@
+name: "opencodex CodeQL config"
+
+# The default GitHub setup scanned test files, documentation, and fixtures and
+# produced thousands of non-actionable alerts. Restrict analysis to shipped
+# code paths; dismissed alerts stay dismissed on re-scan, and only files under
+# these roots can produce new findings.
+paths-ignore:
+  - tests
+  - docs-site
+  - devlog
+  - "**/*.test.ts"
+  - "**/fixtures/**"
+  - gui/dist
+  - skills
+  - .devin
+  - .claude
+  - .agents
+  - .github/copilot-instructions.md
