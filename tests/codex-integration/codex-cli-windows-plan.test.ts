@@ -4,7 +4,10 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlink
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { inspectCodexCliInstall, MAX_NATIVE_BACKING_BYTES } from "../../src/codex/cli-install-provenance";
+import { applyCodexCliUpdate } from "../../src/codex/cli-update-apply";
 import { createCodexCliUpdatePlan } from "../../src/codex/cli-update-plan";
+import { handleCodexCliUpdateRoutes } from "../../src/server/management/codex-cli-update-routes";
+import type { ManagementContext } from "../../src/server/management/context";
 import { setWindowsInstallationFilesOpenedForTests } from "../../src/codex/windows-installation-files";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath, repoRoot } from "../helpers/repo-root";
@@ -68,6 +71,42 @@ native("a production plan is deterministic while Windows apply stays explicitly 
   expect((await createCodexCliUpdatePlan(deps)).planId).toBe(first.planId);
   writeFileSync(join(f.backing, "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe"), "changed backing bytes");
   expect((await createCodexCliUpdatePlan(deps)).planId).not.toBe(first.planId);
+});
+
+native("a Windows plan id with applicable=false cannot enter a management apply job", async () => {
+  const f = fixture();
+  const deps = { inspectionDeps: f.deps,
+    resolveTarget: () => ({ kind: "resolved" as const, version: "1.2.4", integrity: "sha512-" + Buffer.alloc(64, 1).toString("base64") }),
+    scanProcesses: () => ({ kind: "observed" as const, processes: [] }) };
+  const plan = await createCodexCliUpdatePlan(deps);
+  expect(plan.planId).toMatch(/^[a-f0-9]{32}$/);
+  expect(plan).toMatchObject({ applicable: false, refusal: "windows_apply_disabled" });
+
+  const oldHome = process.env.OPENCODEX_HOME;
+  process.env.OPENCODEX_HOME = f.deps.configDir;
+  try {
+    const request = new Request("http://localhost/api/codex/cli-update/apply", { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requestId: "windows-nonapplicable-plan-001", planId: plan.planId, confirmed: true }) });
+    const ctx: ManagementContext = { req: request, url: new URL(request.url),
+      config: { port: 10100, providers: {} } as import("../../src/types").OcxConfig,
+      deps: {}, version: "test", principal: "gui-session", trustedLoopbackIngress: true, guiSessionIssuance: null,
+      convergeCodexCatalog: async () => ({ status: "skipped", reason: "not-requested", retryable: false }),
+      syncClaudeAgentDefsBestEffort: async () => {} };
+    const response = await handleCodexCliUpdateRoutes(ctx);
+    expect(response?.status).toBe(503);
+    expect(await response?.json()).toEqual({ error: "unsupported_store" });
+
+    let leaseAttempts = 0, installAttempts = 0;
+    const apply = await applyCodexCliUpdate(plan.planId!, { platform: "win32", inspectionDeps: f.deps,
+      acquireLease: () => { leaseAttempts += 1; return null; },
+      install: async () => { installAttempts += 1; return { terminal: true, exitCode: 0 }; } });
+    expect(apply).toMatchObject({ outcome: "refused", reason: "windows_inspection_deferred" });
+    expect(leaseAttempts).toBe(0);
+    expect(installAttempts).toBe(0);
+  } finally {
+    if (oldHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = oldHome;
+  }
 });
 
 native("a published-size Windows npm backing binds; one past the shared finite limit refuses", async () => {
