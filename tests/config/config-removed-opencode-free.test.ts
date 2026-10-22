@@ -172,15 +172,17 @@ test("all routed reference sites and whitespace aliases are pruned while healthy
     },
     combos: { retired: { alias: " retired-combo ", targets: [{ provider: "opencode-free", model: "old" }] } },
     codexRoleTiers: { fast: ["retired-alias/old", "healthy/keep"], standard: ["opencode-free/old"], frontier: ["retired-combo"] },
-    visionSidecar: { backend: "routed", model: "retired-alias/old" },
+    visionSidecar: { enabled: false, backend: "routed", model: "retired-alias/old" },
     webSearchSidecar: { backend: "openai", model: "opencode-free/old" },
+    claudeCode: { visionSidecar: { backend: "routed", model: "opencode-free/old" } },
     shadowCallIntercept: { enabled: true, model: "healthy/keep", sourceModels: ["opencode-free/*", "healthy/*"] },
   }, bytes => {
     const loaded = loadConfig();
     expect(readConfigDiagnostics().source).toBe("file");
     expect(loaded.codexRoleTiers).toEqual({ fast: ["healthy/keep"], standard: [], frontier: [] });
-    expect(loaded.visionSidecar).toBeUndefined();
-    expect(loaded.webSearchSidecar).toBeUndefined();
+    expect(loaded.visionSidecar).toEqual({ enabled: false });
+    expect(loaded.webSearchSidecar).toEqual({ enabled: false });
+    expect(loaded.claudeCode?.visionSidecar).toEqual({ enabled: false });
     expect(loaded.shadowCallIntercept).toEqual({ enabled: true, model: "healthy/keep", sourceModels: ["healthy/*"] });
     expect(loaded.providers.healthy.defaultModel).toBeUndefined();
     expect(loaded.providers.healthy.autoReviewModel).toBeUndefined();

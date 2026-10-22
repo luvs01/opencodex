@@ -32,14 +32,14 @@ export function sanitizeRemovedOpenCodeFreeForLoad(parsed: unknown): void {
 
   // Prune references in arrays/maps as well as structured provider/model targets. A decision
   // model is required operator intent: disable that combo instead of choosing another service.
-  function prune(value: unknown, preserveContainer = false): unknown {
+  function prune(value: unknown, preserveContainer = false, disableOnRetiredTarget = false): unknown {
     if (retired(value)) { changed = true; return undefined; }
     if (Array.isArray(value)) return value.map(item => prune(item)).filter(item => item !== undefined);
     const row = record(value);
     if (!row) return value;
     if (!preserveContainer && [row.provider, row.model, row.decisionModel, row.decisionProvider].some(retired)) {
       changed = true;
-      return undefined;
+      return disableOnRetiredTarget ? { enabled: false } : undefined;
     }
     const hadTargets = Array.isArray(row.targets) && row.targets.length > 0;
     const hadCandidates = Array.isArray(row.candidates) && row.candidates.length > 0;
@@ -47,7 +47,7 @@ export function sanitizeRemovedOpenCodeFreeForLoad(parsed: unknown): void {
     for (const [key, child] of Object.entries(row)) {
       // Descriptions and credential/transport data are not model references.
       if (["note", "description", "displayName", "label", "modelProfile", "headers", "apiKey", "apiKeys", "baseUrl", "modelDisplayNames"].includes(key)) continue;
-      const next = retired(key) ? undefined : prune(child);
+      const next = retired(key) ? undefined : prune(child, false, /sidecar/i.test(key));
       if (next === undefined) { delete row[key]; changed = true; }
       else row[key] = next;
     }
@@ -97,7 +97,7 @@ export function sanitizeRemovedOpenCodeFreeForLoad(parsed: unknown): void {
   }
   for (const [key, value] of Object.entries(config)) {
     if (key === "providers" || !/model|provider|combo|routing|claudeCode|fallback|redirect|compaction|autoReview|advisor|tokenGuardian|images|codexRoleTiers|sidecar|shadowCallIntercept/i.test(key)) continue;
-    const next = prune(value, key === "claudeCode");
+    const next = prune(value, key === "claudeCode", /sidecar/i.test(key));
     if (next === undefined) delete config[key];
     else config[key] = next;
   }
