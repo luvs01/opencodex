@@ -57,11 +57,11 @@ leaves is the failed child's resolved provider and model. Two selectors under on
 to different providers make a provider hop; a routing profile's `current` advances to the redirected
 candidate.
 
-The hard-lock site classifies its one proactive hop from config alone, before anything is sent: a
-combo, account namespace or concrete target through `previewRouteModel`, and a routing profile from
-its declared candidates (any candidate on another provider makes a provider hop) without running the
-evaluator, which would open `routing-history.sqlite` under `OPENCODEX_HOME`. The profile's own
-dispatch still evaluates it.
+The hard-lock site classifies its one proactive hop from config alone, before anything is sent:
+combos and routing profiles from all their declared candidates (any candidate on another provider
+makes a provider hop), and account namespaces or concrete targets through `previewRouteModel`.
+This neither samples a nondeterministic combo nor runs the profile evaluator, which would open
+`routing-history.sqlite` under `OPENCODEX_HOME`; their own dispatch still makes the actual selection.
 
 ## Refusal contract
 

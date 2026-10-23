@@ -101,6 +101,30 @@ describe("hard-lock fallback with fallback off", () => {
     expect(body).toEqual({ model: "gpt-5.3", reasoning: { effort: "high" } });
   });
 
+  test("a random mixed-provider combo is classified from all declared targets without sampling", async () => {
+    observe({ weeklyPercent: 98 });
+    const cfg = {
+      ...config({ provider: false, model: true }),
+      codexMainAccountHardLockFallback: { model: "combo/random-rescue" },
+      combos: { "random-rescue": { strategy: "random", targets: [
+        { provider: "openai", model: "gpt-5.4" },
+        { provider: "deepseek", model: "deepseek-chat" },
+      ] } },
+    } as OcxConfig;
+    const originalRandom = Math.random;
+    let randomCalls = 0;
+    Math.random = () => { randomCalls += 1; return 0; };
+    try {
+      await expect(applyMainHardLockFallbackOverride({ model: "gpt-5.3" }, cfg))
+        .rejects.toBeInstanceOf(FallbackRefusedError);
+    } finally {
+      Math.random = originalRandom;
+    }
+    expect(randomCalls).toBe(0);
+    expect(recentFallbackEvents()).toMatchObject([{ outcome: "refused", kind: "provider",
+      from: "openai/gpt-5.3", to: "deepseek/deepseek-chat" }]);
+  });
+
   test("a route override on the source model reopens it; absent policy is unchanged", async () => {
     observe({ weeklyPercent: 98 });
     const routed: Record<string, unknown> = { model: "gpt-5.3" };

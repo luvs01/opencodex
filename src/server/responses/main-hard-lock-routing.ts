@@ -156,12 +156,16 @@ export async function applyMainHardLockFallbackOverride(
  * OPENCODEX_HOME just to classify the hop (on Windows the open handle then outlives the request's
  * home); the profile's own dispatch still evaluates it. Its declared candidates are classified
  * instead, as the hop the profile could take: a candidate on another provider makes it a provider
- * hop. Combos, account namespaces and concrete targets resolve from config alone.
+ * hop. Combos use the same conservative classification so a random selection is never previewed
+ * independently from its dispatch. Account namespaces and concrete targets resolve from config.
  */
 function hardLockTargetOf(config: OcxConfig, sourceModel: string, model: string): FallbackTarget {
   const policyId = resolvePolicyProfileId(config, model);
   const profile = policyId ? getRoutingProfile(config, policyId) : undefined;
   if (profile) return profileHopTarget(config, sourceModel, profile);
+  const comboId = resolveComboId(config, model);
+  const combo = comboId ? config.combos?.[comboId] : undefined;
+  if (combo) return declaredHopTarget(config, sourceModel, combo.targets);
   try {
     const route = previewRouteModel(config, model);
     return { provider: route.providerName, model: route.modelId };
@@ -172,7 +176,15 @@ function hardLockTargetOf(config: OcxConfig, sourceModel: string, model: string)
 }
 
 function profileHopTarget(config: OcxConfig, sourceModel: string, profile: NormalizedRoutingProfile): FallbackTarget {
-  const targets = profile.candidates.map((candidate): FallbackTarget => {
+  return declaredHopTarget(config, sourceModel, profile.candidates);
+}
+
+function declaredHopTarget(
+  config: OcxConfig,
+  sourceModel: string,
+  candidates: ReadonlyArray<{ provider: string; model: string }>,
+): FallbackTarget {
+  const targets = candidates.map((candidate): FallbackTarget => {
     try {
       const route = routeConcreteModel(config, candidate.provider + "/" + candidate.model);
       return { provider: route.providerName, model: route.modelId };
