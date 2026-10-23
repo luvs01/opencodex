@@ -1,10 +1,12 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 import type { TKey } from "./en";
 
 /**
  * Korean i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ko: Record<TKey, string> = {
+  ...codexCliUpdateCopy("ko"),
   "pws.completion.title": "모델 응답 테스트",
   "pws.completion.model": "테스트할 모델",
   "pws.completion.choose": "모델 선택",

@@ -1,10 +1,12 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 import type { TKey } from "./en";
 
 /**
  * Russian i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ru: Record<TKey, string> = {
+  ...codexCliUpdateCopy("ru"),
   "pws.completion.title": "Проверка ответа модели",
   "pws.completion.model": "Модель для проверки",
   "pws.completion.choose": "Выберите модель",

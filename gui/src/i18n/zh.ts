@@ -1,10 +1,12 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 import type { TKey } from "./en";
 
 /**
  * Chinese i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const zh: Record<TKey, string> = {
+  ...codexCliUpdateCopy("zh"),
   "pws.completion.title": "模型响应测试",
   "pws.completion.model": "要测试的模型",
   "pws.completion.choose": "选择模型",

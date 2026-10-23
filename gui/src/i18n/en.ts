@@ -1,4 +1,5 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 // English — source of truth. Its keys define the TKey type; de/fr/ko/zh/zh-TW/ru/ja/tr must match (compile-checked).
 // Strings with {cmd} render a <code> chip via <Trans>; {var} are plain interpolations.
 /**
@@ -7,6 +8,7 @@ import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
  * `{var}` are plain interpolations.
  */
 export const en = {
+  ...codexCliUpdateCopy("en"),
   "pws.completion.title": "Model completion test",
   "pws.completion.model": "Model to test",
   "pws.completion.choose": "Choose a model",

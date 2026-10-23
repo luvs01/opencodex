@@ -169,6 +169,18 @@ See [planning details](/reference/cli/agents/#read-only-codex-cli-update-plan).
 
 For Windows x64 installation observation, see [the `attest` command](/reference/cli/agents/#explicit-installation-observation-on-windows-x64). Without explicit paths it observes the selected candidate identified from the proof-bound launcher snapshot; it does not grant update authority or attest runtime selection.
 
+In the browser dashboard, **Update → Codex CLI update** reviews this CLI separately from the
+OpenCodex update controls. Check the plan, review its installed/planned versions and ownership,
+then explicitly confirm before applying an eligible plan. Windows apply remains disabled;
+native app and Store/MSIX bundles stay outside this updater.
+
+The panel follows the admitted job without treating an unknown result as success. If the Apply
+reply is lost, **Recover original request** resubmits the same confirmed request ID and plan;
+it does not create a new update. The browser tab retains that request until a verified terminal
+job response. Closing the dialog stops status polling and does not cancel the server job.
+No update starts or retries automatically. Applying requires a trusted local dashboard session.
+The Tauri desktop shell uses a separate update window; this panel belongs to the browser dashboard.
+
 List or status is the default where unambiguous. Use `--json` only on leaves that support it, and
 `ocx observe logs --follow --jsonl` for amended row output, or
 `ocx logs --follow --events` for versioned observed-window snapshots/appends.

@@ -55,7 +55,7 @@ export default function Dashboard({ apiBase, readOnly = false, connected = false
       setExpandedProviders={setExpandedProviders}
     />
   );
-  const updateDialog = <DashboardDialogs {...d} />;
+  const updateDialog = <DashboardDialogs {...d} readOnly={readOnly} />;
 
   const sections: { id: DashboardSection; label: string; body: ReactNode }[] = [
     { id: "overview", label: t("dash.workspace.overview"), body: overviewSection },

@@ -1,10 +1,12 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 import type { TKey } from "./en";
 
 /**
  * French i18n catalog. Must match the `TKey` set.
  */
 export const fr: Record<TKey, string> = {
+  ...codexCliUpdateCopy("fr"),
   "pws.completion.title": "Test de réponse du modèle",
   "pws.completion.model": "Modèle à tester",
   "pws.completion.choose": "Choisir un modèle",

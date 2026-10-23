@@ -1,4 +1,5 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 // Vietnamese — generated from en.ts. Must match TKey set (compile-checked).
 import type { TKey } from "./en";
 
@@ -7,6 +8,7 @@ import type { TKey } from "./en";
  * Technical terms and model identifiers intentionally remain English.
  */
 export const vi: Record<TKey, string> = {
+  ...codexCliUpdateCopy("vi"),
   "pws.completion.title": "Kiểm tra phản hồi mô hình",
   "pws.completion.model": "Mô hình cần kiểm tra",
   "pws.completion.choose": "Chọn mô hình",

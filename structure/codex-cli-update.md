@@ -135,4 +135,26 @@ Windows apply remains refused. Shims and non-npm managers remain unsupported.
 
 `bin/ocx.mjs` includes the proof-bound Codex candidate snapshot for the published `start` command as well as the updater commands; this makes the production management plan work without accepting request-supplied candidate evidence. `src/codex/cli-update-inspection-context.ts` is the shared bridge from that Node snapshot to the installer inspector. Direct Bun/source launches have no trusted candidate and fail closed; neither path reconstructs write targets from display data. `src/codex/cli-update-job.ts` owns the bounded durable admission ledger shared by CLI and management. Request IDs are scoped to the protected config root and payload digest; exact retries return the same opaque job, conflicts refuse, and a full ledger refuses new admission. Every store operation requires a canonical same-owner config parent with safe write permissions and canonical ancestry to filesystem root; each ancestor must be owned by root or the current user, and shared-writable ancestors are refused unless root-owned and sticky. Only confirmed apply admission may create one absent config-root level, which is revalidated as owner-private. Plan and status reads never create it, and an existing root must pass the same canonical/no-link checks. This path-based ancestry check prevents untrusted other-user writable ancestors from redirecting store operations; it does not defend against concurrent tampering by the same user or root. Atomic updates use a private same-owner POSIX directory, no-follow reads and a short exclusive lock. Unresolved records are not expired. An in-process generation and revision own completion writes; after restart a queued/running record projects as `ambiguous` with `owner_state_unknown`, without claiming the old owner stopped. A `retained` lease state requires an execution reason that proves acquisition and intentional preservation; synthetic job errors, unverified release and release exceptions project as `unknown`. The path-free DTO separates owner state, installer child state, lease retention and overall lifetime uncertainty with fixed outcome/reason/cleanup codes.
 
-`src/cli/codex-cli-update.ts` records confirmed CLI apply in that ledger and exposes `status <job-id>` from the same protected record, without requiring a GUI token. `src/server/management/codex-cli-update-routes.ts` exposes a proof-bound read-only plan, confirmed `gui-session` plus trusted-loopback apply admission, and authenticated status. HTTP apply returns after durable admission; disconnect does not cancel the worker. Dashboard display data is never accepted back as a candidate, prefix, executable or managed-selection attestation. There is no dashboard job UI in this contract.
+`src/cli/codex-cli-update.ts` records confirmed CLI apply in that ledger and exposes `status <job-id>` from the same protected record, without requiring a GUI token. `src/server/management/codex-cli-update-routes.ts` exposes a proof-bound read-only plan, confirmed `gui-session` plus trusted-loopback apply admission, and authenticated status. HTTP apply returns after durable admission; disconnect does not cancel the worker. Dashboard display data is never accepted back as a candidate, prefix, executable or managed-selection attestation.
+
+## Dashboard CLI update panel
+
+`gui/src/components/CodexCliUpdatePanel.tsx` is a separate panel in the browser Dashboard Update
+dialog. It keeps the OpenCodex updater's controls and state separate. The Tauri shell's separate
+update window is outside this panel. Windows apply stays disabled; native app and Store/MSIX
+installations remain unmanaged. The panel displays only versions, ownership and closed status labels;
+file paths, integrity, command argv and private inspection inputs are discarded by
+`gui/src/components/codex-cli-update-state.ts`.
+
+`gui/src/components/use-codex-cli-update.ts` uses the dashboard's authenticated fetch for plan,
+confirmed apply admission and job status. A new apply requires an applicable managed npm plan with
+a plan ID, an explicit confirmation checkbox and a button click. Before POST, the hook retains the
+request ID and plan ID in sessionStorage. A lost response exposes explicit recovery with the same
+confirmed request; it never generates a new request ID for that recovery. Late receipts cannot
+overwrite a newer retained request. Updates never start or retry from an effect.
+
+Polling runs only while the panel is open and a known job is queued or running. Closing or
+unmounting stops timers and status reads; it does not cancel the server job. Reopening resumes
+status reads for a retained job. Failed reads and ambiguous owner, child or lease evidence stop
+automatic polling and remain unconfirmed, with explicit status refresh. A verified terminal job
+releases the retained request; an unknown result never becomes a success display.

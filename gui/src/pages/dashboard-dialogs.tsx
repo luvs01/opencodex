@@ -8,10 +8,11 @@ import type { useDashboardData } from "./use-dashboard-data";
 import { shadowSourceModelLabel } from "./shadow-call-source";
 import SubagentSurfaceWarningModal from "../components/SubagentSurfaceWarningModal";
 import { SUBAGENT_SURFACE_GUIDE_URL } from "../subagent-surface";
+import { CodexCliUpdatePanel } from "../components/CodexCliUpdatePanel";
 
 type Dash = ReturnType<typeof useDashboardData>;
 
-export function DashboardDialogs(d: Dash) {
+export function DashboardDialogs(d: Dash & { readOnly?: boolean }) {
   const {
     t,
     updateOpen, closeUpdateDialog, updateDialogRef,
@@ -137,6 +138,8 @@ export function DashboardDialogs(d: Dash) {
               {t("dash.runUpdate")}
             </button>
           </div>
+          <hr />
+          {updateOpen && <CodexCliUpdatePanel key={d.apiBase} apiBase={d.apiBase} active readOnly={d.readOnly} />}
         </div>
       </dialog>
 

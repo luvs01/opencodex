@@ -1,4 +1,5 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 // Brazilian Portuguese — generated from en.ts. Must match TKey set (compile-checked).
 import type { TKey } from "./en";
 
@@ -7,6 +8,7 @@ import type { TKey } from "./en";
  * Technical terms and model identifiers intentionally remain English.
  */
 export const pt: Record<TKey, string> = {
+  ...codexCliUpdateCopy("pt"),
   "pws.completion.title": "Teste de resposta do modelo",
   "pws.completion.model": "Modelo a testar",
   "pws.completion.choose": "Escolha um modelo",

@@ -1,8 +1,10 @@
 import { desktopCompatibilityCopy } from "./desktop-compatibility-copy";
+import { codexCliUpdateCopy } from "./codex-cli-update-copy";
 import type { TKey } from "./en";
 
 /** Traditional Chinese (Taiwan) UI strings — keys must match `en.ts` 1:1. */
 export const zhTW: Record<TKey, string> = {
+  ...codexCliUpdateCopy("zh-TW"),
   "pws.completion.title": "模型回應測試",
   "pws.completion.model": "要測試的模型",
   "pws.completion.choose": "選擇模型",
