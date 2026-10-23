@@ -27,9 +27,11 @@ const cmd = ['@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b',
   '  SET "_prog=node"', '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
   'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*',
 ].join('\r\n');
-function fixture() {
+function fixture(separateNodeToolchain = false) {
   const root = mkdtempSync(join(tmpdir(), "ocx-windows-plan-")); roots.push(root);
   const prefix = join(root, "npm");
+  const toolchainPrefix = separateNodeToolchain ? join(root, "nodejs") : prefix;
+  const npmRoot = join(toolchainPrefix, "node_modules", "npm");
   const packageRoot = join(prefix, "node_modules", "@openai", "codex");
   // Closest Node lookup lane: there is no earlier ancestor package to shadow it.
   const backing = join(packageRoot, "bin", "node_modules", "@openai", "codex-win32-x64");
@@ -40,15 +42,16 @@ function fixture() {
     [join(packageRoot, "bin", "codex.js"), 'throw new Error("Codex must never execute");'],
     [join(backing, "package.json"), JSON.stringify({ name: "@openai/codex", version: "1.2.3-win32-x64" })],
     [join(backing, "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe"), "synthetic backing bytes"],
-    [join(prefix, "node_modules", "npm", "package.json"), JSON.stringify({ name: "npm", version: "11.0.0", bin: { npm: "bin/npm-cli.js" } })],
-    [join(prefix, "node_modules", "npm", "bin", "npm-cli.js"), 'throw new Error("npm must never execute");'],
+    [join(npmRoot, "package.json"), JSON.stringify({ name: "npm", version: "11.0.0", bin: { npm: "bin/npm-cli.js" } })],
+    [join(npmRoot, "bin", "npm-cli.js"), 'throw new Error("npm must never execute");'],
   ]);
   const pe = Buffer.alloc(128); pe.write('MZ'); pe.writeUInt32LE(64, 60); pe.write('PE\0\0', 64); pe.writeUInt16LE(0x8664, 68);
-  files.set(join(prefix, "node.exe"), pe);
+  files.set(join(toolchainPrefix, "node.exe"), pe);
   for (const [path, value] of files) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, value); }
-  const deps = { env: { CODEX_CLI_PATH: join(prefix, "codex.cmd"), PATH: prefix, PATHEXT: ".EXE;.CMD" },
-    configDir: join(root, "absent-home"), selectionAttested: true, arch: "x64" as const, observeInstallContent: true };
-  return { root, prefix, packageRoot, backing, files, deps };
+  const deps = { env: { CODEX_CLI_PATH: join(prefix, "codex.cmd"), PATH: toolchainPrefix, PATHEXT: ".EXE;.CMD" },
+    configDir: join(root, "absent-home"),
+    selectionAttested: true, arch: "x64" as const, observeInstallContent: true };
+  return { root, prefix, toolchainPrefix, npmRoot, packageRoot, backing, files, deps };
 }
 
 native("production Windows inspector binds selected npm shim, package, backing and toolchain with no candidate execution", async () => {
@@ -155,10 +158,56 @@ native("npm toolchain drift after inspection refuses metadata without executing 
   const f = fixture(); let queries = 0;
   const plan = await createCodexCliUpdatePlan({ inspectionDeps: f.deps, inspect: async deps => {
     const report = await inspectCodexCliInstall(deps); expect(report.managed).toBe(true);
-    writeFileSync(join(f.prefix, "node_modules", "npm", "bin", "npm-cli.js"), "throw new Error('replacement');");
+    writeFileSync(join(f.npmRoot, "bin", "npm-cli.js"), "throw new Error('replacement');");
     return report;
   }, resolveTarget: () => { queries++; throw new Error("must not query changed toolchain"); } });
   expect(queries).toBe(0); expect(plan.refusal).toBe("target_unresolved");
+});
+
+native("a separate PATH Node is refused without proof of the target cmd-shim's search result", async () => {
+  const f = fixture(true);
+  expect((await inspectCodexCliInstall({ ...f.deps, selectionAttested: false })).managed).toBe(false);
+  const report = await inspectCodexCliInstall(f.deps);
+  expect(report).toMatchObject({ managed: false, installContentDigest: null });
+  let targetQueries = 0;
+  const plan = await createCodexCliUpdatePlan({ inspectionDeps: f.deps,
+    resolveTarget: () => { targetQueries++; throw new Error("unproven Node must not query registry"); } });
+  expect(targetQueries).toBe(0);
+  expect(plan.managed).toBe(false);
+  expect(plan.refusal).toBe("windows_inspection_deferred");
+  expect(JSON.stringify(plan)).not.toContain(f.root);
+});
+
+native("synthetic CMD lookup selects a current-directory node.cmd ahead of PATH", () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-cmd-search-")); roots.push(root);
+  const current = join(root, "current"); const pathDir = join(root, "path");
+  mkdirSync(current); mkdirSync(pathDir);
+  writeFileSync(join(current, "node.cmd"), "@echo off\r\necho fixture-current-directory\r\n");
+  writeFileSync(join(pathDir, "node.cmd"), "@echo off\r\necho fixture-path\r\n");
+  const systemRoot = process.env.SystemRoot!;
+  const cmdExe = join(systemRoot, "System32", "cmd.exe");
+  const run = spawnSync(cmdExe, ["/d", "/c", "node"], { cwd: current, encoding: "utf8", windowsHide: true,
+    timeout: 5_000, env: { SystemRoot: systemRoot, COMSPEC: cmdExe, PATH: pathDir,
+      PATHEXT: ".COM;.EXE;.BAT;.CMD" } });
+  expect(run.error).toBeUndefined();
+  expect(run.status).toBe(0);
+  expect(run.stdout).toContain("fixture-current-directory");
+  expect(run.stdout).not.toContain("fixture-path");
+});
+
+native("a refused or reparse prefix-local Node is not treated as absent for PATH fallback", async () => {
+  const f = fixture(true);
+  mkdirSync(join(f.prefix, "node.exe"));
+  const report = await inspectCodexCliInstall(f.deps);
+  expect(report.managed).toBe(false);
+  expect(report.installContentDigest).toBeNull();
+
+  const g = fixture(true);
+  const target = join(g.root, "node-target"); mkdirSync(target);
+  symlinkSync(target, join(g.prefix, "node.exe"), "junction");
+  const reparse = await inspectCodexCliInstall(g.deps);
+  expect(reparse.managed).toBe(false);
+  expect(reparse.installContentDigest).toBeNull();
 });
 
 native("actual CLI handler reaches production inspector and plan from the proof-bound selection", async () => {
@@ -181,17 +230,17 @@ native("actual CLI handler reaches production inspector and plan from the proof-
 });
 
 native("published Node CLI uses the production inspector and observed toolchain for read-only metadata", () => {
-  const f = fixture(); const node = Bun.which("node"); expect(node).not.toBeNull();
-  copyFileSync(node!, join(f.prefix, "node.exe"));
+  const f = fixture(); const hostNode = Bun.which("node"); expect(hostNode).not.toBeNull();
+  const node = join(f.toolchainPrefix, "node.exe"); copyFileSync(hostNode!, node);
   const integrity = "sha512-" + Buffer.alloc(64, 1).toString("base64");
   const main = { name: "@openai/codex", version: "1.2.4", optionalDependencies: { "@openai/codex-win32-x64": "1.2.4" },
     dist: { integrity, tarball: "https://registry.npmjs.org/@openai/codex/-/codex-1.2.4.tgz" } };
   const backing = { name: "@openai/codex-win32-x64", version: "1.2.4", dist: { integrity,
     tarball: "https://registry.npmjs.org/@openai/codex-win32-x64/-/codex-win32-x64-1.2.4.tgz" } };
   // Controlled registry protocol fixture; no real npm installation or network request.
-  writeFileSync(join(f.prefix, "node_modules", "npm", "bin", "npm-cli.js"),
+  writeFileSync(join(f.npmRoot, "bin", "npm-cli.js"),
     `const spec = process.argv[3]; console.log(JSON.stringify(spec.startsWith('@openai/codex-win32-x64@') ? ${JSON.stringify(backing)} : ${JSON.stringify(main)}));`);
-  const run = spawnSync(node!, [repoPath("bin", "ocx.mjs"), "system", "codex-cli-update", "plan", "--json"], {
+  const run = spawnSync(node, [repoPath("bin", "ocx.mjs"), "system", "codex-cli-update", "plan", "--json"], {
     cwd: repoRoot(), encoding: "utf8", windowsHide: true, timeout: 45_000,
     env: { ...process.env, CODEX_CLI_PATH: f.deps.env.CODEX_CLI_PATH, OPENCODEX_HOME: f.deps.configDir,
       OPENCODEX_BUN_PATH: process.execPath, OCX_NO_DESKTOP_HANDOFF: "1" },

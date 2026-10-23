@@ -57,8 +57,14 @@ an existing Codex session. Windows enumeration/installation limits remain unchan
 ## Windows read-only plan predicate
 
 `src/codex/cli-windows-plan-provenance.ts` admits only a proof-captured, drive-absolute
-`CODEX_CLI_PATH` naming the exact standard npm `codex.cmd` grammar, with Node and npm
-in the same prefix. The production runtime resolver confirms that explicit override's
+`CODEX_CLI_PATH` naming the exact standard npm `codex.cmd` grammar. The global npm
+package prefix comes from the shim directory and its `node_modules` tree. This plan
+currently requires prefix-local `node.exe` and npm. Derivation may propose a PATH Node only
+when the local Node probe proves `not-found`; a refused/reparse probe never counts as absent.
+The production plan still refuses that external candidate: a standard npm cmd-shim runs bare
+`node` when its local Node is absent, and CMD can prefer the invocation working directory.
+The proof-bound launcher snapshot has PATH/PATHEXT but no target-shim invocation
+cwd/search-result evidence, so a separate Node cannot be selected safely yet. The production runtime resolver confirms the explicit Codex override's
 priority without saved-state reads or probes. A PE header binds Node's architecture;
 the package manifest/bin, npm manifest/bin, Node and the first in-prefix platform
 package plus native backing are observed together. Backing lookup follows the
@@ -70,7 +76,7 @@ to 256 KiB and Node to 128 MiB. The native backing uses the same finite 1 GiB
 The native reader bounds aggregate requests to that backing plus 128 MiB Node
 and twelve 1 MiB text requests; hash-only bytes are never buffered whole.
 
-PATH-only selection, separate-prefix Node, autostart wrappers, global/vendor fallback,
+PATH-only or separate-prefix Node selection, autostart wrappers, global/vendor fallback,
 app/Store/MSIX bundles and version-manager ownership remain unverified and unmanaged.
 The explicit `attest` report stays observation-only. Only the production plan predicate
 creates private plan evidence; copying a public report cannot enable Windows planning.

@@ -3,6 +3,7 @@ import { win32 } from "node:path";
 import { parseStrictSemver } from "../lib/strict-semver";
 import { npmCodexCommandShim } from "./cli-installation-identity";
 import { MAX_NATIVE_BACKING_BYTES } from "./cli-installation-limits";
+import { deriveCodexCliInstallationInput } from "./cli-installation-targets";
 import type { CodexCliInstallProvenanceDeps, CodexCliInstallReport } from "./cli-install-provenance";
 import { resolveCodexRuntime } from "./runtime";
 import { inspectWindowsInstallationFiles, type WindowsInstallationFilesResult } from "./windows-installation-files";
@@ -15,6 +16,7 @@ export const windowsCodexCliPlanEvidence = (report: CodexCliInstallReport): Wind
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 type File = Extract<WindowsInstallationFilesResult, { kind: "observed" }>["files"][number];
 const id = (file: File): string => JSON.stringify([file.path, file.identity, file.digest]);
+const sameWindowsPath = (left: string, right: string): boolean => win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase();
 /** Metadata queries execute only while the observed Node/npm and ancestors deny replacement. */
 export async function withWindowsCodexCliPlanToolchain<T>(report: CodexCliInstallReport, run: () => T): Promise<T | null> {
   const toolchain = evidence.get(report);
@@ -45,11 +47,10 @@ function peArch(bytes: Uint8Array): "x64" | "arm64" | null {
 }
 
 /**
- * Read-only supported subset: a proof-captured absolute npm cmd-shim override,
- * prefix-local Node/npm and an in-prefix optional backing. An explicit override
- * is the runtime resolver's first candidate; no saved-state or app discovery I/O
- * is needed to prove its priority. PATH-only selection and autostart wrappers
- * remain deferred. Held local volume-relative handles refuse reparse ancestors.
+ * Read-only supported subset: a proof-captured absolute standard npm cmd-shim
+ * override, its global-prefix package, prefix-local Node/npm, and the prefix-local
+ * optional backing. PATH-only Node selection remains refused until the snapshot
+ * proves the target cmd-shim's cwd and search policy.
  */
 export async function inspectWindowsCodexCliPlanInstall(
   deps: CodexCliInstallProvenanceDeps, fallback: CodexCliInstallReport, excluded: (path: string) => boolean,
@@ -60,9 +61,21 @@ export async function inspectWindowsCodexCliPlanInstall(
     || win32.basename(candidate) !== "codex.cmd"
     || (deps.selectedCommand != null && deps.selectedCommand !== candidate)) return fallback;
   const prefix = win32.dirname(candidate);
-  const node = win32.join(prefix, "node.exe");
-  const npmRoot = win32.join(prefix, "node_modules", "npm");
-  const npmCli = win32.join(npmRoot, "bin", "npm-cli.js");
+  const localNodePath = win32.join(prefix, "node.exe");
+  const localNode = await inspectWindowsInstallationFiles([{ path: localNodePath, maxBytes: 0, metadataOnly: true }]);
+  if (localNode.kind === "refused" && localNode.reason !== "not-found") return fallback;
+  const selectedPath = env.PATH;
+  const selectedPathExt = env.PATHEXT;
+  const derivation = await deriveCodexCliInstallationInput({
+    codexCliPath: candidate, path: selectedPath ?? null, pathExt: selectedPathExt ?? null,
+  }, { platform: "win32" });
+  if (derivation.kind !== "derived" || derivation.input.candidate !== candidate
+    || derivation.input.npmPrefix !== prefix) return fallback;
+  const node = derivation.input.node;
+  const npmCli = derivation.input.npmCli;
+  const npmRoot = win32.dirname(win32.dirname(npmCli));
+  const pathNode = !sameWindowsPath(node, localNodePath);
+  if (pathNode) return fallback;
   const root = win32.join(prefix, "node_modules", "@openai", "codex");
   const manifest = win32.join(root, "package.json");
   const npmManifest = win32.join(npmRoot, "package.json");
@@ -110,7 +123,12 @@ export async function inspectWindowsCodexCliPlanInstall(
     const final = await inspectWindowsInstallationFiles([...requests,
       { path: node, maxBytes: 128 * 1024 * 1024, hashOnly: true },
       { path: native, maxBytes: MAX_NATIVE_BACKING_BYTES, hashOnly: true },
-    ], async () => selected() && await backingSelection() === backingManifest);
+    ], async () => selected() && env.PATH === selectedPath && env.PATHEXT === selectedPathExt
+      && await deriveCodexCliInstallationInput({ codexCliPath: candidate,
+        path: selectedPath ?? null, pathExt: selectedPathExt ?? null }, { platform: "win32" })
+        .then(current => current.kind === "derived" && current.input.candidate === candidate
+          && current.input.npmPrefix === prefix && current.input.node === node && current.input.npmCli === npmCli)
+      && await backingSelection() === backingManifest);
     if (final.kind !== "observed") return fallback;
     const files = new Map(final.files.map(file => [file.path, file]));
     if (!npmCodexCommandShim(files.get(candidate)!.bytes)) return fallback;
@@ -119,7 +137,7 @@ export async function inspectWindowsCodexCliPlanInstall(
     const backing = json(files.get(backingManifest)!);
     if (!backing || "exports" in backing || ![pkg, "@openai/codex"].includes(String(backing.name))
       || ![main.version, `${main.version}-win32-${arch}`].includes(String(backing.version))) return fallback;
-    const content = hash(JSON.stringify(["windows-npm-read-only-plan-v1", arch, prefix, candidate, node, npmCli,
+    const content = hash(JSON.stringify(["windows-npm-read-only-plan-v2", arch, prefix, candidate, node, npmCli,
       ...final.files.map(file => [file.path, file.identity, file.digest])]));
     const report: CodexCliInstallReport = Object.freeze({ ...fallback, managed: true, selectionAttested: true,
       provenance: "npm-global", reason: "managed_npm_global", packageVersion: main.version,
