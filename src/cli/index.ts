@@ -29,7 +29,6 @@ try {
 }
 import {
   currentExternalCodexModelProvider,
-  restoreNativeCodex,
   restoreNativeCodexAsync,
   shouldInjectApiAuthHeader,
 } from "../codex/inject";
@@ -162,7 +161,7 @@ import { removeOwnedConfigAfterDesktopCleanup } from "./uninstall-client-state";
 import { withProcessRuntimeProvenance } from "../lib/bun-runtime";
 import { startArgv } from "../lib/self-launch-argv";
 import { initializeNodeLauncherContext } from "./launcher-context";
-import { assertConnectedClientStopSupported, connectedClientStopSkipLine, preflightConnectedClientStop, preserveConnectedClientRoutingOnExit, restoreSharedClientStateAfterStop } from "./stop-restore";
+import { assertConnectedClientStopSupported, connectedClientStopSkipLine, preflightConnectedClientStop, preserveConnectedClientRoutingOnExit, restoreCodexRoutingOnExit, restoreSharedClientStateAfterStop } from "./stop-restore";
 import { startClientRuntimeUnderOwnershipLease } from "./client-start-fence";
 import { recoverStartStateUnderOwnershipLease } from "./start-owner-fence";
 import { handledSignalExitCode } from "../lib/handled-signal-exit";
@@ -663,7 +662,7 @@ async function handleStart(options: { block?: boolean } = {}) {
     if (teardown.restoreNativeCodex) {
       try {
         if (!codexHomeIsAbsent(getCodexHome())) {
-          const restored = restoreNativeCodex();
+          const restored = restoreCodexRoutingOnExit();
           if (!restored.success) {
             cleanupSucceeded = false;
             console.error(`⚠️  Native Codex restore failed during shutdown: ${restored.message}`);
@@ -706,7 +705,7 @@ async function handleStart(options: { block?: boolean } = {}) {
     void (async () => {
       let shutdownSucceeded = false;
       try {
-        shutdownSucceeded = await drainAndShutdown(server, config.shutdownTimeoutMs ?? 5000);
+        shutdownSucceeded = await drainAndShutdown(server, config.shutdownTimeoutMs ?? 5000, () => { syncCleanup(); });
       } finally {
         const restored = syncCleanup(); // idempotent (cleaned-guard); also re-run by process.on("exit")
         process.exit(restored && shutdownSucceeded ? handledSignalExitCode(signal) : 1);
@@ -1086,9 +1085,11 @@ async function handleStopUnlocked(snapshot?: GuardedStopSnapshot) {
   // the record; a record left behind by a hard-killed sibling still says so.
   const siblingOfPort = readRuntimePort()?.siblingOfPort;
   const stoppingSibling = siblingOfPort !== undefined;
-  const connectedClientSkip = stoppingSibling ? null : connectedClientStopSkipLine(readClientConnectionState());
+  const clientConnection = readClientConnectionState();
+  const connectedClient = !stoppingSibling && clientConnection.kind === "connected";
+  const connectedClientSkip = stoppingSibling ? null : connectedClientStopSkipLine(clientConnection);
   let connectedClientAlreadyStopped = false;
-  if (connectedClientSkip) {
+  if (connectedClient) {
     const preflight = await preflightConnectedClientStop(snapshot?.approval);
     if (preflight === "already-stopped") connectedClientAlreadyStopped = true;
     else if (preflight) return preflight;
@@ -1148,7 +1149,7 @@ async function handleStopUnlocked(snapshot?: GuardedStopSnapshot) {
     // Resolve ONCE. Reading the runtime record twice let the receipt name the configured
     // guess while the request went to a runtime endpoint that appeared in between.
     const exact = discovered ?? endpointOf(readRuntimePort(pid));
-    if (connectedClientSkip) await assertConnectedClientStopSupported(exact ? { ...exact, pid } : null);
+    if (connectedClient) await assertConnectedClientStopSupported(exact ? { ...exact, pid } : null);
     claimTeardown(exact ?? configuredEndpoint(), exact ? "exact" : "guessed");
     const graceful = await stopProxy(pid, {
       deferSharedTeardownNonce: teardownNonce,
@@ -1429,7 +1430,7 @@ async function handleStopUnlocked(snapshot?: GuardedStopSnapshot) {
       // not answering. That is the whole point of leaving the receipt behind.
       console.log("↩️  Finishing a shared teardown left unfinished by an earlier stop.");
     }
-    const restore = await restoreSharedClientStateAfterStop(reportRetainedCodexProviderTable);
+    const restore = await restoreSharedClientStateAfterStop(reportRetainedCodexProviderTable, clientConnection.kind === "connected" ? clientConnection.value : undefined);
     record.sharedTeardown = restore.historyDeferred ? "refused" : restore.other ? "failed" : "restored";
     if (restore.other) stopFailed = true;
     else if (restore.historyDeferred) historyDeferredNonces = teardownNonce ? [teardownNonce, ...recoveredNonces] : recoveredNonces;

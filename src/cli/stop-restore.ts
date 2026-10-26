@@ -1,4 +1,4 @@
-import { restoreNativeCodexAsync } from "../codex/inject";
+import { restoreNativeCodex, restoreNativeCodexAsync } from "../codex/inject";
 import type { RetainedCodexProviderTable } from "../codex/inject/restore";
 import { stripGrokConfig } from "../grok/inject";
 import { readClientConnectionState, type ClientConnectionState } from "../client/state";
@@ -14,18 +14,30 @@ import { findLiveProxy, probeEndpointLiveness, proveLiveProxyOwnedByHome } from 
 import { observeGuardedManagerStopped } from "../service/guarded-manager-target";
 import type { StartExitTeardown } from "./dispatch";
 import type { StopOutcome } from "./stop-report";
+import { restoreLinkClientRouting } from "../client/stop-routing";
+import type { OcxClientConnectionConfig } from "../types";
 
 /** Re-read ownership when an ordinary runtime actually exits, including after API drain. */
 export function preserveConnectedClientRoutingOnExit(teardown: StartExitTeardown): StartExitTeardown {
-  return readClientConnectionState().kind === "connected"
-    ? { ...teardown, restoreNativeCodex: false, stripGrokConfig: false }
+  const connection = readClientConnectionState();
+  return connection.kind === "connected"
+    ? { ...teardown, restoreNativeCodex: connection.value.transport === "link" && teardown.restoreNativeCodex, stripGrokConfig: false }
     : teardown;
+}
+
+/** Signal cleanup must not apply standalone restoration to connection-owned integrations. */
+export function restoreCodexRoutingOnExit(): { success: boolean; message: string } {
+  const connection = readClientConnectionState();
+  if (connection.kind === "connected") return connection.value.transport === "link"
+    ? restoreLinkClientRouting(connection.value)
+    : { success: true, message: "Hub connection-owned routing preserved." };
+  return restoreNativeCodex();
 }
 
 type ConnectedStopTarget = { pid: number; port: number; hostname?: string };
 const CONNECTED_STOP_PROBE_MS = 2000;
 const unsupportedConnectedStop = () => new ProxyOwnershipRefusedError(
-  "Connected-client stop refused: runtime identity, shutdown preservation or safe runtime absence could not be verified. Inspect 'ocx service status' and update/restart an incompatible runtime through its supervisor, then retry; use 'ocx disconnect' only if you intend to release those integrations.",
+  "Connected-client stop refused: runtime identity, shutdown ownership handling or safe runtime absence could not be verified. Inspect 'ocx service status' and update/restart an incompatible runtime through its supervisor, then retry; use 'ocx disconnect' only if you intend to release those integrations.",
   "connected_client_stop_unsupported",
 );
 
@@ -64,7 +76,7 @@ export async function assertConnectedClientStopSupported(target: ConnectedStopTa
     }
     const health = await readDocument(response);
     if (!readPinnedRuntime() || health?.service !== "opencodex" || health.pid !== target.pid) throw unsupportedConnectedStop();
-    // Native machine listeners preserve integrations on signal and have no /api/stop route.
+    // Native machine listeners own transport-specific signal cleanup and have no /api/stop route.
     if (health.role === "client") return;
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw unsupportedConnectedStop();
@@ -123,17 +135,17 @@ export async function preflightConnectedClientStop(approved?: ConnectedStopTarge
  * The line `ocx stop` prints in place of the shared teardown on a connected client, or null
  * when this home is not one (#7563).
  *
- * A hub client or Remote Link Child gets its Codex routing and catalog from `ocx connect` /
- * `ocx sync`, and its client runtime never writes them on start. The standalone teardown
+ * A hub client gets its Codex routing and catalog from `ocx connect` / `ocx sync`, and its
+ * client runtime never writes them on start. The standalone teardown
  * restored native Codex, rewrote the catalog and stripped the Grok block, and nothing on the
  * client put any of it back: `ocx start` brought the runtime up with Codex still native and
  * Grok unconfigured. Leaving them in place makes stop/start a round trip; `ocx disconnect`
- * remains the teardown that owns them, with its own ownership checks.
+ * remains the teardown that owns them, with its own ownership checks. A Remote Link Child
+ * is deliberately excluded: its unauthenticated loopback route is unsafe after the listener exits.
  */
 export function connectedClientStopSkipLine(state: ClientConnectionState): string | null {
-  if (state.kind !== "connected") return null;
-  const role = state.value.transport === "link" ? "Remote Link Child" : "hub client";
-  return `↩️  Codex routing, its catalog and the Grok config stay as they are: this ${role}'s connection owns them, and 'ocx start' serves them again. To hand Codex back to its own account, run 'ocx disconnect'.`;
+  if (state.kind !== "connected" || state.value.transport === "link") return null;
+  return `↩️  Codex routing, its catalog and the Grok config stay as they are: this hub client's connection owns them, and 'ocx start' serves them again. To hand Codex back to its own account, run 'ocx disconnect'.`;
 }
 
 /**
@@ -155,7 +167,16 @@ export function connectedClientStopSkipLine(state: ClientConnectionState): strin
  */
 export async function restoreSharedClientStateAfterStop(
   reportRetainedCodexProviderTable: (retained: RetainedCodexProviderTable) => void,
+  expectedConnection?: OcxClientConnectionConfig,
 ): Promise<{ historyOnly: boolean; historyDeferred: boolean; other: boolean }> {
+  const connection = readClientConnectionState();
+  const link = expectedConnection?.transport === "link" ? expectedConnection
+    : connection.kind === "connected" && connection.value.transport === "link" ? connection.value : null;
+  if (link) {
+    const result = restoreLinkClientRouting(link);
+    (result.success ? console.log : console.error)(`↩️  ${result.message}`);
+    return { historyOnly: false, historyDeferred: false, other: !result.success };
+  }
   let historyOnly = false;
   let historyDeferred = false;
   let other = false;

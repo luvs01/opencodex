@@ -25,7 +25,7 @@ const options = JSON.parse(readFileSync(0, "utf8")) as {
   exitCleanup?: boolean;
   nativeSignal?: boolean;
   apiFailure?: boolean;
-  stopBodyFailure?: boolean;
+  apiBodyFailure?: "truncated" | "timeout";
   proxyProbePort?: number;
   alreadyStopped?: boolean;
   absence?: "dead" | "unknown" | "live";
@@ -56,6 +56,8 @@ const fakePid = 4242;
 const calls = { killed: 0, native: 0, grok: 0, cleared: 0, exited: 0, service: 0 };
 const urls: string[] = [];
 const probes: string[] = [];
+let directPosts = 0;
+const linkRestores: string[] = [];
 const unexpectedIo: string[] = [];
 let alive = !options.alreadyStopped;
 let nonce: string | undefined;
@@ -87,7 +89,7 @@ mock.module("node:child_process", () => ({
 const receipts = await import("../../src/config/pending-teardown");
 process.on("exit", () => {
   writeFileSync(join(home, "parent-stop-result.json"), JSON.stringify({
-    calls, urls, probes, unexpectedIo, nonce,
+    calls, urls, probes, directPosts, linkRestores, unexpectedIo, nonce,
     receiptExists: nonce !== undefined && existsSync(receipts.pendingTeardownPathFor(nonce)),
   }));
 });
@@ -149,8 +151,18 @@ if (options.alreadyStopped) {
 const native = await import("../../src/codex/inject");
 mock.module("../../src/codex/inject", () => ({
   ...native,
+  restoreNativeCodex: () => { calls.native += 1; return options.restore; },
   restoreNativeCodexAsync: async () => { calls.native += 1; return options.restore; },
 }));
+const linkRouting = await import("../../src/client/stop-routing");
+let linkRestored = false;
+mock.module("../../src/client/stop-routing", () => ({ ...linkRouting, restoreLinkClientRouting: () => {
+  linkRestores.push(alive ? "before-stop" : "after-stop");
+  if (linkRestored) return { success: true, restored: false, message: "Link routing already restored" };
+  calls.native++;
+  linkRestored = options.restore.success;
+  return { success: options.restore.success, restored: options.restore.success, message: "Link routing restored" };
+} }));
 const grok = await import("../../src/grok/inject");
 mock.module("../../src/grok/inject", () => ({
   ...grok,
@@ -202,14 +214,13 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
 // Only the real proxy-environment mode above exercises TCP; other cases inject responses.
 const direct = await import("../../src/server/direct-local-http");
 mock.module("../../src/server/direct-local-http", () => ({ ...direct,
-  directLocalHttpFetch: async (input: string | URL | Request, init?: RequestInit, io?: { onResponseStatus?: (status: number) => void }) => {
+  directLocalHttpFetch: async (input: string | URL | Request, init?: RequestInit, io?: Parameters<typeof direct.directLocalHttpFetch>[2]) => {
+    if (init?.method === "POST") directPosts++;
     if (!alive && String(input).endsWith("/healthz")) throw Object.assign(new Error("fixture listener closed"), { code: "ECONNREFUSED" });
-    if (options.stopBodyFailure && init?.method === "POST") {
-      urls.push(String(input));
-      io?.onResponseStatus?.(409);
-      throw new Error("fixture truncated stop refusal");
-    }
-    return globalThis.fetch(input, { ...init, method: init?.method ?? "GET", redirect: "error" });
+    const response = await globalThis.fetch(input, { ...init, method: init?.method ?? "GET", redirect: "error" });
+    io?.onResponseStatus?.(response.status);
+    if (init?.method === "POST" && options.apiBodyFailure) throw new Error(`fixture stop body ${options.apiBodyFailure}`);
+    return response;
   },
 }));
 
@@ -230,7 +241,7 @@ if (options.exitCleanup) {
     preserveConnectedClientRoutingOnExit: (restore as Record<string, unknown>).preserveConnectedClientRoutingOnExit,
     revertSystemEnv() {}, removePid() {}, removeRuntimePort() {}, serviceEnvironmentOwnedHere: () => true,
     getCodexHome: () => "fixture", codexHomeIsAbsent: () => false,
-    restoreNativeCodex: () => { calls.native++; return options.restore; },
+    restoreCodexRoutingOnExit: restore.restoreCodexRoutingOnExit,
     stripGrokConfig: () => { calls.grok++; return { ok: true, changed: true, message: "stripped" }; },
   };
   const cleanup = new Function(...Object.keys(bindings), "let cleaned = false; let cleanupSucceeded = true;\n" + source.slice(from, to) + "\nreturn syncCleanup();");

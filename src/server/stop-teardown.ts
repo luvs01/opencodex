@@ -3,6 +3,8 @@ import { siblingOfLivePort, siblingSkipMessage } from "../codex/sibling-start";
 import { deferralMatchesReceipt } from "../config/pending-teardown";
 import { isDesktopSupervised } from "../lib/system-restart-contract";
 import type { ManagementPrincipal } from "./management-auth";
+import { restoreLinkClientRouting, type LinkRoutingRestoreResult } from "../client/stop-routing";
+import type { OcxClientConnectionConfig } from "../types";
 
 /**
  * Shared-teardown decision and execution for `POST /api/stop` (#3008).
@@ -25,6 +27,7 @@ export type StopTeardownIo = {
   ownsReceipt?: (nonce: string | null) => boolean;
   restoreNativeCodex?: () => Promise<CodexNativeRestoreResult>;
   stripGrok?: () => GrokStripResult;
+  restoreLinkRouting?: (connection: OcxClientConnectionConfig) => LinkRoutingRestoreResult;
 };
 
 export type StopTeardownBody = {
@@ -87,12 +90,20 @@ export async function performStopTeardown(url: URL, io: StopTeardownIo = {}): Pr
   // A connection owns its integrations across stop/start, even for a successful API stop.
   // This is persisted authority, not a caller's request to skip an obligation it owns.
   const connection = (await import("../client/state")).readClientConnectionState();
-  if (connection.kind === "connected") {
+  // A Link Child's route is an unauthenticated loopback listener. Once this process exits,
+  // preserving that route would let another local process claim the released port.
+  if (connection.kind === "connected" && connection.value.transport !== "link") {
     return {
       success: true,
       message: "Proxy stopping; connection-owned Codex routing, catalog and Grok config preserved. Run `ocx disconnect` to release them.",
       sharedTeardown: "not-owned",
     };
+  }
+  if (connection.kind === "connected") {
+    // The loopback route must be removed while this listener still owns its port, even
+    // when a parent holds a deferred-teardown receipt. Never use standalone restoration.
+    const result = (io.restoreLinkRouting ?? restoreLinkClientRouting)(connection.value);
+    return { success: result.success, message: result.message, sharedTeardown: "performed" };
   }
   const ownsReceipt = io.ownsReceipt ?? deferralMatchesReceipt;
   if (deferralHonored(url, ownsReceipt)) {
