@@ -124,6 +124,74 @@ for (const change of ["pin", "clear", "stop", "abort", "valid"] as const) {
   });
 }
 
+for (const cache of ["cold", "warm"] as const) {
+  test(`async runtime persistence discards a pre-aborted ${cache} observation without execution or a write`, async () => {
+    if (cache === "warm") warmRuntime();
+    const controller = new AbortController();
+    controller.abort();
+    expect(await runtime.resolveAndPersistCodexRuntimeAsync({
+      discoverAlternatives: false, signal: controller.signal,
+    })).toBeNull();
+    expect(exec.mock.calls).toHaveLength(0);
+    expect(existsSync(runtime.codexRuntimeStatePath(root))).toBe(false);
+  });
+}
+
+for (const probeVersion of [true, false]) {
+  test(`async runtime persistence discards cancellation during macOS trust (probe=${probeVersion})`, async () => {
+    const command = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex";
+    const trust = hold<string | null>();
+    const entered = hold<void>();
+    const controller = new AbortController();
+    let probes = 0;
+    const pending = runtime.resolveAndPersistCodexRuntimeAsync({
+      configDir: root, platform: "darwin", env: { CODEX_CLI_PATH: command, PATH: "", HOME: "/synthetic-home" },
+      discoverAlternatives: false, probeVersion, signal: controller.signal,
+      existsSync: path => path === command, readdirSync: () => [],
+      readBundleIdentifier: () => "com.openai.codex",
+      macBundleTrustReasonAsync: async (_bundle, binary, signal) => {
+        expect(binary).toBe(command);
+        expect(signal).toBe(controller.signal);
+        entered.resolve();
+        return trust.promise;
+      },
+      execFile: async () => { probes++; return "codex-cli 0.160.0"; },
+    });
+    await Promise.race([entered.promise, pending.then(() => { throw new Error("resolution settled before trust check"); })]);
+    expect(probes).toBe(0);
+    controller.abort();
+    trust.resolve(null);
+    expect(await pending).toBeNull();
+    expect(probes).toBe(0);
+    expect(existsSync(runtime.codexRuntimeStatePath(root))).toBe(false);
+  });
+}
+
+test("async runtime persistence discards a warm observation cancelled before publication", async () => {
+  warmRuntime();
+  const controller = new AbortController();
+  const pending = runtime.resolveAndPersistCodexRuntimeAsync({
+    discoverAlternatives: false, signal: controller.signal,
+  });
+  controller.abort();
+  expect(await pending).toBeNull();
+  expect(exec.mock.calls).toHaveLength(0);
+  expect(existsSync(runtime.codexRuntimeStatePath(root))).toBe(false);
+});
+
+test("async runtime persistence propagates a resolution error without cancellation", async () => {
+  const failure = new Error("synthetic runtime observation failure");
+  const controller = new AbortController();
+  expect(controller.signal.aborted).toBe(false);
+  await expect(runtime.resolveAndPersistCodexRuntimeAsync({
+    configDir: root, platform: "win32", env: { CODEX_CLI_PATH: selected.command, PATH: "" },
+    discoverAlternatives: false, signal: controller.signal, readdirSync: () => [],
+    existsSync: () => { throw failure; },
+  })).rejects.toBe(failure);
+  expect(exec.mock.calls).toHaveLength(0);
+  expect(existsSync(runtime.codexRuntimeStatePath(root))).toBe(false);
+});
+
 test("a scoped source abort does not cancel an independent shared model flight", async () => {
   warmRuntime();
   const held = hold<string>();
