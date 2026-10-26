@@ -41,6 +41,7 @@ import {
   peekCodexRuntimeProcessCache,
   resolveAndPersistCodexRuntime,
   resolveAndPersistCodexRuntimeAsync,
+  codexRuntimeCommandForExecution,
   codexRuntimeSelectionIdentity,
   codexRuntimeStateEpoch,
   execCodexFileAsync,
@@ -341,8 +342,10 @@ function* bundledCatalogSteps(
 export function loadBundledCodexCatalog(deps: BundledCatalogDeps = {}): ReadonlyRawCatalog | null {
   const useCache = !deps.commandCandidates && !deps.execFileSync && !deps.execFile && !deps.configDir && !deps.env;
   const resolved = deps.commandCandidates ? null : resolveAndPersistCodexRuntime(bundledRuntimeDeps(deps));
+  const command = resolved ? codexRuntimeCommandForExecution(resolved.runtime) : null;
+  if (resolved && !command) return null;
   const inputs = codexRuntimeSelectionIdentity(bundledRuntimeDeps(deps));
-  const steps = bundledCatalogSteps(deps.commandCandidates?.() ?? [resolved!.runtime.command],
+  const steps = bundledCatalogSteps(deps.commandCandidates?.() ?? [command!],
     useCache ? bundledRuntimeKey(resolved!.runtime) : null,
     () => inputs === codexRuntimeSelectionIdentity(bundledRuntimeDeps(deps)));
   let step = steps.next();
@@ -397,11 +400,13 @@ export function loadBundledCodexCatalogAsync(
     const resolved = deps.commandCandidates ? null : await resolveAndPersistCodexRuntimeAsync({ ...runtimeDeps, signal: controller.signal },
       () => active() && codexRuntimeSelectionIdentity(runtimeDeps) === inputs);
     if (!active() || (!deps.commandCandidates && !resolved)) return null;
+    const command = resolved ? codexRuntimeCommandForExecution(resolved.runtime) : null;
+    if (resolved && !command) return null;
     flight.inputs = codexRuntimeSelectionIdentity(runtimeDeps);
     const runtimeEpoch = codexRuntimeStateEpoch();
     const current = () => active() && runtimeEpoch === codexRuntimeStateEpoch()
       && flight.inputs === codexRuntimeSelectionIdentity(runtimeDeps);
-    const steps = bundledCatalogSteps(deps.commandCandidates?.() ?? [resolved!.runtime.command],
+    const steps = bundledCatalogSteps(deps.commandCandidates?.() ?? [command!],
       useCache ? bundledRuntimeKey(resolved!.runtime) : null, current, false);
     let step = steps.next();
     while (!step.done) {

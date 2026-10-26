@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { redactSecretArgs } from "./secret-args";
 import { codexExecInvocation } from "../codex/exec-invocation";
-import { resolveAndPersistCodexRuntime, type ResolveCodexRuntimeDeps } from "../codex/runtime";
+import { codexRuntimeCommandForExecution, resolveAndPersistCodexRuntime, type ResolveCodexRuntimeDeps } from "../codex/runtime";
 import type { ResolveDeps, SpawnInvocation } from "../lib/win-exec";
 import {
   apiError,
@@ -80,7 +80,7 @@ export function nativeMainCodexLoginInvocation(
   platform: NodeJS.Platform = process.platform,
   deps: NativeMainCodexLoginInvocationDeps = {},
 ): SpawnInvocation {
-  const command = resolveAndPersistCodexRuntime({
+  const resolved = resolveAndPersistCodexRuntime({
     env: deps.env ?? process.env,
     platform,
     existsSync: deps.existsSync,
@@ -88,7 +88,9 @@ export function nativeMainCodexLoginInvocation(
     configDir: deps.configDir,
     readFileSync: deps.readFileSync,
     discoverAlternatives: false,
-  }).runtime.command || "codex";
+  });
+  const command = codexRuntimeCommandForExecution(resolved.runtime);
+  if (!command) throw Object.assign(new Error("Codex CLI is unavailable"), { code: "ENOENT" });
   return codexExecInvocation(command, ["login"], platform, deps);
 }
 

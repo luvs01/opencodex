@@ -14,7 +14,7 @@ import { getCodexRoutingKind } from "../codex/inject";
 import { missingOwnedCatalogPath } from "../codex/inject/config-toml";
 import { CODEX_CONFIG_PATH } from "../codex/paths";
 import { diagnoseCodexShim } from "../codex/shim";
-import { displayCodexRuntimePath, effortClampAppliesToRuntime, liveRemovedEfforts, loadLastEffortClamp, resolveCodexRuntime } from "../codex/runtime";
+import { codexRuntimeCommandForExecution, displayCodexRuntimePath, effortClampAppliesToRuntime, liveRemovedEfforts, loadLastEffortClamp, resolveCodexRuntime } from "../codex/runtime";
 import { packageVersion } from "./help";
 import { computeVersionSkew, type VersionSkew } from "./version-skew";
 import { redactSecretString, redactUserPath } from "../lib/redact";
@@ -902,7 +902,7 @@ export async function collectStatus(options: { mainAccountPolicy?: boolean } = {
     }
   })();
   const clientConnection = collectClientConnectionStatus(Date.now(), undefined, {
-    selectedCodexCommand: resolvedRuntime.runtime.command,
+    selectedCodexCommand: codexRuntimeCommandForExecution(resolvedRuntime.runtime),
   });
   // Asked before the local probes below so a connected client's report is hub-sourced from its
   // first line. Bounded and failure-tolerant: an offline hub degrades the remoteHub block, it
@@ -992,8 +992,8 @@ export async function collectStatus(options: { mainAccountPolicy?: boolean } = {
     const detail = resolvedRuntime.failures[0]?.reason;
     warningParts.push(
       detail
-        ? `No validated Codex runtime found (${detail}); falling back to \`codex\`. Run ocx doctor for diagnosis and recovery.`
-        : "No validated Codex runtime found; falling back to `codex`. Run ocx doctor for diagnosis and recovery.",
+        ? `No validated Codex runtime found (${detail}). Run ocx doctor for diagnosis and recovery.`
+        : "No validated Codex runtime found. Run ocx doctor for diagnosis and recovery.",
     );
   }
   if (resolvedRuntime.newerAvailable) {

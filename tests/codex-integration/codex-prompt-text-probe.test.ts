@@ -23,6 +23,7 @@ import {
 } from "../../src/codex/prompt-text-probe";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { displayCodexRuntimePath } from "../../src/codex/runtime";
+import * as runtimeModule from "../../src/codex/runtime";
 import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
 
 const lifecycleRoots: string[] = [];
@@ -696,6 +697,26 @@ describe("unmapped layers", () => {
 });
 
 describe("runtime resolution and failure classification", () => {
+  test.each([false, true])("publisher verification uses the asynchronous resolver before any prompt process starts (cancelled: %s)", async cancelled => {
+    const missing: runtimeModule.ResolveCodexRuntimeResult = { runtime: { command: "codex", source: "fallback", version: null }, failures: [] };
+    let release!: () => void, finished = false;
+    const synchronous = spyOn(runtimeModule, "resolveCodexRuntime").mockReturnValue(missing);
+    const asynchronous = spyOn(runtimeModule, "resolveCodexRuntimeAsync").mockImplementation(async () => {
+      await new Promise<void>(resolve => { release = resolve; }); return missing;
+    });
+    try {
+      const controller = new AbortController(), signal = controller.signal;
+      const pending = probePromptText(2000, signal).finally(() => { finished = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(synchronous).not.toHaveBeenCalled();
+      expect(asynchronous).toHaveBeenCalledWith({ discoverAlternatives: false, probeVersion: false, signal });
+      expect(finished).toBe(false); expect(promptTextProbeSpawnAttemptsForTests()).toBe(0);
+      if (cancelled) controller.abort();
+      release(); const result = await pending; expect(result.ok).toBe(false);
+      if (cancelled) expect(result.detail).toBe("prompt probe cancelled");
+    } finally { release?.(); asynchronous.mockRestore(); synchronous.mockRestore(); }
+  });
+
   test("a runtime the shared resolver finds is spawned, not reported missing", async () => {
     // Issue 4458: the old four-path POSIX check reported "codex binary not
     // found" on a Windows machine where the Codex App had installed codex.exe

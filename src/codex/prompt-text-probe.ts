@@ -29,7 +29,7 @@ import { resolveCodexHomeDir } from "./home";
 import {
   CODEX_PROGRAM_NOT_FOUND_REASON,
   displayCodexRuntimePath,
-  resolveCodexRuntime,
+  resolveCodexRuntimeAsync,
   type CodexRuntimeSource,
   type ResolveCodexRuntimeResult,
 } from "./runtime";
@@ -881,10 +881,12 @@ export async function probePromptText(
   // Both flags are deliberate. This runs on a request path: discoverAlternatives
   // would walk the whole PATH just to fill a newerAvailable diagnostic the probe
   // never shows, and probeVersion would pay a blocking `--version` exec per
-  // candidate. The probe needs a command it can spawn; the version is irrelevant.
+  // candidate. Publisher verification still runs asynchronously before selecting an app CLI.
   const resolved = probeCommandForTests || probeRuntimeForTests !== undefined
     ? null
-    : resolveCodexRuntime({ discoverAlternatives: false, probeVersion: false });
+    : await resolveCodexRuntimeAsync({ discoverAlternatives: false, probeVersion: false, signal })
+      .catch(error => { if (signal?.aborted) return null; throw error; });
+  if (signal?.aborted) return { ok: false, codexHome, layers: { ...baseLayers }, base, detail: "prompt probe cancelled" };
   const runtime: { command: string; source: CodexRuntimeSource } | undefined =
     probeRuntimeForTests !== undefined
       ? probeRuntimeForTests ?? undefined

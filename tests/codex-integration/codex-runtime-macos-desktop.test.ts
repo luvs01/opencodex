@@ -1,13 +1,18 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import {
-  codexRuntimeStatePath, resolveCodexRuntime, resolveCodexRuntimeAsync,
+  codexRuntimeCommandForExecution, codexRuntimeSelectionIdentity, codexRuntimeStatePath, resolveCodexRuntime, resolveCodexRuntimeAsync,
   setCodexRuntimeResolveCacheForTests, type ResolveCodexRuntimeDeps,
 } from "../../src/codex/runtime";
 import { loadBundledCodexCatalog, loadBundledCodexCatalogAsync } from "../../src/codex/catalog/bundled";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { OPENAI_TEAM_ID, untrustedChatgptBundleReason, type BundleTrustDeps } from "../../src/chatgpt/app-server-shim/bundle-trust";
+import * as runtimeModule from "../../src/codex/runtime";
+import { codexFeaturesInvocation } from "../../src/cli/v2";
+import { nativeMainCodexLoginInvocation } from "../../src/cli/account-main";
+import { CodexRemoteWorkspaceRuntimeFactory } from "../../src/remote-control/workspace-codex-runtime";
 
 const roots: string[] = [];
 afterEach(async () => { for (const path of roots.splice(0)) await removeTreeWithRetry(path); });
@@ -76,6 +81,169 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
     expect(f.probed).not.toContain(f.current);
   });
 
+  for (const asynchronous of [false, true]) test(`a successful bare fallback cannot retry the rejected PATH app (async=${asynchronous})`, async () => {
+    const f = fixture();
+    f.versions.set(f.current, "0.162.0"); f.versions.set("codex", "0.162.0");
+    f.deps.env!.PATH = posix.dirname(f.current);
+    f.deps.macBundleTrustReason = () => "untrusted";
+    const result = asynchronous ? await resolveCodexRuntimeAsync(f.deps) : resolveCodexRuntime(f.deps);
+    expect(result.runtime).toEqual({ command: "codex", source: "fallback", version: null });
+    expect(f.probed).toEqual([]);
+  });
+
+  for (const asynchronous of [false, true]) for (const probeVersion of [true, false]) {
+    for (const alias of ["bare", "relative"] as const) test(`explicit ${alias} app aliases require trust (async=${asynchronous}, probe=${probeVersion})`, async () => {
+      const f = fixture();
+      const command = alias === "bare" ? "codex" : posix.relative(process.cwd(), f.current);
+      f.versions.set(f.current, "0.162.0"); f.versions.set(command, "0.162.0");
+      f.deps.env!.PATH = posix.dirname(f.current);
+      f.deps.env!.CODEX_CLI_PATH = command;
+      f.deps.macBundleTrustReason = () => "untrusted";
+      const deps = { ...f.deps, probeVersion };
+      const result = asynchronous ? await resolveCodexRuntimeAsync(deps) : resolveCodexRuntime(deps);
+      expect(result.runtime).toEqual({ command: "codex", source: "fallback", version: null });
+      expect(f.probed).toEqual([]);
+    });
+  }
+
+  for (const asynchronous of [false, true]) test(`real PATH lookup skips a non-executable before the rejected app (async=${asynchronous})`, async () => {
+    const f = fixture(), nonExecutable = posix.join(f.deps.env!.HOME!, "non-executable/codex");
+    for (const file of [nonExecutable, f.current]) {
+      mkdirSync(posix.dirname(file), { recursive: true }); writeFileSync(file, "#!/bin/sh\nexit 0\n");
+    }
+    chmodSync(nonExecutable, 0o600); chmodSync(f.current, 0o700);
+    delete f.deps.existsSync;
+    f.deps.env!.PATH = `${posix.dirname(nonExecutable)}:${posix.dirname(f.current)}`;
+    f.versions.set(f.current, "0.162.0"); f.versions.set("codex", "0.162.0");
+    f.deps.macBundleTrustReason = () => "untrusted";
+    const result = asynchronous ? await resolveCodexRuntimeAsync(f.deps) : resolveCodexRuntime(f.deps);
+    expect(result.runtime).toEqual({ command: "codex", source: "fallback", version: null });
+    expect(f.probed).not.toContain("codex"); expect(f.probed).not.toContain(f.current);
+  });
+
+  for (const path of ["", "."]) for (const asynchronous of [false, true]) {
+    test(`current-directory PATH entries cannot hide an app target (PATH=${JSON.stringify(path)}, async=${asynchronous})`, async () => {
+      const f = fixture(), cwd = process.cwd();
+      mkdirSync(posix.dirname(f.current), { recursive: true });
+      f.versions.set(f.current, "0.162.0"); f.versions.set("codex", "0.162.0");
+      f.deps.env!.PATH = path; f.deps.env!.CODEX_CLI_PATH = "codex";
+      f.deps.macBundleTrustReason = () => "untrusted";
+      try {
+        process.chdir(posix.dirname(f.current));
+        const result = asynchronous ? await resolveCodexRuntimeAsync(f.deps) : resolveCodexRuntime(f.deps);
+        expect(result.runtime).toEqual({ command: "codex", source: "fallback", version: null });
+        expect(f.probed).toEqual([]);
+      } finally { process.chdir(cwd); }
+    });
+  }
+
+  for (const asynchronous of [false, true]) test(`a verified non-app fallback remains usable after an unrelated app refusal (async=${asynchronous})`, async () => {
+    const f = fixture(), target = posix.join(f.deps.env!.HOME!, "ordinary/bin/codex");
+    f.versions.set(target, "0.150.0"); f.versions.set(f.current, "0.162.0");
+    f.deps.env!.PATH = posix.dirname(target); f.deps.env!.CODEX_CLI_PATH = f.current;
+    f.deps.macBundleTrustReason = () => "untrusted";
+    let attempts = 0;
+    const exec = (file: string) => {
+      f.probed.push(file);
+      if (file === target && ++attempts > 1) return "codex-cli 0.150.0";
+      throw new Error("first version probe unavailable");
+    };
+    f.deps.execFileSync = exec; f.deps.execFile = async file => exec(file);
+    const result = asynchronous ? await resolveCodexRuntimeAsync(f.deps) : resolveCodexRuntime(f.deps);
+    expect(result.runtime).toEqual({ command: target, source: "fallback", version: "0.150.0" });
+    expect(codexRuntimeCommandForExecution(result.runtime)).toBe(target);
+    expect(f.probed).toEqual([target, target]);
+  });
+
+  for (const asynchronous of [false, true]) for (const source of ["environment", "configured"] as const) {
+    test(`selected app aliases retain the verified absolute command (async=${asynchronous}, source=${source})`, async () => {
+      const f = fixture();
+      const command = source === "environment" ? "codex" : posix.relative(process.cwd(), f.current);
+      f.versions.set(f.current, "0.162.0"); f.versions.set(command, "0.162.0");
+      f.deps.env!.PATH = posix.dirname(f.current);
+      if (source === "environment") {
+        f.deps.env!.CODEX_CLI_PATH = command;
+        f.pin("/fixture/pinned/codex", "pinned"); f.versions.set("/fixture/pinned/codex", "0.150.0");
+      } else f.pin(command, "pinned");
+      const result = asynchronous ? await resolveCodexRuntimeAsync(f.deps) : resolveCodexRuntime(f.deps);
+      expect(result.runtime).toEqual({ command: f.current, source, version: "0.162.0" });
+      expect(codexRuntimeCommandForExecution(result.runtime)).toBe(f.current);
+      expect(result.replacedConfigured).toBeUndefined();
+    });
+  }
+
+  test("macOS runtime memo identity binds the lookup directory and distinguishes absent PATH", () => {
+    const f = fixture(), cwd = process.cwd();
+    const before = codexRuntimeSelectionIdentity(f.deps);
+    try {
+      process.chdir(f.deps.env!.HOME!);
+      expect(codexRuntimeSelectionIdentity(f.deps)).not.toBe(before);
+    } finally { process.chdir(cwd); }
+    const { PATH: _path, ...withoutPath } = f.deps.env!;
+    expect(codexRuntimeSelectionIdentity({ ...f.deps, env: withoutPath })).not.toBe(before);
+  });
+
+  for (const consumer of ["sync-catalog", "async-catalog", "features", "login", "remote"] as const) test(`a rejected app cannot be retried as bare PATH codex by ${consumer}`, async () => {
+    const f = fixture(); f.versions.set(f.current, "0.162.0");
+    f.deps.macBundleTrustReason = () => "untrusted";
+    const rejected = resolveCodexRuntime(f.deps);
+    expect(rejected.runtime).toEqual({ command: "codex", source: "fallback", version: null });
+    let commands = 0;
+    const resolve = spyOn(runtimeModule, "resolveAndPersistCodexRuntime").mockReturnValue(rejected);
+    const resolveAsync = spyOn(runtimeModule, "resolveAndPersistCodexRuntimeAsync").mockResolvedValue(rejected);
+    const remoteResolve = spyOn(runtimeModule, "resolveCodexRuntimeAsync").mockResolvedValue(rejected);
+    const previousPath = process.env.PATH;
+    try {
+      if (consumer === "sync-catalog") {
+        expect(loadBundledCodexCatalog({ execFileSync: () => { commands++; throw new Error("must not execute"); } })).toBeNull();
+      } else if (consumer === "async-catalog") {
+        expect(await loadBundledCodexCatalogAsync({ execFile: async () => { commands++; throw new Error("must not execute"); } })).toBeNull();
+      } else if (consumer === "features") expect(() => codexFeaturesInvocation("enable")).toThrow("Codex CLI is unavailable");
+      else if (consumer === "login") expect(() => nativeMainCodexLoginInvocation()).toThrow("Codex CLI is unavailable");
+      else {
+        process.env.PATH = "";
+        const factory = new CodexRemoteWorkspaceRuntimeFactory();
+        await expect(factory.start({} as Parameters<typeof factory.start>[0])).rejects.toThrow("Codex CLI is unavailable");
+      }
+      expect(commands).toBe(0);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+      remoteResolve.mockRestore(); resolveAsync.mockRestore(); resolve.mockRestore();
+    }
+  });
+
+  for (const probeVersion of [true, false]) test(`async bundle trust yields before selection (probe=${probeVersion})`, async () => {
+    const f = fixture(); f.versions.set(f.current, "0.162.0");
+    let release!: (reason: string | null) => void, checked = 0, synchronousChecks = 0;
+    f.deps.macBundleTrustReason = () => { synchronousChecks++; return "sync verifier must not run"; };
+    f.deps.macBundleTrustReasonAsync = async () => { checked++; return new Promise(resolve => { release = resolve; }); };
+    const pending = resolveCodexRuntimeAsync({ ...f.deps, probeVersion });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(checked).toBe(1);
+    expect(synchronousChecks).toBe(0);
+    expect(f.probed).not.toContain(f.current);
+    release(null);
+    expect((await pending).runtime.command).toBe(f.current);
+    expect(checked).toBe(1);
+    expect(f.probed.includes(f.current)).toBe(probeVersion);
+  });
+
+  test("a cancelled asynchronous trust check cannot select or probe the app", async () => {
+    const f = fixture(); f.versions.set(f.current, "0.162.0");
+    const controller = new AbortController();
+    let release!: (reason: string | null) => void, checked = 0;
+    f.deps.macBundleTrustReasonAsync = async (_bundle, _binary, signal) => {
+      expect(signal).toBe(controller.signal); checked++;
+      return new Promise(resolve => { release = resolve; });
+    };
+    const pending = resolveCodexRuntimeAsync({ ...f.deps, signal: controller.signal });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(checked).toBe(1);
+    controller.abort(); release(null);
+    await expect(pending).rejects.toThrow("aborted");
+    expect(f.probed).not.toContain(f.current);
+  });
+
   for (const source of ["environment", "configured", "shim", "path", "installed", "fallback"] as const) {
     test(`${source} precedes the app during version discovery`, () => {
       const f = fixture();
@@ -85,7 +253,18 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
       if (source === "configured") f.pin(command, "pinned");
       if (source === "shim") writeFileSync(join(f.deps.configDir!, "codex-shim.json"), JSON.stringify({ originalPath: command }));
       if (source === "path") f.deps.env!.PATH = "/fixture/bin";
-      expect(resolveCodexRuntime(f.deps).runtime).toEqual({ command, source, version: "0.150.0" });
+      if (source === "fallback") {
+        const target = "/fixture/bin/codex", exec = f.deps.execFileSync!;
+        f.deps.env!.PATH = "/fixture/bin"; f.versions.set(target, "0.150.0");
+        let attempts = 0;
+        f.deps.execFileSync = (file, args, options) => {
+          if (file === target && attempts++ === 0) throw new Error("first version probe unavailable");
+          return exec(file, args, options);
+        };
+      }
+      expect(resolveCodexRuntime(f.deps).runtime).toEqual({
+        command: source === "fallback" ? "/fixture/bin/codex" : command, source, version: "0.150.0",
+      });
     });
   }
 
@@ -216,6 +395,27 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
     expect(resolveCodexRuntime(f.deps).runtime.source).toBe("fallback");
   });
 
+  for (const unsafeParent of [false, true]) test(`established links use the real ownership and bundle checks (unsafe parent=${unsafeParent})`, () => {
+    const f = fixture();
+    mkdirSync(posix.dirname(f.current), { recursive: true }); writeFileSync(f.current, "fixture executable");
+    const link = posix.join(f.deps.env!.HOME!, ".local/bin/codex");
+    mkdirSync(posix.dirname(link), { recursive: true }); symlinkSync(f.current, link);
+    if (unsafeParent) chmodSync(posix.dirname(link), 0o777);
+    const checked: string[] = [];
+    const trust: BundleTrustDeps = {
+      uid: process.getuid!(), readlink: path => readlinkSync(path),
+      stat(path) { try { const s = lstatSync(path); return { uid: s.uid, gid: s.gid, mode: s.mode,
+        isFile: s.isFile(), isDirectory: s.isDirectory(), isSymbolicLink: s.isSymbolicLink() }; } catch { return null; } },
+      codesign(args) { checked.push(args.at(-1)!); return { status: 0, output: `TeamIdentifier=${OPENAI_TEAM_ID}\n` }; },
+    };
+    f.deps.macBundleTrustReason = (bundle, command) => untrustedChatgptBundleReason(bundle, command, trust, { resolveLinks: true });
+    f.versions.set(link, "0.150.0");
+    const result = resolveCodexRuntime(f.deps);
+    expect(result.runtime.command).toBe(unsafeParent ? "codex" : link);
+    expect(f.probed.includes(link)).toBe(!unsafeParent);
+    expect(checked.includes(realpathSync(f.current))).toBe(!unsafeParent);
+  });
+
   for (const probeVersion of [true, false]) test(`persisted app identity is rechecked after replacement (probe=${probeVersion})`, () => {
     const f = fixture(); f.pin(f.current); f.versions.set(f.current, "0.162.0");
     expect(resolveCodexRuntime({ ...f.deps, probeVersion }).runtime.command).toBe(f.current);
@@ -269,6 +469,11 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
   test("an injected bundle trust check cannot populate the process memo", () => {
     expect(() => setCodexRuntimeResolveCacheForTests({ runtime: { command: "codex", version: null, source: "fallback" }, failures: [] },
       { macBundleTrustReason: () => null })).toThrow("Injected runtime dependencies");
+  });
+
+  test("an injected asynchronous bundle trust check cannot populate the process memo", () => {
+    expect(() => setCodexRuntimeResolveCacheForTests({ runtime: { command: "codex", version: null, source: "fallback" }, failures: [] },
+      { macBundleTrustReasonAsync: async () => null })).toThrow("Injected runtime dependencies");
   });
 });
 

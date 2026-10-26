@@ -1706,17 +1706,17 @@ describe("cli surface", () => {
   test("codexFeaturesInvocation: POSIX passthrough; win32 .cmd routed through cmd.exe (devlog 260715 020)", () => {
     const execFileSync = () => "codex-cli 0.145.0";
     expect(codexFeaturesInvocation("enable", "multi_agent_v2", "darwin", {
-      env: { PATH: "" },
+      env: { PATH: "/test/codex/bin" },
       configDir: mkdtempSync(join(tmpdir(), "ocx-v2-inv-posix-")),
-      existsSync: () => false,
+      existsSync: (p: string) => p === "/test/codex/bin/codex",
       execFileSync,
-    })).toEqual({ file: "codex", args: ["features", "enable", "multi_agent_v2"], options: {} });
+    })).toEqual({ file: "/test/codex/bin/codex", args: ["features", "enable", "multi_agent_v2"], options: {} });
     expect(codexFeaturesInvocation("enable", "default_mode_request_user_input", "darwin", {
-      env: { PATH: "" },
+      env: { PATH: "/test/codex/bin" },
       configDir: mkdtempSync(join(tmpdir(), "ocx-v2-inv-posix-")),
-      existsSync: () => false,
+      existsSync: (p: string) => p === "/test/codex/bin/codex",
       execFileSync,
-    })).toEqual({ file: "codex", args: ["features", "enable", "default_mode_request_user_input"], options: {} });
+    })).toEqual({ file: "/test/codex/bin/codex", args: ["features", "enable", "default_mode_request_user_input"], options: {} });
     // Explicit CODEX_CLI_PATH pointing at a .cmd (npm-only Windows Codex install).
     const inv = codexFeaturesInvocation("disable", "multi_agent_v2", "win32", {
       env: { CODEX_CLI_PATH: "C:\\npm\\codex.cmd", ComSpec: "C:\\WINDOWS\\system32\\cmd.exe", PATH: "" },
@@ -1747,6 +1747,7 @@ describe("cli surface", () => {
     process.env.OPENCODEX_HOME = mkdtempSync(join(tmpdir(), "ocx-cli-config-"));
     const logs: string[] = [];
     const deps = {
+      featuresInvocation: (action: "enable" | "disable") => ({ file: "fixture-codex", args: ["features", action, "multi_agent_v2"], options: {} }),
       execFile: (_file: string, args: string[]) => {
         // POSIX: ["features", "enable|disable", ...]; win32 .cmd: ["/d","/s","/c","...enable..."]
         const joined = args.join(" ");

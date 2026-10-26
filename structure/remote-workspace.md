@@ -26,6 +26,9 @@ RPC v1 peers fail closed and must upgrade together rather than fall back to imme
 `src/remote-control/workspace-hub.ts`, `src/remote-control/workspace-device.ts` and `src/remote-control/workspace-sessions.ts` own separate persisted state. `src/remote-control/workspace-secret-store.ts` requires private permissions and rejects access failures rather than treating them as first-run absence. Publication reuses `src/config/atomic-write.ts`; workspace file publication uses the remote-workspace publisher in `src/lib/windows-atomic-replace.ts`.
 
 `src/remote-control/workspace-runtime.ts` is the lazy composition owner for Hub services. Codex, Claude and Pi adapters keep model processes on the Hub and expose selected remote tools. Their source configuration is not evidence of live CLI confinement. `src/cli/remote-workspace.ts` contains registered executor pair/agent/status handling; the machine-readable entries live in `src/cli/capabilities.ts`.
+`src/remote-control/workspace-codex-runtime.ts` rechecks runtime resolution at session start.
+An unsuccessful diagnostic fallback refuses before PATH lookup or process setup, even if a
+previous availability check succeeded; an explicit injected test command keeps its existing seam.
 
 The explicit hub status/runtimes/sessions branch selects `src/cli/remote-workspace-hub.ts` before executor storage. It performs fixed management reads and projects public devices/root labels, named runtime availability and session events; it exposes no pairing or session mutation. The outer management dispatcher returns available:false with HTTP200 when activation is off; CLI reports that observation with exit1 and fixed recovery guidance, distinct from an available Hub with empty lists. Client-role refusal, transport errors and malformed observations remain nonzero.
 

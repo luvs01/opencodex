@@ -64,6 +64,19 @@ through the filesystem root. Ancestors must be owned by this user or root; group
 is accepted only for trusted sticky ancestors or root-owned, non-world-writable containers
 whose group matches the local directory service's admin group. An unreadable admin-group lookup
 does not grant that exception. These checks do not attest ACL or mount-policy restrictions.
+Runtime discovery in `src/codex/runtime.ts` explicitly enables owned-link resolution: each link
+and directory along the traversal must be root- or current-user-owned with safe replacement
+permissions, and the canonical target must remain inside the canonical bundle. Signature checks
+cover that bundle and target; ordinary launch/restore retain their strict direct-path policy.
+The async trust verifier shares these filesystem checks and runs directory-service/signature
+commands asynchronously, with 5-second/30-second deadlines, cancellation and 64 KiB output caps.
+Bare and relative macOS runtime commands resolve to the actual executable before these checks;
+PATH lookup preserves empty/relative entries and skips non-executable files. Accepted results retain
+the verified absolute command for later execution. Requested aliases remain selection/diagnostic
+metadata, and the runtime memo distinguishes absent PATH and changes of working directory.
+`tests/codex-integration/codex-runtime-macos-desktop.test.ts` covers trust-before-probe,
+nonblocking deferred selection, cancellation, bare fallback/relative aliases and established-link permission boundaries;
+`tests/clients/desktop-app-server-shim-launcher.test.ts` checks sync/async trust-policy parity.
 Restore does not require the experimental flag or a bundled
 app-server binary. It relaunches without that override and removes the launcher only after open succeeds; when no
 `com.openai.codex` bundle is found it removes the launcher, relaunches nothing and

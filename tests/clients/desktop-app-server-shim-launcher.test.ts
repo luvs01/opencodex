@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { OPENAI_TEAM_ID, untrustedChatgptBundleReason, type BundleTrustDeps } from "../../src/chatgpt/app-server-shim/bundle-trust";
+import { OPENAI_TEAM_ID, untrustedChatgptBundleReason, untrustedChatgptBundleReasonAsync, type BundleTrustDeps } from "../../src/chatgpt/app-server-shim/bundle-trust";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -170,6 +170,25 @@ describe("bundle trust before the launcher is written", () => {
     expect(untrustedChatgptBundleReason(root, binary, deps({ verify: 1 }))).toContain("code-signature");
     expect(untrustedChatgptBundleReason(root, binary, deps({ team: "ABCDE12345" }))).toContain("not signed by OpenAI");
     expect(untrustedChatgptBundleReason(root, "/tmp/codex", deps())).toContain("outside the bundle");
+  });
+
+  test("asynchronous verification retains the strict signature and filesystem policy", async () => {
+    for (const scenario of [{}, { owner: 502 }, { mode: 0o777 }, { verify: 1 }, { team: "ABCDE12345" }]) {
+      const sync = deps(scenario);
+      const asynchronous = { ...sync, codesign: async (args: readonly string[]) => sync.codesign(args) };
+      expect(await untrustedChatgptBundleReasonAsync(root, binary, asynchronous))
+        .toBe(untrustedChatgptBundleReason(root, binary, sync));
+    }
+  });
+
+  test("cancellation between signature commands prevents further verification", async () => {
+    const controller = new AbortController(), sync = deps();
+    let commands = 0;
+    const result = await untrustedChatgptBundleReasonAsync(root, binary, { ...sync,
+      codesign: async args => { commands++; controller.abort(); return sync.codesign(args); },
+    }, { signal: controller.signal });
+    expect(result).toContain("aborted");
+    expect(commands).toBe(1);
   });
 });
 

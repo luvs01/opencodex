@@ -108,6 +108,7 @@ function runStatusProbe(options: {
   catalog?: string;
   connectRejectCatalog?: string;
   preferred?: "valid" | "failed" | "missing";
+  unavailable?: boolean;
   persisted?: boolean;
   fullDiagnostics?: boolean;
   /** Windows-only negative control; always a test-owned external install root. */
@@ -157,8 +158,8 @@ function runStatusProbe(options: {
       const selectedDir = join(opencodexHome, "selected");
       const lowerDir = join(opencodexHome, "lower");
       const rejectedDir = join(opencodexHome, "rejected");
-      const selected = writeRuntimeFixture(selectedDir, "0.145.0");
-      writeRuntimeFixture(lowerDir, "99.0.0");
+      const selected = writeRuntimeFixture(selectedDir, "0.145.0", !options.unavailable);
+      writeRuntimeFixture(lowerDir, "99.0.0", !options.unavailable);
       if (options.externalInstalledRoot && process.platform === "win32") {
         // Use a real executable for the Windows-only installed-root control.
         copyFileSync(process.execPath, join(lowerDir, "codex.exe"));
@@ -548,6 +549,14 @@ describe("connected-client runtime probe scope", () => {
     expect(missing).toHaveLength(1);
     expect(missing[0]?.reason).toBe("path does not exist");
     expect(probe.runtime?.selectionUnchanged).toBe(true);
+  }, SPAWN_BUDGET_MS);
+
+  test.each(["connect", "status"] as const)("%s does not retry the rejected PATH runtime for catalog inspection", surface => {
+    const probe = runStatusProbe({ connected: true, ladder: "observed", unavailable: true, surface });
+    expect(probe.status.readiness).toBe("unverified");
+    expect(probe.runtime?.beforeDiagnostics.selected.length).toBeGreaterThan(0);
+    expect(probe.runtime?.beforeDiagnostics.selected.every(command => command === "--version")).toBe(true);
+    expect(probe.runtime?.beforeDiagnostics.lower.every(command => command === "--version")).toBe(true);
   }, SPAWN_BUDGET_MS);
 
   test("a general ocx status does not re-probe the runtime it already resolved", () => {

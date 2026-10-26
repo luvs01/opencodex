@@ -19,7 +19,7 @@ import { getAgentsEnabled, getAgentsMaxDepth, getLogicalMaxThreads, getMultiAgen
 
 import { commandInvocation, type SpawnInvocation } from "../lib/win-exec";
 import { deleteConfigTopLevelKey, loadConfig, saveConfig } from "../config";
-import { resolveAndPersistCodexRuntime, type ResolveCodexRuntimeDeps } from "../codex/runtime";
+import { codexRuntimeCommandForExecution, resolveAndPersistCodexRuntime, type ResolveCodexRuntimeDeps } from "../codex/runtime";
 
 export interface V2CliDeps {
   execFile?: (file: string, args: string[], options?: SpawnInvocation["options"] & { env?: NodeJS.ProcessEnv }) => void;
@@ -59,10 +59,8 @@ export function codexFeaturesInvocation(
     configDir: deps.configDir,
     readFileSync: deps.readFileSync,
   });
-  if (deps.requireAvailable && resolved.runtime.source === "fallback" && resolved.runtime.version === null) {
-    throw Object.assign(new Error("spawn codex ENOENT"), { code: "ENOENT" });
-  }
-  const command = resolved.runtime.command || "codex";
+  const command = codexRuntimeCommandForExecution(resolved.runtime);
+  if (!command) throw Object.assign(new Error("Codex CLI is unavailable"), { code: "ENOENT" });
   return commandInvocation(command, ["features", action, feature], platform, deps);
 }
 

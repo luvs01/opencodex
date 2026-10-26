@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, posix } from "node:path";
 import { atomicWriteFile, getConfigDir } from "../config";
@@ -9,7 +9,7 @@ import { decodeOverlayState } from "./shim-state-file";
 import { redactSecretString, redactUserPath } from "../lib/redact";
 import { SUBPROCESS_KILL_GRACE_MS, waitForSubprocessExit } from "../lib/bounded-subprocess";
 import { isPassiveRead } from "../lib/passive-read";
-import { untrustedChatgptBundleReason } from "../chatgpt/app-server-shim/bundle-trust";
+import { untrustedChatgptBundleReason, untrustedChatgptBundleReasonAsync } from "../chatgpt/app-server-shim/bundle-trust";
 
 export type CodexRuntimeSource =
   | "environment"
@@ -95,6 +95,8 @@ export interface ResolveCodexRuntimeDeps {
   readBundleIdentifier?: (infoPlistPath: string) => string | null;
   /** macOS bundle publisher/filesystem trust check; injected checks bypass the memo. */
   macBundleTrustReason?: (bundleRoot: string, binary: string) => string | null;
+  /** Async trust verifier for server paths; injected checks bypass the process memo. */
+  macBundleTrustReasonAsync?: (bundleRoot: string, binary: string, signal?: AbortSignal) => Promise<string | null>;
   now?: () => number;
   /**
    * When false, stop after the first valid priority candidate (skip PATH-wide
@@ -425,7 +427,7 @@ export function clearPersistedCodexRuntime(deps: ResolveCodexRuntimeDeps = {}): 
   }
 }
 
-type VersionProbeResult = { ok: true; version: string | null } | { ok: false; reason: string };
+type VersionProbeResult = { ok: true; version: string | null; command: string } | { ok: false; reason: string };
 
 /** Checks that need no exec; a non-null answer settles the candidate without running `--version`. */
 function versionProbePrecheck(command: string, deps: ResolveCodexRuntimeDeps): VersionProbeResult | null {
@@ -444,7 +446,6 @@ function versionProbePrecheck(command: string, deps: ResolveCodexRuntimeDeps): V
   if (!macCodexAppIdentityMatches(command, deps)) {
     return { ok: false, reason: "Codex app bundle identity mismatch or unavailable" };
   }
-  if (deps.probeVersion === false) return { ok: true, version: null };
   return null;
 }
 
@@ -467,10 +468,10 @@ function versionProbeInvocation(command: string, deps: ResolveCodexRuntimeDeps, 
   };
 }
 
-function versionProbeOutput(output: string): VersionProbeResult {
+function versionProbeOutput(output: string, command: string): VersionProbeResult {
   const version = parseCodexVersionOutput(output);
   if (!version) return { ok: false, reason: "unrecognized --version output" };
-  return { ok: true, version };
+  return { ok: true, version, command };
 }
 
 function versionProbeError(error: unknown, probeHome: string | undefined): VersionProbeResult {
@@ -490,8 +491,14 @@ function removeProbeHome(probeHome: string | undefined): void {
 }
 
 function probeVersion(command: string, deps: ResolveCodexRuntimeDeps): VersionProbeResult {
+  const executable = macCodexProbeCommand(command, deps);
+  if (!executable) return { ok: false, reason: CODEX_PROGRAM_NOT_FOUND_REASON };
+  command = executable;
   const settled = versionProbePrecheck(command, deps);
   if (settled) return settled;
+  const trustReason = macCodexAppTrustReason(command, deps);
+  if (trustReason) return { ok: false, reason: trustReason };
+  if (deps.probeVersion === false) return { ok: true, version: null, command };
   const exec = deps.execFileSync ?? (execFileSync as unknown as RuntimeExecFile);
   // Sandbox the probe's CODEX_HOME: a real Codex CLI creates state (tmp/, logs) under
   // CODEX_HOME even for `--version`, and the probe inherits the caller's env — so a
@@ -502,7 +509,7 @@ function probeVersion(command: string, deps: ResolveCodexRuntimeDeps): VersionPr
   try {
     probeHome = mkdtempSync(join(tmpdir(), "ocx-codex-probe-"));
     const { file, args, options } = versionProbeInvocation(command, deps, probeHome);
-    return versionProbeOutput(exec(file, args, options));
+    return versionProbeOutput(exec(file, args, options), command);
   } catch (error) {
     return versionProbeError(error, probeHome);
   } finally {
@@ -558,14 +565,21 @@ export const execCodexFileAsync: RuntimeExecFileAsync = (file, args, options) =>
 
 /** probeVersion with the same sandbox and outcomes, but the exec never holds the event loop. */
 async function probeVersionAsync(command: string, deps: ResolveCodexRuntimeDeps): Promise<VersionProbeResult> {
+  const executable = macCodexProbeCommand(command, deps);
+  if (!executable) return { ok: false, reason: CODEX_PROGRAM_NOT_FOUND_REASON };
+  command = executable;
   const settled = versionProbePrecheck(command, deps);
   if (settled) return settled;
+  const trustReason = await macCodexAppTrustReasonAsync(command, deps);
+  if (deps.signal?.aborted) throw new Error("Codex runtime resolution aborted");
+  if (trustReason) return { ok: false, reason: trustReason };
+  if (deps.probeVersion === false) return { ok: true, version: null, command };
   const exec = deps.execFile ?? execCodexFileAsync;
   let probeHome: string | undefined;
   try {
     probeHome = mkdtempSync(join(tmpdir(), "ocx-codex-probe-"));
     const { file, args, options } = versionProbeInvocation(command, deps, probeHome);
-    return versionProbeOutput(await exec(file, args, { ...options, signal: deps.signal }));
+    return versionProbeOutput(await exec(file, args, { ...options, signal: deps.signal }), command);
   } catch (error) {
     return versionProbeError(error, probeHome);
   } finally {
@@ -618,6 +632,27 @@ function pathCandidates(deps: ResolveCodexRuntimeDeps): string[] {
   return [...new Set(out)];
 }
 
+/** Resolve the executable before app identity/trust checks, including a bare PATH retry. */
+function macCodexProbeCommand(command: string, deps: ResolveCodexRuntimeDeps): string | null {
+  if ((deps.platform ?? process.platform) !== "darwin" || posix.isAbsolute(command)) return command;
+  if (command.includes("/")) return posix.resolve(command);
+  // execFile uses the default POSIX path only when PATH is absent. Empty and relative
+  // entries refer to the current directory; dropping them could inspect a different binary.
+  const path = (deps.env ?? process.env).PATH ?? "/usr/bin:/bin";
+  for (const directory of path.split(":")) {
+    const candidate = posix.resolve(directory || ".", command);
+    if (deps.existsSync) {
+      if (deps.existsSync(candidate)) return candidate;
+      continue;
+    }
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch { /* exec skips absent or non-executable PATH entries */ }
+  }
+  return null;
+}
+
 /** Conventional Codex desktop bundles, ordered system before user. */
 function macCodexAppBundles(deps: ResolveCodexRuntimeDeps): string[] {
   const env = deps.env ?? process.env;
@@ -641,8 +676,10 @@ function realpathOrNull(path: string): string | null {
  * let a canonical bundle path skip the identity check or the handover exclusion.
  */
 function macCodexAppBundleFor(command: string, deps: ResolveCodexRuntimeDeps): string | undefined {
-  if ((deps.platform ?? process.platform) !== "darwin" || !posix.isAbsolute(command)) return undefined;
-  const forms = [posix.normalize(command), realpathOrNull(command)].filter((form): form is string => Boolean(form));
+  if ((deps.platform ?? process.platform) !== "darwin") return undefined;
+  const executable = macCodexProbeCommand(command, deps);
+  if (!executable) return undefined;
+  const forms = [posix.normalize(executable), realpathOrNull(executable)].filter((form): form is string => Boolean(form));
   return macCodexAppBundles(deps).find(bundle => {
     const roots = [posix.normalize(bundle), realpathOrNull(bundle)].filter((root): root is string => Boolean(root));
     return forms.some(form => roots.some(root => form.startsWith(`${root}/`)));
@@ -653,9 +690,28 @@ function macCodexAppIdentityMatches(command: string, deps: ResolveCodexRuntimeDe
   const bundle = macCodexAppBundleFor(command, deps);
   if (!bundle) return true;
   try {
-    if ((deps.readBundleIdentifier ?? readBoundedBundleIdentifier)(`${bundle}/Contents/Info.plist`) !== "com.openai.codex") return false;
-    return !(deps.macBundleTrustReason ?? untrustedChatgptBundleReason)(bundle, command);
+    return (deps.readBundleIdentifier ?? readBoundedBundleIdentifier)(`${bundle}/Contents/Info.plist`) === "com.openai.codex";
   } catch { return false; }
+}
+
+function macCodexAppTrustReason(command: string, deps: ResolveCodexRuntimeDeps): string | null {
+  const bundle = macCodexAppBundleFor(command, deps);
+  if (!bundle) return null;
+  try {
+    return deps.macBundleTrustReason ? deps.macBundleTrustReason(bundle, command)
+      : untrustedChatgptBundleReason(bundle, command, undefined, { resolveLinks: true });
+  } catch { return "Codex app bundle trust check unavailable"; }
+}
+
+async function macCodexAppTrustReasonAsync(command: string, deps: ResolveCodexRuntimeDeps): Promise<string | null> {
+  const bundle = macCodexAppBundleFor(command, deps);
+  if (!bundle) return null;
+  try {
+    if (deps.macBundleTrustReasonAsync) return await deps.macBundleTrustReasonAsync(bundle, command, deps.signal);
+    // Keep the existing synchronous injection usable by deterministic filesystem fixtures.
+    if (deps.macBundleTrustReason) return deps.macBundleTrustReason(bundle, command);
+    return await untrustedChatgptBundleReasonAsync(bundle, command, undefined, { resolveLinks: true, signal: deps.signal });
+  } catch { return "Codex app bundle trust check unavailable"; }
 }
 
 /** XML plist subset only: no external entity expansion, subprocess, or unbounded read. */
@@ -1020,6 +1076,7 @@ function resolveCacheKey(deps: ResolveCodexRuntimeDeps): string | null {
     || deps.readFileSync
     || deps.readBundleIdentifier
     || deps.macBundleTrustReason
+    || deps.macBundleTrustReasonAsync
     || deps.readdirSync
     || deps.statSync
     || deps.configDir
@@ -1036,8 +1093,9 @@ export function codexRuntimeSelectionIdentity(deps: ResolveCodexRuntimeDeps = {}
   return JSON.stringify({
     configDir: deps.configDir ?? getConfigDir(),
     cli: env.CODEX_CLI_PATH ?? "",
-    path: env.PATH ?? "",
+    path: env.PATH ?? null,
     platform: deps.platform ?? process.platform,
+    cwd: (deps.platform ?? process.platform) === "darwin" ? process.cwd() : undefined,
     discover: deps.discoverAlternatives !== false,
     probeVersion: deps.probeVersion !== false,
     localAppData: env.LOCALAPPDATA?.trim() ?? "",
@@ -1109,8 +1167,13 @@ export async function resolveCodexRuntimeAsync(
 async function resolveCodexRuntimeObservationAsync(deps: ResolveCodexRuntimeDeps): Promise<AsyncRuntimeObservation> {
   const inputs = codexRuntimeSelectionIdentity(deps);
   const observed = (result: ResolveCodexRuntimeResult, epoch: number | null): AsyncRuntimeObservation => ({ result, inputs, epoch });
-  // A deferred selection never execs, so the sync path is already nonblocking.
-  if (deps.probeVersion === false) return observed(resolveCodexRuntime(deps), resolveCacheEpoch);
+  // Skipping --version still requires asynchronous publisher verification on macOS.
+  if (deps.probeVersion === false) {
+    const epoch = resolveCacheEpoch;
+    const result = await resolveCodexRuntimeUncachedAsync(deps);
+    const current = !deps.signal?.aborted && epoch === resolveCacheEpoch && codexRuntimeSelectionIdentity(deps) === inputs;
+    return observed(result, current ? epoch : null);
+  }
   const cacheKey = resolveCacheKey({ ...deps, signal: undefined });
   if (cacheKey && resolveCache && resolveCache.key === cacheKey && Date.now() - resolveCache.at < RESOLVE_CACHE_MS) {
     return observed(cloneAndDeepFreeze(resolveCache.value), resolveCacheEpoch);
@@ -1158,7 +1221,8 @@ export function getCodexRuntimeSnapshot(): ResolveCodexRuntimeResult {
   // A passive read (a Remote Link Child's, #6959) starts no version probes on this machine.
   if (!isPassiveRead()) resolveCodexRuntimeAsync().catch(() => { /* the next read retries */ });
   if (memo) return cloneAndDeepFreeze(memo.value);
-  return resolveCodexRuntime({ discoverAlternatives: false, probeVersion: false });
+  return resolveCodexRuntime({ discoverAlternatives: false, probeVersion: false,
+    ...(process.platform === "darwin" ? { macBundleTrustReason: () => "Codex app bundle verification pending" } : {}) });
 }
 
 /** Test-only: drop the short-lived process resolve cache. */
@@ -1217,6 +1281,9 @@ function* resolveCodexRuntimeSteps(
 
   const seen = new Set<string>();
   const valid: ResolvedCodexRuntime[] = [];
+  // Priority and configured diagnostics follow the requested alias; execution keeps
+  // the absolute command whose identity and trust were checked by the probe.
+  const requestedCommands = new Map<ResolvedCodexRuntime, string>();
   // A caller that declined PATH-wide discovery normally gets the first valid
   // candidate and nothing else, which is right for a hot path and wrong for
   // exactly one arrangement: an unpinned persisted selection sitting in front of
@@ -1253,7 +1320,9 @@ function* resolveCodexRuntimeSteps(
       failures.push({ command: candidate.command, source: candidate.source, reason: probed.reason });
       continue;
     }
-    valid.push({ command: candidate.command, version: probed.version, source: candidate.source });
+    const runtime = { command: probed.command, version: probed.version, source: candidate.source };
+    requestedCommands.set(runtime, candidate.command);
+    valid.push(runtime);
   }
 
   if (valid.length === 0) {
@@ -1269,12 +1338,12 @@ function* resolveCodexRuntimeSteps(
   let supersededDiscovered: ResolveCodexRuntimeResult["supersededDiscovered"];
 
   const envValid = envPath
-    ? valid.find(item => sameRuntimeCommand(item.command, envPath) && item.source === "environment")
+    ? valid.find(item => sameRuntimeCommand(requestedCommands.get(item)!, envPath) && item.source === "environment")
     : undefined;
   if (envValid) selected = envValid;
 
   if (persisted?.command) {
-    const configuredStillValid = valid.some(item => sameRuntimeCommand(item.command, persisted.command));
+    const configuredStillValid = valid.some(item => sameRuntimeCommand(requestedCommands.get(item)!, persisted.command));
     // Only emit replacement diagnostics when we actually searched alternatives or
     // the preferred configured runtime was probed and rejected.
     const configuredRejected = failures.some(item => sameRuntimeCommand(item.command, persisted.command));
@@ -1291,7 +1360,7 @@ function* resolveCodexRuntimeSteps(
       // Keep priority-selected replacement (already in `selected`).
     } else if (!envValid && configuredStillValid) {
       // Stick to configured even when a later PATH entry is also valid.
-      selected = valid.find(item => sameRuntimeCommand(item.command, persisted.command)) ?? selected;
+      selected = valid.find(item => sameRuntimeCommand(requestedCommands.get(item)!, persisted.command)) ?? selected;
       // An explicit pin is the user's decision and this change must never
       // silently replace it — issue 4204 says so in as many words. Stick.
       // An unpinned record (missing origin, or origin "discovered") may hand
@@ -1415,6 +1484,11 @@ function persistResolvedCodexRuntime(
     if (pinVanished) clearPersistedCodexRuntime(deps);
   }
   return result;
+}
+
+/** An unresolved fallback is diagnostic text, never permission to retry a rejected PATH entry. */
+export function codexRuntimeCommandForExecution(runtime: ResolvedCodexRuntime): string | null {
+  return runtime.source === "fallback" && runtime.version === null ? null : runtime.command || null;
 }
 
 export function formatRuntimeLogLine(runtime: ResolvedCodexRuntime): string {
