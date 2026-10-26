@@ -371,15 +371,18 @@ fn async_runtime_persistence_rejects_pin_changes_cache_clear_and_stopped_sources
 const initial = {version:1,command:'C:\\fixture\\codex.exe',source:'environment',selectedVersion:'0.159.0',
   origin:'discovered',updatedAt:'2026-10-08T00:00:00Z'};
 async function resolveCase(change) {
-  let release;
+  let release, entered;
+  const probing = new Promise(resolve=>{entered=resolve});
   let bytes = JSON.stringify(initial);
   let current = true;
   const dir = join(root,change); fs.mkdirSync(dir);
   const deps = {configDir:dir,env:{CODEX_CLI_PATH:initial.command,PATH:''},platform:'win32',
     discoverAlternatives:false,existsSync:()=>true,readdirSync:()=>[],
     readFileSync:path=>{if(path.endsWith('codex-runtime.json')) return bytes; throw Error('absent')},
-    execFile:()=>new Promise(resolve=>{release=resolve})};
+    execFile:()=>new Promise(resolve=>{release=resolve;entered()})};
   const pending = runtime.resolveAndPersistCodexRuntimeAsync(deps,()=>current);
+  // Trust checks can suspend before execFile. Mutate only after the version probe is held.
+  await Promise.race([probing,pending.then(()=>{throw Error('runtime settled before version probe entry')})]);
   if(change==='pin') bytes = JSON.stringify({...initial,origin:'pinned'}); // same timestamp and command
   if(change==='clear') runtime.clearCodexRuntimeResolveCache();
   if(change==='stop') current = false;
