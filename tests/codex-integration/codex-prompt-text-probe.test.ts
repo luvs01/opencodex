@@ -697,6 +697,61 @@ describe("unmapped layers", () => {
 });
 
 describe("runtime resolution and failure classification", () => {
+  test("the prompt deadline cancels pending runtime verification and preserves the base prompt", async () => {
+    const home = promptHome({ "config.toml": 'model = "gpt-test"\nmodel_instructions_file = "base.md"\n', "base.md": "Base prompt body." });
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    const missing: runtimeModule.ResolveCodexRuntimeResult = { runtime: { command: "codex", source: "fallback", version: null }, failures: [] };
+    let observedSignal: AbortSignal | undefined, release!: () => void;
+    const asynchronous = spyOn(runtimeModule, "resolveCodexRuntimeAsync").mockImplementation(options => {
+      observedSignal = options?.signal;
+      return new Promise((resolve, reject) => {
+        release = () => resolve(missing);
+        observedSignal?.addEventListener("abort", () => reject(observedSignal!.reason), { once: true });
+      });
+    });
+    const pending = probePromptText(20);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 80));
+      expect(observedSignal?.aborted).toBe(true);
+      const result = await pending;
+      expect(result).toMatchObject({ ok: false, detail: "prompt probe timed out", failure: { kind: "execution-failed" } });
+      expect(result.base).toMatchObject({ text: "Base prompt body.", reason: "ok" });
+      expect(promptTextProbeSpawnAttemptsForTests()).toBe(0);
+    } finally {
+      release?.(); await pending; asynchronous.mockRestore();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
+  test("runtime verification and prompt execution share one deadline", async () => {
+    const started = join(root(), "deadline-child.txt");
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = root();
+    const asynchronous = spyOn(runtimeModule, "resolveCodexRuntimeAsync").mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      setPromptTextProbeCommandForTests({ binary: process.execPath, args: ["-e", [
+        `require("node:fs").writeFileSync(${JSON.stringify(started)}, "started");`,
+        `setTimeout(() => process.stdout.write(${JSON.stringify(VALID_PROBE_OUTPUT)}), 600);`,
+      ].join("")] });
+      return { runtime: { command: process.execPath, source: "installed", version: null }, failures: [] };
+    });
+    try {
+      const first = probePromptText(1_000);
+      await waitUntil(() => existsSync(started), "deadline child start");
+      const second = probePromptText(1_000);
+      const result = await first;
+      expect(result).toMatchObject({ ok: false, detail: "prompt probe timed out", failure: { kind: "execution-failed" } });
+      // A later caller has its own remaining budget and keeps the shared child alive.
+      expect((await second).ok).toBe(true);
+      expect(promptTextProbeSpawnAttemptsForTests()).toBe(1);
+      expect(existsSync(started)).toBe(true);
+    } finally {
+      asynchronous.mockRestore();
+      if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
   test.each([false, true])("publisher verification uses the asynchronous resolver before any prompt process starts (cancelled: %s)", async cancelled => {
     const missing: runtimeModule.ResolveCodexRuntimeResult = { runtime: { command: "codex", source: "fallback", version: null }, failures: [] };
     let release!: () => void, finished = false;
@@ -709,9 +764,12 @@ describe("runtime resolution and failure classification", () => {
       const pending = probePromptText(2000, signal).finally(() => { finished = true; });
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(synchronous).not.toHaveBeenCalled();
-      expect(asynchronous).toHaveBeenCalledWith({ discoverAlternatives: false, probeVersion: false, signal });
+      const resolverSignal = asynchronous.mock.calls[0]?.[0]?.signal;
+      expect(asynchronous).toHaveBeenCalledWith({ discoverAlternatives: false, probeVersion: false, signal: resolverSignal });
+      expect(resolverSignal).toBeInstanceOf(AbortSignal);
+      expect(resolverSignal!.aborted).toBe(false);
       expect(finished).toBe(false); expect(promptTextProbeSpawnAttemptsForTests()).toBe(0);
-      if (cancelled) controller.abort();
+      if (cancelled) { controller.abort(); expect(resolverSignal!.aborted).toBe(true); }
       release(); const result = await pending; expect(result.ok).toBe(false);
       if (cancelled) expect(result.detail).toBe("prompt probe cancelled");
     } finally { release?.(); asynchronous.mockRestore(); synchronous.mockRestore(); }

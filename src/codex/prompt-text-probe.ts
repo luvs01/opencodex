@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { expandUserPath } from "../config";
+import { clearableDeadline } from "../lib/abort";
 import { parseCatalogJson, readCodexCatalogPathForHome, type RawCatalog, type RawEntry } from "./catalog/parsing";
 import { codexExecInvocation } from "./exec-invocation";
 import { resolveCodexHomeDir } from "./home";
@@ -859,6 +860,26 @@ export async function probePromptText(
   timeoutMs = 15_000,
   signal?: AbortSignal,
   promptStateFingerprint: string | null = null,
+): Promise<PromptTextProbe> {
+  // One caller budget includes publisher verification and waiting on a shared child.
+  // Keep the configured subprocess budget in its flight key so equal callers still join.
+  const deadline = clearableDeadline(timeoutMs, signal);
+  try {
+    const result = await probePromptTextWithinDeadline(timeoutMs, deadline.signal, promptStateFingerprint);
+    if (!deadline.didExpire()) return result;
+    const command = `${result.runtime?.command ?? "codex"} debug prompt-input`;
+    return { ...result, ok: false, detail: "prompt probe timed out", failure: {
+      kind: "execution-failed", command, detail: `codex prompt probe timed out: ${command}`,
+    } };
+  } finally {
+    deadline.clear();
+  }
+}
+
+async function probePromptTextWithinDeadline(
+  timeoutMs: number,
+  signal: AbortSignal,
+  promptStateFingerprint: string | null,
 ): Promise<PromptTextProbe> {
   // The probe runs in CODEX_HOME, never in a caller-supplied directory. A `cwd`
   // parameter let an authenticated request read any readable folder's AGENTS.md,
