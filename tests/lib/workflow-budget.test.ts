@@ -11,7 +11,9 @@ import {
   DEFAULT_WORKFLOW_BUDGET_POLICY,
   listTrackedWorkflowRoots,
   listWorkflowBudgetEvents,
+  refundWorkflowSend,
   resetWorkflowBudgetsForTest,
+  reserveWorkflowSend,
   settleWorkflowSpend,
   workflowBudgetSnapshot,
   workflowDenialSummary,
@@ -61,6 +63,18 @@ describe("workflow count caps", () => {
     const decision = admitWorkflowTurn("r1", "interactive", smallPolicy);
     expect(decision?.admitted).toBe(false);
     if (decision && !decision.admitted) expect(decision.reason).toBe("workflow-sends-exhausted");
+  });
+
+  test("physical sends reserve atomically and unused permits refund", () => {
+    const oneSend = { ...smallPolicy, maxPhysicalSends: 1 };
+    admitWorkflowTurn("atomic-root", "interactive", oneSend)?.lease.release();
+
+    expect(reserveWorkflowSend("atomic-root", oneSend)).toBe(true);
+    expect(reserveWorkflowSend("atomic-root", oneSend)).toBe(false);
+    expect(workflowBudgetSnapshot("atomic-root", oneSend)?.sends).toBe(1);
+
+    refundWorkflowSend("atomic-root");
+    expect(reserveWorkflowSend("atomic-root", oneSend)).toBe(true);
   });
 
   test("a worker lane may not take the interactive reserve", () => {

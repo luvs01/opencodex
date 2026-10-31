@@ -3,7 +3,8 @@ import type { RequestSendObserver } from "../../lib/request-execution-budget";
 import { sharedSpendLedger, sharedSpendPolicy, type SpendReservationLedger, type SpendScopes, type SpendSeed, type SpendReservationProof, type SpendAdmissionPolicy } from "../../lib/spend-reservation-ledger";
 import { SpendLedgerOwnerError } from "../../lib/spend-ledger-owner";
 import { markLocalRequestLogRefusal, type RequestLogContext } from "../request-log";
-import { recordWorkflowRefusalEvent, workflowDenialSummary, type WorkflowDenial } from "../../lib/workflow-budget";
+import { recordWorkflowRefusalEvent, refundWorkflowSend, reserveWorkflowSend, workflowDenialSummary, type WorkflowDenial } from "../../lib/workflow-budget";
+import { currentWorkflowBudgetPolicy } from "../../lib/workflow-budget-config";
 
 /** The terminal usage a request reported, in the only two fields the ledger books. */
 export interface TerminalSpendUsage {
@@ -78,6 +79,7 @@ export function createRequestSpendTracker(
   let seededAccounting = false;
   let finalRequested = false;
   let finalUsage: TerminalSpendUsage | undefined;
+  let workflowReservations = 0;
   let reporters = 0;
   const seeds = new Map<string, { seed: SpendSeed; started: boolean; reported: boolean }>();
   // Abandoned capabilities retain cleanup ownership, never admission lookup.
@@ -348,9 +350,24 @@ export function createRequestSpendTracker(
       // fetch -- so without it a root ceiling on the canonical Codex path would sit one send
       // short of its limit forever and refuse nothing.
       const alreadySent = options?.alreadySent === true;
+      if (alreadySent) {
+        // Reporting transports cannot be stopped retroactively, but still record the send so
+        // later reservations see the true total.
+        if (!reserveWorkflowSend(rootId, { ...currentWorkflowBudgetPolicy(), maxPhysicalSends: Number.MAX_SAFE_INTEGER })) {
+          throw new Error("Already-sent workflow charge could not be recorded");
+        }
+      } else if (!reserveWorkflowSend(rootId, currentWorkflowBudgetPolicy())) {
+        return false;
+      } else if (rootId) {
+        workflowReservations++;
+      }
       if (!alreadySent && tracker.enforced) {
         const seed = tracker.ensureSeed({ targetKey: options?.targetKey });
-        if (!seed) return false;
+        if (!seed) {
+          refundWorkflowSend(rootId);
+          if (rootId) workflowReservations--;
+          return false;
+        }
         options?.onReserved?.({ ledger: ledger(), sendId: seed.sendId });
         return true;
       }
@@ -404,6 +421,10 @@ export function createRequestSpendTracker(
       if (index >= 0) live.push(...live.splice(index, 1));
     },
     refund(proof): void {
+      if (workflowReservations > 0) {
+        refundWorkflowSend(rootId);
+        workflowReservations--;
+      }
       if (proof && proof.ledger === ledgerRef && seededAccounting) {
         const match = [...seeds.entries()].find(([, state]) => state.seed.sendId === proof.sendId);
         if (match && !match[1].started) retireSeed(match[0], match[1].seed);
