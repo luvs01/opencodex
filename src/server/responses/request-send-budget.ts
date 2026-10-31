@@ -2,7 +2,6 @@ import { createInferenceSendBudget } from "../inference/context";
 import type { ResponsesRequestContext } from "./core-options";
 import { claimDispatchSpendProof, createPhysicalSendReporter, createRequestExecutionBudget, isRequestExecutionBudget, reportDispatchSends } from "../../lib/request-execution-budget";
 import {
-  chargeWorkflowSends,
   workflowSendCeilingReached,
   workflowSpendCeilingReached,
 } from "../../lib/workflow-budget";
@@ -79,7 +78,6 @@ export function createResponsesSendBudget(
     noteTargetSends(charged);
     reportDispatchSends(sendBudget, charged, permit);
     options.onCompactionRecoverySendsReported?.(charged);
-    chargeWorkflowSends(workflowRootId, charged);
   };
   const noteTransientSends = (used: number): void => recordTransientSends(used, pendingHopPermit ?? inheritedPermit);
   // Capture at helper creation, before another leg can replace the pending handoff.
@@ -88,7 +86,6 @@ export function createResponsesSendBudget(
       identityId: logCtx.accountLogLabel }), permit, charged => {
       noteTargetSends(Math.max(0, charged));
       options.onCompactionRecoverySendsReported?.(charged);
-      chargeWorkflowSends(workflowRootId, charged);
     });
   // Refused before any dispatch, and deliberately not by evicting the root's ledger entry:
   // dropping the record to make room would hand the fan-out a fresh allowance, which is the
@@ -336,7 +333,6 @@ export function createResponsesSendBudget(
       }
       targetSendsUsed += 1;
       options.onCompactionRecoverySendsReported?.(1);
-      chargeWorkflowSends(workflowRootId, 1);
     },
     /** Physical sends reported by this owner; unrelated shared reservations cannot consume it. */
     get targetSendsUsed(): number { return targetSendsUsed; },
