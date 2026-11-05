@@ -249,6 +249,15 @@ decides at each launch:
 This is recomputed every launch, not remembered, so logging in or out is picked up on the
 next `ocx claude` with nothing to reconfigure.
 
+On macOS, the Keychain check waits up to 1.5 seconds for metadata. If an unlock or access
+prompt is still pending and no other source confirms a login, Auto treats the result as
+unknown and keeps the subscription path with a warning. The deadline ends the caller's
+wait without terminating the Keychain query. Repeated checks in the same process do not
+start another query while it is pending. Respond to or dismiss the macOS prompt, then
+retry; once the pending query finishes, the next check reads the Keychain again.
+Automatic Claude credential reads use a five-second caller deadline with the same
+pending-query guard and retain their existing credential-file fallback.
+
 Pick **Subscription** or **Proxy** explicitly when you want it fixed. An explicit choice is
 stored in `claudeCode.authMode` and detection never overrides it — including after you log
 in or out later. Switch back to Auto to hand the decision back.

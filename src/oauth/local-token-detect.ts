@@ -3,14 +3,13 @@
  * Read-only: never writes to external credential stores.
  * Ported from jawcode packages/ai/src/utils/oauth/local-token-detect.ts (xAI portion).
  */
-import { execFile, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readClaudeKeychain, readClaudeKeychainAsync } from "../claude/keychain";
 import type { OAuthCredentials } from "./types";
 
 const XAI_AUTH_KEY_PREFIX = "https://auth.x.ai::";
-const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 
 export function detectGrokCliToken(): OAuthCredentials | null {
   const authPath = join(process.env.HOME ?? homedir(), ".grok", "auth.json");
@@ -73,18 +72,6 @@ function claudeConfigDir(): string {
   return explicit ? explicit : join(homedir(), ".claude");
 }
 
-/** Read the Claude Code OAuth credential from the macOS Keychain (darwin only). */
-function readClaudeKeychain(): string | null {
-  if (process.platform !== "darwin") return null;
-  try {
-    return execSync(`security find-generic-password -s "${CLAUDE_KEYCHAIN_SERVICE}" -w`, {
-      encoding: "utf8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Read the Claude Code credential file (`<config-dir>/.credentials.json`).
  * Claude Code writes this on Linux/Windows (and on macOS when the Keychain is
@@ -107,15 +94,6 @@ function readClaudeSecureStorage(): string | null {
   // Do not let the default macOS Keychain entry shadow that requested credential file.
   if (process.env.CLAUDE_CONFIG_DIR?.trim()) return readClaudeCredentialsFile() ?? readClaudeKeychain();
   return readClaudeKeychain() ?? readClaudeCredentialsFile();
-}
-
-/** Non-blocking Keychain read for request paths; same item and timeout as the sync reader. */
-function readClaudeKeychainAsync(): Promise<string | null> {
-  if (process.platform !== "darwin") return Promise.resolve(null);
-  return new Promise(resolve => {
-    execFile("security", ["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"], { encoding: "utf8", timeout: 5000 },
-      (error, stdout) => resolve(error ? null : stdout.trim() || null));
-  });
 }
 
 /**

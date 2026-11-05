@@ -13,7 +13,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { probeClaudeKeychain } from "./keychain";
 
 export type AuthPresence = "present" | "absent" | "unknown";
 
@@ -33,11 +33,6 @@ export type AuthSourceId =
  * feedback loop (002 §1) sneaks back in.
  */
 export const PROXY_MARKER = "opencodex-proxy";
-
-const KEYCHAIN_SERVICE = "Claude Code-credentials";
-/** `security` exit code for "the item does not exist" — a real absent, not a failure. */
-const KEYCHAIN_ITEM_NOT_FOUND = 44;
-const KEYCHAIN_TIMEOUT_MS = 1_500;
 
 export interface AuthSourceResult {
   source: AuthSourceId;
@@ -204,15 +199,7 @@ export function defaultAuthDetectDeps(
       return existsSync(join(configDir, ".credentials.json"));
     },
     keychainProbe() {
-      if (process.platform !== "darwin") return "absent";
-      const result = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE], {
-        timeout: KEYCHAIN_TIMEOUT_MS,
-        stdio: ["ignore", "ignore", "ignore"],
-      });
-      if (result.error || result.signal !== null) return "unknown";
-      if (result.status === 0) return "present";
-      if (result.status === KEYCHAIN_ITEM_NOT_FOUND) return "absent";
-      return "unknown";
+      return probeClaudeKeychain();
     },
     env: () => env,
     ownTokens,

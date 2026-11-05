@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import * as childProcess from "node:child_process";
+import * as keychain from "../../src/claude/keychain";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,43 +137,31 @@ test("the default claude.json reader stays inside the overridden profile", () =>
   expect(defaultAuthDetectDeps({ HOME: dir }).readClaudeJson()?.oauthAccount).toBeDefined();
 });
 
-// The keychain probe must be metadata-only: -g and -w print password material.
-// OBSERVED behaviour, not source shape — an assertion that slices this file passes
-// trivially if the args are built dynamically, renamed, or moved, and this is the
-// unit's top security invariant.
-test("the default keychain probe never asks for secret material", () => {
-  const calls: string[][] = [];
-  const spy = spyOn(childProcess, "spawnSync").mockImplementation(((file: string, args: string[]) => {
-    calls.push([file, ...args]);
-    return { status: 44, signal: null, error: undefined, stdout: null, stderr: null, output: [], pid: 0 };
-  }) as never);
+// The shared process runner's executable args/stdio are exercised on every host in
+// claude-keychain-process.test.ts. This boundary must preserve all three outcomes.
+test("the default detector uses the shared metadata probe and preserves its outcomes", () => {
+  const spy = spyOn(keychain, "probeClaudeKeychain");
   try {
-    expect(defaultAuthDetectDeps({}).keychainProbe()).toBe(process.platform === "darwin" ? "absent" : "absent");
-    if (process.platform !== "darwin") return; // non-Darwin short-circuits before spawning
-    expect(calls).toHaveLength(1);
-    const [file, ...args] = calls[0]!;
-    expect(file).toBe("security");
-    expect(args).toEqual(["find-generic-password", "-s", "Claude Code-credentials"]);
-    // -w prints the password, -g prints it to stderr. Neither may ever appear.
-    expect(args).not.toContain("-w");
-    expect(args).not.toContain("-g");
+    for (const presence of ["present", "absent", "unknown"] as const) {
+      spy.mockReturnValue(presence);
+      const real = defaultAuthDetectDeps({});
+      const result = detectClaudeAuth({ ...real, readClaudeJson: () => undefined, credentialsFileExists: () => false });
+      expect(result.presence).toBe(presence);
+      expect(result.sources.find(source => source.source === "macos-keychain")?.presence).toBe(presence);
+    }
+    expect(spy).toHaveBeenCalledTimes(3);
   } finally {
     spy.mockRestore();
   }
 });
 
-// The probe's stdio must stay fully ignored: -g writes to stderr, so a captured pipe
-// would put secret material in our process even with correct args.
-test("the default keychain probe captures no output streams", () => {
-  let options: { stdio?: unknown } | undefined;
-  const spy = spyOn(childProcess, "spawnSync").mockImplementation(((_f: string, _a: string[], o: { stdio?: unknown }) => {
-    options = o;
-    return { status: 44, signal: null, error: undefined, stdout: null, stderr: null, output: [], pid: 0 };
-  }) as never);
+test("a failed shared probe stays unknown and does not expose error material", () => {
+  const spy = spyOn(keychain, "probeClaudeKeychain").mockImplementation(() => { throw new Error("private-fixture-error"); });
   try {
-    defaultAuthDetectDeps({}).keychainProbe();
-    if (process.platform !== "darwin") return;
-    expect(options?.stdio).toEqual(["ignore", "ignore", "ignore"]);
+    const real = defaultAuthDetectDeps({});
+    const result = detectClaudeAuth({ ...real, readClaudeJson: () => undefined, credentialsFileExists: () => false });
+    expect(result.presence).toBe("unknown");
+    expect(JSON.stringify(result)).not.toContain("private-fixture-error");
   } finally {
     spy.mockRestore();
   }

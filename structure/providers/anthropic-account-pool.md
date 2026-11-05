@@ -300,6 +300,46 @@ Regression coverage: `tests/adapters/anthropic/anthropic-account-pause.test.ts`,
 `tests/adapters/anthropic/anthropic-model-routes.test.ts`, `tests/oauth/oauth-accounts-api.test.ts`,
 `tests/cli/cli-account-pool-verbs.test.ts`, and `gui/tests/provider-quota-refresh-controls.test.tsx`.
 
+## Local Claude credential reads
+
+`src/oauth/local-token-detect.ts` reads the Keychain first on macOS, then the default
+credential file. An explicit `CLAUDE_CONFIG_DIR` reverses that order: its credential
+file comes first, with Keychain fallback. Its synchronous and asynchronous reads
+and the metadata probe in `src/claude/auth-detect.ts` use the shared
+accessor in `src/claude/keychain.ts`. A persistent, unreferenced worker created through
+`src/lib/worker-embed.ts` owns the child process through `src/claude/keychain-process.ts`.
+The child runs `/usr/bin/security` without a process timeout or a termination signal.
+`src/claude/keychain-worker.ts` owns request admission in the worker;
+`src/claude/keychain-protocol.ts` defines the shared-memory result layout.
+
+Caller waiting is bounded separately from child lifetime: token reads wait up to five
+seconds and metadata probes up to 1.5 seconds. Synchronous callers use `Atomics.wait`;
+asynchronous callers use `Atomics.waitAsync`. One active slot covers both operations
+within the process. Asynchronous reads share the original deadline. Synchronous reads
+return unavailable while any query is pending, so an OAuth ownership recheck cannot reuse
+an older read; different operations also return unavailable. A deadline returns no token
+or an unknown auth probe without terminating the child or releasing the slot. The slot is
+released only after confirmed child exit and stdout completion. The next request performs
+a fresh query; completed or late results are not cached, preserving credential rotation
+checks. Worker failure or unconfirmed exit keeps the accessor unavailable for the process lifetime because
+it does not establish that the child has exited.
+
+Token output is limited to 1 MiB; overflow discards the result and continues draining the
+pipe without terminating the child. Metadata probes omit `-w` and `-g` and ignore all
+stdio. Exit zero means present, exit 44 means absent, and other failures mean unknown.
+The existing auth-source aggregation remains unchanged: any present source wins;
+otherwise an unknown source keeps Auto mode on the subscription path with a warning.
+
+The accessor preserves the default Keychain search list and does not modify settings
+or ACLs. Mock and subprocess-fixture coverage
+checks bounded caller waits, retained in-flight ownership, output handling, and auth
+fallbacks. It does not establish the absence of `securityd` crashes on macOS. Real macOS
+validation covers locked and unlocked Keychains, denied access, pending user prompts,
+credential rotation, and application exit while a query is pending.
+Regressions: `tests/claude-integration/claude-keychain-access.test.ts`,
+`tests/claude-integration/claude-keychain-process.test.ts`, and
+`tests/oauth/claude-keychain-fallback.test.ts`.
+
 ## Claude credential identity
 
 `src/oauth/anthropic-identity.ts` observes only authenticated `account.uuid` from the exact

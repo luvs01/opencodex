@@ -735,6 +735,11 @@
       "scope": "Anthropic OAuth instances (primary and Pool 2), account pause, model routes, quota labels, and pool-bound helpers, quota, reset grants and management surfaces.",
       "documents": [
         "src/oauth/",
+        "src/claude/auth-detect.ts",
+        "src/claude/keychain.ts",
+        "src/claude/keychain-process.ts",
+        "src/claude/keychain-protocol.ts",
+        "src/claude/keychain-worker.ts",
         "src/providers/",
         "src/providers/quota/anthropic-account-quota.ts",
         "src/server/management/anthropic-pool-settings.ts",
