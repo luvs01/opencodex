@@ -4,6 +4,8 @@ import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../confi
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
+import type { ResidentResponseState, SpilledResponseState, SpillFailedResponseState, StoredResponseState, ResidentInput, PreviousResponseReplayFailure } from "./state/entry-types";
+export type { ResidentResponseState, SpilledResponseState, SpillFailedResponseState, StoredResponseState, ResidentInput, PreviousResponseReplayFailure } from "./state/entry-types";
 import {
   deleteResponseSpill,
   inspectResponseSpillDir,
@@ -22,6 +24,8 @@ import { collectReferencedSpillFileNames, snapshotReferencedSpillFileNames } fro
 import { selectSnapshotEntries, snapshotPayload } from "./state/snapshot-select";
 import { expandStoredResponseInput } from "./state/replay-input";
 import { normalizedClientThreadId, replayScopeMatches, validReplayOwnerKey } from "./state/replay-owner";
+import { bindConnectionScopeStore, connectionReplayScopeAcceptsEntry, noteConnectionScopeEntry, oldestConnectionScopeResident, type ConnectionReplayScope } from "./state/connection-scope";
+export { mintConnectionReplayScope, connectionReplayScopeLive, connectionReplayScopeForThread, connectionReplayScopeOwnerKey, releaseConnectionReplayScope, type ConnectionReplayScope } from "./state/connection-scope";
 import { hasPendingClientToolCall } from "./state/unforced-store-false";
 import { computeResponseStateMetrics, type ResponseStateMetrics } from "./state/metrics";
 export type { ResponseStateMetrics } from "./state/metrics";
@@ -113,46 +117,6 @@ const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
 const SNAPSHOT_FILE_MAX_BYTES = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_REWRITE_ATTEMPTS = 4;
 const RESPONSE_SPILL_SHUTDOWN_TERMINALIZATION_MAX_PASSES = MAX_STORED_RESPONSES + 1;
-
-export interface ResidentResponseState {
-  kind: "resident";
-  createdAt: number;
-  clientThreadId?: string;
-  replayOwnerKey?: string;
-  items: unknown[];
-  /** Index in `items` where provider output begins; see clientCarriedPrefixLength. */
-  providerOutputStart?: number;
-  providers?: OcxProviderContinuationState;
-  unforcedStoreFalse?: boolean;
-  sizeBytes: number;
-}
-
-export interface SpilledResponseState {
-  kind: "spill";
-  createdAt: number;
-  clientThreadId?: string;
-  replayOwnerKey?: string;
-  /** Mirrors the spilled payload boundary so a spilled entry keeps its anchor. */
-  providerOutputStart?: number;
-  providers?: OcxProviderContinuationState;
-  unforcedStoreFalse?: boolean;
-  spill: ResponseSpillRef;
-  sizeBytes: number;
-}
-
-export interface SpillFailedResponseState {
-  kind: "spill-failed";
-  createdAt: number;
-  sizeBytes: number;
-}
-
-export type StoredResponseState = ResidentResponseState | SpilledResponseState | SpillFailedResponseState;
-export type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
-
-export type PreviousResponseReplayFailure = {
-  code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "scope_mismatch";
-};
 
 const states = new Map<string, StoredResponseState>();
 let storedResponseBytes = 0;
@@ -423,6 +387,13 @@ function replaceWithSpillFailure(
 }
 
 function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: ResponseSpillRef): boolean {
+  if (expected.connectionOwned === true) {
+    // Memory-only entries can never become stubs. A queued write reaching this sink is
+    // already off-invariant: unlink the file it produced and keep the resident — the
+    // scope's own eviction or release removes it, never a spill swap.
+    deleteResponseSpill(ref);
+    return false;
+  }
   const base: Omit<SpilledResponseState, "sizeBytes"> = {
     kind: "spill",
     createdAt: expected.createdAt,
@@ -447,6 +418,9 @@ function replaceSpillEntryAtomically(
   expected: SpilledResponseState,
   candidate: ResidentResponseState,
 ): void {
+  // A memory-only candidate never displaces a durable spill entry: the foreign stub is
+  // left exactly as it was and the scoped write is refused.
+  if (candidate.connectionOwned === true) return;
   try {
     const ref = writeResponseSpillDurably(id, {
       createdAt: candidate.createdAt,
@@ -494,6 +468,14 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
   const expected = states.get(id);
   const candidate = measureResidentEntry(id, entry);
   if (!candidate) {
+    // Memory-only entries leave no tombstone either: a spill-failed marker would still
+    // persist the response id in the durable snapshot, so a connection-scoped write whose
+    // items cannot be measured drops instead of marking.
+    if (entry.connectionOwned === true) {
+      if (expected) deleteEntry(id);
+      pruneResponses();
+      return;
+    }
     replaceWithSpillFailure(id, expected);
     // A tombstone is tiny but still resident state: the hard-cap invariant
     // must hold on EVERY mutation path (review C2-1 — with a test cap below
@@ -504,6 +486,18 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
   if (candidate.sizeBytes > byteCap()) {
     admitOversizedCandidate(id, candidate, expected);
     pruneResponses();
+    return;
+  }
+  if (candidate.connectionOwned === true) {
+    // Memory-only entries never join the spill machinery — not the ACL queue, not the
+    // superseded-spill merge, not the atomic swap — even when an external pending
+    // publication holds a superseded ref for this id. The write may land on a free slot
+    // or replace a same-scope or dead entry; any other expected state belongs to a
+    // different owner, so the write is refused and that state is left untouched.
+    if (expected === undefined || expected.kind === "spill-failed" || (expected.kind === "resident" && expected.connectionOwned === true)) {
+      replaceMapEntry(id, candidate, expected);
+      pruneResponses();
+    }
     return;
   }
   if (windowsSecretAclApplies() && (expected?.kind === "spill" || spillQueueSupersededSpillFor(id))) {
@@ -534,6 +528,12 @@ function admitOversizedCandidate(
   candidate: ResidentResponseState,
   expected?: StoredResponseState,
 ): void {
+  // Memory-only candidates can never demote: drop them so the next continuation misses cleanly.
+  if (candidate.connectionOwned === true) {
+    admissionCounters.oversizedDrops += 1;
+    if (expected) deleteEntry(id);
+    return;
+  }
   if (candidate.sizeBytes > responseSpillPayloadCap()) {
     admissionCounters.oversizedDrops += 1;
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
@@ -611,6 +611,7 @@ bindSpillQueueStore({
   enforceSpilledResponseBudget,
   terminalizationMaxPasses: () => RESPONSE_SPILL_SHUTDOWN_TERMINALIZATION_MAX_PASSES,
 });
+bindConnectionScopeStore({ deleteEntry, currentEntry: id => states.get(id) });
 
 // Replay provenance must stay proxy-private: a WeakMap distinguishes replayed history from the
 // newly appended input suffix without adding an unknown field that native passthrough could send
@@ -949,6 +950,12 @@ function pruneResponses(at = now()): void {
   // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
   // deleted only when even their bounded metadata cannot fit the override.
   while (storedResponseBytes > byteCap() && states.size > 0) {
+    // Memory-only connection residents drop before any durable entry pays a disk demotion.
+    const connectionOldest = oldestConnectionScopeResident(states, spillQueueHoldsResidentCandidate);
+    if (connectionOldest !== undefined) {
+      deleteEntry(connectionOldest);
+      continue;
+    }
     const oldestResident = [...states].find(([id, entry]) => entry.kind === "resident"
       && !spillQueueHoldsResidentCandidate(id, entry));
     const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => entry.kind === "resident"
@@ -1021,6 +1028,7 @@ export function evictOldestResponseContinuationForBudget(): number {
   const id = oldestResidentId;
   const entry = states.get(id);
   if (!entry || entry.kind !== "resident") return 0;
+  if (entry.connectionOwned === true) { deleteEntry(id); schedulePersist(); return entry.sizeBytes; }
   if (windowsSecretAclApplies()) {
     queuePendingResponseSpill(id, entry);
     schedulePersist();
@@ -1229,7 +1237,7 @@ export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
   providerState?: OcxProviderContinuationState | string,
-  opts?: { force?: boolean; clientThreadId?: string; retainForToolContinuation?: boolean; replayOwnerKey?: string | null; compiledPlaintext?: boolean },
+  opts?: { force?: boolean; clientThreadId?: string; retainForToolContinuation?: boolean; replayOwnerKey?: string | null; compiledPlaintext?: boolean; connectionScope?: ConnectionReplayScope },
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
@@ -1249,6 +1257,11 @@ export function rememberResponseState(
       || (details as { reason?: unknown }).reason !== "max_output_tokens") return;
   } else if (response.status !== undefined && response.status !== "completed") return;
   if ((opts?.compiledPlaintext && !validReplayOwnerKey(opts.replayOwnerKey)) || opts?.replayOwnerKey === null || (opts?.replayOwnerKey !== undefined && !validReplayOwnerKey(opts.replayOwnerKey))) return;
+  const connectionScope = opts?.connectionScope;
+  // Scoped writes carry the scope's own key and thread while the socket lives; closed, expired
+  // or foreign handles refuse — the comparison happens inside the scope module so the record
+  // itself is never reachable from a cast literal.
+  if (connectionScope && !connectionReplayScopeAcceptsEntry(connectionScope, opts?.replayOwnerKey, opts?.clientThreadId)) return;
   ensureLoaded();
   const existing = states.get(response.id);
   // Never let a colliding upstream id replace a different caller's retained response.
@@ -1270,6 +1283,7 @@ export function rememberResponseState(
     ...(clientThreadId ? { clientThreadId } : {}),
     ...(opts?.replayOwnerKey ? { replayOwnerKey: opts.replayOwnerKey } : {}),
     items: [...requestItems, ...response.output],
+    ...(connectionScope ? { connectionOwned: true as const } : {}),
     // Where response.output begins. A replay skip requires a matched item at or past this
     // index that also carries a provider-issued id — position alone proves only that an item
     // sits on the provider side, not that the provider authored it.
@@ -1284,6 +1298,7 @@ export function rememberResponseState(
   });
   enforceAppOwnedMemoryBudget();
   schedulePersist();
+  if (connectionScope) noteConnectionScopeEntry(connectionScope, response.id);
 }
 
 /** Test-only persistence churn hook; invoked after each atomic snapshot rewrite. */
