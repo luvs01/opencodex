@@ -23,7 +23,15 @@ export type UpscaleFn = (input: Buffer, width: number, height: number) => Promis
 
 /** Default upscaler: Bun.Image resize, re-encoded as PNG so small text strips stay sharp. */
 export const bunImageUpscale: UpscaleFn = async (input, width, height) => {
-  const out = await new Bun.Image(input).resize(width, height).png().toBuffer();
+  const image = new Bun.Image(input);
+  // Sniffed dimensions choose candidates, but only the codec can bound its decode.
+  const meta = await image.metadata();
+  const w = meta.width;
+  const h = meta.height;
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0 || w * h > MAX_INPUT_PIXELS) {
+    throw new Error("image dimensions exceed the safe decode limit");
+  }
+  const out = await image.resize(width, height).png().toBuffer();
   return { data: Buffer.from(out).toString("base64"), mediaType: "image/png" };
 };
 

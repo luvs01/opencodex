@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createOpenAIChatAdapter } from "../../../src/adapters/openai-chat";
 import { createMimoFreeAdapter, resetMimoJwtCache } from "../../../src/adapters/mimo-free";
 import {
   hasShrinkableOpenAIChatImages,
+  bunImageUpscale,
   normalizeOpenAIChatImages,
   OPENAI_CHAT_IMAGE_BASE64_BUDGET,
   upscaledImageSize,
@@ -118,6 +119,25 @@ function headerOnlyBmpB64(width: number, height: number): string {
   bytes.writeUInt16LE(1, 26);
   bytes.writeUInt16LE(24, 28);
   return bytes.toString("base64");
+}
+
+/** A tiny JPEG with oversized native SOF dimensions and a misleading APP1 marker. */
+async function misleadingOversizedJpeg(): Promise<Buffer> {
+  const jpeg = Buffer.from(await new Bun.Image(Buffer.from(ONE_PX_PNG, "base64")).jpeg().toBuffer());
+  let patched = false;
+  for (let o = 2; o + 9 < jpeg.length; o++) {
+    if (jpeg[o] === 0xff && (jpeg[o + 1] === 0xc0 || jpeg[o + 1] === 0xc2)) {
+      jpeg.writeUInt16BE(4_000, o + 5);
+      jpeg.writeUInt16BE(5_000, o + 7);
+      patched = true;
+      break;
+    }
+  }
+  if (!patched) throw new Error("fixture JPEG has no SOF");
+  const fakeSof = Buffer.from([0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+  const prefix = Buffer.from([0xff, 0xd8, 0xff, 0, 0, 8, 0, 0, 0xff, 0xe1, 0, fakeSof.length + 2]);
+  // No large image is encoded or decoded. Tests intercept resize before native work.
+  return Buffer.concat([prefix, fakeSof, jpeg.subarray(2)]);
 }
 
 
@@ -501,6 +521,61 @@ describe("openai-chat minimum image edge", () => {
     apiKey: "sk-test",
     authMode: "key",
   };
+
+  test("upscaling checks native pixel dimensions even when the sniffer sees one pixel", async () => {
+    const input = await misleadingOversizedJpeg();
+    expect(input.length).toBeLessThan(1_024);
+    expect(sniffImageDimensions(input.toString("base64"))).toEqual({ width: 1, height: 1 });
+    expect(await new Bun.Image(input).metadata()).toMatchObject({ width: 5_000, height: 4_000 });
+    const resize = spyOn(Bun.Image.prototype, "resize").mockImplementation(() => {
+      throw new Error("unexpected native resize");
+    });
+    try {
+      await expect(bunImageUpscale(input, 64, 64)).rejects.toThrow("image dimensions exceed the safe decode limit");
+      expect(resize).not.toHaveBeenCalled();
+    } finally {
+      resize.mockRestore();
+    }
+  });
+
+  test("Venice preserves oversized originals without resize and releases decode admission", async () => {
+    const input = await misleadingOversizedJpeg();
+    const original = dataUrl(input.toString("base64"), "image/jpeg");
+    const resize = spyOn(Bun.Image.prototype, "resize").mockImplementation(() => {
+      throw new Error("unexpected native resize");
+    });
+    try {
+      const built = await Promise.all(Array.from({ length: IMAGE_NORMALIZE_CONCURRENCY + 2 }, () =>
+        createOpenAIChatAdapter(venice).buildRequest(parsedWith([imageMessage([original])]))));
+      for (const request of built) {
+        expect(imageParts(wireMessages(request.body as string))[0]?.image_url?.url).toBe(original);
+      }
+      expect(resize).not.toHaveBeenCalled();
+    } finally {
+      resize.mockRestore();
+    }
+    const next = await createOpenAIChatAdapter(venice).buildRequest(parsedWith([imageMessage([dataUrl(ONE_PX_PNG)])]));
+    const sent = imageParts(wireMessages(next.body as string))[0]?.image_url?.url ?? "";
+    expect(sniffImageDimensions(sent.split(",")[1] ?? "")).toEqual({ width: 64, height: 64 });
+  });
+
+  test("upscaling refuses invalid native dimensions before resize", async () => {
+    const input = Buffer.from(ONE_PX_PNG, "base64");
+    const metadata = spyOn(Bun.Image.prototype, "metadata");
+    const resize = spyOn(Bun.Image.prototype, "resize").mockImplementation(() => {
+      throw new Error("unexpected native resize");
+    });
+    try {
+      for (const width of [0, -1, Number.NaN, Infinity, 0.5]) {
+        metadata.mockResolvedValue({ width, height: 1, format: "png" });
+        await expect(bunImageUpscale(input, 64, 64)).rejects.toThrow("image dimensions exceed the safe decode limit");
+      }
+      expect(resize).not.toHaveBeenCalled();
+    } finally {
+      resize.mockRestore();
+      metadata.mockRestore();
+    }
+  });
 
   test("a Venice image below 64px is upscaled with its aspect ratio kept", async () => {
     const strip = await realPngB64(320, 25);

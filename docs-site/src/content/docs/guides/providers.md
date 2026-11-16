@@ -948,3 +948,5 @@ An access-denied result does not by itself prove an expired login or an ineligib
 ## Large inline images on Chat providers
 
 Translated OpenAI-compatible Chat requests shrink inline images when their combined base64 data exceeds 3.5 MiB. Older images lose detail first. This is a best-effort image budget, so large text, schemas, or images that cannot be processed may still exceed an upstream request limit. Remote image URLs are not downloaded, and images that cannot be shrunk remain attached. Native Chat passthrough keeps its original image bytes.
+
+Venice also enlarges small inline images to its 64-pixel minimum edge. Before resizing, the image codec checks the original dimensions against the 16-million-pixel local processing limit. Images with invalid or oversized dimensions remain attached unchanged, so the provider may reject them; OpenCodex does not decode them locally for enlargement.
