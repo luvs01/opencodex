@@ -399,6 +399,23 @@ describe("reasoning diagnostic analysis budget", () => {
     expect(metadata.isReasoningEffortRejection(exact + " ")).toBe(false);
   });
 
+  test("exact-refusal failover allows long metadata without widening prose or repair budgets", async () => {
+    const { metadata } = await load();
+    const error = { param: "reasoning_effort", message: "Invalid reasoning effort." };
+    const longMetadata = JSON.stringify({ request_id: "x".repeat(1100), error });
+    expect(metadata.hasConflictingReasoningEffortCode(longMetadata, 16_384)).toBe(false);
+    expect(metadata.hasConflictingReasoningEffortCode(longMetadata)).toBe(true);
+    expect(metadata.isReasoningEffortRejection(longMetadata)).toBe(false);
+    expect(metadata.hasConflictingReasoningEffortCode(longMetadata.padEnd(16_385, " "), 16_384)).toBe(true);
+    for (const message of ["parameter" + " ".repeat(1100) + "!", "a-".repeat(550) + "!"]) {
+      const hostile = JSON.stringify({ error: { ...error, message } });
+      expect(metadata.hasConflictingReasoningEffortCode(hostile, 16_384)).toBe(true);
+    }
+    const conflicting = JSON.stringify({ request_id: "x".repeat(1100), error,
+      details: { param: "temperature", message: "Invalid temperature." } });
+    expect(metadata.hasConflictingReasoningEffortCode(conflicting, 16_384)).toBe(true);
+  });
+
   test.each([
     ["parameter whitespace", "parameter" + " ".repeat(1024) + "!"],
     ["optional field whitespace", "missing" + " ".repeat(1024) + "!"],

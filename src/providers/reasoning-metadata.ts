@@ -1013,6 +1013,7 @@ function diagnosticTextNamesOtherParameter(text: string, authoritativeEffortSubj
 
 function isConflictingDiagnosticProse(str: string | undefined, authoritativeEffortSubject = false): boolean {
   if (!str) return false;
+  if (str.length > MAX_REASONING_DIAGNOSTIC_CHARS) return true;
   const s = str.trim();
   if (!s) return false;
   if (
@@ -1060,9 +1061,14 @@ function isHttpStatusNumber(value: unknown): boolean {
  * (e.g. reasoning_effort at root with an inner error identifying temperature) so they stay terminal
  * or proceed to combo failover without false reasoning-effort learning or same-target ladder retries (#8173).
  */
-export function hasConflictingReasoningEffortCode(text: string | undefined): boolean {
+export function hasConflictingReasoningEffortCode(
+  text: string | undefined,
+  maxEnvelopeChars: 1_024 | 16_384 = MAX_REASONING_DIAGNOSTIC_CHARS,
+): boolean {
   if (!text) return false;
-  if (text.length > MAX_REASONING_DIAGNOSTIC_CHARS) return true;
+  // Exact-refusal failover may inspect a larger complete envelope; prose heuristics
+  // retain the short limit even when unrelated metadata makes that envelope larger.
+  if (text.length > maxEnvelopeChars) return true;
   if (isIncompleteStructuredWrapper(text)) return true;
   let unescaped = text.trim();
   for (let d = 0; d < 3; d += 1) {
