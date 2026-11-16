@@ -11,12 +11,14 @@
  * is exercised at the transport boundary, not behind a mock. Upstream calls go
  * to a counting fixture; a refusal must never dispatch (no duplicate billing).
  */
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses } from "../../src/server/responses";
-import { clearResponseStateForTests, connectionReplayScopeOwnerKey, type ConnectionReplayScope } from "../../src/responses/state";
+import { clearResponseStateForTests, connectionReplayScopeOwnerKey, responseStateMetrics, type ConnectionReplayScope } from "../../src/responses/state";
+import { getAdapterDefinition } from "../../src/adapters/registry";
+import { adapterNeedsForcedContinuation, adapterNeedsToolCallContinuation } from "../../src/server/responses/core-replay";
 import { createServeOptions, type ServeOptionsContext } from "../../src/server/index/serve-options";
 import { type WsData } from "../../src/server/ws-bridge";
 import { type DataPlaneAdmission } from "../../src/server/auth-cors";
@@ -159,8 +161,8 @@ function turn(ws: WebSocket, frame: Frame): Promise<Frame[]> {
   });
 }
 
-function create(previous?: string, model = "native/gpt-5.6-sol", omitStore = false): Frame {
-  return { type: "response.create", model, ...(omitStore ? {} : { store: false }), stream: true,
+function create(previous?: string, model = "native/gpt-5.6-sol"): Frame {
+  return { type: "response.create", model, store: false, stream: true,
     ...(previous ? { previous_response_id: previous } : {}),
     input: previous
       ? [{ type: "function_call_output", call_id: "synthetic-call", output: "synthetic tool result" }]
@@ -224,31 +226,104 @@ test("same connection replays; a second socket, a reconnect and HTTP all keep th
   expect(sent).toHaveLength(3);
 });
 
-test("a routed-provider turn replays on the same socket only", async () => {
+test("a routed Responses store:false tool turn replays on the same socket only", async () => {
   const cfg = config();
   upstream();
   startScopeServer(cfg);
   const ws = await openSocket("own-a");
-  // A routed adapter retains only requests that do not suppress storage: store:false
-  // retention is an explicit adapter opt-in (core-replay.ts), so this turn stores normally.
-  const turn1 = await turn(ws, create(undefined, "swe/argon-1", true));
+  // Responses passthrough already forces local continuation retention despite
+  // store:false. The connection scope confines that existing policy to this socket.
+  const first = create(undefined, "swe/argon-1");
+  expect(first.store).toBe(false);
+  const turn1 = await turn(ws, first);
   expect(turn1.map(f => f.type)).toContain("response.completed");
-  const turn2 = await turn(ws, create("resp-ws-1", "swe/argon-1", true));
+  const continuation = create("resp-ws-1", "swe/argon-1");
+  expect(continuation.store).toBe(false);
+  const turn2 = await turn(ws, continuation);
   expect(turn2.map(f => f.type)).toContain("response.completed");
   expect(sent).toHaveLength(2);
   expect(sent[1]).toContain("SYNTHETIC_PRIVATE_TASK");
   expect(sent[1]).toContain("synthetic tool result");
   const foreign = await openSocket("own-a");
-  const denied = await turn(foreign, create("resp-ws-1", "swe/argon-1", true));
+  const denied = await turn(foreign, create("resp-ws-1", "swe/argon-1"));
   expect(denied.map(f => f.type)).toContain("error");
   expect(sent).toHaveLength(2);
   // A delegated child's fresh plaintext task has its own connection and own thread.
   const child = await openSocket("child-own-b");
-  const fresh = create(undefined, "swe/argon-1", true);
+  const fresh = create(undefined, "swe/argon-1");
   fresh.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "SYNTHETIC_CHILD_PLAINTEXT_TASK" }] }];
   expect((await turn(child, fresh)).map(f => f.type)).toContain("response.completed");
   expect(sent).toHaveLength(3);
   expect(sent[2]).toContain("SYNTHETIC_CHILD_PLAINTEXT_TASK");
+});
+
+test("Devin store:false keeps no local tool replay; client-carried tool history remains usable", async () => {
+  const adapterName = "devin";
+  const cfg = config();
+  cfg.providers.swe!.adapter = adapterName;
+  cfg.providers.swe!.models = ["fixture-model"];
+  const model = "swe/fixture-model";
+  upstream();
+  // Use the registered Devin adapter and its real name/policy. Replace only its
+  // cloud executor with deterministic events; no Cognition login or network call.
+  const definition = getAdapterDefinition("devin")!;
+  const originalCreate = definition.create;
+  const factory = spyOn(definition, "create").mockImplementation((provider, context) => {
+    const adapter = originalCreate(provider, context);
+    expect(adapter.name).toBe("devin");
+    adapter.runTurn = async (parsed, _incoming, emit) => {
+      expect(parsed._rawBody?.store).toBe(false);
+      sent.push(JSON.stringify(parsed.context.messages));
+      if (sent.length === 1) {
+        emit({ type: "tool_call_start", id: "synthetic-call", name: "collaboration.spawn_agent" });
+        emit({ type: "tool_call_delta", arguments: JSON.stringify({ message: "SYNTHETIC_PRIVATE_TASK" }) });
+        emit({ type: "tool_call_end" });
+      } else emit({ type: "text_delta", text: "routed final reply" });
+      emit({ type: "done" });
+    };
+    return adapter;
+  });
+  try {
+    expect(adapterNeedsToolCallContinuation(adapterName)).toBe(false);
+    expect(adapterNeedsForcedContinuation(adapterName)).toBe(false);
+    const captured: { scope?: ConnectionReplayScope } = {};
+    startScopeServer(cfg, captured);
+    const ws = await openSocket("own-store-false");
+    const first = create(undefined, model);
+    expect(first.store).toBe(false);
+    const frames = await turn(ws, first);
+    const completed = frames.find(frame => frame.type === "response.completed")!;
+    expect(completed).toBeDefined();
+    const response = completed.response as { id: string; output: unknown[] };
+    // Generic adapter WS intentionally publishes an empty id, so Codex carries
+    // history rather than chaining a server-stored response on this path.
+    expect(response.id).toBe("");
+    expect(response.output.some(item => (item as { type?: string }).type === "function_call")).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(captured.scope).toBeDefined();
+    expect(responseStateMetrics().count).toBe(0);
+
+    const continuation = create("synthetic-unretained-response", model);
+    expect(continuation.store).toBe(false);
+    // Supplying a made-up id cannot resurrect the unretained tool call and is
+    // refused before the stub executor can receive an incomplete history.
+    const partial = await turn(ws, continuation);
+    expect(partial.find(frame => frame.type === "error")?.status).toBe(400);
+    expect(sent).toHaveLength(1);
+
+    // Existing policy still permits a tool continuation when the caller carries
+    // the preceding call and result itself, rather than requiring local storage.
+    const full = create(undefined, model);
+    full.input = [...first.input as unknown[], ...response.output, ...continuation.input as unknown[]];
+    const fullFrames = await turn(ws, full);
+    expect(fullFrames.map(frame => frame.type)).toContain("response.completed");
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain("SYNTHETIC_PRIVATE_TASK");
+    expect(sent[1]).toContain("synthetic tool result");
+    const final = fullFrames.find(frame => frame.type === "response.completed")!.response as { id: string };
+    expect(final.id).toBe("");
+    expect(responseStateMetrics().count).toBe(0);
+  } finally { factory.mockRestore(); }
 });
 
 test("a keyed loopback upgrade issues no connection scope and retains durable replay after close", async () => {
