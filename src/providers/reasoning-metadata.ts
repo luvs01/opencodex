@@ -443,6 +443,12 @@ const REJECTION_LANGUAGE = /unsupported|not supported|does not support|invalid|n
  * every 400 that mentions effort as a refusal of it.
  */
 const REJECTION_WINDOW = 48;
+/**
+ * Optional effort repair only analyzes a complete, short diagnostic (UTF-16 code units).
+ * Longer input is conflicting evidence, never a prefix to retry or learn from. This bounds
+ * the remaining heuristic scans; it does not truncate the upstream response body.
+ */
+const MAX_REASONING_DIAGNOSTIC_CHARS = 1_024;
 
 /**
  * The `invalid_request_error` type tag rides along on essentially every 400 an OpenAI-shaped
@@ -951,7 +957,7 @@ function diagnosticTextNamesOtherParameter(text: string, authoritativeEffortSubj
   const s = text.replace(GENERIC_ERROR_TYPE, " ");
   if (authoritativeEffortSubject) return diagnosticTextNamesConcreteOtherField(s);
 
-  const paramPattern = /\b(?:parameter|param|argument|arg|field|property)\s*(?:[:=]\s*['"`]?|['"`]|\s+)['"`]?([a-zA-Z0-9_\-\.]+)['"`]?/gi;
+  const paramPattern = /\b(?:parameter|param|argument|arg|field|property)(?:\s*[:=]\s*['"`]?|\s*['"`]|\s+)['"`]?([a-zA-Z0-9_\-\.]+)['"`]?/gi;
   for (let m = paramPattern.exec(s); m; m = paramPattern.exec(s)) {
     const tokenIndex = tokenStartIndex(m, m[1], false);
     if (isCompetingParameterToken(s, tokenIndex, m[1])) return true;
@@ -984,7 +990,7 @@ function diagnosticTextNamesOtherParameter(text: string, authoritativeEffortSubj
   }
 
   const rejectionExtra =
-    /\b(?:unexpected|missing|cannot\s+(?:specify|use|set|pass|provide))\s+(?:field|param|parameter|argument|property)?\s*['"`]?([a-zA-Z0-9_\-\.]+)['"`]?/gi;
+    /\b(?:unexpected|missing|cannot\s+(?:specify|use|set|pass|provide))\s+(?:(?:field|param|parameter|argument|property)\s*)?['"`]?([a-zA-Z0-9_\-\.]+)['"`]?/gi;
   for (let m = rejectionExtra.exec(s); m; m = rejectionExtra.exec(s)) {
     const tokenIndex = tokenStartIndex(m, m[1], false);
     if (isCompetingParameterToken(s, tokenIndex, m[1])) return true;
@@ -1056,6 +1062,7 @@ function isHttpStatusNumber(value: unknown): boolean {
  */
 export function hasConflictingReasoningEffortCode(text: string | undefined): boolean {
   if (!text) return false;
+  if (text.length > MAX_REASONING_DIAGNOSTIC_CHARS) return true;
   if (isIncompleteStructuredWrapper(text)) return true;
   let unescaped = text.trim();
   for (let d = 0; d < 3; d += 1) {
@@ -1333,7 +1340,7 @@ function diagnosticRecordBlamesReasoningEffort(rec: Record<string, unknown>, dep
  * (such as temperature or max_tokens errors) as effort refusals (#8173).
  */
 export function isReasoningEffortRejection(text: string | undefined, depth = 0): boolean {
-  if (!text || depth > 4) return false;
+  if (!text || text.length > MAX_REASONING_DIAGNOSTIC_CHARS || depth > 4) return false;
   if (isHardPolicyOrOriginRefusal(text)) return false;
   if (hasConflictingReasoningEffortCode(text)) return false;
 

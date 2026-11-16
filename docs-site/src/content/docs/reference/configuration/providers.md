@@ -1793,6 +1793,15 @@ their previous behavior. See the
 [ordering migration note](/guides/model-ordering/#migration-note-native-ids-in-existing-orders).
 `modelDisplayNames` on a provider controls readable labels without changing wire ids.
 
+## Reasoning-effort rejection diagnostics
+
+Automatic retries of the same provider and model at a lower effort, and learned unsupported
+efforts, use a complete upstream error diagnostic of at most 1,024 UTF-16 code units, including
+any wrapper text. Larger diagnostics cannot authorize this retry or learning from their prefix.
+The original error body remains available to normal handling, including ordinary Combo failover;
+existing client error-display limits still apply. A long but legitimate effort error therefore
+does not trigger automatic effort repair or update the learned effort ladder.
+
 ## Routed agent messages
 
 With the [`openai-responses` adapter](/reference/adapters/#openai-responses), Codex

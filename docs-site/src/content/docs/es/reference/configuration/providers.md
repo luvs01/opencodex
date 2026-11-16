@@ -7,6 +7,12 @@ description: "Entradas de proveedores, autenticación, puntos finales, catálogo
 
 Un proveedor le dice a opencodex dónde vive un modelo, qué adaptador de cable habla y cómo se autentican las solicitudes.
 
+<a id="reasoning-effort-rejection-diagnostics"></a>
+
+## Diagnósticos de rechazo del esfuerzo de razonamiento
+
+Los reintentos al mismo proveedor y modelo con un esfuerzo menor, y el aprendizaje de niveles no admitidos, usan un diagnóstico de error completo de hasta 1.024 unidades de código UTF-16, incluido cualquier texto envolvente. Un diagnóstico mayor no autoriza estos reintentos ni el aprendizaje a partir de su prefijo. El cuerpo original sigue disponible para el manejo habitual de errores, incluida la conmutación ordinaria de Combo; se mantienen los límites existentes de visualización de errores del cliente. Un error legítimo pero demasiado largo tampoco activa la reducción automática del esfuerzo ni actualiza los niveles aprendidos.
+
 <a id="deepseek-tokens-versus-image-bytes"></a>
 
 ## DeepSeek: tokens y bytes de imágenes
