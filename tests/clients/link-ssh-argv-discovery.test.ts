@@ -112,9 +112,10 @@ test.skipIf(process.platform === "win32").each(["Windows_NT", "MSYS_NT-10.0-2263
  * #8359: the install that last started serving this home wins over a stale Desktop or PATH copy.
  * The census is written by the real recorder, so a format change on that side breaks these cases.
  */
-function servedFixture(tools = ["awk", "dd", "wc", "stat", "id", "readlink"]) {
+function servedFixture(tools = ["awk", "dd", "wc"]) {
   const f = fixture("Linux"); // Recorded hints require the Linux ownership/mode gate.
-  for (const tool of tools) symlinkSync(Bun.which(tool)!, join(f.home, "remote-bin", tool));
+  // Keep trust evidence available when a case removes one of the census reader's tools.
+  for (const tool of new Set([...tools, "stat", "id", "readlink"])) symlinkSync(Bun.which(tool)!, join(f.home, "remote-bin", tool));
   f.install(0); // a runnable Desktop copy that must lose to the served install
   const census = (command: string[]) => recordServingRuntime(
     { command, version: "2.99.0", servedAt: "2026-11-09T00:00:00.000Z" },
