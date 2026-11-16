@@ -16,7 +16,7 @@ function isolatedArgv(): string[] {
 }
 function toolDir(home: string): string {
   const bin = join(home, "bin"); mkdirSync(bin);
-  for (const command of ["sh", "uname", "mktemp", "sleep", "cat", "awk", "dd", "wc", "rm"]) {
+  for (const command of ["sh", "uname", "mktemp", "sleep", "cat", "awk", "dd", "wc", "rm", "stat", "id", "readlink"]) {
     const executable = Bun.which(command);
     if (!executable) throw new Error(`Required test tool not found on PATH: ${command}`);
     symlinkSync(executable, join(bin, command));
