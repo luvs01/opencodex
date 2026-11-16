@@ -113,7 +113,7 @@ test.skipIf(process.platform === "win32").each(["Windows_NT", "MSYS_NT-10.0-2263
  * The census is written by the real recorder, so a format change on that side breaks these cases.
  */
 function servedFixture(tools = ["awk", "dd", "wc", "stat", "id", "readlink"]) {
-  const f = fixture();
+  const f = fixture("Linux"); // Recorded hints require the Linux ownership/mode gate.
   for (const tool of tools) symlinkSync(Bun.which(tool)!, join(f.home, "remote-bin", tool));
   f.install(0); // a runnable Desktop copy that must lose to the served install
   const census = (command: string[]) => recordServingRuntime(
@@ -529,7 +529,8 @@ test.skipIf(process.platform === "win32")("runtime inspection reports the served
   writeFileSync(cli, "// entry\n");
   recordServingRuntime({ command: [bun, cli], version: "2.99.0", servedAt: "2026-11-09T00:00:00.000Z" }, join(home, ".opencodex"));
   const bin = join(home, "tools"); mkdirSync(bin);
-  for (const tool of ["sh", "uname", "awk", "dd", "wc", "stat", "id", "readlink"]) symlinkSync(Bun.which(tool)!, join(bin, tool));
+  for (const tool of ["sh", "awk", "dd", "wc", "stat", "id", "readlink"]) symlinkSync(Bun.which(tool)!, join(bin, tool));
+  executable(join(bin, "uname"), "printf 'Linux\\n'");
   const result = Bun.spawnSync(remoteInspectRuntimeArgv("posix"), { env: { HOME: home, PATH: bin }, stdout: "pipe", stderr: "pipe" });
   const lines = result.stdout.toString().split("\n");
   expect(result.exitCode).toBe(0);

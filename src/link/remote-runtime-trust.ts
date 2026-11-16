@@ -6,6 +6,8 @@
  * Sticky shared directories are safe only with the same ownership checks on their
  * children. Keep the verified original spelling so package-prefix discovery and
  * interpreter entrypoint semantics remain unchanged.
+ * macOS recorded hints are skipped: mode bits miss ACL grants and system ls can
+ * conceal ACL read failures. Its existing known-install discovery still runs.
  * These checks do not defend against root or unrestricted same-account mutation.
  */
 export const REMOTE_SERVED_PATH_TRUST = `served_path_info() {
@@ -13,6 +15,8 @@ export const REMOTE_SERVED_PATH_TRUST = `served_path_info() {
 }
 trusted_served_path() (
   case "$1" in /*) ;; *) return 1;; esac
+  # A portable shell cannot prove macOS ACL protection from stat/ls output.
+  [ "$(uname -s 2>/dev/null)" = Linux ] || return 1
   served_uid=$(id -u 2>/dev/null) || return 1
   case "$served_uid" in ''|*[!0-9]*) return 1;; esac
   original=$1; pending=\${1#/}; resolved=/; steps=0; links=0

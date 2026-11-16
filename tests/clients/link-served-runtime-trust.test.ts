@@ -18,14 +18,16 @@ function executable(path: string, body: string): void {
   writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
 }
 
-function fixture() {
+function fixture(platform = "Linux") {
   const home = mkdtempSync(join(tmpdir(), "ocx-runtime-trust-")); roots.push(home);
   const bin = join(home, "tools"); mkdirSync(bin);
-  for (const name of ["sh", "uname", "mktemp", "sleep", "cat", "awk", "dd", "wc", "rm", "stat", "id", "readlink"]) {
+  for (const name of ["sh", "mktemp", "sleep", "cat", "awk", "dd", "wc", "rm", "stat", "id", "readlink"]) {
     const command = Bun.which(name);
     if (!command) throw new Error(`Missing fixture tool: ${name}`);
     symlinkSync(command, join(bin, name));
   }
+  // Exercise the Linux gate on either POSIX host; Darwin fallback has separate cases.
+  executable(join(bin, "uname"), `printf '%s\\n' ${q(platform)}`);
   const served = join(home, "package/bun");
   const entry = join(home, "package/src/cli/index.ts");
   mkdirSync(dirname(entry), { recursive: true }); writeFileSync(entry, "// fixture entry\n");
@@ -156,4 +158,23 @@ posix("BSD stat output uses the same gate when GNU formatting is unavailable", a
 shift 2
 exec ${q(realStat)} ${process.platform === "darwin" ? "-f '%u %Lp'" : "-c '%u %a'"} "$@"`);
   expect((await f.run(remoteOcxArgv(["link", "port"]))).stdout).toBe("served\n");
+}, SPAWN_BUDGET_MS);
+
+for (const [name, argv] of consumers) {
+  posix.each(["binary", "package"] as const)(`Darwin ${name} skips recorded %s hints before any version probe`, async kind => {
+    const f = fixture("Darwin");
+    if (kind === "binary") f.record([f.served]);
+    const result = await f.run(argv());
+    expect(existsSync(join(f.home, "served-calls"))).toBe(false);
+    if (name === "discovery") expect(result.stdout).toBe("fallback\n");
+    if (name === "pinned sync") expect(result.stderr).toContain("ocx-fanout:selected:2.98.0");
+    if (name === "inspection") expect(result.stdout).toContain("ocx-inspect:version:opencodex 2.98.0");
+    if (name === "full-install census") expect(result.stdout).toContain("ocx-census:full");
+  }, SPAWN_BUDGET_MS);
+}
+
+posix.each(["FreeBSD", ""])("an unverified platform %s skips recorded hints", async platform => {
+  const f = fixture(platform);
+  expect((await f.run(remoteOcxArgv(["link", "port"]))).stdout).toBe("fallback\n");
+  expect(existsSync(join(f.home, "served-calls"))).toBe(false);
 }, SPAWN_BUDGET_MS);
