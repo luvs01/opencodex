@@ -718,6 +718,8 @@ Compruebe primero la gramática del alias y los nombres reservados. Un alias dup
 
 ### Rechazos por ventana de contexto
 
+Los errores del proveedor con muchos espacios conservan las mismas reglas de desbordamiento y negación. Los espacios alrededor de los incisos de negación se procesan una sola vez, sin repetir la búsqueda sobre la misma secuencia.
+
 La recuperación de combos utiliza el mismo detector acotado de desbordamiento de contexto que Responses. Lee el mensaje más interno del proveedor y reconoce `context_length_exceeded`, `prompt is too long`, `input is too long for requested model` y `Please reduce the length of the messages or completion`. Los tres últimos solo cuentan cuando el mensaje comienza con ellos; en el caso de Anthropic se incluyen sus recuentos de tokens. Un error de validación que cite esas frases como valor de un parámetro o una cadena de error de SDK que las envuelva no cumplen la condición. Tampoco la cumplen un código junto a un mensaje ajeno al contexto, JSON mal formado, un error de validación de parámetros o una instrucción genérica de acortar un parámetro.
 
 La salida ya confirmada nunca se reproduce. Se mantienen la política de fallback, el consentimiento de gasto y los presupuestos de envío; cada intento físico conserva su propio uso. Si se agotan los objetivos elegibles o el presupuesto, el primer rechazo HTTP 400 de contexto confirmado tiene prioridad sobre errores reintentables posteriores, incluidos los de cuota. Un rechazo fatal posterior detiene el proceso inmediatamente.

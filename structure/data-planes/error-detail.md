@@ -253,7 +253,7 @@ overflow in another sentence. A throttle worded only as "too many tokens" is not
 explicit "prompt is too long" remains a verdict when no throughput signal is present.
 Body inspection time does not count toward the upstream slow-attempt budget, and empty chunks cannot
 starve the deadline or cancellation. The retry and cancellation
-contracts are exercised in `tests/lib/upstream-retry.test.ts`.
+contracts are exercised in `tests/lib/upstream-retry.test.ts`. The shared detector folds negation asides without repartitioning whitespace across optional patterns; `tests/lib/definite-overflow-verdict.test.ts` checks bounded-response classification and abort-timer responsiveness through the retry helper.
 `InvalidSendBudgetError` displays only a finite non-negative number or `invalid`.
 `UpstreamRetryEvidenceError` uses fixed retry-evidence wording and retains the original rejection
 only as `Error.cause`. Chat request-read failures keep typed local size/encoding messages; other
