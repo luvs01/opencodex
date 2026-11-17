@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { remoteOcxArgv, remotePinnedSyncArgv } from "../../src/link/ssh-argv";
 import { remoteFullInstallCensusArgv, remoteInspectRuntimeArgv } from "../../src/link/remote-plant";
+import { REMOTE_SERVED_PATH_TRUST } from "../../src/link/remote-runtime-trust";
 import { spawnTestChild } from "../helpers/spawn-test-child";
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
@@ -150,14 +151,29 @@ posix("a missing symlink reader never treats the link as a regular executable", 
   expect(existsSync(join(f.home, "served-calls"))).toBe(false);
 }, SPAWN_BUDGET_MS);
 
-posix("BSD stat output uses the same gate when GNU formatting is unavailable", async () => {
+posix("BSD stat preserves sticky ancestors and zero-padded permission bits", async () => {
   const f = fixture(); const realStat = Bun.which("stat")!;
+  chmodSync(dirname(f.served), 0o1777);
   unlinkSync(join(f.bin, "stat"));
   executable(join(f.bin, "stat"), `if [ "$1" = -c ]; then exit 1; fi
-[ "$1" = -f ] && [ "$2" = '%u %Lp' ] || exit 1
+[ "$1" = -f ] || exit 1
+format=$2
 shift 2
-exec ${q(realStat)} ${process.platform === "darwin" ? "-f '%u %Lp'" : "-c '%u %a'"} "$@"`);
+${process.platform === "darwin" ? `exec ${q(realStat)} -f "$format" "$@"` : `info=$(${q(realStat)} -c '%u %a' "$@") || exit 1
+set -- $info
+mode=$((0$2))
+case "$format" in
+  '%u %Lp') printf '%s %o\\n' "$1" "$((mode & 0777))";;
+  '%u %Mp%Lp') printf '%s %o%o\\n' "$1" "$((mode >> 9 & 7))" "$((mode & 0777))";;
+  '%u %Mp%03Lp') printf '%s %o%03o\\n' "$1" "$((mode >> 9 & 7))" "$((mode & 0777))";;
+  *) exit 1;;
+esac`}`);
   expect((await f.run(remoteOcxArgv(["link", "port"]))).stdout).toBe("served\n");
+  for (const mode of [0o1007, 0o4005]) {
+    chmodSync(f.entry, mode);
+    const result = await f.run(["sh", "-c", `${REMOTE_SERVED_PATH_TRUST}\nserved_path_info ${q(f.entry)}`]);
+    expect(result.stdout).toBe(`${process.getuid!()} ${mode.toString(8)}\n`);
+  }
 }, SPAWN_BUDGET_MS);
 
 for (const [name, argv] of consumers) {

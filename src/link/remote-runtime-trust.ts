@@ -11,7 +11,7 @@
  * These checks do not defend against root or unrestricted same-account mutation.
  */
 export const REMOTE_SERVED_PATH_TRUST = `served_path_info() {
-  stat -c '%u %a' "$1" 2>/dev/null || stat -f '%u %Lp' "$1" 2>/dev/null
+  stat -c '%u %a' "$1" 2>/dev/null || stat -f '%u %Mp%03Lp' "$1" 2>/dev/null
 }
 trusted_served_path() (
   case "$1" in /*) ;; *) return 1;; esac
