@@ -169,10 +169,16 @@ case "$format" in
   *) exit 1;;
 esac`}`);
   expect((await f.run(remoteOcxArgv(["link", "port"]))).stdout).toBe("served\n");
-  for (const mode of [0o1007, 0o4005]) {
-    chmodSync(f.entry, mode);
-    const result = await f.run(["sh", "-c", `${REMOTE_SERVED_PATH_TRUST}\nserved_path_info ${q(f.entry)}`]);
-    expect(result.stdout).toBe(`${process.getuid!()} ${mode.toString(8)}\n`);
+  // Darwin reserves sticky regular files for root; an owned directory needs no privilege.
+  const stickyDirectory = join(f.home, "sticky-padding"); mkdirSync(stickyDirectory);
+  try {
+    for (const [path, mode] of [[stickyDirectory, 0o1007], [f.entry, 0o4005]] as const) {
+      chmodSync(path, mode);
+      const result = await f.run(["sh", "-c", `${REMOTE_SERVED_PATH_TRUST}\nserved_path_info ${q(path)}`]);
+      expect(result.stdout).toBe(`${process.getuid!()} ${mode.toString(8)}\n`);
+    }
+  } finally {
+    chmodSync(stickyDirectory, 0o700); // Restore owner access for recursive fixture cleanup.
   }
 }, SPAWN_BUDGET_MS);
 
