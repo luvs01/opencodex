@@ -1081,7 +1081,7 @@ const MODERATION_REFUSAL_TAIL = new RegExp("^(?:"
   + ")", "i");
 
 /** Whether a prose string is a known moderation refusal copy and nothing else (bounded, linear). */
-function isModerationRefusalProse(text: string): boolean {
+export function isModerationRefusalProse(text: string): boolean {
   if (text.length > 2_000) return false;
   let rest = text.replace(/\s+/g, " ").trim();
   const verdict = MODERATION_REFUSAL_VERDICT.exec(rest);
