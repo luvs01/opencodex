@@ -1063,18 +1063,21 @@ const RESPONSE_REQUEST_ECHO_KEYS = new Set([
  */
 // Verdict and tail stay apart: a single `^(?:verdict)(?:tail)*$` backtracks exponentially
 // because a category list swallows words ("and retry") that a later tail phrase also accepts.
-// The Azure wording leads because "the response was filtered" is a strict prefix of it; the
-// anchored scan commits to the first verdict alternative that matches, so the longest must run first.
+// The anchored scan commits to the first verdict alternative that matches, so alternatives run
+// longest-first: Azure's fixed wording leads ("the response was filtered" is a strict prefix of it)
+// and the noun-phrased verdict precedes the bare one (its `by ... system` clause reaches further).
 const MODERATION_REFUSAL_VERDICT = new RegExp("^(?:"
   + "the response was filtered due to the prompt triggering azure openai'?s content management policy\\.?"
-  + "|(?:content )?(?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter))?\\.?"
   + "|(?:(?:the|your) )?(?:input|request|prompt|content|message|response|output)(?: (?:was|has been|is))?"
   + " (?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter)(?: system)?)?\\.?"
+  + "|(?:content )?(?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter))?\\.?"
   + "|(?:your )?(?:input|request|prompt|content) violated (?:the )?content (?:safety|management|filtering) polic(?:y|ies)\\.?"
   + ")", "i");
 // Category separators are disjoint by first byte so each anchored match has exactly one parse.
+// `, and ` skips retry/please/to word openings so `retry later` still parses as the retry advice
+// rather than a trailing category (the historical ambiguity made both readings reach `$`).
 const MODERATION_REFUSAL_TAIL = new RegExp("^(?:"
-  + " categor(?:y|ies): [a-z][a-z/_-]*(?:(?:, and | and |, )[a-z][a-z/_-]*)*\\.?"
+  + " categor(?:y|ies): [a-z][a-z/_-]*(?:(?:, and (?!retry\\b|try\\b|please\\b|to\\b)| and |, )[a-z][a-z/_-]*)*\\.?"
   + "| please (?:modify|revise|rephrase|change|adjust|edit) (?:your|the) (?:prompt|input|request|message)(?: and (?:retry|try again))?\\.?"
   + "| (?:please )?(?:retry|try again)(?: later)?\\.?"
   + "| to learn more about our content filtering policies please read our documentation: https://[^ ]+"

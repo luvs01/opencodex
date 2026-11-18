@@ -16,6 +16,13 @@ describe("moderation refusal prose matcher", () => {
     "Your request was rejected by the content filter system.",
     "the response was filtered due to the prompt triggering azure openai's content management policy.",
     "the response was filtered due to the prompt triggering azure openais content management policy.",
+    // A shorter verdict alternative must not win over the noun-phrased one that
+    // reaches `by ... system` — the scan commits to the first verdict match.
+    "content refused by moderation system.",
+    "The request was blocked by the content filter system.",
+    // `, and ` must not swallow retry-advice openings as category names.
+    "refused category: harassment, and retry later.",
+    "refused category: harassment, and please change your prompt.",
     "Your input violated the content safety policies.",
     "input violated content filtering policy",
     "refused category: a, b and c. please change your prompt and retry.",
