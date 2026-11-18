@@ -1061,23 +1061,38 @@ const RESPONSE_REQUEST_ECHO_KEYS = new Set([
  * Any other wording (an account, model, parameter or billing problem, in any phrasing) does not
  * match, so the body keeps dev's decision; only known shapes are admitted.
  */
-const MODERATION_REFUSAL_PROSE = new RegExp("^(?:"
-  + "(?:content )?(?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter))?\\.?"
+// Verdict and tail stay apart: a single `^(?:verdict)(?:tail)*$` backtracks exponentially
+// because a category list swallows words ("and retry") that a later tail phrase also accepts.
+// The Azure wording leads because "the response was filtered" is a strict prefix of it; the
+// anchored scan commits to the first verdict alternative that matches, so the longest must run first.
+const MODERATION_REFUSAL_VERDICT = new RegExp("^(?:"
+  + "the response was filtered due to the prompt triggering azure openai'?s content management policy\\.?"
+  + "|(?:content )?(?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter))?\\.?"
   + "|(?:(?:the|your) )?(?:input|request|prompt|content|message|response|output)(?: (?:was|has been|is))?"
   + " (?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter)(?: system)?)?\\.?"
-  + "|the response was filtered due to the prompt triggering azure openai'?s content management policy\\.?"
   + "|(?:your )?(?:input|request|prompt|content) violated (?:the )?content (?:safety|management|filtering) polic(?:y|ies)\\.?"
-  + ")(?:"
-  + " categor(?:y|ies): [a-z][a-z/_-]*(?:(?:,? and |, )[a-z][a-z/_-]*)*\\.?"
+  + ")", "i");
+// Category separators are disjoint by first byte so each anchored match has exactly one parse.
+const MODERATION_REFUSAL_TAIL = new RegExp("^(?:"
+  + " categor(?:y|ies): [a-z][a-z/_-]*(?:(?:, and | and |, )[a-z][a-z/_-]*)*\\.?"
   + "| please (?:modify|revise|rephrase|change|adjust|edit) (?:your|the) (?:prompt|input|request|message)(?: and (?:retry|try again))?\\.?"
   + "| (?:please )?(?:retry|try again)(?: later)?\\.?"
   + "| to learn more about our content filtering policies please read our documentation: https://[^ ]+"
-  + ")*$", "i");
+  + ")", "i");
 
 /** Whether a prose string is a known moderation refusal copy and nothing else (bounded, linear). */
 function isModerationRefusalProse(text: string): boolean {
   if (text.length > 2_000) return false;
-  return MODERATION_REFUSAL_PROSE.test(text.replace(/\s+/g, " ").trim());
+  let rest = text.replace(/\s+/g, " ").trim();
+  const verdict = MODERATION_REFUSAL_VERDICT.exec(rest);
+  if (!verdict) return false;
+  rest = rest.slice(verdict[0].length);
+  while (rest.length > 0) {
+    const piece = MODERATION_REFUSAL_TAIL.exec(rest);
+    if (!piece) return false;
+    rest = rest.slice(piece[0].length);
+  }
+  return true;
 }
 
 /**
