@@ -389,6 +389,14 @@ ocx config set oauthOpenBrowser false
 3. Si la devolución de llamada no puede llegar al concentrador, pegue la URL o el código de redirección final en el panel de control/ CLI. Envía `POST /api/oauth/login/code` con `{provider,input}`.
 4. Sondear el punto final de estado existente hasta que se complete y, a continuación, realizar una solicitud de modelo enrutado.
 
+Para las cuentas del grupo de ChatGPT/Codex, un concentrador puede exigir en su lugar el flujo con código de dispositivo, de modo que nunca se inicie un inicio de sesión con devolución de llamada a localhost:
+
+```bash
+ocx config set codexAuthMethod device-only
+```
+
+Un concentrador en ejecución mantiene el método de inicio de sesión con el que arrancó, así que reinícielo (`ocx restart`, o reinicie el pod) para aplicar el cambio; `ocx config set` lo indica. Al añadir o volver a autenticar una cuenta del grupo desde el panel de control, o con `ocx account login openai [--id <account-id> --reauth]`, se muestran una URL de verificación y un código corto para introducir en cualquier otro dispositivo. Con `--json`, añada `--no-wait`: el inicio de sesión devuelve al momento `url` y `deviceCode`, y una espera en JSON se rechaza (y su flujo se cancela) porque no mostraría ninguno de los dos hasta el final; `--code` se rechaza del mismo modo. Quite el ajuste con `ocx config unset codexAuthMethod` y vuelva a reiniciar.
+
 Nunca ponga el código OAuth en argv de shell, registros, texto de emisión, capturas de pantalla o evidencia de implementación. La ruta de código manual mantiene sus comprobaciones de entrada existentes de proveedor desconocido, flujo no activo, código no válido y 4096 bytes.
 
 ## Docker Compose
@@ -539,6 +547,12 @@ Para una reversión de contenedor, conserve tanto los volúmenes de estado con n
 `ocx usage` lee el concentrador conectado con la clave de datos registrada de este cliente. La salida humana identifica la fuente del concentrador y el alcance de la clave del cliente; `--json` devuelve los mismos datos de alcance. Los filtros de rango, superficie, proveedor / modelo y los límites personalizados `--since` / `--until` permanecen disponibles. Los desgloses de cuentas y los registros de otros clientes no se comparten. Un concentrador antiguo o no disponible produce un error explícito en lugar de sustituir el uso local; actualice el concentrador si no admite esta lectura.
 
 El endpoint de datos de solo lectura es `GET /v1/usage`. Usa `x-opencodex-api-key` con una clave de cliente configurada; se rechazan las claves globales del entorno y las de administración. Acepta `range`, `surface`, `provider`, `model`, `since` y `until`. Rechaza opciones desconocidas o repetidas e identificadores de clave elegidos por quien hace la solicitud. Las filas demasiado grandes que se omiten conservan el aviso explícito de historial incompleto.
+
+Usa `GET /v1/usage/windows` en el listener de datos del concentrador para consultar la cuota de suscripción en caché de una sola cuenta del proveedor. Envía una clave de cliente configurada en `x-opencodex-api-key` o `Authorization: Bearer`. Asigna a la clave un solo proveedor permitido y deja vacía su lista de modelos permitidos. La ruta devuelve `401` para otras credenciales, incluidos el token compartido de la instancia y los tokens de administración. Una clave válida recibe `404 usage_windows_not_a_hub` en instalaciones autónomas o de cliente.
+
+Si un proveedor llega a la selección de cuentas y tiene varias cuentas registradas, el concentrador devuelve `403 usage_windows_account_scope_required`. Los proveedores deshabilitados y las cuentas sin una lectura verificada para la credencial OAuth actual devuelven una lista `windows` vacía. Las lecturas de cuota de Kiro caducan a los diez minutos. Después de reiniciar, una lectura en caché cuya pertenencia a la credencial no se haya verificado permanece oculta hasta que haya una lectura verificada. Cada fila indica el porcentaje consumido, el estado del límite de esa ventana y la hora de reinicio en milisegundos Unix. El uso adicional mensual de Anthropic se omite porque el proveedor no informa de su hora de reinicio.
+
+El proveedor OpenAI puede mostrar la única cuenta registrada en el grupo de ChatGPT. Sus etiquetas son `ChatGPT Weekly`, `ChatGPT Monthly` y, para la ventana corta, `ChatGPT 5-hour` si la observación correspondiente indica 18 000 segundos o `ChatGPT Short window` si la duración es distinta o desconocida. Remote Link permite `/v1/usage` y excluye `/v1/usage/windows`.
 
 Las credenciales de uso del cliente se envían solo por HTTPS o loopback HTTP. Tanto la solicitud como la respuesta deshabilitan el almacenamiento en caché.
 

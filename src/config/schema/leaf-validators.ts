@@ -327,6 +327,7 @@ export const providerConfigSchema = z.object({
   accountAutoPause: accountAutoPausePolicySchema.optional(),
   apiKeyPool: z.array(z.object({ id: z.string(), key: z.string(), label: z.string().optional(), addedAt: z.number().optional(), disabled: z.boolean().optional(), pauseRevision: z.string().optional(), pauseDetails: accountPauseDetailsSchema.optional() }).passthrough()).optional(),
   anthropicAccountPool: anthropicAccountPoolSchema,
+  anthropicImageContextRecovery: z.boolean().optional(),
   // Raw diagnostics/writes reject malformed provenance; tolerant loads preserve the custom row.
   anthropicOAuthInstance: z.literal("anthropic2").optional().catch(undefined),
   modelCapabilities: modelCapabilitiesSchema.optional(),
@@ -460,6 +461,7 @@ export const providerConfigSchema = z.object({
   messagePhaseInference: z.boolean().optional(),
   estimateMissingUsage: z.boolean().optional(),
   hideRawReasoning: z.boolean().optional(),
+  rawReasoningAsSummary: z.boolean().optional(),
   forwardAdvisorTool: z.boolean().optional(),
   perMessageEffort: z.boolean().optional(),
   // Invalid blocks degrade to "absent" rather than failing the whole config load: an unusable
@@ -1078,6 +1080,8 @@ export const clientConnectionSchema = z.object({
  * rejected write rather than a silently ignored key that leaves the operator believing they
  * excluded something.
  */
+export const codexAuthMethodSchema = z.enum(["auto", "device-only"]).optional();
+
 export const codexPoolSchema = z.object({
   excludedPlans: z.array(z.string().trim().min(1)).optional(),
   startIdleWindows: z.boolean().optional(),

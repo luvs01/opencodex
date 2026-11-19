@@ -1,7 +1,7 @@
 import { createInferenceSendBudget } from "../inference/context";
 import { responsesSpendTarget } from "./request-spend-target";
 import type { ResponsesRequestContext } from "./core-options";
-import { claimDispatchSpendProof, createPhysicalSendReporter, createRequestExecutionBudget, isRequestExecutionBudget, hasWorkflowSendObserver, reportDispatchSends } from "../../lib/request-execution-budget";
+import { claimDispatchSpendProof, createPhysicalSendReporter, createRequestExecutionBudget, isRequestExecutionBudget, hasWorkflowSendObserver, reportDispatchSends, requestHasCapturedSpendCeiling } from "../../lib/request-execution-budget";
 import {
   chargeWorkflowSends,
   reserveWorkflowSend,
@@ -11,8 +11,9 @@ import {
 import { currentWorkflowBudgetPolicy } from "../../lib/workflow-budget-config";
 import { poolContinuityRefusalReason, workflowRefusalResponse } from "../workflow-refusal";
 import type { AttemptRecoveryKind, AttemptRecoveryWithheld } from "../../usage/log";
-import { noteAttemptRecoveryWithheld, noteAttemptSend } from "../request-log";
-import { TRANSIENT_RETRY_MAX_ATTEMPTS, SendBudgetExhaustedError } from "../../lib/upstream-retry";
+import { noteAttemptRecoveryWithheld, noteAttemptSend, type RequestLogContext } from "../request-log";
+import { TRANSIENT_RETRY_MAX_ATTEMPTS, SendBudgetExhaustedError, type TransientSendBudget } from "../../lib/upstream-retry";
+import type { SpendScopes } from "../../lib/spend-reservation-ledger";
 import { estimateTokens } from "../../lib/token-estimate";
 import type {
   DispatchDecision,
@@ -45,6 +46,20 @@ export function transientSendCapFor(
   return Math.max(0, configuredAttempts - Math.max(0, sendsUsed));
 }
 
+/** Read the admitted target's ceilings without claiming a send or a prepaid proof. */
+export function responsesHasCapturedSpendCeiling(
+  sendBudget: TransientSendBudget,
+  req: Pick<Request, "headers">,
+  logCtx: RequestLogContext,
+  target: SpendScopes,
+): boolean {
+  return requestHasCapturedSpendCeiling(sendBudget, {
+    rootId: req.headers.get("x-codex-parent-thread-id")?.trim() || undefined,
+    identityId: target.identityId ?? logCtx.accountLogLabel,
+    poolId: target.poolId ?? logCtx.spendPoolId ?? logCtx.provider,
+  });
+}
+
 /** Owns the shared request send counter and recovery permits. */
 export function createResponsesSendBudget(
   requestContext: Pick<ResponsesRequestContext, "options" | "req" | "logCtx">,
@@ -58,7 +73,7 @@ export function createResponsesSendBudget(
   // fresh default of 3. It is now a holder carried on options, so a combo child inherits the
   // parent's spend instead of starting over per target -- both halves of the measured
   // amplification in #4546.
-  const sendBudget = options.sendBudget ?? createInferenceSendBudget(req, logCtx);
+  const sendBudget = options.sendBudget ?? createInferenceSendBudget(req, logCtx, options.hostedAdvisorSpendScope?.ceilings);
   // The root workflow is the user-visible task. A per-request cap cannot bound a fan-out that
   // sends once per child seven hundred times, so every send charged to the request is charged
   // to the root as well (#4546).
@@ -88,12 +103,12 @@ export function createResponsesSendBudget(
   };
   const noteTransientSends = (used: number): void => recordTransientSends(used, pendingHopPermit ?? inheritedPermit);
   const physicalSendReporter = (permit?: SingleUseDispatchPermit, explicitContinuation = false,
-    continuationEstimate?: { inputTokens: number; outputCeilingTokens: number }) => {
+    wireEstimate?: { inputTokens: number; outputCeilingTokens: number },
+    targetKey = explicitContinuation ? `native-continuation:${crypto.randomUUID()}` : undefined) => {
     let unreportedWorkflowStarts = 0;
-    const targetKey = explicitContinuation ? `native-continuation:${crypto.randomUUID()}` : undefined;
     const reporter = createPhysicalSendReporter(sendBudget, () => ({ ...responsesSpendTarget(logCtx),
       ...(targetKey ? { targetKey } : {}),
-      ...(continuationEstimate ? { estimate: continuationEstimate, explicitEstimate: true } : {}) }), permit, charged => {
+      ...(wireEstimate ? { estimate: wireEstimate, explicitEstimate: true } : {}) }), permit, charged => {
       noteTargetSends(Math.max(0, charged));
       options.onCompactionRecoverySendsReported?.(charged);
       const prepaid = Math.min(unreportedWorkflowStarts, Math.max(0, charged));
@@ -189,6 +204,7 @@ export function createResponsesSendBudget(
   // typed as the narrow holder so a caller that predates this can still pass one, so narrow it
   // once here rather than asserting at each adapter call site.
   const adapterSendBudget = isRequestExecutionBudget(sendBudget) ? sendBudget : undefined;
+  const hasCapturedSpendCeiling = (target: SpendScopes = {}): boolean => responsesHasCapturedSpendCeiling(sendBudget, req, logCtx, target);
   /**
    * Records an adapter's OWN inner retries against this attempt.
    *
@@ -321,7 +337,7 @@ export function createResponsesSendBudget(
   /**
    * One credential hop of this logical request, admitted by the INTERSECTION of two bounds.
    *
-   * The snapshotted generic OAuth roster cap and `ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST`
+   * The snapshotted generic OAuth and Anthropic roster caps
    * bound rotation within one credential roster. What neither
    * can see is everything else this request already sent, so three hops layered on a spent
    * budget still reached upstream three more times. A hop now happens only when its own layer
@@ -367,6 +383,19 @@ export function createResponsesSendBudget(
     /401|429|oauth|rate-limit|key/.test(recovery) ? "auth-recovery" : "repair";
 
   return {
+    imageRecoverySendReporter: (body: string, maxOutputTokens: number) => {
+      // Each leg needs its own seed at normal capacity, on the ordinary physical-send counter.
+      const reporter = physicalSendReporter(undefined, false, { inputTokens: estimateTokens(body, logCtx.model),
+        outputCeilingTokens: maxOutputTokens }, `image-413:${crypto.randomUUID()}`);
+      const beforeSend = reporter.beforeSend;
+      reporter.beforeSend = () => {
+        const target = responsesSpendTarget(logCtx);
+        // A legacy or observe-only holder may know the ceiling without being able to reserve.
+        if (adapterSendBudget?.spendEnforced !== true && hasCapturedSpendCeiling(target)) return false;
+        return beforeSend?.() !== false;
+      };
+      return reporter;
+    },
     workflowRootId,
     noteTransientSends,
     transientSendReporter,
@@ -426,6 +455,7 @@ export function createResponsesSendBudget(
      */
     get sendsUsed(): number { return sendBudget.used; },
     adapterSendBudget,
+    hasCapturedSpendCeiling,
     dispatchSidecarSend,
     adapterDispatchBudget,
     refundableAdapterDispatchBudget,
@@ -474,6 +504,7 @@ function adapterDispatchBudgetView(
     get spendEnforced() { return budget.spendEnforced; },
     get spendPolicyStarted() { return budget.spendPolicyStarted; },
     get spendAdmissionPolicy() { return budget.spendAdmissionPolicy; },
+    hasCapturedSpendCeiling: target => requestHasCapturedSpendCeiling(budget, target),
     startRequest: target => budget.startRequest?.(target),
     claimPhysicalSend: auxiliary => auxiliary ? budget.claimPhysicalSend?.(true) : budget.claimPhysicalSend?.(),
     claimContinuationPhysicalSend: () => budget.claimContinuationPhysicalSend?.(),

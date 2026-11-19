@@ -15,7 +15,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * sends plus one alternate -- by funding the alternate from a reserve that a validated
  * sanitized repair can spend instead, but never both.
  */
-import type { SpendSeed, SpendScopes, SpendReservationProof, SpendAdmissionPolicy } from "./spend-reservation-ledger";
+import { sharedSpendPolicy, type SpendSeed, type SpendScopes, type SpendReservationProof, type SpendAdmissionPolicy, type SpendUsage } from "./spend-reservation-ledger";
 import type { TransientSendBudget } from "./upstream-retry";
 
 export type SendClass =
@@ -168,12 +168,20 @@ export interface RequestSendObserver {
   readonly enforced?: boolean;
   readonly policyStarted?: boolean;
   readonly spendAdmissionPolicy?: SpendAdmissionPolicy;
+  /** Capture/query original ceilings for a selected target without starting accounting. */
+  hasCapturedSpendCeiling?(target?: SpendScopes): boolean;
   /** Capture request policy at its first admission or actual physical start. */
   startRequest?(target?: SpendScopes & { targetKey?: string }): void;
   ensureSeed?(target: SpendScopes & { targetKey?: string; auxiliary?: boolean; estimate?: { inputTokens: number; outputCeilingTokens: number }; explicitEstimate?: boolean }, proof?: SpendReservationProof): SpendSeed | undefined;
   /** Release only this tracker's unstarted seed when physical admission refuses it. */
   releaseSeed?(seed: SpendSeed): void;
-  beginReporter?(): { start(seed: SpendSeed, ordinal: number): void; rebindTarget(target: SpendScopes & { targetKey?: string }, ordinal: number): boolean; report(sends: number): void; close(): void };
+  beginReporter?(): {
+    start(seed: SpendSeed, ordinal: number): void;
+    rebindTarget(target: SpendScopes & { targetKey?: string }, ordinal: number): boolean;
+    recordUsage?(ordinal: number, usage: Partial<SpendUsage> | null): void;
+    report(sends: number): void;
+    close(): void;
+  };
   dispatch?(proof: SpendReservationProof): void;
   /** Give back a booking whose send never happened. */
   refund(proof?: SpendReservationProof | null): void;
@@ -192,6 +200,8 @@ export interface RequestExecutionBudget extends TransientSendBudget {
   readonly workflowCountObserved?: boolean;
   readonly spendPolicyStarted?: boolean;
   readonly spendAdmissionPolicy?: SpendAdmissionPolicy;
+  /** Optional hosted work checks the original ceilings even before an account was selected. */
+  hasCapturedSpendCeiling?(target?: SpendScopes): boolean;
   startRequest?(target?: SpendScopes & { targetKey?: string }): void;
   claimPhysicalSend?(auxiliary?: boolean): number | undefined;
   /** A validated explicit successor still pays root/spend admission, not the recovery allowance. */
@@ -289,6 +299,29 @@ interface SharedSendLedger {
 }
 
 const sharedSendLedgers = new WeakMap<RequestExecutionBudget, SharedSendLedger>();
+// Only optional-work queries capture this fallback. Factory scopes key it by their shared
+// ledger; legacy/foreign holders key it by their public owner. No accounting observer is added.
+const fallbackSpendPolicies = new WeakMap<object, SpendAdmissionPolicy>();
+function fallbackHasCapturedSpendCeiling(owner: object, target: SpendScopes = {}, published?: SpendAdmissionPolicy): boolean {
+  let policy = published ?? fallbackSpendPolicies.get(owner);
+  if (!policy) {
+    const current = sharedSpendPolicy();
+    policy = Object.freeze({ root: Object.freeze({ ...current.root }), identity: Object.freeze({ ...current.identity }), pool: Object.freeze({ ...current.pool }) });
+    fallbackSpendPolicies.set(owner, policy);
+  }
+  return (Boolean(target.rootId) && policy.root.maxTokens !== undefined)
+    || (Boolean(target.identityId) && policy.identity.maxTokens !== undefined)
+    || (Boolean(target.poolId) && policy.pool.maxTokens !== undefined);
+}
+
+/** An authoritative query's false is final; only absent query authority uses the fallback. */
+export function requestHasCapturedSpendCeiling(budget: TransientSendBudget, target?: SpendScopes): boolean {
+  const execution = budget as Partial<RequestExecutionBudget>;
+  if (execution.hasCapturedSpendCeiling) return execution.hasCapturedSpendCeiling(target);
+  if (execution.spendEnforced === true) return true;
+  return fallbackHasCapturedSpendCeiling(budget, target, execution.spendAdmissionPolicy);
+}
+
 interface SameTargetRecoveryScope {
   targetKey: string;
   maxAdditionalSends: number;
@@ -344,14 +377,25 @@ export function reportDispatchSends(
   } else budget.used += count - prepaid;
 }
 
+type RecordPhysicalSendUsage = (usage: Partial<SpendUsage> | null) => void;
 /** A helper owns its starts and can never consume another helper's receipts. */
 export type PhysicalSendReporter = ((sends: number) => void) & {
   beforeSend?: () => boolean;
   close?: () => void;
   execute?: <T>(run: () => Promise<T>) => Promise<T>;
   bind?: (target: SpendScopes & { targetKey?: string }) => boolean;
+  /** Null gives this send exclusive ownership of its usage, even if none arrives. */
+  recordUsage?: RecordPhysicalSendUsage;
+  captureUsageRecorder?: () => RecordPhysicalSendUsage | undefined;
 };
 const activePhysicalReporters = new AsyncLocalStorage<PhysicalSendReporter>();
+export function recordCurrentPhysicalSendUsage(usage: Partial<SpendUsage> | null): void {
+  activePhysicalReporters.getStore()?.recordUsage?.(usage);
+}
+/** Retain the receipt of this exact dispatch across a later recovery decision. */
+export function captureCurrentPhysicalSendUsage(): RecordPhysicalSendUsage | undefined {
+  return activePhysicalReporters.getStore()?.captureUsageRecorder?.();
+}
 /** Selection owners rebind this helper's current start before invoking the executor. */
 export function rebindPhysicalSend(budget: TransientSendBudget | undefined, target: SpendScopes & { targetKey?: string }): boolean {
   if (!(budget as RequestExecutionBudget | undefined)?.spendEnforced) return true;
@@ -427,6 +471,14 @@ export function createPhysicalSendReporter(
     if (!producer || currentOrdinal === undefined || observer?.enforced !== true) return true;
     return producer.rebindTarget(selected, currentOrdinal);
   };
+  report.recordUsage = (usage) => {
+    if (currentOrdinal !== undefined) producer?.recordUsage?.(currentOrdinal, usage);
+  };
+  report.captureUsageRecorder = () => {
+    const ordinal = currentOrdinal;
+    const owner = producer;
+    if (ordinal !== undefined && owner) return usage => owner.recordUsage?.(ordinal, usage);
+  };
   report.close = () => {
     if (closed) return;
     try { if (producer) report(started - reported); }
@@ -491,6 +543,13 @@ function createRequestExecutionBudgetWithLedger(
     get workflowCountObserved(): boolean { return observer?.beforePhysicalSend !== undefined; },
     get spendPolicyStarted(): boolean { return observer?.policyStarted === true; },
     get spendAdmissionPolicy(): SpendAdmissionPolicy | undefined { return observer?.spendAdmissionPolicy; },
+    hasCapturedSpendCeiling(target) {
+      if (observer?.hasCapturedSpendCeiling) return observer.hasCapturedSpendCeiling(target);
+      if (observer?.enforced === true) return true;
+      return counter.recoveryOwner
+        ? requestHasCapturedSpendCeiling(counter.recoveryOwner, target)
+        : fallbackHasCapturedSpendCeiling(counter, target, observer?.spendAdmissionPolicy);
+    },
     startRequest(target) {
       observer?.startRequest?.(target);
       if (observer?.enforced && counter.physicalLimit === undefined) {
