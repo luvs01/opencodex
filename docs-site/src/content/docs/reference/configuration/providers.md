@@ -1811,7 +1811,9 @@ efforts, use a complete upstream error diagnostic of at most 1,024 UTF-16 code u
 any wrapper text. Larger diagnostics cannot authorize this retry or learning from their prefix.
 The original error body remains available to normal handling, including ordinary Combo failover;
 existing client error-display limits still apply. A long but legitimate effort error therefore
-does not trigger automatic effort repair or update the learned effort ladder.
+does not trigger automatic effort repair or update the learned effort ladder. Short diagnostics such as
+`cannot use parameter 'reasoning_effort'` still identify effort; an actual unrelated field
+continues to block this retry and learning.
 
 ## Routed agent messages
 

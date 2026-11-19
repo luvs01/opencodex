@@ -966,6 +966,11 @@ function diagnosticTextNamesOtherParameter(text: string, authoritativeEffortSubj
   const prefixParamPattern = /\b['"`]?([a-zA-Z0-9_\-\.]+)['"`]?\s+(?:parameter|param|argument|arg|field|property)\b/gi;
   for (let m = prefixParamPattern.exec(s); m; m = prefixParamPattern.exec(s)) {
     const tokenIndex = tokenStartIndex(m, m[1], true);
+    const beforeToken = s.slice(0, tokenIndex);
+    // In "cannot use parameter 'x'", use introduces the label, not a field named use.
+    // Quoted field names and verbs outside that diagnostic phrase remain competing subjects.
+    if (!/['"`]$/.test(beforeToken) && (m[1].toLowerCase() === "missing"
+      || (/^(?:specify|use|set|pass|provide)$/i.test(m[1]) && /\bcannot\s+$/i.test(beforeToken)))) continue;
     if (isCompetingParameterToken(s, tokenIndex, m[1])) return true;
   }
 
@@ -990,7 +995,7 @@ function diagnosticTextNamesOtherParameter(text: string, authoritativeEffortSubj
   }
 
   const rejectionExtra =
-    /\b(?:unexpected|missing|cannot\s+(?:specify|use|set|pass|provide))\s+(?:(?:field|param|parameter|argument|property)\s*)?['"`]?([a-zA-Z0-9_\-\.]+)['"`]?/gi;
+    /\b(?:unexpected|missing|cannot\s+(?:specify|use|set|pass|provide))\s+(?:(?:field|param|parameter|argument|property)\b\s*)?['"`]?([a-zA-Z0-9_\-\.]+)['"`]?/gi;
   for (let m = rejectionExtra.exec(s); m; m = rejectionExtra.exec(s)) {
     const tokenIndex = tokenStartIndex(m, m[1], false);
     if (isCompetingParameterToken(s, tokenIndex, m[1])) return true;

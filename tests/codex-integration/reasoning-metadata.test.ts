@@ -449,6 +449,27 @@ describe("reasoning diagnostic analysis budget", () => {
     }
   });
 
+  test.each([
+    ["cannot use parameter 'reasoning_effort'", false],
+    ["cannot use parameter'reasoning_effort'", false],
+    ["missing parameter `reasoning_effort`", false],
+    ['cannot set param"reasoning.effort"', false],
+    ["unexpected field`reasoning_effort`", false],
+    ["cannot use parameter 'sampling_knob'", true],
+    ["cannot use field`sampling_knob`", true],
+    ["cannot use parametersampling_knob", true],
+    ["the use parameter is invalid", true],
+    ["cannot 'use' parameter", true],
+    ["'missing' parameter is invalid", true],
+  ] as const)("matches complete diagnostic labels: %s", async (diagnostic, conflicting) => {
+    const { metadata } = await load();
+    const message = `Invalid reasoning effort. ${diagnostic}`;
+    for (const text of [message, JSON.stringify({ error: { message } })]) {
+      expect(metadata.hasConflictingReasoningEffortCode(text)).toBe(conflicting);
+      expect(metadata.isReasoningEffortRejection(text)).toBe(!conflicting);
+    }
+  });
+
   test("keeps separators and quoted field names distinct from effort refusals", async () => {
     const { metadata } = await load();
     const forms = [
