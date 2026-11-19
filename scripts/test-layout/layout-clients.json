@@ -171,6 +171,8 @@
   "client-link-relay.test.ts": "clients",
   "client-link-runtime.test.ts": "clients",
   "client-link-stop.test.ts": "clients",
+  "client-link-stop-recovery.test.ts": "clients",
+  "client-link-stop-sibling.test.ts": "clients",
   "link-routes.test.ts": "clients",
   "client-link-state.test.ts": "clients",
   "client-link-status.test.ts": "clients",
@@ -259,5 +261,6 @@
   "link-ocx-child-ws-gate.test.ts": "clients",
   "link-ocx-child-ws-feature.test.ts": "clients",
   "link-relay-wait-observer.test.ts": "clients",
-  "link-ws-autobahn.test.ts": "clients"
+  "link-ws-autobahn.test.ts": "clients",
+  "pi-family-developer-role.test.ts": "clients"
 }

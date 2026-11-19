@@ -16,6 +16,17 @@ account selection or defaults.
 While a provider login is in progress, its Accounts panel offers **Cancel** once sign-in
 instructions appear.
 
+## Reasoning-effort rejection diagnostics
+
+Automatic retries of the same provider and model at a lower effort, and learned unsupported
+efforts, use a complete upstream error diagnostic of at most 1,024 UTF-16 code units, including
+any wrapper text. Larger diagnostics cannot authorize this retry or learning from their prefix.
+The original error body remains available to normal handling, including ordinary Combo failover;
+existing client error-display limits still apply. A long but legitimate effort error therefore
+does not trigger automatic effort repair or update the learned effort ladder. Short diagnostics such as
+`cannot use parameter 'reasoning_effort'` still identify effort; an actual unrelated field
+continues to block this retry and learning.
+
 ## OpenAI account modes
 
 | Provider id | Use | Credential/account rule |
@@ -903,6 +914,13 @@ Providers with a live probe: OpenAI/Codex, Anthropic, xAI, Cursor, Kimi,
 Google Antigravity, OpenCode Go, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax,
 Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt, Command Code, and any a6api-backed
 or Abliteration custom provider.
+
+**Anthropic monthly usage.** Usage-based seats such as Enterprise can show a monthly
+extra-usage bar when Anthropic reports enabled extra usage and no plan windows. The reading
+comes without a reset date. The bar clears when Anthropic reports plan windows or confirms that
+extra usage is disabled. If the response supplies no usable quota window, the account quota check
+still reports that the reading is unavailable, including after a provider quota refresh receives
+the same response.
 
 **Kimi Coding Plan quota.** Account login and API-key providers on the canonical
 `https://api.kimi.com/coding/v1` endpoint read `/usages`. API-key providers on the regional
