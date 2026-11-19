@@ -91,6 +91,7 @@ export async function executeResponsesRunTurn(
     PreparedResponsesRequest,
     | "parsed"
     | "route"
+    | "subagentFallbackSelected"
     | "selectedForwardHeaders"
     | "translatorBudget"
     | "inboundWire"
@@ -358,8 +359,12 @@ export async function executeResponsesRunTurn(
           turnParsed,
           {
             headers: requestState.selectedForwardHeaders,
+            inboundTransport: options.inboundTransport,
+            agyAcpUnattendedHttpTurn: options.agyAcpUnattendedHttpTurn,
             abortSignal: producerAbort.signal,
             comboAttempt: options.comboAttempt === true,
+            ...(requestState.subagentFallbackSelected ? { subagentFallback: true } : {}),
+            ...(options.internalDecisionCall ? { internalDecisionCall: true } : {}),
             translatorBudget,
             providerFetch: runTurnProviderFetch,
             pacingSlot,
@@ -936,6 +941,7 @@ export async function executeResponsesRunTurn(
           hideThinkingSummary: parsed.options.hideThinkingSummary,
           chatRawReasoningVisible: options.chatRawReasoningVisible,
           hideRawReasoning: parsed.options.hideRawReasoning,
+          rawReasoningAsSummary: parsed.options.rawReasoningAsSummary,
           declaredToolNames,
           bareCustomToolNames,
           enforceDeclaredToolNames,
@@ -1107,6 +1113,7 @@ export async function executeResponsesRunTurn(
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         chatRawReasoningVisible: options.chatRawReasoningVisible,
         hideRawReasoning: parsed.options.hideRawReasoning,
+        rawReasoningAsSummary: parsed.options.rawReasoningAsSummary,
         toolNsMap,
         declaredToolNames,
         enforceDeclaredToolNames,

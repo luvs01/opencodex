@@ -22,11 +22,12 @@ import type {
 } from "../types";
 import { isAllowedToolChoice, namespacedToolName, resolveToolChoiceWireName } from "../types";
 import { ANTHROPIC_OAUTH_BETA, CLAUDE_CODE_SYSTEM_INSTRUCTION, applyClaudeToolPrefix, stripClaudeToolPrefix } from "../oauth/anthropic";
+import { sameProviderContinuationOwner } from "../responses/provider-continuation";
 import { parseDataUrl } from "./image";
 import { enforceAnthropicImageLimits } from "./anthropic-image-guard";
 import { normalizeAnthropicImages } from "./anthropic-image-normalize";
 import { normalizeAnthropicOutputSchema } from "./anthropic-output-schema";
-import { stripResponsesOnlyEncryptedMarker } from "./responses-tool-schema";
+import { normalizeAnthropicInputSchema } from "./anthropic-input-schema";
 import { identifyRoutedModel } from "./identity";
 import { redactSecretString } from "../lib/redact";
 import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "./client-fingerprint";
@@ -41,7 +42,7 @@ import { resolveReasoningCapabilities } from "../providers/reasoning-capabilitie
 import { declaresThinkingToggleWire, reasoningControlsAreUnsupported } from "./reasoning-controls";
 import { applyAgentRouterLanguageFraming, isAgentRouterEndpoint } from "./agentrouter";
 import { anthropicCacheWrite1hTokens, resolveAnthropicCacheRetention, type AnthropicCacheRetention } from "./anthropic/cache-retention";
-import { advisorServerExchange, advisorServerToolDestination, planAnthropicServerTools } from "./anthropic/advisor-tool";
+import { advisorServerExchange, advisorServerToolDestination, hostedAdvisorCredentials, planAnthropicServerTools } from "./anthropic/advisor-tool";
 import { applyAnthropicPerMessageEffort } from "./anthropic/per-message-effort";
 import { claudeFamilyVersion, rejectsCombinedSampling, rejectsForcedToolChoice, rejectsSamplingParameters, supportsExplicitThinkingDisable, usesAdaptiveThinking, usesBetweenToolsFloor } from "./anthropic-model-contract";
 
@@ -566,11 +567,17 @@ export function anthropicBaseRequestHeaders(stream: boolean | undefined): Record
   };
 }
 
+/** The configured credential used by the non-OAuth Messages serializer. */
+export function anthropicApiKeyForRequest(provider: OcxProviderConfig): string | undefined {
+  return provider.authMode !== "oauth" && typeof provider.apiKey === "string" ? provider.apiKey : undefined;
+}
+
 /** Key-auth credential placement: `x-api-key`, or a bearer when the provider asks for one. */
 export function applyAnthropicKeyAuth(headers: Record<string, string>, provider: OcxProviderConfig): void {
-  if (typeof provider.apiKey !== "string") return;
-  if (anthropicKeyUsesBearer(provider)) headers["Authorization"] = `Bearer ${provider.apiKey}`;
-  else headers["x-api-key"] = provider.apiKey;
+  const apiKey = anthropicApiKeyForRequest(provider);
+  if (apiKey === undefined) return;
+  if (anthropicKeyUsesBearer(provider)) headers["Authorization"] = `Bearer ${apiKey}`;
+  else headers["x-api-key"] = apiKey;
 }
 
 export function resolveTranslatedAnthropicSessionKey(parsed: OcxParsedRequest, incoming?: IncomingMeta): string | undefined {
@@ -972,68 +979,6 @@ function withAnthropicServerTools(tools: unknown[] | undefined, parsed: OcxParse
   return [...(tools ?? []), ...serverTools.map(t => ({ ...t, cache_control: undefined }))];
 }
 
-function normalizeAnthropicInputSchema(schema: unknown): Record<string, unknown> {
-  const stripped = stripResponsesOnlyEncryptedMarker(schema);
-  const obj = stripped && typeof stripped === "object" && !Array.isArray(stripped)
-    ? stripped as Record<string, unknown>
-    : {};
-  // Anthropic rejects root-level missing type and oneOf/anyOf/allOf in input_schema.
-  // Normalize the root only: ensure type:"object" + properties, flatten root composition
-  // while preserving nested schemas. Mirrors kiro-tools.ts ensureRootObjectType.
-  // Known limitation: Object.assign on branch properties means later branches overwrite
-  // earlier ones when the same property name appears with different schemas.
-  const compositionKeys = ["oneOf", "anyOf", "allOf"] as const;
-  const hasRootComposition = compositionKeys.some(key => Array.isArray(obj[key]));
-  const type = obj.type;
-  const rootObjectType = type === "object" || (Array.isArray(type) && type.includes("object"));
-
-  if (!hasRootComposition) {
-    const normalized: Record<string, unknown> = rootObjectType && type === "object"
-      ? { ...obj }
-      : { ...obj, type: "object" };
-    if (normalized.properties === undefined || normalized.properties === null) {
-      normalized.properties = {};
-    }
-    return normalized;
-  }
-
-  const properties: Record<string, unknown> = {};
-  const required = new Set<string>();
-  if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
-    Object.assign(properties, obj.properties as Record<string, unknown>);
-  }
-  if (Array.isArray(obj.required)) {
-    for (const item of obj.required) if (typeof item === "string") required.add(item);
-  }
-
-  for (const key of compositionKeys) {
-    const variants = obj[key];
-    if (!Array.isArray(variants)) continue;
-    const mergeRequired = key === "allOf";
-    for (const variant of variants) {
-      if (!variant || typeof variant !== "object" || Array.isArray(variant)) continue;
-      const v = variant as Record<string, unknown>;
-      if (v.properties && typeof v.properties === "object" && !Array.isArray(v.properties)) {
-        Object.assign(properties, v.properties as Record<string, unknown>);
-      }
-      if (mergeRequired && Array.isArray(v.required)) {
-        for (const item of v.required) if (typeof item === "string") required.add(item);
-      }
-    }
-  }
-
-  const normalized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(obj)) {
-    if (key === "oneOf" || key === "anyOf" || key === "allOf") continue;
-    if (key === "type" || key === "properties" || key === "required") continue;
-    normalized[key] = value;
-  }
-  normalized.type = "object";
-  normalized.properties = properties;
-  if (required.size > 0) normalized.required = [...required];
-  return normalized;
-}
-
 export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetention?: "none" | "short" | "long"): ProviderAdapter {
   const isOAuth = provider.authMode === "oauth";
   const toolNames = buildToolNameTransforms(provider);
@@ -1044,6 +989,10 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
     formatErrorBody: formatAnthropicErrorBody,
 
     async buildRequest(parsed: OcxParsedRequest, incoming?: IncomingMeta) {
+      if (parsed._anthropicImageOwner && (!parsed._providerContinuationOwner
+        || !sameProviderContinuationOwner(parsed._anthropicImageOwner, parsed._providerContinuationOwner))) {
+        throw new Error("Anthropic image context no longer belongs to the selected account.");
+      }
       if (typeof provider.apiKey !== "string" || provider.apiKey.trim() === "") {
         if (isOAuth) {
           throw new Error("anthropic oauth token missing — run ocx login anthropic");
@@ -1219,7 +1168,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         delete body.top_p;
       }
 
-      if (nativeOpus55 && !reasoningControlsUnsupported && thinkingEnabled !== false) {
+      if (nativeOpus55 && !reasoningControlsUnsupported && thinkingEnabled !== false && !parsed._anthropicImageSummary) {
         // An explicit per-request summary (concise/detailed) still forces summarized (#7881).
         body.thinking = summaryRequested || thinkingDisplayPolicy === "summarized"
           ? { type: "adaptive", display: "summarized" }
@@ -1260,7 +1209,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         else if (tc === "none") body.tool_choice = { type: "none" };
         else if (tc === "required") body.tool_choice = { type: "any" };
         else if (isAllowedToolChoice(tc)) body.tool_choice = { type: tc.mode === "required" ? "any" : "auto" };
-        else if (typeof tc === "object" && "name" in tc) body.tool_choice = { type: "tool", name: toolNames.toWire(resolveToolChoiceWireName(parsed.context.tools, tc.name)) };
+        else if (typeof tc === "object" && "name" in tc) body.tool_choice = { type: "tool", name: toolNames.toWire(resolveToolChoiceWireName(parsed.context.tools, tc.name, tc)) };
       } else if (tools && parsed.options.parallelToolCalls === false) {
         // The caller asked for one tool call at a time but sent no explicit choice.
         // Anthropic carries that intent INSIDE tool_choice, so the implicit default
@@ -1305,6 +1254,11 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       const headers = anthropicBaseRequestHeaders(parsed.stream);
       if (isOAuth) applyAnthropicOAuthAuth(headers, provider.apiKey, resolveTranslatedAnthropicSessionKey(parsed, incoming));
       else applyAnthropicKeyAuth(headers, provider);
+      const advisorCredential = serverToolPlan.betas.length > 0
+        ? headers.Authorization !== undefined
+          ? { header: "authorization" as const, value: headers.Authorization }
+          : { header: "x-api-key" as const, value: headers["x-api-key"]! }
+        : undefined;
       if (provider.headers) Object.assign(headers, provider.headers);
       mergeAnthropicBetaHeader(headers, [...(fastSpeed?.betas ?? []), ...(progressUpdates ? ["thinking-display-updates-2026-08-18"] : []), ...serverToolPlan.betas]);
 
@@ -1339,6 +1293,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
         ),
       };
       captureAnthropicRejectionPayloads(request, body, incoming?.translatorBudget);
+      if (advisorCredential) hostedAdvisorCredentials.set(request, advisorCredential);
       return request;
     },
 

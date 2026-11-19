@@ -9,6 +9,7 @@ import type { AdapterExchange } from "./adapter-dispatch";
 import type { AdapterContinuations } from "./adapter-continuation";
 import { guardTerminalEventStream } from "./terminal-guard";
 import { guardEmptyCompletionEventStream } from "./empty-completion-guard";
+import { UNDECLARED_TOOL_CALL_ERROR_CODE } from "../../lib/errors";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "../../bridge";
 import type { OcxProviderContinuationState, AdapterEvent } from "../../types";
 import { rememberResponseState } from "../../responses/state";
@@ -31,6 +32,7 @@ import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { currentTurnToolBridgeMaps, guardEmptyToolCatalogEvents, guardEmptyToolCatalogStream } from "../../lib/empty-tool-catalog";
 import { guardCompactionSummary } from "../../responses/compaction-summary";
 import { settleAnthropicPerMessageEffort } from "../../adapters/anthropic/per-message-effort";
+import { adapterResponseSpendObserver } from "./request-spend";
 
 /** One responsibility of the Responses request pipeline; state owners are explicit. */
 export async function deliverAdapterResponse(
@@ -76,6 +78,8 @@ export async function deliverAdapterResponse(
     fetchGuardedEmptyCompletionRetry,
     isContinuationBodyStall,
   } = continuationState;
+  const preserveEmptyCompletionRetryError = (event: AdapterEvent) =>
+    (event.type === "error" && event.code === UNDECLARED_TOOL_CALL_ERROR_CODE) || isContinuationBodyStall(event);
   const { emptyCompletionGuardEnabled } = completionPolicy;
   const {
     cancelResponseCompletion,
@@ -86,6 +90,7 @@ export async function deliverAdapterResponse(
   const { routedCompaction } = sidecarState;
   const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream });
   const upstreamRequestsStream = parsed.stream || isCanonicalOpenAiForwardProvider(route.provider);
+  const observeInitialSpend = adapterResponseSpendObserver(upstreamResponse);
   const recoverThinkingSignature = (events: AsyncIterable<AdapterEvent>): AsyncIterable<AdapterEvent> =>
     thinkingSignatureRecovery.wrap(events, async function* () {
       const result = await refetchThinkingSignature();
@@ -106,6 +111,7 @@ export async function deliverAdapterResponse(
         return;
       }
       try {
+        const observeRetrySpend = adapterResponseSpendObserver(response);
         const bodyInactivityMs = resolveStallTimeoutMs(config.stallTimeoutSec, { localUpstream: adapterExchange.localUpstream });
         const retryEvents = upstreamRequestsStream
           ? readResponseStreamWithInactivity(response, upstream.signal, bodyInactivityMs,
@@ -115,6 +121,7 @@ export async function deliverAdapterResponse(
                 guarded => transportState.activeAdapter.parseResponse!(guarded, translatorBudget, logCtx.activeTierMetadata));
             })();
         for await (const event of retryEvents) {
+          observeRetrySpend?.(event);
           options.onCompactionRecoveryAdapterEvent?.(event);
           yield event;
         }
@@ -150,6 +157,7 @@ export async function deliverAdapterResponse(
           bodyInactivityMs,
           response => transportState.activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata, { completedToolBlocks: outputItemIds !== undefined }),
         )) {
+          observeInitialSpend?.(event);
           options.onCompactionRecoveryAdapterEvent?.(event);
           yield event;
         }
@@ -198,7 +206,7 @@ export async function deliverAdapterResponse(
       ? guardEmptyCompletionEventStream({
           firstEvents: advisorStream,
           continuation: fetchGuardedEmptyCompletionRetry,
-          preserveRetryError: isContinuationBodyStall,
+          preserveRetryError: preserveEmptyCompletionRetryError,
         })
       : advisorStream;
     const catalogGuardedEventStream = guardEmptyToolCatalogStream(completionGuardedEventStream, clientToolCatalog, translatorBudget);
@@ -268,6 +276,7 @@ export async function deliverAdapterResponse(
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         chatRawReasoningVisible: options.chatRawReasoningVisible,
         hideRawReasoning: parsed.options.hideRawReasoning,
+        rawReasoningAsSummary: parsed.options.rawReasoningAsSummary,
         declaredToolNames,
         bareCustomToolNames,
         enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
@@ -317,7 +326,10 @@ export async function deliverAdapterResponse(
           response => transportState.activeAdapter.parseResponse!(response, translatorBudget, logCtx.activeTierMetadata),
         ));
       }
-      for (const event of initialEvents) options.onCompactionRecoveryAdapterEvent?.(event);
+      for (const event of initialEvents) {
+        observeInitialSpend?.(event);
+        options.onCompactionRecoveryAdapterEvent?.(event);
+      }
       const recoveredEvents: AdapterEvent[] = [];
       for await (const event of recoverThinkingSignature((async function* () { yield* initialEvents; })())) {
         recoveredEvents.push(event);
@@ -351,7 +363,7 @@ export async function deliverAdapterResponse(
         for await (const event of guardEmptyCompletionEventStream({
           firstEvents: (async function* () { yield* guardedEvents; })(),
           continuation: fetchGuardedEmptyCompletionRetry,
-          preserveRetryError: isContinuationBodyStall,
+          preserveRetryError: preserveEmptyCompletionRetryError,
         })) events.push(event);
       } else {
         events = guardedEvents;
@@ -380,6 +392,7 @@ export async function deliverAdapterResponse(
       hideThinkingSummary: parsed.options.hideThinkingSummary,
       chatRawReasoningVisible: options.chatRawReasoningVisible,
       hideRawReasoning: parsed.options.hideRawReasoning,
+      rawReasoningAsSummary: parsed.options.rawReasoningAsSummary,
       toolNsMap,
       declaredToolNames,
       bareCustomToolNames,

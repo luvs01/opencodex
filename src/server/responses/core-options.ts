@@ -1,4 +1,5 @@
 import type { ClientFacingModelLabel } from "../../lib/error-destination";
+import type { HostedAdvisorSelection } from "../../claude/inbound-content-options";
 import type { CodexAccountModelRefusal } from "../../combos/failover";
 import type { NativeResponseControl } from "./native-response-control";
 import type { AdapterEvent, OcxUsage, OcxProviderContinuationState, OcxConfig } from "../../types";
@@ -25,8 +26,14 @@ import type { RequestLogContext } from "../request-log";
 import type { UpstreamHostAdmissionLease } from "../../codex/upstream-host-health";
 import type { AccountLease } from "../../oauth/kiro-account-load";
 import type { PolicyRequestScope } from "./policy-request-scope";
+import type { SpendAdmissionPolicy } from "../../lib/spend-reservation-ledger";
 import type { OcxParsedRequest } from "../../types";
 import type { PolicyRequestEvidence } from "../../routing/evaluator";
+
+export interface HostedAdvisorSpendScope {
+  readonly ceilings: SpendAdmissionPolicy;
+  optionalWithheld: boolean;
+}
 
 export interface ConsumedComboFailure {
   response: Response;
@@ -37,6 +44,8 @@ export interface ConsumedComboFailure {
   malformedResponseFormat?: boolean;
   /** Complete bounded-envelope OpenRouter opaque-400 verdict captured before display truncation. */
   openRouterOpaque400?: boolean;
+  /** Complete bounded-envelope unoffered-tool-call verdict captured before display truncation. */
+  unofferedToolCallRefusal?: boolean;
   /** Complete bounded-envelope provider moderation verdict captured before display truncation. */
   providerModerationRefusal?: boolean;
   /** Structured upstream `error.code` when present in the failure body. */
@@ -214,6 +223,10 @@ export interface HandleResponsesOptions {
   nativeReasoningMint?: { owner?: NativeReasoningOwner };
   /** The Claude client's typed `web_search_*` / `web_fetch_*` declarations; kept only for `inboundWire: "anthropic"`. */
   anthropicServerTools?: readonly Record<string, unknown>[];
+  /** The original Messages choice names a typed hosted Advisor, possibly with a duplicate name. */
+  anthropicHostedAdvisorSelection?: HostedAdvisorSelection;
+  /** Hosted work shares this state across routing candidates and translated combo children. */
+  hostedAdvisorSpendScope?: HostedAdvisorSpendScope;
   /** The Claude client's replayable server-tool exchanges (`replayedAnthropicServerBlocks`); same scope. */
   anthropicServerReplay?: ReadonlyMap<string, readonly Record<string, unknown>[]>;
   /** The caller's cached system prefix (`systemCachePrefix`); same scope. */
@@ -226,6 +239,8 @@ export interface HandleResponsesOptions {
   protocolSource?: import("./core-combo-native").ComboProtocolSource;
   /** Internal transport identity for route-scoped upstream compatibility policy. */
   inboundTransport?: "websocket";
+  /** ACP refusal signal captured from the original HTTP request, before any bridge translation. */
+  agyAcpUnattendedHttpTurn?: boolean;
   /**
    * Set by the HTTP `/v1/responses` ingress only: a streaming combo turn whose target selection
    * outlasts `COMBO_SELECTION_KEEPALIVE_THRESHOLD_MS` commits a 200 SSE head and sends keepalive
@@ -259,6 +274,9 @@ export interface HandleResponsesOptions {
    * can carry the binding to the context that writes the row.
    */
   onBridgeUsageBound?: () => void;
+  /** A web-search deadline has been recorded on the child before its failure is emitted. */
+  onWebSearchLocalFailure?: () => void;
+  onHostedWebSearchStream?: () => void;
   /** Child-owned prepaid initial send; capacity remains charged until dispatch or unsent release. */
   comboInitialSend?: { permit: SingleUseDispatchPermit; producerOwned?: boolean };
   /** Exact externally booked combo hop, used for its child's spend preflight and send reports. */

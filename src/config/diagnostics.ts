@@ -1,4 +1,5 @@
 import { aliasTemplateError } from "../providers/alias-template";
+import { redactSecretString } from "../lib/redact";
 import { parseDashboardTrustedProxy } from "./dashboard-trusted-proxy";
 import { readExistingSpendSalt, spendPoolAliasesError, validatePoolAliasOwners } from "../lib/spend-pool-alias-validation";
 import { isSubagentModelEntry, rawSubagentModelForce } from "./subagent-models";
@@ -30,6 +31,7 @@ import { projectRemovedOpenCodeFreeSnapshot } from "./removed-opencode-free-back
 import { sanitizeOpenCodeOverridesForLoad } from "./opencode-wire-upgrade";
 import {
   sanitizeReasoningPinsForLoad,
+  sanitizeAgyAcpForLoad,
   sanitizeRetryOn429ForLoad,
   sanitizeCapabilityDeclarationsForLoad,
   sanitizeModelCostsForLoad,
@@ -57,6 +59,7 @@ import {
   rawConfigRecord,
   malformedNativeSubagentFields,
   malformedNativeSubagentFieldWarning,
+  malformedCodexAuthMethodWarning,
   malformedCodexAccountPickerWarning,
   nativeSubagentSyncDisabledReason,
   normalizeNativeSubagentSync,
@@ -131,7 +134,7 @@ function configPlaceholderWarnings(config: OcxConfig): string[] {
   return warnings;
 }
 
-function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): ConfigDiagnostics {
+function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown, repairs: readonly string[]): ConfigDiagnostics {
   // Unsafe hand-edited optional values are disabled in memory instead of rejecting
   // the entire config, which would hide unrelated providers/accounts. The next
   // ordinary save persists the normalized absence.
@@ -139,7 +142,9 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   const rawForce = rawSubagentModelForce(rawParsed);
   const rawEffort = rawClaudeSubagentEffort(rawParsed);
   const normalized = normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed);
-  const warnings = configPlaceholderWarnings(normalized);
+  const warnings = [...repairs, ...configPlaceholderWarnings(normalized)];
+  const codexAuthWarning = malformedCodexAuthMethodWarning(rawParsed);
+  if (codexAuthWarning) warnings.push(codexAuthWarning);
   if (rawForce !== undefined && !isSubagentModelEntry(rawForce)) warnings.push("claudeCode.subagentModelForce ignored: expected a safe roster-style model id");
   if (normalized.chatgptDesktop?.appServerShim === true && process.platform !== "darwin") {
     warnings.push("chatgptDesktop.appServerShim is experimental and macOS only; ignored on this platform");
@@ -229,8 +234,8 @@ export function mergeConfigDefaults(parsed: unknown): unknown {
 
 function schemaDiagnosticsError(error: z.ZodError): string {
   const details = error.issues.map(issue => {
-    const path = issue.path.join(".") || "config";
-    return `${path}: ${issue.message}`;
+    const path = issue.path.map(segment => typeof segment === "string" ? redactSecretString(segment) : segment).join(".") || "config";
+    return `${path}: ${redactSecretString(issue.message)}`;
   });
   return details.length > 0 ? `schema_invalid: ${details.join("; ")}` : "schema_invalid";
 }
@@ -555,6 +560,12 @@ function oauthOpenBrowserError(value: unknown): string | null {
   return "schema_invalid: oauthOpenBrowser: must be a boolean or omitted";
 }
 
+function codexAuthMethodError(value: unknown): string | null {
+  return malformedCodexAuthMethodWarning(value)
+    ? 'schema_invalid: codexAuthMethod: must be "auto", "device-only", or omitted'
+    : null;
+}
+
 /** Validate an in-memory config candidate without touching disk. Used by headless CLI import/set. */
 /**
  * Reject a loopback-listener port that collides with the proxy port (#1102), and a port-less
@@ -805,6 +816,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? emptyCompletionRetryError(value)
     ?? dropCodexSafetyBufferingError(value)
     ?? oauthOpenBrowserError(value)
+    ?? codexAuthMethodError(value)
     ?? showCodexCreditsError(value)
     ?? creditCodexAccountIdsError(value)
     ?? remainingQuotaAccountIdsError(value)
@@ -835,6 +847,11 @@ export function configDiagnosticsFromRaw(raw: string, options: { warn?: (message
 
 function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Uint8Array }, warn?: (message: string) => void): ConfigDiagnostics {
   try {
+    const repairs: string[] = [];
+    const reportAgyRepair = (message: string): void => {
+      repairs.push(message);
+      (warn ?? console.warn)(`⚠️  config.json ${message}`);
+    };
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
     projectRemovedOpenCodeFreeSnapshot(parsed, file);
     sanitizeOpenCodeOverridesForLoad(parsed);
@@ -845,17 +862,19 @@ function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Ui
     sanitizeModelDisplayNamesForLoad(parsed, warn);
     sanitizeAutoReviewForLoad(parsed, warn);
     sanitizeRetryOn429ForLoad(parsed, warn);
+    sanitizeAgyAcpForLoad(parsed, reportAgyRepair);
     sanitizeModelCostsForLoad(parsed, warn);
     sanitizeCapabilityDeclarationsForLoad(parsed, warn);
     const result = configSchema.safeParse(parsed);
     if (result.success) {
-      return validFileConfigDiagnostics(normalizeApiKeyIds(result.data as OcxConfig), parsed);
+      return validFileConfigDiagnostics(normalizeApiKeyIds(result.data as OcxConfig), parsed, repairs);
     }
 
     const merged = mergeConfigDefaults(parsed);
+    sanitizeAgyAcpForLoad(merged, reportAgyRepair);
     const retryResult = configSchema.safeParse(merged);
     if (retryResult.success) {
-      return validFileConfigDiagnostics(normalizeApiKeyIds(retryResult.data as OcxConfig), parsed);
+      return validFileConfigDiagnostics(normalizeApiKeyIds(retryResult.data as OcxConfig), parsed, repairs);
     }
 
     // #1785: one invalid routing profile must not make diagnostics report the built-in
@@ -871,7 +890,7 @@ function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Ui
     const salvaged = salvageConfigCandidate(merged, retryResult.error);
     if (salvaged) {
       const config = normalizeApiKeyIds(salvaged.parsed);
-      const warnings = degradedListenerWarnings(parsed, config);
+      const warnings = [...repairs, ...degradedListenerWarnings(parsed, config)];
       const chatgptDesktopIssue = chatgptDesktopConfigIssue(parsed);
       if (chatgptDesktopIssue) warnings.push(`${chatgptDesktopIssue}; the whole chatgptDesktop block is ignored, so the ChatGPT desktop integration reads as off`);
       return {
