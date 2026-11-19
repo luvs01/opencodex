@@ -218,6 +218,7 @@ import { withGrokSessionIdentity } from "../../grok/session-identity";
 import { withCallerSessionIdentity } from "../caller-session-identity";
 import { agentAssertionUnsupportedResponse, hasAgentAssertionAuthorization } from "../../lib/authorization-scheme";
 import { runTurnStateCallerScope } from "../turn-state-handles";
+import { classifyRequestPeer, runWithRequestPeer } from "../../lib/request-peer-scope";
 
 export {
   claudeInterceptRouteAllowed,
@@ -576,13 +577,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // unauthenticated loopback listener (#1102) is a second Bun.serve, and handing its
         // request to the public server's upgrade would fail or cross sockets.
         if (requestServer.upgrade(req, {
-          data: buildResponsesWsData(
+          data: { ...buildResponsesWsData(
             forwardHeaders,
             admission,
             websocketLease,
             sessionLaneIdFromRequest(req.headers),
             classifyUsageClient(req.headers), replayPrincipal,
-          ),
+          ), peerLocal: classifyRequestPeer(ingress, requestServer.requestIP?.(req)?.address, config.dashboardTrustedProxy, req.headers).local },
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
@@ -798,6 +799,11 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       if (url.pathname === "/v1/usage" && req.method === "GET") {
         const { handleHubUsage } = await import("../hub-usage");
         return handleHubUsage(req, config, policy);
+      }
+
+      if (url.pathname === "/v1/usage/windows" && req.method === "GET") {
+        const { handleHubUsageWindows } = await import("../hub-usage-windows");
+        return handleHubUsageWindows(req, config, policy);
       }
 
       if (url.pathname === "/v1/hub-state" && (req.method === "GET" || req.method === "HEAD")) {
@@ -1203,9 +1209,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           ));
         };
         const promoteAliasId = modelAliasIdPromoter(config);
-        const routedRows = await Promise.all(uniqueCatalogModelsForRawPublicList(goOrdered)
+        const { effectiveModelAliases } = await import("../../providers/default-aliases");
+        // One synchronous view per provider for this projection, including empty collision results.
+        // Keep it request-local so later config or discovery changes cannot reuse stale aliases.
+        const aliasViews = new Map<string, ReturnType<typeof effectiveModelAliases>>();
+        const routedRows = uniqueCatalogModelsForRawPublicList(goOrdered)
           .filter(m => listAllows(m.provider, m.id))
-          .map(async m => {
+          .map(m => {
           // Same rule as the anthropic branch: with the global fast switch on, a client
           // that has no Fast toggle is offered the fast identity directly. An operator
           // alias is an explicit decision and still wins.
@@ -1213,14 +1223,12 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           const publicId = m.alias ?? `${m.provider}/${fastModelId ?? m.id}`;
           const isCombo = m.provider === "combo" && exactComboSlugs.has(publicId);
           const provider = config.providers[m.provider];
-          const effective = provider
-            ? (await import("../../providers/default-aliases")).effectiveModelAliases(
-                config,
-                provider,
-                knownModelIdsForProvider(m.provider, provider, config),
-                m.provider,
-              ).get(m.id)
-            : undefined;
+          let aliases = aliasViews.get(m.provider);
+          if (provider && aliases === undefined) {
+            aliases = effectiveModelAliases(config, provider, knownModelIdsForProvider(m.provider, provider, config), m.provider);
+            aliasViews.set(m.provider, aliases);
+          }
+          const effective = aliases?.get(m.id);
           const effectiveId = !isCombo && !fastModelId && effective
             ? promoteAliasId(m.provider, m.id, effective.alias, catalogRowFastEligible(m)) ?? publicId
             : publicId;
@@ -1258,7 +1266,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             config,
             effortRowKnownIds,
           ));
-        }));
+        });
         const data = [
           ...visibleNatives
             .filter(id => listAllows(OPENAI_CODEX_PROVIDER_ID, id))
@@ -1942,6 +1950,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
   const routeFetch = serveOptions.fetch;
   // x-opencodex-served-by on GET /v1/models, whichever branch answered (src/remote/served-by.ts).
   // Each request runs with its own caller slot, which admission fills for turn-state handle binding.
-  return { ...serveOptions, fetch: (req: Request, requestServer: Server<WsData>): Promise<Response> => runTurnStateCallerScope(async () =>
-    stampServedBy(req.method, codexCompatibleUrl(req.url).pathname, await routeFetch(req, requestServer))) } as const;
+  // Each request also carries its peer snapshot (listener + kernel-observed address), read by local-only providers.
+  return { ...serveOptions, fetch: (req: Request, requestServer: Server<WsData>): Promise<Response> => runWithRequestPeer(
+    classifyRequestPeer(ingressForServer(requestServer), requestServer.requestIP?.(req)?.address, config.dashboardTrustedProxy, req.headers), () => runTurnStateCallerScope(async () =>
+      stampServedBy(req.method, codexCompatibleUrl(req.url).pathname, await routeFetch(req, requestServer)))) } as const;
 }

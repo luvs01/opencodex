@@ -38,9 +38,10 @@ export interface OcxReasoningReplayScopeRef {
    */
   readonly clientPrincipalId?: string;
   /**
-   * Conversation namespace for replay state. Historically this was always the Codex parent-thread
-   * id; headerless Responses callers use a raw sanitized thread/Cursor/session fallback, never the
-   * hashed request-log conversation id.
+   * Conversation namespace for replay state. The request's own thread-id wins so a child agent
+   * cannot write its route into the parent's record (#8632); otherwise this is the Codex
+   * parent-thread id, and headerless Responses callers use a raw sanitized thread/Cursor/session
+   * fallback, never the hashed request-log conversation id.
    */
   readonly clientThreadId: string;
   current?: Readonly<OcxReasoningReplayIdentity>;
@@ -171,6 +172,10 @@ export interface OcxParsedRequest {
   _providerContinuationCandidate?: OcxProviderContinuationState;
   /** Exact process-local route owner attached to newly persisted provider state. */
   _providerContinuationOwner?: OcxProviderContinuationOwner;
+  /** Serving owner of image history that was summarized within this request. */
+  _anthropicImageOwner?: OcxProviderContinuationOwner;
+  /** Internal image recovery summary that must bypass native adaptive thinking defaults. */
+  _anthropicImageSummary?: true;
   /**
    * The hosted `{type:"web_search", ...}` tool config, stashed when Codex enables web search. Routed
    * (non-OpenAI) providers can't run it server-side, so the proxy re-exposes it as a function tool and
@@ -416,6 +421,10 @@ export interface OcxRequestOptions {
   topP?: number;
   stopSequences?: string[];
   toolChoice?: OcxToolChoice;
+  /** Root functions explicitly selected by the caller. An empty list permits no synthetic root function. */
+  explicitRootFunctionChoices?: readonly string[];
+  /** Caller-owned function and custom selectors before hosted tools are lowered for the provider. */
+  explicitClientToolChoices?: readonly { type: "function" | "custom"; name: string; namespace?: string }[];
   parallelToolCalls?: boolean;
   reasoning?: string;
   /**
@@ -426,6 +435,8 @@ export interface OcxRequestOptions {
   hideThinkingSummary?: boolean;
   /** Provider policy: suppress raw content-channel reasoning while summaries stay visible. */
   hideRawReasoning?: boolean;
+  /** Final-route Chat-to-Responses display compatibility, off unless explicitly enabled. */
+  rawReasoningAsSummary?: boolean;
   serviceTier?: string;
   /** Final outbound tier action, resolved after the provider/model wire is settled. */
   tierDecision?: TierDecision;

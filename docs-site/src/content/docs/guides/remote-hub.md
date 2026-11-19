@@ -604,6 +604,20 @@ ocx config set oauthOpenBrowser false
    dashboard/CLI. It sends `POST /api/oauth/login/code` with `{provider,input}`.
 4. Poll the existing status endpoint until complete, then make a routed model request.
 
+For ChatGPT/Codex pool accounts, a hub can require the device-code flow instead, so no localhost
+callback login is ever started:
+
+```bash
+ocx config set codexAuthMethod device-only
+```
+
+A running hub keeps the login method it started with, so restart it (`ocx restart`, or restart the
+pod) to apply the change; `ocx config set` says so. Adding or re-authenticating a pool account from the dashboard, or with
+`ocx account login openai [--id <account-id> --reauth]`, then shows a verification URL and a short
+code to enter on any other device. With `--json`, add `--no-wait`: the login returns the `url` and `deviceCode`
+at once, and a JSON wait is refused (and its flow cancelled) because it would print neither until the end; `--code` is
+refused the same way. Remove the setting with `ocx config unset codexAuthMethod`, then restart again.
+
 Never put the OAuth code in shell argv, logs, issue text, screenshots, or deployment evidence. The
 manual-code route keeps its existing unknown-provider, no-active-flow, invalid-code, and 4096-byte
 input checks.
@@ -891,6 +905,12 @@ For a service rollback, stop the branch service and repair the prior release aga
 `ocx usage` reads the connected hub with this client's enrolled data key. Human output identifies the hub source and client-key scope; `--json` returns the same scoped data. Range, surface, provider/model filters and custom `--since`/`--until` bounds remain available. Account breakdowns and other clients' records are not shared. An old or unavailable hub produces an explicit error instead of substituting local usage; upgrade the hub if it does not support this read.
 
 The read-only data-plane endpoint is `GET /v1/usage`, using `x-opencodex-api-key` with a configured client key. Environment-wide and admin keys are refused. It accepts `range`, `surface`, `provider`, `model`, `since`, and `until`; unknown/repeated options and caller-selected key IDs are rejected. Oversized skipped rows retain the explicit incomplete-history warning.
+
+Use `GET /v1/usage/windows` on the hub's data listener to read cached subscription quota for one upstream account. Send a configured client key in `x-opencodex-api-key` or `Authorization: Bearer`. Give the key exactly one allowed provider and leave its model allowlist empty. The route rejects other credentials with `401`, including the shared instance token and admin tokens. An eligible key gets `404 usage_windows_not_a_hub` on standalone and client installs.
+
+If a provider reaches account selection and has multiple registered accounts, the hub returns `403 usage_windows_account_scope_required`. Disabled providers and accounts without a reading verified for the current OAuth credential yield an empty `windows` list. Kiro quota readings expire after ten minutes. After a restart, a cached reading without ownership evidence stays hidden until a verified reading is available. Each row gives the used percentage, its own limit status and the reset time in epoch milliseconds. Anthropic monthly extra usage has no reported reset time, so it is omitted.
+
+The OpenAI provider can expose the sole registered ChatGPT pool account. Its labels are `ChatGPT Weekly`, `ChatGPT Monthly` and either `ChatGPT 5-hour` when the matching observation reports 18,000 seconds or `ChatGPT Short window` for other or unknown short durations. Remote Link serves `/v1/usage` and excludes `/v1/usage/windows`.
 
 Client usage credentials are sent only over HTTPS or loopback HTTP. Both the request and response disable caching.
 
