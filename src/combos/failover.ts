@@ -1226,8 +1226,6 @@ const RESPONSE_REQUEST_ECHO_KEYS = new Set([
  * Any other wording (an account, model, parameter or billing problem, in any phrasing) does not
  * match, so the body keeps dev's decision; only known shapes are admitted.
  */
-// Verdict and tail stay apart: a single `^(?:verdict)(?:tail)*$` backtracks exponentially
-// because a category list swallows words ("and retry") that a later tail phrase also accepts.
 // The anchored scan commits to the first verdict alternative that matches, so alternatives run
 // longest-first: Azure's fixed wording leads ("the response was filtered" is a strict prefix of it)
 // and the noun-phrased verdict precedes the bare one (its `by ... system` clause reaches further).
@@ -1238,29 +1236,46 @@ const MODERATION_REFUSAL_VERDICT = new RegExp("^(?:"
   + "|(?:content )?(?:refused|flagged|blocked|rejected|filtered)(?: by (?:the )?(?:moderation|content filter))?\\.?"
   + "|(?:your )?(?:input|request|prompt|content) violated (?:the )?content (?:safety|management|filtering) polic(?:y|ies)\\.?"
   + ")", "i");
-// Category separators are disjoint by first byte so each anchored match has exactly one parse.
-// `, and ` skips retry/please/to word openings so `retry later` still parses as the retry advice
-// rather than a trailing category (the historical ambiguity made both readings reach `$`).
-const MODERATION_REFUSAL_TAIL = new RegExp("^(?:"
-  + " categor(?:y|ies): [a-z][a-z/_-]*(?:(?:, and (?!retry\\b|try\\b|please\\b|to\\b)| and |, )[a-z][a-z/_-]*)*\\.?"
+const MODERATION_REFUSAL_TAIL = new RegExp("(?:"
+  + "( categor(?:y|ies): )"
   + "| please (?:modify|revise|rephrase|change|adjust|edit) (?:your|the) (?:prompt|input|request|message)(?: and (?:retry|try again))?\\.?"
   + "| (?:please )?(?:retry|try again)(?: later)?\\.?"
   + "| to learn more about our content filtering policies please read our documentation: https://[^ ]+"
-  + ")", "i");
+  + ")", "iy");
+const MODERATION_CATEGORY_WORD = /[a-z][a-z/_-]*/iy;
+const MODERATION_CATEGORY_AND = / and /iy;
 
-/** Whether a prose string is a known moderation refusal copy and nothing else (bounded, linear). */
+/** Whether the whole string is known moderation refusal copy. */
 export function isModerationRefusalProse(text: string): boolean {
   if (text.length > 2_000) return false;
-  let rest = text.replace(/\s+/g, " ").trim();
-  const verdict = MODERATION_REFUSAL_VERDICT.exec(rest);
+  const prose = text.replace(/\s+/g, " ").trim();
+  const verdict = MODERATION_REFUSAL_VERDICT.exec(prose);
   if (!verdict) return false;
-  rest = rest.slice(verdict[0].length);
-  while (rest.length > 0) {
-    const piece = MODERATION_REFUSAL_TAIL.exec(rest);
-    if (!piece) return false;
-    rest = rest.slice(piece[0].length);
+
+  // A comma can introduce the category "and" or the separator ", and ". Keep both
+  // interpretations until the rest of the sentence distinguishes them. Each token
+  // boundary is visited once, even when several interpretations reach it.
+  const tailStarts = new Set([verdict[0].length]);
+  const categoryStarts = new Set<number>();
+  for (let index = verdict[0].length; index < prose.length; index++) {
+    if (tailStarts.has(index)) {
+      MODERATION_REFUSAL_TAIL.lastIndex = index;
+      const tail = MODERATION_REFUSAL_TAIL.exec(prose);
+      if (tail) {
+        const next = tail[1] ? categoryStarts : tailStarts;
+        next.add(MODERATION_REFUSAL_TAIL.lastIndex);
+      }
+    }
+    if (!categoryStarts.has(index)) continue;
+    MODERATION_CATEGORY_WORD.lastIndex = index;
+    if (!MODERATION_CATEGORY_WORD.test(prose)) continue;
+    const end = MODERATION_CATEGORY_WORD.lastIndex;
+    tailStarts.add(prose[end] === "." ? end + 1 : end);
+    if (prose.startsWith(", ", end)) categoryStarts.add(end + 2);
+    MODERATION_CATEGORY_AND.lastIndex = prose[end] === "," ? end + 1 : end;
+    if (MODERATION_CATEGORY_AND.test(prose)) categoryStarts.add(MODERATION_CATEGORY_AND.lastIndex);
   }
-  return true;
+  return tailStarts.has(prose.length);
 }
 
 /**

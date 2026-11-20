@@ -23,6 +23,8 @@ describe("moderation refusal prose matcher", () => {
     // `, and ` must not swallow retry-advice openings as category names.
     "refused category: harassment, and retry later.",
     "refused category: harassment, and please change your prompt.",
+    "content refused. category: spam, and please",
+    "refused category: a, and and b",
     "Your input violated the content safety policies.",
     "input violated content filtering policy",
     "refused category: a, b and c. please change your prompt and retry.",
