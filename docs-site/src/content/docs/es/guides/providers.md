@@ -527,6 +527,8 @@ La sección **Límites de solicitudes** de la descripción general de proveedore
 
 Proveedores con una consulta activa: OpenAI/Codex, Anthropic, xAI, Cursor, Kimi, Google Antigravity, OpenCode Go, OpenRouter, DeepSeek, ClinePass, Z.AI, MiniMax, Moonshot, Venice, Synthetic, DeepInfra, Neuralwatt, Command Code y proveedores personalizados basados en a6api o Abliteration.
 
+**Saldos de Venice.** Los alias de proveedor que usan el endpoint oficial `https://api.venice.ai/api/v1` pueden mostrar por separado los saldos en DIEM y USD. Si Venice informa del consumo de DIEM en la época actual, también aparece junto al saldo. La consulta usa primero `/billing/balance`. Si falla o no devuelve un saldo utilizable, se consulta `/api_keys/rate_limits`.
+
 **Uso mensual de Anthropic.** Las cuentas con facturación por uso, como las de Enterprise,
 pueden mostrar una barra mensual cuando Anthropic indica que el uso adicional está activado
 y no informa de ventanas del plan. La barra se muestra sin fecha de restablecimiento y desaparece
