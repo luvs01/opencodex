@@ -14,7 +14,8 @@ import type { DataPlaneAdmission } from "../../src/server/auth-cors";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { setVideoHandleKeyForTests } from "../../src/server/video-handle";
 import { matchVideoRoute } from "../../src/lib/video-routes";
-import { handleVideos, setVideoCreateBodyTimeoutForTests, setVideoOutboundDependenciesForTests } from "../../src/server/videos";
+import { handleVideos, setVideoCreateBodyTimeoutForTests, setVideoOutboundDependenciesForTests, type VideoRouteOptions } from "../../src/server/videos";
+import { getActiveTurnCount, tryAdmitTurn } from "../../src/server/lifecycle";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
@@ -95,14 +96,14 @@ function config(overrides: Partial<OcxConfig> = {}, rows: Record<string, OcxProv
 
 const logContext = (): RequestLogContext => ({ model: "video", provider: "unknown" } as RequestLogContext);
 
-async function call(cfg: OcxConfig, method: string, path: string, body?: BodyInit, admission = ALICE, headers: Record<string, string> = { "content-type": "application/json" }, secret = secretFor(admission)) {
+async function call(cfg: OcxConfig, method: string, path: string, body?: BodyInit, admission = ALICE, headers: Record<string, string> = { "content-type": "application/json" }, secret = secretFor(admission), options?: VideoRouteOptions) {
   const url = new URL("http://localhost" + path);
   headers = { ...headers, authorization: "Bearer " + secret };
   const route = matchVideoRoute(method, url.pathname);
   if (!route) throw new Error("no video route for " + method + " " + path);
   const logCtx = logContext();
   const req = new Request(url, { method, headers, ...(body !== undefined ? { body } : {}) });
-  const response = await handleVideos(req, url, cfg, route, logCtx, admission);
+  const response = await handleVideos(req, url, cfg, route, logCtx, admission, options);
   return { response, logCtx };
 }
 
@@ -233,6 +234,26 @@ describe("GET /v1/videos/{id} and /content", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(MP4);
     expect(sent).toEqual([{ method: "GET", url: "https://" + HOST + "/v1/videos/video_up_1/content", address: "93.184.216.34", authorization: "Bearer " + KEY }]);
+  });
+
+  test("content retains its admitted turn until the response body is cancelled", async () => {
+    const handle = await handleFor();
+    answer = () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(MP4); },
+    }), { headers: { "content-type": "video/mp4" } });
+    const baseline = getActiveTurnCount();
+    const lease = tryAdmitTurn();
+    expect(lease).not.toBeNull();
+    try {
+      const { response } = await call(config(), "GET", "/v1/videos/" + handle + "/content", undefined, ALICE, {}, ALICE_SECRET, { lease: lease! });
+      const reader = response.body!.getReader();
+      expect((await reader.read()).value).toEqual(MP4);
+      expect(getActiveTurnCount()).toBe(baseline + 1);
+      await reader.cancel("client stopped download");
+      expect(getActiveTurnCount()).toBe(baseline);
+    } finally {
+      lease?.release();
+    }
   });
 
   test("content never relays an active media type and passes only known variants", async () => {
@@ -416,6 +437,14 @@ test("the loopback listener hands /v1/videos paths to the same matcher and nothi
   expect(gate).toContain('if (path === "/v1/videos" || path.startsWith("/v1/videos/")) return matchVideoRoute(req.method, path) !== undefined;');
   // The one gate line names the bare path and its subtree, and delegates both to matchVideoRoute.
   expect(gate.match(/\/v1\/videos/g)?.length).toBe(2);
+});
+
+test("the dispatcher admits every matched videos route as an active turn", async () => {
+  const source = await Bun.file(repoPath("src", "server", "index", "serve-options.ts")).text();
+  const start = source.indexOf("const videoRoute =");
+  const branch = source.slice(start, source.indexOf("\n      if (req.method === \"GET\"", start));
+  expect(branch).toContain("return runAdmittedHttpTurn(req, policy, lease => run(lease)");
+  expect(branch).not.toContain('videoRoute.kind === "create" ?');
 });
 
 test("route matching admits only the three documented shapes", () => {
