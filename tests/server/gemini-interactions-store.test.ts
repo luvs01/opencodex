@@ -50,11 +50,28 @@ describe("stored Gemini interactions", () => {
   test("an owner at its cap evicts its own oldest entry, never another owner's", () => {
     rememberInteraction(entry("other", "o2"), 0);
     for (let i = 0; i < MAX_OWNER_INTERACTIONS; i++) rememberInteraction(entry("o1-" + i, "o1"), 1 + i);
-    rememberInteraction(entry("o1-new", "o1"), 10_000);
+    rememberInteraction(entry("o1-new", "o1"), 10_000, MAX_INTERACTION_BYTES, { evictOwnerEntries: true });
     expect(recallInteraction("o1-0", "o1", 10_001)).toBeUndefined();
     expect(recallInteraction("o1-1", "o1", 10_001)).toBeDefined();
     expect(recallInteraction("o1-new", "o1", 10_001)).toBeDefined();
     expect(recallInteraction("other", "o2", 10_001)).toBeDefined();
+  });
+
+  test("a shared owner at capacity preserves retained entries while a keyed owner rotates its own", () => {
+    const syntheticCap = { maxOwnerInteractions: 2 };
+    expect(rememberInteraction(entry("shared-a", "loopback"), 1, MAX_INTERACTION_BYTES, { ...syntheticCap, evictOwnerEntries: false })).toBe(true);
+    expect(rememberInteraction(entry("shared-b", "loopback"), 2, MAX_INTERACTION_BYTES, { ...syntheticCap, evictOwnerEntries: false })).toBe(true);
+    expect(rememberInteraction(entry("shared-new", "loopback"), 3, MAX_INTERACTION_BYTES, { ...syntheticCap, evictOwnerEntries: false })).toBe(false);
+    expect(recallInteraction("shared-a", "loopback", 4)).toBeDefined();
+    expect(recallInteraction("shared-b", "loopback", 4)).toBeDefined();
+    expect(recallInteraction("shared-new", "loopback", 4)).toBeUndefined();
+
+    expect(rememberInteraction(entry("keyed-a", "keyed"), 1, MAX_INTERACTION_BYTES, { ...syntheticCap, evictOwnerEntries: true })).toBe(true);
+    expect(rememberInteraction(entry("keyed-b", "keyed"), 2, MAX_INTERACTION_BYTES, { ...syntheticCap, evictOwnerEntries: true })).toBe(true);
+    expect(rememberInteraction(entry("keyed-new", "keyed"), 3, MAX_INTERACTION_BYTES, { ...syntheticCap, evictOwnerEntries: true })).toBe(true);
+    expect(recallInteraction("keyed-a", "keyed", 4)).toBeUndefined();
+    expect(recallInteraction("keyed-b", "keyed", 4)).toBeDefined();
+    expect(recallInteraction("keyed-new", "keyed", 4)).toBeDefined();
   });
 
   test("the app-owned budget sees every byte as evictable and evicts oldest first", () => {
@@ -88,7 +105,7 @@ describe("stored Gemini interactions at the global limit", () => {
     expect(rememberInteraction(entry("new", "owner-new"), 5_000)).toBe(false);
     expect(recallInteraction("o0-0", "owner-0", 5_001)).toBeDefined();
     // An owner already in the store makes room from its own entries.
-    expect(rememberInteraction(entry("o1-next", "owner-1"), 5_002)).toBe(true);
+    expect(rememberInteraction(entry("o1-next", "owner-1"), 5_002, MAX_INTERACTION_BYTES, { evictOwnerEntries: true })).toBe(true);
     expect(recallInteraction("o1-0", "owner-1", 5_003)).toBeUndefined();
     expect(recallInteraction("o0-0", "owner-0", 5_003)).toBeDefined();
     expect(interactionsRetainedStoreSnapshot().count).toBe(1_000);

@@ -51,12 +51,19 @@ function cancelledNonStream(finalLog: NativeFinalLog): Response {
 export const INTERACTION_STORED_HEADER = "x-opencodex-interaction-stored";
 
 /**
- * Who owns a stored interaction: the salted principal of the data-plane key the caller presented
- * (also on a loopback bind, where admission itself reads no key), or one shared "loopback" owner for
- * a keyless loopback caller. Rotating a key mints a new principal, so its chains then answer 404.
+ * Storage identity and eviction are separate: keyed principals may rotate their own oldest entries,
+ * while the shared keyless owner cannot evict already retained conversations at capacity.
  */
+interface InteractionStorageScope { owner: string; evictOwnerEntries: boolean }
+
+function interactionStorageScope(req: Request, config: OcxConfig, admission: DataPlaneAdmission | undefined): InteractionStorageScope | undefined {
+  const principal = resolveContextPrincipal(req, config, admission);
+  if (principal) return { owner: principal, evictOwnerEntries: true };
+  return admission?.kind === "loopback" ? { owner: "loopback", evictOwnerEntries: false } : undefined;
+}
+
 export function interactionOwner(req: Request, config: OcxConfig, admission: DataPlaneAdmission | undefined): string | undefined {
-  return resolveContextPrincipal(req, config, admission) ?? (admission?.kind === "loopback" ? "loopback" : undefined);
+  return interactionStorageScope(req, config, admission)?.owner;
 }
 
 /** POST /v1beta/interactions. `req` is the admitted, session-promoted request. */
@@ -81,7 +88,8 @@ export async function handleGeminiInteraction(
   } finally {
     budget.dispose();
   }
-  const owner = interactionOwner(req, config, ids.admission);
+  const storage = interactionStorageScope(req, config, ids.admission);
+  const owner = storage?.owner;
   let history: Record<string, unknown>[] = [];
   if (plan.previousInteractionId !== undefined) {
     const stored = recallInteraction(plan.previousInteractionId, owner);
@@ -120,7 +128,7 @@ export async function handleGeminiInteraction(
   // Interaction-scoped fields (system_instruction, tools, generation_config) are never stored.
   // A stored history larger than the inbound limit could never be chained, so it is not kept.
   const keep: Keep | undefined = plan.store
-    ? { owner, history: [...history, ...input], inputSteps: plan.inputSteps, maxBytes: limit, ...(plan.previousInteractionId ? { previous: plan.previousInteractionId } : {}) }
+    ? { owner, evictOwnerEntries: storage?.evictOwnerEntries ?? false, history: [...history, ...input], inputSteps: plan.inputSteps, maxBytes: limit, ...(plan.previousInteractionId ? { previous: plan.previousInteractionId } : {}) }
     : undefined;
   if (plan.previousInteractionId) meta.previousInteractionId = plan.previousInteractionId;
   return plan.stream
@@ -129,7 +137,7 @@ export async function handleGeminiInteraction(
 }
 
 /** What a stored turn keeps: its owner, the history to continue from, and its input steps. */
-interface Keep { owner: string | undefined; history: Record<string, unknown>[]; inputSteps: Record<string, unknown>[]; maxBytes: number; previous?: string }
+interface Keep { owner: string | undefined; evictOwnerEntries: boolean; history: Record<string, unknown>[]; inputSteps: Record<string, unknown>[]; maxBytes: number; previous?: string }
 
 /** Store a settled turn. False when it has no owner, is too large to keep, or storing failed. */
 function remember(keep: Keep, meta: InteractionMeta, answer: InteractionAnswer, resource: Record<string, unknown>): boolean {
@@ -141,7 +149,7 @@ function remember(keep: Keep, meta: InteractionMeta, answer: InteractionAnswer, 
       owner: keep.owner,
       history: assistant ? [...keep.history, assistant] : keep.history,
       resource: { ...resource, steps: [...keep.inputSteps, ...(resource.steps as Record<string, unknown>[])] },
-    }, Date.now(), keep.maxBytes);
+    }, Date.now(), keep.maxBytes, { evictOwnerEntries: keep.evictOwnerEntries });
   } catch {
     // Storing is best effort; the settled answer still goes out.
     return false;

@@ -5,10 +5,12 @@
  * Process memory only: nothing is written to disk or the request log, and a restart forgets every
  * interaction (clients then get 404 and resend history). Every entry belongs to one owner string the
  * caller resolves (the salted principal of the presented data-plane key, or "loopback" for a keyless
- * loopback caller); a lookup by any other owner is indistinguishable from a missing id. Expiry is lazy:
- * an expired entry is dropped on the next write or lookup, and the app-owned memory budget can evict it
- * before that. Bounds: 24 hours from the last
- * write, 1,000 entries and 64 MiB in total, 200 entries and 16 MiB per owner, 8 MiB per entry. A write
+ * loopback caller); a lookup by any other owner is indistinguishable from a missing id. Keyed owners
+ * may evict their own oldest entries, but the shared keyless owner refuses new entries at capacity so
+ * one local process cannot evict another's retained history. Expiry is lazy: an expired entry is
+ * dropped on the next write or lookup, and the app-owned memory budget can evict it before that.
+ * Bounds: 24 hours from the last write, 1,000 entries and 64 MiB in total, 200 entries and 16 MiB per
+ * owner, 8 MiB per entry. A write
  * evicts only its own owner's entries; when the store is full and the writer owns nothing to evict, the
  * interaction is not kept. Only the app-owned memory budget evicts across owners.
  */
@@ -20,6 +22,12 @@ export const MAX_INTERACTION_STORE_BYTES = 64 * 1024 * 1024;
 export const MAX_OWNER_INTERACTIONS = 200;
 export const MAX_OWNER_INTERACTION_BYTES = 16 * 1024 * 1024;
 export const MAX_INTERACTION_BYTES = 8 * 1024 * 1024;
+
+export interface InteractionWriteOptions {
+  evictOwnerEntries?: boolean;
+  /** Lower-only override for small unit fixtures; the production cap remains the upper bound. */
+  maxOwnerInteractions?: number;
+}
 
 export interface StoredInteraction {
   id: string;
@@ -65,18 +73,22 @@ export function interactionEntryBytes(entry: Pick<StoredInteraction, "history" |
   return Buffer.byteLength(JSON.stringify(entry.history)) + Buffer.byteLength(JSON.stringify(entry.resource));
 }
 
-/** Store an interaction. Returns false when it is too large to keep; the answer is unaffected. */
+/** Store an interaction. Returns false when it cannot be kept; the settled answer is unaffected. */
 export function rememberInteraction(
   entry: { id: string; owner: string; history: Record<string, unknown>[]; resource: Record<string, unknown> },
   now = Date.now(),
   maxBytes = MAX_INTERACTION_BYTES,
+  options: InteractionWriteOptions = {},
 ): boolean {
   const bytes = interactionEntryBytes(entry);
   if (bytes > Math.min(maxBytes, MAX_INTERACTION_BYTES)) return false;
   drop(entry.id);
   sweep(now);
+  const evictOwnerEntries = options.evictOwnerEntries ?? false;
+  const maxOwnerInteractions = Math.min(options.maxOwnerInteractions ?? MAX_OWNER_INTERACTIONS, MAX_OWNER_INTERACTIONS);
   const owned = () => ownerTotals.get(entry.owner) ?? { count: 0, bytes: 0 };
-  while (owned().count + 1 > MAX_OWNER_INTERACTIONS || owned().bytes + bytes > MAX_OWNER_INTERACTION_BYTES) {
+  while (owned().count + 1 > maxOwnerInteractions || owned().bytes + bytes > MAX_OWNER_INTERACTION_BYTES) {
+    if (!evictOwnerEntries) return false;
     const oldest = oldestOf(entry.owner);
     if (oldest === undefined) break;
     drop(oldest);
@@ -84,6 +96,7 @@ export function rememberInteraction(
   // At the global limits a writer evicts only its own oldest entries; with none left, this one is
   // not kept (the answer is unaffected), so one key's traffic never removes another's history.
   while (entries.size + 1 > MAX_STORED_INTERACTIONS || totalBytes + bytes > MAX_INTERACTION_STORE_BYTES) {
+    if (!evictOwnerEntries) return false;
     const oldest = oldestOf(entry.owner);
     if (oldest === undefined) return false;
     drop(oldest);
