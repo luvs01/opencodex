@@ -199,12 +199,16 @@ describe("native streaming combo mandatory tools (#7456)", () => {
       },
     }]);
   });
-  const terminalError = { code: "content_policy_violation", message: "Fixture refusal" };
+  const terminalError = { code: "content_policy_violation", message: "Fixture refusal echoed key-a" };
   const terminalRefusal = { type: "message", id: "msg_refusal", role: "assistant", status: "completed",
-    content: [{ type: "refusal", refusal: "Fixture refusal" }] };
+    content: [{ type: "refusal", refusal: "Fixture refusal echoed key-a" }] };
   test.each([
     { carrier: "event error", verdict: { error: terminalError }, snapshot: {} },
+    { carrier: "event error string", verdict: { error: "Fixture refusal echoed key-a" }, snapshot: {} },
+    { carrier: "event last error", verdict: { last_error: terminalError }, snapshot: {} },
     { carrier: "nested error", verdict: {}, snapshot: { error: terminalError } },
+    { carrier: "nested last error", verdict: {}, snapshot: { last_error: terminalError } },
+    { carrier: "event refusal content", verdict: { output: [terminalRefusal] }, snapshot: {} },
     { carrier: "terminal refusal content", verdict: {}, snapshot: { output: [terminalRefusal] } },
   ])("required-tool rewrite preserves $carrier without a second send", async ({ verdict, snapshot }) => {
     const sent: Array<Record<string, unknown>> = [];
@@ -212,7 +216,9 @@ describe("native streaming combo mandatory tools (#7456)", () => {
     const config = configFor(() => sse(event), sent);
     const text = await (await request(config, "required")).text();
     expect(sent.map(body => [body.model, body.tool_choice])).toEqual([["m1", "required"]]);
-    expect(terminal(text)).toMatchObject([event]);
+    expect(terminal(text)).toMatchObject([{ type: "response.completed", response: { id: "resp_m1", status: "completed" } }]);
+    expect(text).toContain("Fixture refusal echoed [REDACTED]");
+    expect(text).not.toContain("key-a");
   });
   for (const platform of ["win32", "linux"] as const) {
     for (const carrier of ["event", "response"] as const) {

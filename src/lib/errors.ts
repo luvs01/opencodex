@@ -119,6 +119,22 @@ export function responsesCompletionError(payload: unknown): CompletionError | un
   return undefined;
 }
 
+/** Refusal content on either output carrier makes a completion the provider's terminal verdict. */
+export function responsesCompletionHasRefusal(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const event = payload as { type?: unknown; output?: unknown; response?: { output?: unknown } };
+  if (event.type !== "response.completed") return false;
+  const hasRefusal = (output: unknown): boolean => Array.isArray(output) && output.some(value => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const item = value as { type?: unknown; content?: unknown };
+    return item.type === "message" && Array.isArray(item.content) && item.content.some(part => (
+      !!part && typeof part === "object" && !Array.isArray(part)
+      && (part as { type?: unknown }).type === "refusal"
+    ));
+  });
+  return hasRefusal(event.output) || hasRefusal(event.response?.output);
+}
+
 /** First nonblank string across the canonical upstream error paths, in priority order. */
 export function upstreamErrorMessageFromPayload(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;

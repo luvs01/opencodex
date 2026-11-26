@@ -1,4 +1,4 @@
-import { REQUIRED_TOOL_CONTRACT_CODE, responsesCompletionError } from "../../lib/errors";
+import { REQUIRED_TOOL_CONTRACT_CODE, responsesCompletionError, responsesCompletionHasRefusal } from "../../lib/errors";
 import { createSseInspector, type SseInspectorHandlers } from "../relay";
 import { inspectResponseLogSsePayloadParsed } from "../request-log";
 import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "../sse-payload-rewrite";
@@ -10,13 +10,6 @@ import type { AdapterRequest } from "../../adapters/base";
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined;
-}
-function hasRefusalContent(output: unknown): boolean {
-  return Array.isArray(output) && output.some(value => {
-    const item = record(value);
-    return item?.type === "message" && Array.isArray(item.content)
-      && item.content.some(part => record(part)?.type === "refusal");
-  });
 }
 const reasoningEvents = new Set([
   "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
@@ -66,8 +59,7 @@ function terminalGuard(fulfills: (item: RecordValue, clientCall: boolean) => boo
       if (response?.output !== undefined && !Array.isArray(response.output)) evidence.replayUnsafe = true;
       if (event.type !== "response.completed" || !response || !Array.isArray(response.output) || fulfilled) return false;
       // An upstream verdict owns the terminal even when the requested call is missing.
-      if (responsesCompletionError(event) != null
-        || hasRefusalContent(event.output) || hasRefusalContent(response.output)) return false;
+      if (responsesCompletionError(event) != null || responsesCompletionHasRefusal(event)) return false;
       event.type = "response.failed";
       response.status = "failed";
       response.error = {

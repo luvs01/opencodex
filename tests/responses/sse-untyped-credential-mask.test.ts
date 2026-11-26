@@ -527,6 +527,19 @@ describe("untyped error envelopes never carry a value this request sent", () => 
     });
   });
 
+  test("preserved completion verdicts are masked while clean completions stay unchanged", () => {
+    const credential = "fixture-selected-credential";
+    const rewrite = createTerminalErrorRedactionBlockRewrite({ authorization: `Bearer ${credential}` });
+    const diagnostic = { type: "response.completed", response: { status: "completed", output: [],
+      last_error: { code: "server_error", message: `failed with ${credential}` } } };
+    const diagnosticBlock = `event: response.completed\ndata: ${JSON.stringify(diagnostic)}`;
+    const cleanBlock = `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed",
+      response: { status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ordinary output" }] }] } })}`;
+    const masked = rewrite(diagnosticBlock).join("\n");
+    expect([masked.includes(credential), masked.includes("event: response.completed"), masked.includes('"type":"response.completed"')]).toEqual([false, true, true]);
+    expect(rewrite(cleanBlock)).toEqual([cleanBlock]);
+  });
+
   test("a sensitive key keeps its redaction when the selected credential is a substring of it", () => {
     const rewrite = createTerminalErrorRedactionBlockRewrite({ authorization: "Bearer auth" });
     const failed = { type: "response.failed", response: { status: "failed", error: { message: "fixture", authorization: "fixture-unpatterned-value-8415" } } };

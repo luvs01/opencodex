@@ -132,7 +132,9 @@ A missing call in a clean `response.completed` becomes `response.failed` with
 refusal content on either terminal carrier preserves the upstream verdict and commits the stream.
 When either carrier has meaningful `error` or `last_error` evidence, HTTP/SSE and WebSocket delivery
 retain the provider's completion frame while terminal accounting reports failure. Empty placeholders
-preserve a clean completion. A failed completion cannot publish local continuation state, update
+preserve a clean completion. Before client delivery, preserved error/refusal completions receive the
+same structural credential masking as failed and incomplete terminals without changing their event
+or JSON type. A failed completion cannot publish local continuation state, update
 success affinity, or clear a combo reprobe cooldown. The buffered JSON path returns the mapped
 provider error and settles the send using the reported terminal usage. Its in-process
 non-replayable marker prevents a second combo dispatch even when the mapped status is retryable.

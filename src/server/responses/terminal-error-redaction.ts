@@ -10,7 +10,7 @@ import {
 } from "../../lib/outbound-credential-registry";
 import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "../sse-payload-rewrite";
 import { isUntypedBareUpstreamError } from "../bare-upstream-error";
-import { CYBER_POLICY_ERROR_CODE, isCyberPolicyCode, isCyberPolicyMessage, isTerminalRefusalCode, recognizedUpstreamError } from "../../lib/errors";
+import { CYBER_POLICY_ERROR_CODE, isCyberPolicyCode, isCyberPolicyMessage, isTerminalRefusalCode, recognizedUpstreamError, responsesCompletionError, responsesCompletionHasRefusal } from "../../lib/errors";
 
 /**
  * A custom header carries a credential when a credential word is a whole segment of its name
@@ -78,6 +78,12 @@ function keepPolicyEvidence(original: unknown, masked: unknown): unknown {
   if (index < 0 || after[index] === undefined) return masked;
   after[index]!.code = CYBER_POLICY_ERROR_CODE;
   return masked;
+}
+
+/** A completion the required-tool guard preserves because the provider supplied its own verdict. */
+function isPreservedCompletionVerdict(event: Record<string, unknown>): boolean {
+  return responsesCompletionError(event) !== undefined
+    || responsesCompletionHasRefusal(event);
 }
 
 /**
@@ -238,7 +244,8 @@ export function createTerminalErrorRedactionBlockRewrite(
       return [terminalFrame ? maskUnstructuredBlock(block, payload) : block];
     }
     if (isUntypedBareUpstreamError(event) || event?.type === "error") return [block];
-    if (event?.type !== "response.failed" && event?.type !== "response.incomplete") {
+    const preservedCompletionVerdict = !terminalFrame && isPreservedCompletionVerdict(event);
+    if (event?.type !== "response.failed" && event?.type !== "response.incomplete" && !preservedCompletionVerdict) {
       // A terminal event line over another JSON payload is upstream copy throughout, masked field by
       // field so recognized classes survive for every reader.
       return [terminalFrame ? redactUpstreamCopyBlock(block, payload, event) : block];
