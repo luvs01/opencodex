@@ -23,7 +23,7 @@ import { claudeFirstPartyTransition } from "./first-party-transition";
 import { claudeInterceptCaCertPath } from "./intercept/local-ca";
 import { readClaudeInterceptProxyToken } from "./intercept/proxy-auth";
 import { claudeInterceptEnabled } from "./intercept/runtime";
-import { claudeInterceptProxyUrl, claudeSettingsFileState, isClaudeInterceptProxyUrl, readClaudeSettingsEnv } from "./intercept/settings";
+import { claudeInterceptProxyUrl, claudeSettingsFileState, isClaudeInterceptProxyUrl, MAX_STATUS_SETTINGS_BYTES, readClaudeSettingsEnv } from "./intercept/settings";
 import { mergeClaudeInterceptNoProxy, noProxyMergeable, readNoProxyReceipt } from "./intercept/settings-no-proxy";
 
 export type SettingsChangeKind = "add" | "update" | "remove";
@@ -68,6 +68,7 @@ function change(key: string, kind: SettingsChangeKind): FirstPartySettingsChange
 export function previewClaudeFirstPartySettings(input: FirstPartyPreviewInput): FirstPartyPreview {
   const { live, persisted, enabled } = input;
   const options = input.options ?? {};
+  const statusOptions = { ...options, settingsReadLimit: MAX_STATUS_SETTINGS_BYTES };
   const dir = options.claudeConfigDir ?? claudeConfigDir();
   const path = join(dir, "settings.json");
   const refuse = (reason: FirstPartyPreviewRefusal): FirstPartyPreview => ({ ok: false, enabled, reason, path });
@@ -80,17 +81,17 @@ export function previewClaudeFirstPartySettings(input: FirstPartyPreviewInput): 
   // The switch's own pre-checks for turning CLI first-party on, in its order.
   if (enabled) {
     if (!claudeInterceptEnabled(live) || !claudeInterceptEnabled(persisted)) return refuse("intercept_disabled");
-    const inspected = inspectDesktopFirstParty(live, options).settings;
+    const inspected = inspectDesktopFirstParty(live, statusOptions).settings;
     if (inspected.kind === "foreign") return refuse("foreign_env");
     if (inspected.kind === "unreadable") return refuse("unreadable");
   }
 
   // The route adopts the transitioned block into its live config and reconciles with that.
-  const { nextBlock } = claudeFirstPartyTransition(persisted, enabled, options);
+  const { nextBlock } = claudeFirstPartyTransition(persisted, enabled, statusOptions);
   const reconciled: OcxConfig = { ...live, claudeCode: nextBlock };
-  const desired = firstPartyDesired(reconciled, observeClaudeDesktopMode(reconciled, options));
+  const desired = firstPartyDesired(reconciled, observeClaudeDesktopMode(reconciled, statusOptions));
 
-  const read = readClaudeSettingsEnv(dir);
+  const read = readClaudeSettingsEnv(dir, { maxBytes: MAX_STATUS_SETTINGS_BYTES });
   if (read.kind === "unreadable") return refuse("unreadable");
   const env = read.kind === "env" ? read.env : {};
 
@@ -114,7 +115,7 @@ export function previewClaudeFirstPartySettings(input: FirstPartyPreviewInput): 
   if (!claudeInterceptEnabled(reconciled)) return accept([]);
 
   // Mirrors applyClaudeInterceptSettings against the env the apply would write.
-  const inspection = inspectDesktopFirstParty(reconciled, options);
+  const inspection = inspectDesktopFirstParty(reconciled, statusOptions);
   const state = inspection.settings;
   if (state.kind === "unreadable") return refuse("unreadable");
   if (state.kind === "foreign") return refuse("foreign_env");

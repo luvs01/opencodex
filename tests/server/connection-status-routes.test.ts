@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
@@ -311,6 +311,19 @@ describe("security bounds", () => {
     const config = baseConfig({ claudeCode: { extraConfigDirs: [extra] } } as Partial<OcxConfig>);
     const row = (await connections(config)).find(view => view.homeSource === "extra")!;
     expect(row).toMatchObject({ observed: "unknown", owner: "unknown", driftReasons: [] });
+  });
+
+  test.skipIf(process.platform === "win32")("a symlinked regular settings.json keeps Claude-compatible routing", async () => {
+    const extra = join(root, "linked-home");
+    const target = join(root, "linked-settings.json");
+    mkdirSync(extra, { recursive: true });
+    writeFileSync(target, JSON.stringify({ env: {
+      HTTPS_PROXY: "http://proxy.corp:8080", NODE_EXTRA_CA_CERTS: "/corp/ca.pem",
+    } }));
+    symlinkSync(target, join(extra, "settings.json"));
+    const config = baseConfig({ claudeCode: { extraConfigDirs: [extra] } } as Partial<OcxConfig>);
+    const row = (await connections(config)).find(view => view.homeSource === "extra")!;
+    expect(row).toMatchObject({ observed: "foreign", owner: "external", driftReasons: [] });
   });
 
   test("an oversized default settings.json makes the preview refuse instead of reading it", async () => {
