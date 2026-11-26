@@ -323,6 +323,64 @@ test("an account-qualified search model uses that exact account and sends the ba
   }
 });
 
+test("an account-qualified search leaves through its selected account route", async () => {
+  const accountProxy = "http://127.0.0.1:9/";
+  const providerProxy = "http://127.0.0.1:11/";
+  const config = exactSearchConfig();
+  config.providers.openai!.proxy = providerProxy;
+  config.codexAccounts = config.codexAccounts?.map(account => account.id === "pool-a"
+    ? { ...account, egress: { proxy: accountProxy } }
+    : account);
+  saveExactSearchCredentials();
+  const sends: Array<{ proxy: unknown; authorization: string | null; account: string | null; body: unknown }> = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    sends.push({
+      proxy: (init as { proxy?: unknown } | undefined)?.proxy,
+      authorization: headers.get("authorization"),
+      account: headers.get("chatgpt-account-id"),
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+    });
+    return Response.json({ encrypted_output: "ciphertext", output: "search result" });
+  }) as typeof fetch;
+
+  const response = await handleSearch(
+    alphaSearchRequest({ id: "search-session", model: "side/gpt-test" }),
+    config,
+    { model: "", provider: "" },
+  );
+
+  expect(response.status).toBe(200);
+  expect(sends).toEqual([{
+    proxy: accountProxy,
+    authorization: "Bearer pool-a-token",
+    account: "acct-pool-a",
+    body: { id: "search-session", model: "gpt-test" },
+  }]);
+});
+
+test("an invalid selected account route refuses search before dispatch", async () => {
+  const config = exactSearchConfig();
+  config.codexAccounts = config.codexAccounts?.map(account => account.id === "pool-a"
+    ? { ...account, egress: { proxy: "not-a-proxy-route" } }
+    : account);
+  saveExactSearchCredentials();
+  let sends = 0;
+  globalThis.fetch = (async () => {
+    sends += 1;
+    return Response.json({ output: "must not dispatch" });
+  }) as typeof fetch;
+
+  const response = await handleSearch(
+    alphaSearchRequest({ id: "search-session", model: "side/gpt-test" }),
+    config,
+    { model: "", provider: "" },
+  );
+
+  expect(response.status).toBe(502);
+  expect(sends).toBe(0);
+});
+
 test("an exact search 429 never switches to the active Pool account and reports only its public selector", async () => {
   const captured: CapturedRequest[] = [];
   const upstream = fakeSearchUpstream(captured, 429, { error: { message: "rate limited" } });

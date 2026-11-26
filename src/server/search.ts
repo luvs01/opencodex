@@ -1,3 +1,4 @@
+import { codexAccountFetch } from "../codex/account-egress-runtime";
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { isolateCodexPoolClientMetadata, mergeCodexSelectedHeaders } from "../codex/forward-transport-headers";
 /**
@@ -207,7 +208,7 @@ export async function handleSearch(
   let upstreamResponse: Response | undefined;
   try {
     upstream.beforeDispatch?.();
-    upstreamResponse = await fetch(url, {
+    upstreamResponse = await codexAccountFetch(codexLogAccountId(upstream.authContext), { config })(url, {
       method: "POST",
       headers,
       body: JSON.stringify(isolateCodexPoolClientMetadata(
