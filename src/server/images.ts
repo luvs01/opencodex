@@ -81,6 +81,13 @@ const IMAGES_UPSTREAM_TIMEOUT_MS = 300_000;
  */
 export const IMAGES_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
 
+/**
+ * xAI edit requests are rebuilt as JSON after ingress parsing. Keep that second request-sized
+ * allocation below the shared 256 MiB default even when an operator raises the general cap.
+ */
+export const XAI_EDIT_MAX_REQUEST_BYTES = 100 * 1024 * 1024;
+export const XAI_EDIT_MAX_AGGREGATE_ENCODED_BYTES = XAI_EDIT_MAX_REQUEST_BYTES;
+
 interface ImageResponseBytesOptions {
   signal?: AbortSignal;
   /** Smaller values are used only by focused reader tests. */
@@ -133,28 +140,96 @@ export async function readImageResponseBytes(
 const CCA_IMAGE_MODEL = "gemini-3.1-flash-image";
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/** An edit source xAI can fetch: an https URL without credentials, or a base64 image data URL. */
-function isXaiEditSourceUrl(value: string): boolean {
+type XaiEditSourceInspection =
+  | { kind: "valid"; inlineEncodedBytes: number }
+  | { kind: "invalid" }
+  | { kind: "oversized" };
+
+/** Inspect an xAI edit source without decoding or normalizing its base64 payload. */
+function inspectXaiEditSourceUrl(value: string, maxEncodedBytesPerImage: number): XaiEditSourceInspection {
   const header = /^data:image\/(?:png|jpeg|jpg|webp);base64,/i.exec(value);
   if (header) {
     const start = header[0].length;
-    if (value.length === start || (value.length - start) % 4 !== 0) return false;
+    const inlineEncodedBytes = value.length - start;
+    if (inlineEncodedBytes > maxEncodedBytesPerImage) return { kind: "oversized" };
+    if (inlineEncodedBytes === 0 || inlineEncodedBytes % 4 !== 0) return { kind: "invalid" };
     const nonAlphabet = /[^A-Za-z0-9+/]/g;
     nonAlphabet.lastIndex = start;
     const firstNonAlphabet = nonAlphabet.exec(value)?.index;
-    if (firstNonAlphabet === undefined) return true;
+    if (firstNonAlphabet === undefined) return { kind: "valid", inlineEncodedBytes };
     const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-    if (firstNonAlphabet !== value.length - padding) return false;
+    if (firstNonAlphabet !== value.length - padding) return { kind: "invalid" };
     // Canonical padding leaves four unused bits before "==" or two before "=".
     const lastSextet = BASE64_ALPHABET.indexOf(value[firstNonAlphabet - 1]!);
-    return (lastSextet & (padding === 2 ? 0x0f : 0x03)) === 0;
+    return (lastSextet & (padding === 2 ? 0x0f : 0x03)) === 0
+      ? { kind: "valid", inlineEncodedBytes }
+      : { kind: "invalid" };
   }
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.hostname !== "" && !url.username && !url.password;
+    return url.protocol === "https:" && url.hostname !== "" && !url.username && !url.password
+      ? { kind: "valid", inlineEncodedBytes: 0 }
+      : { kind: "invalid" };
   } catch {
-    return false;
+    return { kind: "invalid" };
   }
+}
+
+/** Collect every caller-supplied source before authentication or outbound serialization. */
+export function collectXaiEditSources(
+  obj: Record<string, unknown>,
+  limits: { maxEncodedBytesPerImage: number; maxAggregateEncodedBytes: number } = {
+    maxEncodedBytesPerImage: MAX_ENCODED_BYTES_PER_IMAGE,
+    maxAggregateEncodedBytes: XAI_EDIT_MAX_AGGREGATE_ENCODED_BYTES,
+  },
+): { sources: string[]; unusable: boolean; oversized: boolean } {
+  const sources = new Set<string>();
+  let unusable = false;
+  let oversized = false;
+  let aggregateEncodedBytes = 0;
+  const add = (value: unknown) => {
+    const url = typeof value === "string" ? value.trim() : "";
+    if (sources.has(url)) return;
+    const inspected = inspectXaiEditSourceUrl(url, limits.maxEncodedBytesPerImage);
+    if (inspected.kind === "invalid") { unusable = true; return; }
+    if (inspected.kind === "oversized") { oversized = true; return; }
+    if (inspected.inlineEncodedBytes > limits.maxAggregateEncodedBytes - aggregateEncodedBytes) {
+      oversized = true;
+      return;
+    }
+    // One extra source records overflow. Later entries are still inspected so none are dropped.
+    if (sources.size <= XAI_MAX_EDIT_IMAGES) {
+      sources.add(url);
+      aggregateEncodedBytes += inspected.inlineEncodedBytes;
+    }
+  };
+  if (obj.image !== undefined) add(obj.image);
+  if (obj.image_url !== undefined) add(obj.image_url);
+  if (obj.images !== undefined) {
+    if (!Array.isArray(obj.images)) unusable = true;
+    else for (const entry of obj.images) {
+      if (typeof entry === "string") { add(entry); continue; }
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) { unusable = true; continue; }
+      const rec = entry as Record<string, unknown>;
+      if (rec.image_url === undefined && rec.url === undefined) { unusable = true; continue; }
+      if (rec.image_url !== undefined) {
+        const nested = rec.image_url;
+        if (nested && typeof nested === "object" && !Array.isArray(nested)) add((nested as Record<string, unknown>).url);
+        else add(nested);
+      }
+      if (rec.url !== undefined) add(rec.url);
+    }
+  }
+  return { sources: [...sources], unusable, oversized };
+}
+
+export function resolveImagesRequestBodyLimit(config: OcxConfig, endpoint: ImagesEndpoint): number {
+  const configuredLimit = resolveInboundBodyLimitBytes(config.maxInboundBodyBytes);
+  const usesXaiEditBridge = endpoint === "edits"
+    && config.images?.provider === undefined
+    && config.images?.bridgeEnabled === true
+    && findXaiProvider(config) !== undefined;
+  return usesXaiEditBridge ? Math.min(configuredLimit, XAI_EDIT_MAX_REQUEST_BYTES) : configuredLimit;
 }
 
 /**
@@ -541,44 +616,15 @@ async function tryXaiImageRelay(
   let imageUrl: string | undefined;
   let imageUrls: string[] | undefined;
   if (endpoint === "edits") {
-    const sources = new Set<string>();
     // Every supplied source must be a usable URL: silently dropping one would buy an edit
     // missing an image the caller sent. xAI takes a public https URL or a base64 image data URL;
     // an explicit null counts as supplied.
-    let unusable = false;
-    const add = (value: unknown) => {
-      const url = typeof value === "string" ? value.trim() : "";
-      if (sources.has(url)) return;
-      if (!isXaiEditSourceUrl(url)) {
-        unusable = true;
-        return;
-      }
-      // One extra source records overflow. A later invalid source still takes precedence.
-      if (sources.size <= XAI_MAX_EDIT_IMAGES) sources.add(url);
-    };
-    if (obj.image !== undefined) add(obj.image);
-    if (obj.image_url !== undefined) add(obj.image_url);
-    if (obj.images !== undefined) {
-      if (!Array.isArray(obj.images)) unusable = true;
-      else for (const entry of obj.images) {
-        if (typeof entry === "string") { add(entry); continue; }
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) { unusable = true; continue; }
-        // Every URL-bearing property of an entry is a supplied source; an entry with none
-        // (a file_id, say) cannot be represented.
-        const rec = entry as Record<string, unknown>;
-        if (rec.image_url === undefined && rec.url === undefined) { unusable = true; continue; }
-        if (rec.image_url !== undefined) {
-          const nested = rec.image_url;
-          if (nested && typeof nested === "object" && !Array.isArray(nested)) add((nested as Record<string, unknown>).url);
-          else add(nested);
-        }
-        if (rec.url !== undefined) add(rec.url);
-      }
-    }
-    if (unusable) return formatErrorResponse(400, "invalid_request_error", "xAI image edits need every image as a URL");
+    const collected = collectXaiEditSources(obj);
+    if (collected.unusable) return formatErrorResponse(400, "invalid_request_error", "xAI image edits need every image as a URL");
+    if (collected.oversized) return formatErrorResponse(400, "invalid_request_error", "xAI image edit inline data exceeds the size limit");
     // Same rule as callXaiImages: duplicates collapse first, then the five-source limit applies.
-    if (sources.size > XAI_MAX_EDIT_IMAGES) return formatErrorResponse(400, "invalid_request_error", "xAI image edits accept at most 5 images");
-    [imageUrl, ...imageUrls] = sources;
+    if (collected.sources.length > XAI_MAX_EDIT_IMAGES) return formatErrorResponse(400, "invalid_request_error", "xAI image edits accept at most 5 images");
+    [imageUrl, ...imageUrls] = collected.sources;
     if (!imageUrl) return formatErrorResponse(400, "invalid_request_error", "image edits require an image URL");
   }
   const timeoutMs = config.images?.timeoutMs ?? IMAGES_UPSTREAM_TIMEOUT_MS;
@@ -709,7 +755,7 @@ export async function handleImages(
 ): Promise<Response> {
   let body: unknown;
   try {
-    body = await readJsonRequestBody(req, undefined, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
+    body = await readJsonRequestBody(req, undefined, resolveImagesRequestBodyLimit(config, endpoint));
   } catch (err) {
     return decodeRequestErrorResponse(err, "images");
   }

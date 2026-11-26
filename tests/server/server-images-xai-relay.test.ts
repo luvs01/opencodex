@@ -1,5 +1,10 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { handleImages } from "../../src/server/images";
+import {
+  collectXaiEditSources,
+  handleImages,
+  resolveImagesRequestBodyLimit,
+  XAI_EDIT_MAX_REQUEST_BYTES,
+} from "../../src/server/images";
 import type { OcxConfig } from "../../src/types";
 const oldFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = oldFetch; });
@@ -40,6 +45,43 @@ test("relay validates canonical edit data URLs without decoding their payloads",
   for (const source of sources) {
     expect(from).not.toHaveBeenCalledWith(source.split(",")[1], "base64");
   }
+});
+
+test("relay enforces per-image and aggregate inline budgets with synthetic limits", () => {
+  const limits = { maxEncodedBytesPerImage: 8, maxAggregateEncodedBytes: 12 };
+  const accepted = collectXaiEditSources({
+    image: "https://example.com/source.png",
+    images: ["data:image/png;base64,aGk=", "data:image/jpeg;base64,aG8="],
+  }, limits);
+  expect(accepted).toEqual({
+    sources: [
+      "https://example.com/source.png",
+      "data:image/png;base64,aGk=",
+      "data:image/jpeg;base64,aG8=",
+    ],
+    unusable: false,
+    oversized: false,
+  });
+
+  expect(collectXaiEditSources({ image: "data:image/png;base64,QUFBQUFBQUFB" }, limits).oversized).toBe(true);
+  expect(collectXaiEditSources({
+    images: ["data:image/png;base64,aGk=aGk=", "data:image/jpeg;base64,aG8="],
+  }, { maxEncodedBytesPerImage: 16, maxAggregateEncodedBytes: 8 }).unusable).toBe(true);
+  expect(collectXaiEditSources({
+    images: ["data:image/png;base64,aGk=", "data:image/jpeg;base64,aG8=", "data:image/webp;base64,Ynk="],
+  }, { maxEncodedBytesPerImage: 8, maxAggregateEncodedBytes: 8 }).oversized).toBe(true);
+});
+
+test("xAI edit read cap does not change other image routes", () => {
+  const configuredLimit = 200 * 1024 * 1024;
+  const raised = { ...config, maxInboundBodyBytes: configuredLimit } as OcxConfig;
+  expect(resolveImagesRequestBodyLimit(raised, "edits")).toBe(XAI_EDIT_MAX_REQUEST_BYTES);
+  expect(resolveImagesRequestBodyLimit(raised, "generations")).toBe(configuredLimit);
+  expect(resolveImagesRequestBodyLimit({
+    ...raised,
+    images: { bridgeEnabled: true, provider: "xai" },
+  } as OcxConfig, "edits")).toBe(configuredLimit);
+  expect(resolveImagesRequestBodyLimit({ ...raised, providers: {} } as OcxConfig, "edits")).toBe(configuredLimit);
 });
 
 test("relay keeps five distinct sources in order and validates entries after the limit", async () => {
