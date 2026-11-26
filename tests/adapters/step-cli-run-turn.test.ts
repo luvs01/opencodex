@@ -176,6 +176,23 @@ function host(session: FakeSession): StepConversationHost & { ref: StepConversat
   };
 }
 
+/** A host with no session until `open`, used to distinguish admission from existing continuation. */
+function unopenedHost(session: FakeSession): StepConversationHost & { openCount(): number } {
+  const base = host(session);
+  let openedHandle: string | undefined;
+  let opens = 0;
+  return {
+    ...base,
+    get: ref => ref?.handle === openedHandle ? session : undefined,
+    open: async ref => {
+      opens += 1;
+      openedHandle = ref.handle;
+      return session;
+    },
+    openCount: () => opens,
+  };
+}
+
 function provider() {
   return {
     adapter: "step-cli",
@@ -199,6 +216,56 @@ function parsed(messages: unknown[]): OcxParsedRequest {
 }
 
 const USER_ASK = [{ role: "user", content: "run it", timestamp: 0 }];
+
+describe("StepCode pre-allocation admission", () => {
+  test("non-actionable new conversations are refused without opening a session", async () => {
+    const cases: unknown[][] = [
+      [],
+      [
+        { role: "user", content: "historical question", timestamp: 0 },
+        { role: "assistant", content: "model-only history", timestamp: 1 },
+      ],
+      [{ role: "user", content: " \t\n ", timestamp: 0 }],
+      [
+        { role: "user", content: "historical question", timestamp: 0 },
+        { role: "toolResult", toolCallId: "orphan", toolName: "shell", content: "result", timestamp: 1 },
+      ],
+    ];
+    for (const messages of cases) {
+      const session = new FakeSession();
+      const conversation = unopenedHost(session);
+      const events: AdapterEvent[] = [];
+      await createStepCliAdapter(provider(), { openSession: conversation }).runTurn!(
+        parsed(messages),
+        THREAD_META,
+        event => events.push(event),
+      );
+      expect(conversation.openCount()).toBe(0);
+      expect(session.handshakeCount).toBe(0);
+      expect(events).toMatchObject([{ type: "error", code: "step_cli_no_user_text", status: 400 }]);
+    }
+  });
+
+  test("ordinary user text still opens a session and runs the query", async () => {
+    const session = new FakeSession();
+    const conversation = unopenedHost(session);
+    const events: AdapterEvent[] = [];
+    session.stream = [TURN_COMPLETE];
+    await createStepCliAdapter(provider(), { openSession: conversation }).runTurn!(
+      parsed([
+        { role: "user", content: "historical question", timestamp: 0 },
+        { role: "assistant", content: "historical answer", timestamp: 1 },
+        { role: "user", content: "run it", timestamp: 2 },
+      ]),
+      THREAD_META,
+      event => events.push(event),
+    );
+    expect(conversation.openCount()).toBe(1);
+    expect(session.handshakeCount).toBe(1);
+    expect(session.inputs[0]?.text).toContain("run it");
+    expect(events.find(event => event.type === "done")).toMatchObject({ stopReason: "stop" });
+  });
+});
 
 describe("StepCode reverse requests are always answered", () => {
   test("a permission request with no turn is denied", () => {

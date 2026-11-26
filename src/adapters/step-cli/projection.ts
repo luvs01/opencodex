@@ -195,24 +195,39 @@ export function asRecord(value: unknown): Record<string, unknown> {
 /**
  * The text StepCode should be asked for on this turn.
  *
- * Only the final user message crosses `query.input`; earlier turns live in the process' session,
+ * Only the newest user message crosses `query.input`; earlier turns live in the process' session,
  * because the wire reduces every message to text and images.
  */
+function userMessageText(message: OcxParsedRequest["context"]["messages"][number]): string | undefined {
+  if (message.role !== "user") return undefined;
+  if (!Array.isArray(message.content)) {
+    return typeof message.content === "string" && message.content.trim().length > 0
+      ? message.content
+      : undefined;
+  }
+  const text = message.content
+    .filter(part => part.type === "text")
+    .map(part => (part as { text: string }).text)
+    .join("")
+    .trim();
+  return text.length > 0 ? text : undefined;
+}
+
 export function pendingUserText(parsed: OcxParsedRequest): string | undefined {
   for (let index = parsed.context.messages.length - 1; index >= 0; index -= 1) {
     const message = parsed.context.messages[index];
-    if (!message || message.role !== "user") continue;
-    if (!Array.isArray(message.content)) {
-      return typeof message.content === "string" && message.content.length > 0
-        ? message.content
-        : undefined;
-    }
-    const text = message.content
-      .filter(part => part.type === "text")
-      .map(part => (part as { text: string }).text)
-      .join("")
-      .trim();
-    if (text.length > 0) return text;
+    if (message?.role === "user") return userMessageText(message);
+  }
+  return undefined;
+}
+
+/** User text that starts a new process, excluding closed assistant turns and orphaned tool results. */
+export function newConversationUserText(parsed: OcxParsedRequest): string | undefined {
+  for (let index = parsed.context.messages.length - 1; index >= 0; index -= 1) {
+    const message = parsed.context.messages[index];
+    if (!message) continue;
+    if (message.role === "assistant" || message.role === "toolResult") return undefined;
+    if (message.role === "user") return userMessageText(message);
   }
   return undefined;
 }

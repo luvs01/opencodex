@@ -11,6 +11,7 @@ import {
   composePrompt,
   hasImageInput,
   latestToolResult,
+  newConversationUserText,
   pendingUserText,
   stepModelId,
   stepThinkingTokens,
@@ -158,9 +159,19 @@ export function createStepCliAdapter(
         ? { handle: identified, sessionId: "" }
         : sessions.nextRef();
 
+      // A tool result is actionable only for a live conversation holding the matching call. Refuse
+      // empty, model-only and orphan-result requests before `open` can allocate a process; existing
+      // conversations still reach `driveTurn`, which performs the query/call ownership checks.
+      const userText = newConversationUserText(parsed);
+      const existingSession = userText ? undefined : sessions.get(ref);
+      if (!existingSession && !userText) {
+        emit(noUserTextRefusal());
+        return;
+      }
+
       let session!: StepConversationSession;
       try {
-        session = await sessions.open(ref);
+        session = existingSession ?? await sessions.open(ref);
         await session.handshake();
       } catch (error) {
         await session?.close();
@@ -233,6 +244,14 @@ function emitPreDispatchAbort(emit: (event: AdapterEvent) => void): void {
   emit({ type: "error", message: "StepCode turn was aborted before start.", retryable: false });
 }
 
+function noUserTextRefusal(): AdapterEvent {
+  return refusal(
+    "StepCode carries conversation history inside its own process, so a turn must end with either user text or a tool result.",
+    400,
+    "step_cli_no_user_text",
+  );
+}
+
 async function driveTurn(
   parsed: OcxParsedRequest,
   incoming: IncomingMeta,
@@ -277,13 +296,7 @@ async function driveTurn(
       // abandoned the call still carries the user's message and must keep it.
       const userText = continuedQuery ? undefined : pendingUserText(parsed);
       if (!continuedQuery && !userText) {
-        emit(
-          refusal(
-            "StepCode carries conversation history inside its own process, so a turn must end with either user text or a tool result.",
-            400,
-            "step_cli_no_user_text",
-          ),
-        );
+        emit(noUserTextRefusal());
         return;
       }
 

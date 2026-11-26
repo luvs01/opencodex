@@ -43,6 +43,9 @@ permission denials.
 each session before workspace setup, so shutdown can close an opening session before it spawns.
 At eight owned sessions a home pool refuses new conversations with retryable `step_cli_pool_full`.
 Existing handles and coalesced opens still work. Only confirmed cleanup releases capacity.
+Before `sessions.open` can allocate a process, a new handle must carry non-whitespace user text.
+Empty, model-only and orphan-result requests receive `step_cli_no_user_text`; an existing live handle
+still reaches held-call matching, so a legitimate tool result can continue its original query.
 The pool retains ownership of adapter, idle-timer and sweep closes until termination is
 confirmed. Shutdown drains those receipts and propagates failures.
 Closing handles refuse replacement. Session close is idempotent and clears held-request timers.
